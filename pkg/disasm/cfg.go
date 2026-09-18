@@ -1,0 +1,424 @@
+package disasm
+
+import (
+	"encoding/binary"
+	"fmt"
+	"sort"
+
+	"ps4-recomp/pkg/elfloader"
+
+	"golang.org/x/arch/x86/x86asm"
+)
+
+// Instruction wraps x86asm.Inst with its guest address.
+type Instruction struct {
+	Address uint64
+	Inst    x86asm.Inst
+	Bytes   []byte
+}
+
+// BasicBlock represents a straight-line sequence of instructions.
+type BasicBlock struct {
+	StartAddr uint64
+	EndAddr   uint64 // Address of the next instruction after the last one
+	Insts     []Instruction
+	Succs     []uint64 // Successor block start addresses
+}
+
+// Function represents a discovered guest function composed of basic blocks.
+type Function struct {
+	Name       string
+	EntryAddr  uint64
+	Blocks     map[uint64]*BasicBlock
+	BlockOrder []uint64 // Topologically or address-sorted block start addresses
+}
+
+// Disassembler performs CFG recovery and reachability analysis.
+type Disassembler struct {
+	elf       *elfloader.LoadedELF
+	textSec   *elfloader.Segment
+	textStart uint64
+	textEnd   uint64
+
+	Functions map[uint64]*Function
+	Blocks    map[uint64]*BasicBlock
+}
+
+// NewDisassembler creates a new disassembler for the given loaded ELF.
+func NewDisassembler(loaded *elfloader.LoadedELF) (*Disassembler, error) {
+	textSec, ok := loaded.Sections[".text"]
+	if !ok {
+		return nil, fmt.Errorf("no .text section found in ELF")
+	}
+
+	return &Disassembler{
+		elf:       loaded,
+		textStart: textSec.Addr,
+		textEnd:   textSec.Addr + textSec.Size,
+		Functions: make(map[uint64]*Function),
+		Blocks:    make(map[uint64]*BasicBlock),
+	}, nil
+}
+
+// AnalyzeReachable traverses and discovers all functions reachable from the given entry addresses.
+func (d *Disassembler) AnalyzeReachable(entryAddrs []uint64) error {
+	queue := make([]uint64, 0, len(entryAddrs))
+	visited := make(map[uint64]bool)
+
+	for _, addr := range entryAddrs {
+		if !visited[addr] && addr >= d.textStart && addr < d.textEnd {
+			queue = append(queue, addr)
+			visited[addr] = true
+		}
+	}
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+
+		fn, newCalls, err := d.disasmFunction(curr)
+		if err != nil {
+			// Log or continue
+			continue
+		}
+		d.Functions[curr] = fn
+
+		for _, target := range newCalls {
+			if !visited[target] && target >= d.textStart && target < d.textEnd {
+				visited[target] = true
+				queue = append(queue, target)
+			}
+		}
+	}
+
+	return nil
+}
+
+// disasmFunction disassembles a single function starting at entryAddr.
+func (d *Disassembler) disasmFunction(entryAddr uint64) (*Function, []uint64, error) {
+	if sym, ok := d.elf.SymbolByAddr[entryAddr]; ok && sym.Size > 0 {
+		return d.disasmLinearFunction(entryAddr, sym.Size)
+	}
+	return d.disasmBranchFollowing(entryAddr)
+}
+
+// disasmLinearFunction linearly decodes instructions within [entryAddr, entryAddr+size)
+// and partitions them into basic blocks based on control flow leaders and jump tables.
+func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Function, []uint64, error) {
+	symName := fmt.Sprintf("fn_%x", entryAddr)
+	if sym, ok := d.elf.SymbolByAddr[entryAddr]; ok && sym.Name != "" {
+		symName = sym.Name
+	}
+
+	fn := &Function{
+		Name:      symName,
+		EntryAddr: entryAddr,
+		Blocks:    make(map[uint64]*BasicBlock),
+	}
+
+	fnEnd := entryAddr + size
+	var insts []Instruction
+	var discoveredCalls []uint64
+
+	pc := entryAddr
+	for pc < fnEnd {
+		if pc < d.textStart || pc >= d.textEnd || pc >= uint64(len(d.elf.MemoryImage)) {
+			break
+		}
+
+		inst, err := x86asm.Decode(d.elf.MemoryImage[pc:], 64)
+		if err != nil || inst.Len == 0 {
+			break
+		}
+
+		instBytes := d.elf.MemoryImage[pc : pc+uint64(inst.Len)]
+		wrapped := Instruction{
+			Address: pc,
+			Inst:    inst,
+			Bytes:   instBytes,
+		}
+		insts = append(insts, wrapped)
+
+		nextPC := pc + uint64(inst.Len)
+
+		// Record calls
+		if inst.Op == x86asm.CALL {
+			if rel, ok := inst.Args[0].(x86asm.Rel); ok {
+				target := uint64(int64(nextPC) + int64(rel))
+				discoveredCalls = append(discoveredCalls, target)
+			}
+		}
+
+		pc = nextPC
+	}
+
+	if len(insts) == 0 {
+		return nil, nil, fmt.Errorf("no instructions decoded for function at 0x%x", entryAddr)
+	}
+
+	// Identify basic block leaders
+	leaders := make(map[uint64]bool)
+	leaders[entryAddr] = true
+
+	for _, inst := range insts {
+		nextPC := inst.Address + uint64(inst.Inst.Len)
+
+		switch {
+		case inst.Inst.Op == x86asm.JMP:
+			if rel, ok := inst.Inst.Args[0].(x86asm.Rel); ok {
+				target := uint64(int64(nextPC) + int64(rel))
+				if target >= entryAddr && target < fnEnd {
+					leaders[target] = true
+				} else {
+					// Tail call to another function
+					discoveredCalls = append(discoveredCalls, target)
+				}
+			}
+			if nextPC < fnEnd {
+				leaders[nextPC] = true
+			}
+
+		case isJcc(inst.Inst.Op):
+			if rel, ok := inst.Inst.Args[0].(x86asm.Rel); ok {
+				target := uint64(int64(nextPC) + int64(rel))
+				if target >= entryAddr && target < fnEnd {
+					leaders[target] = true
+				}
+			}
+			if nextPC < fnEnd {
+				leaders[nextPC] = true
+			}
+
+		case inst.Inst.Op == x86asm.RET || inst.Inst.Op == x86asm.UD2:
+			if nextPC < fnEnd {
+				leaders[nextPC] = true
+			}
+
+		case inst.Inst.Op == x86asm.LEA:
+			// Check if LEA references a jump table in .rodata
+			if mem, ok := inst.Inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
+				tableAddr := uint64(int64(nextPC) + mem.Disp)
+				for _, target := range d.findJumpTableTargets(tableAddr, entryAddr, fnEnd) {
+					leaders[target] = true
+				}
+			}
+		}
+	}
+
+	// Also check if any known relocation target is inside this function
+	for _, rel := range d.elf.Relocations {
+		if rel.Addend > 0 {
+			target := uint64(rel.Addend)
+			if target >= entryAddr && target < fnEnd {
+				leaders[target] = true
+			}
+		}
+	}
+
+	// Build basic blocks
+	var currentBlock *BasicBlock
+	for _, inst := range insts {
+		if leaders[inst.Address] || currentBlock == nil {
+			if currentBlock != nil && len(currentBlock.Insts) > 0 {
+				currentBlock.EndAddr = inst.Address
+				fn.Blocks[currentBlock.StartAddr] = currentBlock
+			}
+			currentBlock = &BasicBlock{
+				StartAddr: inst.Address,
+				Insts:     []Instruction{inst},
+			}
+		} else {
+			currentBlock.Insts = append(currentBlock.Insts, inst)
+		}
+	}
+	if currentBlock != nil && len(currentBlock.Insts) > 0 {
+		lastInst := currentBlock.Insts[len(currentBlock.Insts)-1]
+		currentBlock.EndAddr = lastInst.Address + uint64(lastInst.Inst.Len)
+		fn.Blocks[currentBlock.StartAddr] = currentBlock
+	}
+
+	for addr := range fn.Blocks {
+		fn.BlockOrder = append(fn.BlockOrder, addr)
+	}
+	sort.Slice(fn.BlockOrder, func(i, j int) bool {
+		return fn.BlockOrder[i] < fn.BlockOrder[j]
+	})
+
+	return fn, discoveredCalls, nil
+}
+
+// findJumpTableTargets scans .rodata at tableAddr for 32-bit relative offsets pointing within [fnStart, fnEnd).
+func (d *Disassembler) findJumpTableTargets(tableAddr uint64, fnStart, fnEnd uint64) []uint64 {
+	rodataSec, ok := d.elf.Sections[".rodata"]
+	if !ok {
+		return nil
+	}
+	rodataStart := rodataSec.Addr
+	rodataEnd := rodataSec.Addr + rodataSec.Size
+
+	if tableAddr < rodataStart || tableAddr >= rodataEnd {
+		return nil
+	}
+
+	var targets []uint64
+	curr := tableAddr
+	for curr+4 <= rodataEnd && curr+4 <= uint64(len(d.elf.MemoryImage)) {
+		offset := int32(binary.LittleEndian.Uint32(d.elf.MemoryImage[curr : curr+4]))
+		target := tableAddr + uint64(int64(offset))
+		if target >= fnStart && target < fnEnd {
+			targets = append(targets, target)
+			curr += 4
+		} else {
+			break
+		}
+	}
+	return targets
+}
+
+// disasmBranchFollowing disassembles a single function starting at entryAddr (fallback).
+func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uint64, error) {
+	symName := fmt.Sprintf("fn_%x", entryAddr)
+	if sym, ok := d.elf.SymbolByAddr[entryAddr]; ok && sym.Name != "" {
+		symName = sym.Name
+	}
+
+	fn := &Function{
+		Name:      symName,
+		EntryAddr: entryAddr,
+		Blocks:    make(map[uint64]*BasicBlock),
+	}
+
+	var discoveredCalls []uint64
+	blockQueue := []uint64{entryAddr}
+	blockVisited := make(map[uint64]bool)
+	blockVisited[entryAddr] = true
+
+	// Also track instructions to detect block splits
+	instAtAddr := make(map[uint64]Instruction)
+	jumpTargets := make(map[uint64]bool)
+	jumpTargets[entryAddr] = true
+
+	// Step 1: Linear sweep along branches within the function
+	for len(blockQueue) > 0 {
+		blockStart := blockQueue[0]
+		blockQueue = blockQueue[1:]
+
+		pc := blockStart
+		var blockInsts []Instruction
+
+		for {
+			if pc < d.textStart || pc >= d.textEnd {
+				break
+			}
+
+			offset := pc
+			if offset >= uint64(len(d.elf.MemoryImage)) {
+				break
+			}
+
+			inst, err := x86asm.Decode(d.elf.MemoryImage[offset:], 64)
+			if err != nil || inst.Len == 0 {
+				break
+			}
+
+			instBytes := d.elf.MemoryImage[offset : offset+uint64(inst.Len)]
+			wrapped := Instruction{
+				Address: pc,
+				Inst:    inst,
+				Bytes:   instBytes,
+			}
+			blockInsts = append(blockInsts, wrapped)
+			instAtAddr[pc] = wrapped
+
+			nextPC := pc + uint64(inst.Len)
+
+			// Check control flow changes
+			isBranch := false
+			isTerminal := false
+
+			switch inst.Op {
+			case x86asm.JMP:
+				isBranch = true
+				isTerminal = true
+				if rel, ok := inst.Args[0].(x86asm.Rel); ok {
+					target := uint64(int64(nextPC) + int64(rel))
+					// Check if target is inside this function or a tail call
+					// For now, if within reasonable function boundaries or before next symbol
+					jumpTargets[target] = true
+					if !blockVisited[target] && target >= d.textStart && target < d.textEnd {
+						blockVisited[target] = true
+						blockQueue = append(blockQueue, target)
+					}
+				}
+			case x86asm.RET:
+				isTerminal = true
+			case x86asm.UD2:
+				isTerminal = true
+			case x86asm.CALL:
+				// Call does not terminate the basic block; execution continues at nextPC.
+				// Record call target as potential new function.
+				if rel, ok := inst.Args[0].(x86asm.Rel); ok {
+					target := uint64(int64(nextPC) + int64(rel))
+					discoveredCalls = append(discoveredCalls, target)
+				}
+			default:
+				// Conditional jumps (Jcc)
+				if isJcc(inst.Op) {
+					isBranch = true
+					if rel, ok := inst.Args[0].(x86asm.Rel); ok {
+						target := uint64(int64(nextPC) + int64(rel))
+						jumpTargets[target] = true
+						if !blockVisited[target] && target >= d.textStart && target < d.textEnd {
+							blockVisited[target] = true
+							blockQueue = append(blockQueue, target)
+						}
+					}
+					// Fallthrough block
+					jumpTargets[nextPC] = true
+					if !blockVisited[nextPC] && nextPC >= d.textStart && nextPC < d.textEnd {
+						blockVisited[nextPC] = true
+						blockQueue = append(blockQueue, nextPC)
+					}
+				}
+			}
+
+			pc = nextPC
+			if isTerminal || isBranch {
+				break
+			}
+		}
+
+		if len(blockInsts) > 0 {
+			bb := &BasicBlock{
+				StartAddr: blockStart,
+				EndAddr:   pc,
+				Insts:     blockInsts,
+			}
+			fn.Blocks[blockStart] = bb
+		}
+	}
+
+	// Sort block addresses
+	for addr := range fn.Blocks {
+		fn.BlockOrder = append(fn.BlockOrder, addr)
+	}
+	sort.Slice(fn.BlockOrder, func(i, j int) bool {
+		return fn.BlockOrder[i] < fn.BlockOrder[j]
+	})
+
+	return fn, discoveredCalls, nil
+}
+
+func isJcc(op x86asm.Op) bool {
+	switch op {
+	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE,
+		x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ,
+		x86asm.JE, x86asm.JG, x86asm.JGE,
+		x86asm.JL, x86asm.JLE, x86asm.JNE,
+		x86asm.JNO, x86asm.JNP, x86asm.JNS,
+		x86asm.JO, x86asm.JP, x86asm.JS:
+		return true
+	default:
+		return false
+	}
+}
