@@ -1,0 +1,872 @@
+package lifter
+
+import (
+	"fmt"
+
+	"ps4-recomp/pkg/disasm"
+
+	"golang.org/x/arch/x86/x86asm"
+)
+
+func (l *Lifter) liftMov(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	} else if reg, ok := src.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+
+	srcExpr, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	return l.getOperandWrite(dst, sz, srcExpr, nextPC)
+}
+
+func (l *Lifter) liftExtend(op x86asm.Op, dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok {
+		return nil, fmt.Errorf("extend destination must be register")
+	}
+	srcExpr, srcSz, err := l.getOperandRead(src, defMemSz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+
+	var castExpr string
+	if op == x86asm.MOVZX {
+		switch srcSz {
+		case 1:
+			castExpr = fmt.Sprintf("(uint64_t)(uint8_t)(%s)", srcExpr)
+		case 2:
+			castExpr = fmt.Sprintf("(uint64_t)(uint16_t)(%s)", srcExpr)
+		case 4:
+			castExpr = fmt.Sprintf("(uint64_t)(uint32_t)(%s)", srcExpr)
+		default:
+			castExpr = fmt.Sprintf("(uint64_t)(%s)", srcExpr)
+		}
+	} else {
+		switch srcSz {
+		case 1:
+			castExpr = fmt.Sprintf("(uint64_t)(int64_t)(int8_t)(%s)", srcExpr)
+		case 2:
+			castExpr = fmt.Sprintf("(uint64_t)(int64_t)(int16_t)(%s)", srcExpr)
+		case 4:
+			castExpr = fmt.Sprintf("(uint64_t)(int64_t)(int32_t)(%s)", srcExpr)
+		default:
+			castExpr = fmt.Sprintf("(uint64_t)(int64_t)(%s)", srcExpr)
+		}
+	}
+
+	stmt, err := GetRegWriteStmt(dstReg, castExpr)
+	if err != nil {
+		return nil, err
+	}
+	return []string{"    " + stmt}, nil
+}
+
+func (l *Lifter) liftAlu(inst disasm.Instruction, dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	op := inst.Inst.Op
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	} else if reg, ok := src.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+
+	dstRead, _, err := l.getOperandRead(dst, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	srcRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+
+	cType := uintType(sz)
+	var lines []string
+
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s a = (%s)(%s); %s b = (%s)(%s); %s res;", cType, cType, dstRead, cType, cType, srcRead, cType),
+	)
+
+	switch op {
+	case x86asm.ADD:
+		lines = append(lines, "      res = a + b;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_add_u%d(ctx, a, b, res);", sz*8))
+		}
+		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		if err != nil {
+			return nil, err
+		}
+		for _, ws := range writeStmts {
+			lines = append(lines, "    "+ws)
+		}
+
+	case x86asm.ADC:
+		lines = append(
+			lines,
+			fmt.Sprintf("      res = a + b + (%s)ctx->cf;", cType),
+			fmt.Sprintf("      set_flags_add_u%d(ctx, a, b, res);", sz*8),
+		)
+		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		if err != nil {
+			return nil, err
+		}
+		for _, ws := range writeStmts {
+			lines = append(lines, "    "+ws)
+		}
+
+	case x86asm.SUB:
+		lines = append(lines, "      res = a - b;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_sub_u%d(ctx, a, b, res);", sz*8))
+		}
+		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		if err != nil {
+			return nil, err
+		}
+		for _, ws := range writeStmts {
+			lines = append(lines, "    "+ws)
+		}
+
+	case x86asm.CMP:
+		lines = append(
+			lines,
+			"      res = a - b;",
+			fmt.Sprintf("      set_flags_sub_u%d(ctx, a, b, res);", sz*8),
+		)
+
+	case x86asm.TEST:
+		lines = append(
+			lines,
+			"      res = a & b;",
+			fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8),
+		)
+
+	case x86asm.AND:
+		lines = append(lines, "      res = a & b;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
+		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		if err != nil {
+			return nil, err
+		}
+		for _, ws := range writeStmts {
+			lines = append(lines, "    "+ws)
+		}
+
+	case x86asm.OR:
+		lines = append(lines, "      res = a | b;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
+		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		if err != nil {
+			return nil, err
+		}
+		for _, ws := range writeStmts {
+			lines = append(lines, "    "+ws)
+		}
+
+	case x86asm.XOR:
+		lines = append(lines, "      res = a ^ b;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
+		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		if err != nil {
+			return nil, err
+		}
+		for _, ws := range writeStmts {
+			lines = append(lines, "    "+ws)
+		}
+	}
+
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftUnary(inst disasm.Instruction, dst x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	op := inst.Inst.Op
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+
+	dstRead, _, err := l.getOperandRead(dst, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	cType := uintType(sz)
+	var lines []string
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s a = (%s)(%s); %s res;", cType, cType, dstRead, cType),
+	)
+
+	switch op {
+	case x86asm.INC:
+		lines = append(lines, "      res = a + 1;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_inc_u%d(ctx, a, res);", sz*8))
+		}
+	case x86asm.DEC:
+		lines = append(lines, "      res = a - 1;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_dec_u%d(ctx, a, res);", sz*8))
+		}
+	case x86asm.NEG:
+		lines = append(lines, "      res = -a;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_sub_u%d(ctx, 0, a, res);", sz*8))
+		}
+	case x86asm.NOT:
+		lines = append(
+			lines,
+			"      res = ~a;",
+		)
+	}
+
+	writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, ws := range writeStmts {
+		lines = append(lines, "    "+ws)
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftShift(inst disasm.Instruction, dst, countArg x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	op := inst.Inst.Op
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+
+	dstRead, _, err := l.getOperandRead(dst, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	countRead, _, err := l.getOperandRead(countArg, 1, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	cType := uintType(sz)
+	var lines []string
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s a = (%s)(%s); uint8_t count = ((uint8_t)(%s)) & 0x3f; %s res;", cType, cType, dstRead, countRead, cType),
+	)
+
+	switch op {
+	case x86asm.SHL:
+		lines = append(lines, "      res = a << count;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
+	case x86asm.SHR:
+		lines = append(lines, "      res = a >> count;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
+	case x86asm.SAR:
+		signedType := intType(sz)
+		lines = append(
+			lines,
+			fmt.Sprintf("      res = (%s)(((%s)a) >> count);", cType, signedType),
+		)
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
+	}
+
+	writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, ws := range writeStmts {
+		lines = append(lines, "    "+ws)
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftRotate(op x86asm.Op, dst, countArg x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	dstRead, _, err := l.getOperandRead(dst, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	countRead, _, err := l.getOperandRead(countArg, 1, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	bits := sz * 8
+	cType := uintType(sz)
+	var lines []string
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s a = (%s)(%s); uint8_t count = ((uint8_t)(%s)) & %d; %s res;", cType, cType, dstRead, countRead, bits-1, cType),
+	)
+	if op == x86asm.ROL {
+		lines = append(
+			lines,
+			fmt.Sprintf("      res = (a << count) | (a >> ((%d - count) & %d));", bits, bits-1),
+			"      ctx->cf = res & 1;",
+		)
+	} else {
+		lines = append(
+			lines,
+			fmt.Sprintf("      res = (a >> count) | (a << ((%d - count) & %d));", bits, bits-1),
+			fmt.Sprintf("      ctx->cf = (res >> %d) & 1;", bits-1),
+		)
+	}
+	writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, ws := range writeStmts {
+		lines = append(lines, "    "+ws)
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftXchg(op1, op2 x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	v1, sz1, err := l.getOperandRead(op1, defMemSz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	v2, sz2, err := l.getOperandRead(op2, defMemSz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	sz := sz1
+	if sz2 > sz {
+		sz = sz2
+	}
+	cType := uintType(sz)
+	var lines []string
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s tmp1 = (%s)(%s); %s tmp2 = (%s)(%s);", cType, cType, v1, cType, cType, v2),
+	)
+	w1, err := l.getOperandWrite(op1, sz, "tmp2", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	w2, err := l.getOperandWrite(op2, sz, "tmp1", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range w1 {
+		lines = append(lines, "    "+s)
+	}
+	for _, s := range w2 {
+		lines = append(lines, "    "+s)
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftXadd(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	} else if reg, ok := src.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	cType := uintType(sz)
+	sRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+
+	var lines []string
+	if dstMem, ok := dst.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(dstMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(
+			lines,
+			fmt.Sprintf("    { %s orig_src = (%s)(%s);", cType, cType, sRead),
+			fmt.Sprintf("      %s orig_dst = __sync_fetch_and_add((%s *)(ctx->mem_base + (%s)), orig_src);", cType, cType, addr),
+			fmt.Sprintf("      %s res = orig_dst + orig_src;", cType),
+			fmt.Sprintf("      set_flags_add_u%d(ctx, orig_dst, orig_src, res);", sz*8),
+		)
+		wSrc, err := l.getOperandWrite(src, sz, "orig_dst", nextPC)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range wSrc {
+			lines = append(lines, "    "+s)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	dRead, _, err := l.getOperandRead(dst, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s orig_dst = (%s)(%s); %s orig_src = (%s)(%s); %s res = orig_dst + orig_src;", cType, cType, dRead, cType, cType, sRead, cType),
+		fmt.Sprintf("      set_flags_add_u%d(ctx, orig_dst, orig_src, res);", sz*8),
+	)
+	wDst, err := l.getOperandWrite(dst, sz, "res", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	wSrc, err := l.getOperandWrite(src, sz, "orig_dst", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range wDst {
+		lines = append(lines, "    "+s)
+	}
+	for _, s := range wSrc {
+		lines = append(lines, "    "+s)
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftCmpxchg(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	} else if reg, ok := src.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	cType := uintType(sz)
+	sRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	var accReg x86asm.Reg
+	switch sz {
+	case 1:
+		accReg = x86asm.AL
+	case 2:
+		accReg = x86asm.AX
+	case 4:
+		accReg = x86asm.EAX
+	default:
+		accReg = x86asm.RAX
+	}
+	accRead, _, _ := GetRegReadExpr(accReg)
+
+	var lines []string
+	if dstMem, ok := dst.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(dstMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(
+			lines,
+			fmt.Sprintf("    { %s src = (%s)(%s); %s acc = (%s)(%s);", cType, cType, sRead, cType, cType, accRead),
+			fmt.Sprintf("      %s prev = __sync_val_compare_and_swap((%s *)(ctx->mem_base + (%s)), acc, src);", cType, cType, addr),
+			fmt.Sprintf("      set_flags_sub_u%d(ctx, acc, prev, acc - prev);", sz*8),
+			"      if (acc != prev) {",
+		)
+		wAcc, err := GetRegWriteStmt(accReg, "prev")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, "      "+wAcc, "      }", "    }")
+		return lines, nil
+	}
+
+	dRead, _, err := l.getOperandRead(dst, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s dest = (%s)(%s); %s src = (%s)(%s); %s acc = (%s)(%s);", cType, cType, dRead, cType, cType, sRead, cType, cType, accRead),
+		fmt.Sprintf("      set_flags_sub_u%d(ctx, acc, dest, acc - dest);", sz*8),
+		"      if (acc == dest) {",
+	)
+	wDst, err := l.getOperandWrite(dst, sz, "src", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range wDst {
+		lines = append(lines, "      "+s)
+	}
+	lines = append(lines, "      } else {")
+	wAcc, err := GetRegWriteStmt(accReg, "dest")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, "      "+wAcc, "      }", "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftImul(args x86asm.Args, defMemSz int, nextPC uint64) ([]string, error) {
+	if args[1] == nil {
+		// 1-arg: IMUL src -> RDX:RAX = RAX * src
+		sz := defMemSz
+		if reg, ok := args[0].(x86asm.Reg); ok {
+			if info, ok := regMap[reg]; ok && info.Size > 0 {
+				sz = info.Size
+			}
+		}
+		sRead, _, err := l.getOperandRead(args[0], sz, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		if sz == 8 {
+			return []string{
+				fmt.Sprintf("    { __int128 res = (__int128)(int64_t)ctx->rax * (int64_t)(%s);", sRead),
+				"      ctx->rax = (uint64_t)res;",
+				"      ctx->rdx = (uint64_t)(res >> 64);",
+				"      ctx->cf = ctx->of = (res != (int64_t)res);",
+				"    }",
+			}, nil
+		}
+		if sz == 4 {
+			return []string{
+				fmt.Sprintf("    { int64_t res = (int64_t)(int32_t)ctx->rax * (int32_t)(%s);", sRead),
+				"      ctx->rax = (uint64_t)(uint32_t)res;",
+				"      ctx->rdx = (uint64_t)(uint32_t)(res >> 32);",
+				"      ctx->cf = ctx->of = (res != (int32_t)res);",
+				"    }",
+			}, nil
+		}
+		return nil, fmt.Errorf("unsupported 1-arg IMUL size: %d", sz)
+	}
+
+	if args[2] == nil {
+		// 2-arg: IMUL dst, src -> dst = dst * src
+		sz := defMemSz
+		if reg, ok := args[0].(x86asm.Reg); ok {
+			if info, ok := regMap[reg]; ok && info.Size > 0 {
+				sz = info.Size
+			}
+		}
+		dRead, _, err := l.getOperandRead(args[0], sz, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		sRead, _, err := l.getOperandRead(args[1], sz, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		signedType := intType(sz)
+		var lines []string
+		lines = append(
+			lines,
+			fmt.Sprintf("    { %s a = (%s)(%s); %s b = (%s)(%s); %s res = a * b;", signedType, signedType, dRead, signedType, signedType, sRead, signedType),
+		)
+		wDst, err := l.getOperandWrite(args[0], sz, "res", nextPC)
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range wDst {
+			lines = append(lines, "    "+s)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	// 3-arg: IMUL dst, src, imm -> dst = src * imm
+	sz := defMemSz
+	if reg, ok := args[0].(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	sRead, _, err := l.getOperandRead(args[1], sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	immRead, _, err := l.getOperandRead(args[2], sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	signedType := intType(sz)
+	var lines []string
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s a = (%s)(%s); %s b = (%s)(%s); %s res = a * b;", signedType, signedType, sRead, signedType, signedType, immRead, signedType),
+	)
+	wDst, err := l.getOperandWrite(args[0], sz, "res", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range wDst {
+		lines = append(lines, "    "+s)
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftMul(src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := src.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	sRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	if sz == 8 {
+		return []string{
+			fmt.Sprintf("    { unsigned __int128 res = (unsigned __int128)ctx->rax * (uint64_t)(%s);", sRead),
+			"      ctx->rax = (uint64_t)res;",
+			"      ctx->rdx = (uint64_t)(res >> 64);",
+			"      ctx->cf = ctx->of = (ctx->rdx != 0);",
+			"    }",
+		}, nil
+	}
+	if sz == 4 {
+		return []string{
+			fmt.Sprintf("    { uint64_t res = (uint64_t)(uint32_t)ctx->rax * (uint32_t)(%s);", sRead),
+			"      ctx->rax = (uint64_t)(uint32_t)res;",
+			"      ctx->rdx = (uint64_t)(uint32_t)(res >> 32);",
+			"      ctx->cf = ctx->of = (ctx->rdx != 0);",
+			"    }",
+		}, nil
+	}
+	return nil, fmt.Errorf("unsupported MUL size: %d", sz)
+}
+
+func (l *Lifter) liftSbb(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	} else if reg, ok := src.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	dRead, _, err := l.getOperandRead(dst, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	sRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	cType := uintType(sz)
+	var lines []string
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s a = (%s)(%s); %s b = (%s)(%s) + (%s)ctx->cf; %s res = a - b;", cType, cType, dRead, cType, cType, sRead, cType, cType),
+		fmt.Sprintf("      set_flags_sub_u%d(ctx, a, b, res);", sz*8),
+	)
+	wDst, err := l.getOperandWrite(dst, sz, "res", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range wDst {
+		lines = append(lines, "    "+s)
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftBt(base, bit x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := base.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	bRead, _, err := l.getOperandRead(base, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	bitRead, _, err := l.getOperandRead(bit, 1, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		fmt.Sprintf("    ctx->cf = (((uint64_t)(%s)) >> (((uint64_t)(%s)) & %d)) & 1;", bRead, bitRead, sz*8-1),
+	}, nil
+}
+
+func (l *Lifter) liftBsf(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	sRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	cType := uintType(sz)
+	var lines []string
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s val = (%s)(%s);", cType, cType, sRead),
+		"      ctx->zf = (val == 0);",
+		"      if (val != 0) {",
+	)
+	var ctzExpr string
+	if sz == 8 {
+		ctzExpr = "(__builtin_ctzll(val))"
+	} else {
+		ctzExpr = "(__builtin_ctz((uint32_t)val))"
+	}
+	wDst, err := l.getOperandWrite(dst, sz, ctzExpr, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range wDst {
+		lines = append(lines, "        "+s)
+	}
+	lines = append(lines, "      }", "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftBsr(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	sRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	cType := uintType(sz)
+	var lines []string
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s val = (%s)(%s);", cType, cType, sRead),
+		"      ctx->zf = (val == 0);",
+		"      if (val != 0) {",
+	)
+	var clzExpr string
+	switch sz {
+	case 8:
+		clzExpr = "(63 - __builtin_clzll(val))"
+	case 4:
+		clzExpr = "(31 - __builtin_clz((uint32_t)val))"
+	default:
+		clzExpr = "(15 - (__builtin_clz((uint32_t)(uint16_t)val) - 16))"
+	}
+	wDst, err := l.getOperandWrite(dst, sz, clzExpr, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range wDst {
+		lines = append(lines, "        "+s)
+	}
+	lines = append(lines, "      }", "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftDiv(src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := src.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	sRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	if sz == 8 {
+		return []string{
+			"    { unsigned __int128 dividend = ((unsigned __int128)ctx->rdx << 64) | ctx->rax;",
+			fmt.Sprintf("      uint64_t divisor = (uint64_t)(%s);", sRead),
+			"      if (divisor != 0) {",
+			"        ctx->rax = (uint64_t)(dividend / divisor);",
+			"        ctx->rdx = (uint64_t)(dividend % divisor);",
+			"      }",
+			"    }",
+		}, nil
+	}
+	if sz == 4 {
+		return []string{
+			"    { uint64_t dividend = ((uint64_t)(uint32_t)ctx->rdx << 32) | (uint32_t)ctx->rax;",
+			fmt.Sprintf("      uint32_t divisor = (uint32_t)(%s);", sRead),
+			"      if (divisor != 0) {",
+			"        ctx->rax = (uint64_t)(uint32_t)(dividend / divisor);",
+			"        ctx->rdx = (uint64_t)(uint32_t)(dividend % divisor);",
+			"      }",
+			"    }",
+		}, nil
+	}
+	return nil, fmt.Errorf("unsupported DIV size: %d", sz)
+}
+
+func (l *Lifter) liftIdiv(src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := src.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	sRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	if sz == 8 {
+		return []string{
+			"    { __int128 dividend = ((__int128)(int64_t)ctx->rdx << 64) | ctx->rax;",
+			fmt.Sprintf("      int64_t divisor = (int64_t)(%s);", sRead),
+			"      if (divisor != 0) {",
+			"        ctx->rax = (uint64_t)(int64_t)(dividend / divisor);",
+			"        ctx->rdx = (uint64_t)(int64_t)(dividend % divisor);",
+			"      }",
+			"    }",
+		}, nil
+	}
+	if sz == 4 {
+		return []string{
+			"    { int64_t dividend = ((int64_t)(int32_t)ctx->rdx << 32) | (uint32_t)ctx->rax;",
+			fmt.Sprintf("      int32_t divisor = (int32_t)(%s);", sRead),
+			"      if (divisor != 0) {",
+			"        ctx->rax = (uint64_t)(uint32_t)(int32_t)(dividend / divisor);",
+			"        ctx->rdx = (uint64_t)(uint32_t)(int32_t)(dividend % divisor);",
+			"      }",
+			"    }",
+		}, nil
+	}
+	return nil, fmt.Errorf("unsupported IDIV size: %d", sz)
+}

@@ -366,63 +366,92 @@ func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
 }
 
 func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
-	// Map known PLT names to shims
+	// Map canonical symbol names to runtime shims
 	pltMap := map[string]string{
 		"sceKernelUsleep":           "shim_sceKernelUsleep",
 		"sysconf":                   "shim_sysconf",
 		"open":                      "shim_open",
+		"fcntl":                     "shim_fcntl",
 		"__error":                   "shim_error",
 		"mmap":                      "shim_mmap",
+		"munmap":                    "shim_munmap",
+		"madvise":                   "shim_madvise",
 		"sigprocmask":               "shim_sigprocmask",
+		"sigaction":                 "shim_sigaction",
 		"fstat":                     "shim_fstat",
 		"close":                     "shim_close",
-		"_writev":                   "shim_writev",
-		"_write":                    "shim_write",
-		"_ioctl":                    "shim_ioctl",
+		"read":                      "shim_read",
+		"readv":                     "shim_readv",
+		"write":                     "shim_write",
+		"writev":                    "shim_writev",
+		"ioctl":                     "shim_ioctl",
 		"nanosleep":                 "shim_nanosleep",
 		"lseek":                     "shim_lseek",
-		"sigaction":                 "shim_sigaction",
-		"_exit":                     "shim_exit",
+		"exit":                      "shim_exit",
+		"poll":                      "shim_poll",
+		"raise":                     "shim_raise",
+		"sched_yield":               "shim_sched_yield",
+		"pthread_create":            "shim_pthread_create",
+		"pthread_join":              "shim_pthread_join",
+		"pthread_detach":            "shim_pthread_detach",
+		"pthread_self":              "shim_pthread_self",
+		"pthread_equal":             "shim_pthread_equal",
+		"pthread_once":              "shim_pthread_once",
+		"pthread_key_create":        "shim_pthread_key_create",
+		"pthread_setspecific":       "shim_pthread_setspecific",
+		"pthread_getspecific":       "shim_pthread_getspecific",
+		"pthread_mutex_init":        "shim_pthread_mutex_init",
+		"pthread_mutex_lock":        "shim_pthread_mutex_lock",
+		"pthread_mutex_trylock":     "shim_pthread_mutex_trylock",
+		"pthread_mutex_unlock":      "shim_pthread_mutex_unlock",
+		"pthread_mutex_destroy":     "shim_pthread_mutex_destroy",
+		"pthread_mutexattr_init":    "shim_pthread_mutexattr_init",
+		"pthread_mutexattr_settype": "shim_pthread_mutexattr_settype",
+		"pthread_mutexattr_destroy": "shim_pthread_mutexattr_destroy",
+		"pthread_cond_init":         "shim_pthread_cond_init",
+		"pthread_cond_wait":         "shim_pthread_cond_wait",
+		"pthread_cond_timedwait":    "shim_pthread_cond_timedwait",
+		"pthread_cond_signal":       "shim_pthread_cond_signal",
 		"pthread_cond_broadcast":    "shim_pthread_cond_broadcast",
-		"pthread_rwlock_wrlock":     "shim_pthread_rwlock_wrlock",
 		"pthread_cond_destroy":      "shim_pthread_cond_destroy",
 		"pthread_rwlock_rdlock":     "shim_pthread_rwlock_rdlock",
-		"pthread_setspecific":       "shim_pthread_setspecific",
-		"pthread_equal":             "shim_pthread_equal",
-		"pthread_mutex_unlock":      "shim_pthread_mutex_unlock",
-		"pthread_cond_timedwait":    "shim_pthread_cond_timedwait",
-		"poll":                      "shim_poll",
+		"pthread_rwlock_wrlock":     "shim_pthread_rwlock_wrlock",
 		"pthread_rwlock_unlock":     "shim_pthread_rwlock_unlock",
-		"pthread_detach":            "shim_pthread_detach",
-		"pthread_mutexattr_init":    "shim_pthread_mutexattr_init",
-		"pthread_mutex_lock":        "shim_pthread_mutex_lock",
-		"munmap":                    "shim_munmap",
-		"pthread_mutex_destroy":     "shim_pthread_mutex_destroy",
-		"pthread_mutex_trylock":     "shim_pthread_mutex_trylock",
-		"sched_yield":               "shim_sched_yield",
-		"pthread_join":              "shim_pthread_join",
-		"pthread_getspecific":       "shim_pthread_getspecific",
-		"pthread_mutexattr_destroy": "shim_pthread_mutexattr_destroy",
-		"pthread_self":              "shim_pthread_self",
-		"pthread_mutexattr_settype": "shim_pthread_mutexattr_settype",
-		"pthread_key_create":        "shim_pthread_key_create",
-		"pthread_mutex_init":        "shim_pthread_mutex_init",
-		"madvise":                   "shim_madvise",
-		"pthread_once":              "shim_pthread_once",
-		"pthread_cond_wait":         "shim_pthread_cond_wait",
-		"raise":                     "shim_raise",
-		"pthread_cond_signal":       "shim_pthread_cond_signal",
+		"syscall":                   "shim_syscall",
+	}
+
+	lookupShim := func(name string) (string, bool) {
+		if shim, ok := pltMap[name]; ok {
+			return shim, true
+		}
+		// Try stripping leading underscore (e.g. _write -> write, _ioctl -> ioctl)
+		stripped := strings.TrimPrefix(name, "_")
+		if shim, ok := pltMap[stripped]; ok {
+			return shim, true
+		}
+		return "", false
 	}
 
 	for _, rel := range e.elf.Relocations {
 		if rel.SymName != "" {
-			if shim, ok := pltMap[rel.SymName]; ok {
+			if shim, ok := lookupShim(rel.SymName); ok {
 				if rel.PltAddr != 0 {
 					if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s); // PLT %s\n", rel.PltAddr, shim, rel.SymName); err != nil {
 						return err
 					}
 				}
 				if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s); // GOT %s\n", rel.Offset, shim, rel.SymName); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	// Register shims for matching static symbols (e.g. libc stubs like syscall)
+	for _, sym := range e.elf.Symbols {
+		if sym.Name != "" && sym.Address != 0 {
+			if shim, ok := lookupShim(sym.Name); ok {
+				if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s); // Symbol %s\n", sym.Address, shim, sym.Name); err != nil {
 					return err
 				}
 			}

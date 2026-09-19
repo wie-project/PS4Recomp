@@ -83,9 +83,10 @@ func main() {
 		}
 	}
 
-	if *allSymbols {
-		for _, sym := range loaded.Symbols {
-			if sym.Type == elf.STT_FUNC && sym.Address != 0 {
+	// Seed defined function symbols as entry points
+	for _, sym := range loaded.Symbols {
+		if sym.Type == elf.STT_FUNC && sym.Address != 0 {
+			if *allSymbols || (sym.Address >= textSec.Addr && sym.Address < textSec.Addr+textSec.Size) {
 				entries = append(entries, sym.Address)
 			}
 		}
@@ -121,7 +122,7 @@ func main() {
 	}
 
 	// Copy runtime files to outDir
-	runtimeFiles := []string{"recomp_runtime.h", "recomp_runtime.c", "ps4_syscalls.c"}
+	runtimeFiles := []string{"recomp_runtime.h", "recomp_runtime.c", "ps4_syscalls.c", "ps4_threading.c", "ps4_sync.c"}
 	for _, rf := range runtimeFiles {
 		src := filepath.Join("pkg", "runtime", rf)
 		dst := filepath.Join(*outDir, rf)
@@ -140,6 +141,8 @@ func main() {
 
 	cFiles = append(cFiles, filepath.Join(*outDir, "recomp_runtime.c"))
 	cFiles = append(cFiles, filepath.Join(*outDir, "ps4_syscalls.c"))
+	cFiles = append(cFiles, filepath.Join(*outDir, "ps4_threading.c"))
+	cFiles = append(cFiles, filepath.Join(*outDir, "ps4_sync.c"))
 	fmt.Printf("[ps4-recomp] C source emission complete (%d source files).\n", len(cFiles))
 
 	if *compile {

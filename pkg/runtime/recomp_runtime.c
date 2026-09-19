@@ -7,7 +7,8 @@
 #endif
 
 recomp_fn_t *g_dispatch_l1[DISPATCH_L1_SIZE] = {0};
-GuestContext *g_current_ctx = NULL;
+_Thread_local GuestContext *g_current_ctx = NULL;
+pthread_mutex_t g_heap_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
     if (g_current_ctx) {
@@ -95,8 +96,8 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
     }
 
     if (guest_mem_sz == 0) {
-        // Dynamic headroom: TLS/Args (128KB) + initial heap headroom (64MB) + stack (16MB)
-        size_t min_headroom = 0x20000ULL + (64ULL * 1024 * 1024) + (16ULL * 1024 * 1024);
+        // Dynamic headroom: TLS/Args (128KB) + initial heap headroom (1024MB) + stack (64MB)
+        size_t min_headroom = 0x20000ULL + (1024ULL * 1024 * 1024) + (64ULL * 1024 * 1024);
         size_t base_size = image_size > 0 ? image_size : 0;
         guest_mem_sz = base_size + min_headroom;
         // Round up to 2MB boundary
@@ -160,6 +161,21 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
 
     // Initialize guest heap pointer after args area
     ctx->heap_ptr = (args_addr + 0x10000ULL + 0xFFFULL) & ~0xFFFULL;
+
+    // Set up process root context and VM extent manager
+    ctx->process_ctx = ctx;
+    pthread_mutex_init(&ctx->vm_mutex, NULL);
+
+    // Set up initial free VM extent for heap
+    uint64_t stack_floor = (guest_mem_sz > (64ULL * 1024 * 1024)) ? (guest_mem_sz - (64ULL * 1024 * 1024)) : guest_mem_sz;
+    uint64_t heap_start = (ctx->heap_ptr + 4095ULL) & ~4095ULL;
+    if (heap_start < stack_floor) {
+        GuestVMExtent *root = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
+        root->addr = heap_start;
+        root->size = stack_floor - heap_start;
+        root->is_free = true;
+        ctx->vm_extents = root;
+    }
 
     // Set up guest stack at top of allocated guest address space (growing downwards)
     ctx->rsp = (guest_mem_sz - 0x1000ULL) & ~0xFFULL;
@@ -225,6 +241,13 @@ void recomp_free_runtime(GuestContext *ctx) {
     if (ctx->mem_base) {
         munmap(ctx->mem_base, ctx->mem_size);
     }
+    GuestVMExtent *ext = ctx->vm_extents;
+    while (ext) {
+        GuestVMExtent *next = ext->next;
+        free(ext);
+        ext = next;
+    }
+    pthread_mutex_destroy(&ctx->vm_mutex);
     for (size_t i = 0; i < DISPATCH_L1_SIZE; i++) {
         if (g_dispatch_l1[i]) {
             free(g_dispatch_l1[i]);
@@ -247,3 +270,173 @@ void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip) {
     fprintf(stderr, "FATAL: Unwind target 0x%llx not found in active unwind frames!\n", (unsigned long long)target_ip);
     abort();
 }
+
+uint64_t recomp_vm_alloc(GuestContext *ctx, size_t size) {
+    if (!ctx || size == 0) return (uint64_t)-1;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    size_t aligned_size = (size + 4095ULL) & ~4095ULL;
+
+    pthread_mutex_lock(&proc->vm_mutex);
+
+    GuestVMExtent *curr = proc->vm_extents;
+    GuestVMExtent *best = NULL;
+    while (curr) {
+        if (curr->is_free && curr->size >= aligned_size) {
+            if (!best || curr->size < best->size) {
+                best = curr;
+                if (best->size == aligned_size) break;
+            }
+        }
+        curr = curr->next;
+    }
+
+    if (!best) {
+        pthread_mutex_unlock(&proc->vm_mutex);
+        return (uint64_t)-1;
+    }
+
+    if (best->size > aligned_size) {
+        GuestVMExtent *split = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
+        if (split) {
+            split->addr = best->addr + aligned_size;
+            split->size = best->size - aligned_size;
+            split->is_free = true;
+            split->prev = best;
+            split->next = best->next;
+            if (best->next) {
+                best->next->prev = split;
+            }
+            best->next = split;
+            best->size = aligned_size;
+        }
+    }
+
+    best->is_free = false;
+    uint64_t res = best->addr;
+    pthread_mutex_unlock(&proc->vm_mutex);
+    return res;
+}
+
+int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
+    if (!ctx || addr == 0 || size == 0) return -1;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    uint64_t aligned_addr = addr & ~4095ULL;
+    size_t aligned_size = (size + 4095ULL) & ~4095ULL;
+
+    pthread_mutex_lock(&proc->vm_mutex);
+
+    GuestVMExtent *curr = proc->vm_extents;
+    while (curr) {
+        if (aligned_addr >= curr->addr && aligned_addr < curr->addr + curr->size) {
+            break;
+        }
+        curr = curr->next;
+    }
+
+    if (!curr) {
+        pthread_mutex_unlock(&proc->vm_mutex);
+        return 0;
+    }
+
+    // Release host physical pages
+    if (proc->mem_base && aligned_addr + aligned_size <= proc->mem_size) {
+#if defined(__APPLE__) || defined(__linux__)
+        madvise(proc->mem_base + aligned_addr, aligned_size, MADV_DONTNEED);
+#endif
+    }
+
+    // If already free, nothing to do
+    if (curr->is_free) {
+        pthread_mutex_unlock(&proc->vm_mutex);
+        return 0;
+    }
+
+    // Case 1: aligned_addr is inside curr, but after curr->addr: split off the prefix
+    if (aligned_addr > curr->addr) {
+        GuestVMExtent *mid = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
+        if (mid) {
+            mid->addr = aligned_addr;
+            mid->size = curr->size - (aligned_addr - curr->addr);
+            mid->is_free = false;
+            mid->prev = curr;
+            mid->next = curr->next;
+            if (curr->next) curr->next->prev = mid;
+            curr->next = mid;
+            curr->size = aligned_addr - curr->addr;
+            curr = mid;
+        }
+    }
+
+    // Case 2: aligned_size is less than curr->size: split off the suffix
+    if (aligned_size < curr->size) {
+        GuestVMExtent *suffix = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
+        if (suffix) {
+            suffix->addr = curr->addr + aligned_size;
+            suffix->size = curr->size - aligned_size;
+            suffix->is_free = false;
+            suffix->prev = curr;
+            suffix->next = curr->next;
+            if (curr->next) curr->next->prev = suffix;
+            curr->next = suffix;
+            curr->size = aligned_size;
+        }
+    }
+
+    // Now curr matches [aligned_addr, aligned_addr + aligned_size] exactly
+    curr->is_free = true;
+
+    // Coalesce with next if adjacent and free
+    if (curr->next && curr->next->is_free && (curr->addr + curr->size == curr->next->addr)) {
+        GuestVMExtent *next_node = curr->next;
+        curr->size += next_node->size;
+        curr->next = next_node->next;
+        if (next_node->next) next_node->next->prev = curr;
+        free(next_node);
+    }
+
+    // Coalesce with prev if adjacent and free
+    if (curr->prev && curr->prev->is_free && (curr->prev->addr + curr->prev->size == curr->addr)) {
+        GuestVMExtent *prev_node = curr->prev;
+        prev_node->size += curr->size;
+        prev_node->next = curr->next;
+        if (curr->next) curr->next->prev = prev_node;
+        free(curr);
+        curr = prev_node;
+    }
+
+    pthread_mutex_unlock(&proc->vm_mutex);
+    return 0;
+}
+
+GuestContext *recomp_create_thread_context(GuestContext *parent, uint64_t stack_size) {
+    if (!parent) return NULL;
+    if (stack_size == 0) stack_size = 2 * 1024 * 1024; // 2MB default stack
+    GuestContext *proc = parent->process_ctx ? parent->process_ctx : parent;
+
+    // Allocate stack and TCB (64KB) via VM extent allocator
+    size_t alloc_total = stack_size + 0x10000ULL;
+    uint64_t stack_base = recomp_vm_alloc(proc, alloc_total);
+    if (stack_base == (uint64_t)-1) {
+        fprintf(stderr, "[ps4-recomp] FATAL: out of guest memory for new thread stack\n");
+        return NULL;
+    }
+    uint64_t tcb_base = stack_base + stack_size;
+
+    // Initialize FS TCB base
+    *(uint64_t*)(parent->mem_base + tcb_base) = tcb_base;
+
+    GuestContext *t_ctx = (GuestContext *)calloc(1, sizeof(GuestContext));
+    if (!t_ctx) return NULL;
+
+    t_ctx->mem_base = parent->mem_base;
+    t_ctx->mem_size = parent->mem_size;
+    t_ctx->heap_ptr = parent->heap_ptr;
+    t_ctx->fs_base = tcb_base;
+    t_ctx->process_ctx = proc;
+    t_ctx->rsp = (stack_base + stack_size - 0x100ULL) & ~0xFFULL;
+    t_ctx->rbp = t_ctx->rsp;
+    t_ctx->fpu_cw = 0x037F;
+
+    return t_ctx;
+}
+

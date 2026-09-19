@@ -1,6 +1,8 @@
-build/
 tools/
+build_hello/
 build_exceptions/
+build_threading/
+build_memstress/
 exceptions.elf
-.DS_Store
+output_*/
 *.DS_Store

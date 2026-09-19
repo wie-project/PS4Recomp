@@ -80,9 +80,43 @@ typedef struct GuestContext {
   size_t mem_size;
   uint64_t heap_ptr;
 
+  // Guest virtual memory extent manager
+  struct GuestVMExtent *vm_extents;
+  pthread_mutex_t vm_mutex;
+
+  // Threading and TLS
+  uint64_t thread_id;
+  uint64_t tls_keys[128];
+
+  // Process root context (shared across threads)
+  struct GuestContext *process_ctx;
+
   // Active exception unwinding frame stack
   UnwindFrame *unwind_frame;
 } GuestContext;
+
+#define SHIM_RETURN()                                                          \
+  do {                                                                         \
+    ctx->rsp += 8;                                                             \
+    return;                                                                    \
+  } while (0)
+
+static inline void set_guest_errno(GuestContext *ctx, int err) {
+  if (ctx && ctx->fs_base) {
+    *(int *)(ctx->mem_base + ctx->fs_base + 0x100ULL) = err;
+  }
+}
+
+// Guest VM Extent for tracking mmap/munmap ranges
+typedef struct GuestVMExtent {
+  uint64_t addr;
+  size_t size;
+  bool is_free;
+  struct GuestVMExtent *prev;
+  struct GuestVMExtent *next;
+} GuestVMExtent;
+
+extern _Thread_local GuestContext *g_current_ctx;
 
 // x87 FPU stack helpers
 #define FPU_ST(i) ((ctx)->fpu_stack[((ctx)->fpu_top + (i)) & 7])
@@ -135,6 +169,7 @@ static inline void set_flags_logic_u64(GuestContext *ctx, uint64_t res) {
 
 static inline void set_flags_inc_u64(GuestContext *ctx, uint64_t a,
                                      uint64_t res) {
+  (void)a;
   ctx->zf = (res == 0);
   ctx->sf = (res >> 63) & 1;
   ctx->of = (res == 0x8000000000000000ULL);
@@ -142,6 +177,7 @@ static inline void set_flags_inc_u64(GuestContext *ctx, uint64_t a,
 
 static inline void set_flags_dec_u64(GuestContext *ctx, uint64_t a,
                                      uint64_t res) {
+  (void)res;
   ctx->zf = (res == 0);
   ctx->sf = (res >> 63) & 1;
   ctx->of = (a == 0x8000000000000000ULL);
@@ -173,6 +209,7 @@ static inline void set_flags_logic_u32(GuestContext *ctx, uint32_t res) {
 
 static inline void set_flags_inc_u32(GuestContext *ctx, uint32_t a,
                                      uint32_t res) {
+  (void)a;
   ctx->zf = (res == 0);
   ctx->sf = (res >> 31) & 1;
   ctx->of = (res == 0x80000000U);
@@ -275,14 +312,20 @@ void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip);
 GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image, size_t image_size, const char *prog_name);
 GuestContext *recomp_init_runtime_file(const char *image_filename, size_t requested_mem_sz, const char *prog_name);
 void recomp_free_runtime(GuestContext *ctx);
+GuestContext *recomp_create_thread_context(GuestContext *parent, uint64_t stack_size);
+uint64_t recomp_vm_alloc(GuestContext *ctx, size_t size);
+int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size);
 
 // Syscall / Libkernel Shim declarations
 void shim_sceKernelUsleep(GuestContext *ctx);
 void shim_write(GuestContext *ctx);
 void shim_writev(GuestContext *ctx);
+void shim_read(GuestContext *ctx);
+void shim_readv(GuestContext *ctx);
 void shim_open(GuestContext *ctx);
 void shim_close(GuestContext *ctx);
 void shim_lseek(GuestContext *ctx);
+void shim_fcntl(GuestContext *ctx);
 void shim_fstat(GuestContext *ctx);
 void shim_ioctl(GuestContext *ctx);
 void shim_mmap(GuestContext *ctx);
@@ -297,8 +340,10 @@ void shim_sigaction(GuestContext *ctx);
 void shim_sigprocmask(GuestContext *ctx);
 void shim_raise(GuestContext *ctx);
 void shim_poll(GuestContext *ctx);
+void shim_syscall(GuestContext *ctx);
 
 // Pthread shims
+void shim_pthread_create(GuestContext *ctx);
 void shim_pthread_mutex_init(GuestContext *ctx);
 void shim_pthread_mutex_lock(GuestContext *ctx);
 void shim_pthread_mutex_trylock(GuestContext *ctx);

@@ -157,7 +157,8 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 		// Record function pointers loaded via LEA RIP+disp
 		if inst.Op == x86asm.LEA {
 			if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
-				target := uint64(int64(nextPC) + mem.Disp)
+				disp := int64(int32(mem.Disp))
+				target := uint64(int64(nextPC) + disp)
 				if target >= d.textStart && target < d.textEnd && (target < entryAddr || target >= fnEnd) {
 					discoveredCalls = append(discoveredCalls, target)
 				}
@@ -212,7 +213,8 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 		case inst.Inst.Op == x86asm.LEA:
 			// Check if LEA references a jump table in .rodata
 			if mem, ok := inst.Inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
-				tableAddr := uint64(int64(nextPC) + mem.Disp)
+				disp := int64(int32(mem.Disp))
+				tableAddr := uint64(int64(nextPC) + disp)
 				for _, target := range d.findJumpTableTargets(tableAddr, entryAddr, fnEnd) {
 					leaders[target] = true
 				}
@@ -374,7 +376,8 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				}
 			case x86asm.LEA:
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
-					target := uint64(int64(nextPC) + mem.Disp)
+					disp := int64(int32(mem.Disp))
+					target := uint64(int64(nextPC) + disp)
 					if target >= d.textStart && target < d.textEnd {
 						discoveredCalls = append(discoveredCalls, target)
 					}
