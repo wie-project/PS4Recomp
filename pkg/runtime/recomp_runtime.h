@@ -69,6 +69,7 @@ typedef struct GuestContext {
   // Guest memory mapping
   uint8_t *mem_base;
   size_t mem_size;
+  uint64_t heap_ptr;
 } GuestContext;
 
 // x87 FPU stack helpers
@@ -253,7 +254,7 @@ static inline void set_flags_logic_u8(GuestContext *ctx, uint8_t res) {
 }
 
 // Function pointer type for recompiled functions
-typedef void (*recomp_fn_t)(GuestContext *ctx);
+typedef void (*recomp_fn_t)(GuestContext *__restrict__ ctx);
 
 // Dispatch table: maps guest virtual address to compiled function pointer
 // Uses a 2-level page table covering up to 4GB of guest code space with
@@ -287,8 +288,8 @@ static inline void recomp_dispatch(GuestContext *ctx, uint64_t target) {
 }
 
 // Runtime initialization and memory layout
-GuestContext *recomp_init_runtime(const uint8_t *elf_image, size_t image_size);
-GuestContext *recomp_init_runtime_file(const char *image_filename);
+GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image, size_t image_size, const char *prog_name);
+GuestContext *recomp_init_runtime_file(const char *image_filename, size_t requested_mem_sz, const char *prog_name);
 void recomp_free_runtime(GuestContext *ctx);
 
 // Syscall / Libkernel Shim declarations

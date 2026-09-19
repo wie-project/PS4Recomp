@@ -65,9 +65,9 @@ void shim_exit(GuestContext *ctx) {
     exit(status);
 }
 
-// errno pointer
+// errno pointer (allocated within dynamic TLS space)
 void shim_error(GuestContext *ctx) {
-    ctx->rax = 0x10001000ULL;
+    ctx->rax = ctx->fs_base + 0x100ULL;
     SHIM_RETURN();
 }
 
@@ -108,14 +108,23 @@ void shim_sched_yield(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-// Simple bump allocator for guest mmap
-static uint64_t g_guest_heap_ptr = 0x21000000ULL; // Start heap at 528MB (after args at 0x20000000)
+// Dynamic bump allocator for guest mmap
 void shim_mmap(GuestContext *ctx) {
     uint64_t addr = ctx->rdi;
     size_t len = (size_t)ctx->rsi;
     if (addr == 0) {
-        addr = g_guest_heap_ptr;
-        g_guest_heap_ptr = (g_guest_heap_ptr + len + 4095) & ~4095ULL;
+        addr = ctx->heap_ptr;
+        uint64_t next_heap = (ctx->heap_ptr + len + 4095ULL) & ~4095ULL;
+        // Verify heap does not collide with stack (leave at least 8MB stack headroom)
+        uint64_t stack_floor = (ctx->rsp > (8ULL * 1024 * 1024)) ? (ctx->rsp - (8ULL * 1024 * 1024)) : 0;
+        if (next_heap < ctx->mem_size && (stack_floor == 0 || next_heap < stack_floor)) {
+            ctx->heap_ptr = next_heap;
+        } else {
+            fprintf(stderr, "[ps4-recomp] mmap: out of guest address space (heap=0x%llx, req=%zu, mem_size=0x%llx)\n",
+                    (unsigned long long)ctx->heap_ptr, len, (unsigned long long)ctx->mem_size);
+            ctx->rax = (uint64_t)-1;
+            SHIM_RETURN();
+        }
     }
     ctx->rax = addr;
     SHIM_RETURN();

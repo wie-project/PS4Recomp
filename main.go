@@ -175,7 +175,7 @@ func compileParallel(cFiles []string, outDir, targetBin string) error {
 				objFile := strings.TrimSuffix(cFile, ".c") + ".o"
 				objFiles[idx] = objFile
 
-				args := []string{"-Os", "-fvisibility=hidden", "-target", "arm64-apple-darwin", "-I" + outDir, "-c", cFile, "-o", objFile}
+				args := []string{"-O2", "-mcpu=apple-m1", "-fvisibility=hidden", "-target", "arm64-apple-darwin", "-I" + outDir, "-c", cFile, "-o", objFile}
 				cmd := exec.Command("clang", args...)
 				if out, err := cmd.CombinedOutput(); err != nil {
 					errChan <- fmt.Errorf("error compiling %s: %w\n%s", filepath.Base(cFile), err, string(out))

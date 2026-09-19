@@ -77,3 +77,22 @@ func TestDisasmAtomicAdd(t *testing.T) {
 		t.Errorf("Expected block at 0x58eb1 to be discovered, but it was not!")
 	}
 }
+
+func TestCheckEntryPoint(t *testing.T) {
+	elfPath := "../../hello_world.elf"
+	loaded, err := elfloader.LoadELF(elfPath)
+	if err != nil {
+		t.Fatalf("failed to load elf: %v", err)
+	}
+
+	d, err := disasm.NewDisassembler(loaded)
+	if err != nil {
+		t.Fatalf("NewDisassembler error: %v", err)
+	}
+
+	err = d.AnalyzeReachable([]uint64{loaded.EntryPoint})
+	t.Logf("AnalyzeReachable error: %v, total funcs: %d", err, len(d.Functions))
+	for fAddr, fn := range d.Functions {
+		t.Logf("  Func 0x%x: %s (blocks: %d)", fAddr, fn.Name, len(fn.Blocks))
+	}
+}

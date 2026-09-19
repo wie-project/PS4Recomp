@@ -30,14 +30,14 @@ func NewCEmitter(loaded *elfloader.LoadedELF, d *disasm.Disassembler, l *lifter.
 }
 
 // ResolveEntryAddress dynamically resolves the primary guest entry point.
-// It prioritizes the "main" symbol, falls back to the ELF EntryPoint (_start),
+// It prioritizes the ELF EntryPoint (_start), falls back to the "main" symbol,
 // and defaults to 0x60 if no metadata is present.
 func (e *CEmitter) ResolveEntryAddress() (uint64, string) {
-	if mainSym, ok := e.elf.SymbolByName["main"]; ok && mainSym.Address != 0 {
-		return mainSym.Address, "main"
-	}
 	if e.elf.EntryPoint != 0 {
 		return e.elf.EntryPoint, "_start"
+	}
+	if mainSym, ok := e.elf.SymbolByName["main"]; ok && mainSym.Address != 0 {
+		return mainSym.Address, "main"
 	}
 	return 0x60, "entry"
 }
@@ -106,7 +106,7 @@ func (e *CEmitter) EmitFunctionsHeader(path string) (err error) {
 	sort.Slice(fnAddrs, func(i, j int) bool { return fnAddrs[i] < fnAddrs[j] })
 
 	for _, addr := range fnAddrs {
-		if _, err := fmt.Fprintf(w, "void fn_0x%x(GuestContext *ctx);\n", addr); err != nil {
+		if _, err := fmt.Fprintf(w, "void fn_0x%x(GuestContext *__restrict__ ctx);\n", addr); err != nil {
 			return err
 		}
 	}
@@ -212,7 +212,7 @@ func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint6
 
 func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 	addr := fn.EntryAddr
-	if _, err := fmt.Fprintf(w, "// Function %s at 0x%x\nvoid fn_0x%x(GuestContext *ctx) {\n", fn.Name, addr, addr); err != nil {
+	if _, err := fmt.Fprintf(w, "// Function %s at 0x%x\nvoid fn_0x%x(GuestContext *__restrict__ ctx) {\n", fn.Name, addr, addr); err != nil {
 		return err
 	}
 
@@ -415,22 +415,25 @@ int main(int argc, char **argv) {
     printf("[ps4-recomp] Initializing runtime...\n");
     recomp_init_dispatch_table();
 
-    GuestContext *ctx = recomp_init_runtime_file("guest_image.bin");
+    const char *prog_name = (argc > 0 && argv[0]) ? argv[0] : "ps4_app";
+    GuestContext *ctx = recomp_init_runtime_file("guest_image.bin", 0, prog_name);
     if (!ctx) {
         fprintf(stderr, "[ps4-recomp] Failed to allocate guest memory or load guest_image.bin\n");
         return 1;
     }
 
-    printf("[ps4-recomp] Calling global constructors (.init_array)...\n");
-    // Run .init_array
-    uint64_t init_arr[] = {
+    if (strcmp("%s", "_start") != 0) {
+        printf("[ps4-recomp] Calling global constructors (.init_array)...\n");
+        // Run .init_array
+        uint64_t init_arr[] = {
 %s
-    };
-    size_t init_count = sizeof(init_arr) / sizeof(init_arr[0]);
-    for (size_t i = 0; i < init_count; i++) {
-        if (init_arr[i] != 0) {
-            printf("[ps4-recomp] Running init constructor at 0x%%llx...\n", (unsigned long long)init_arr[i]);
-            recomp_dispatch(ctx, init_arr[i]);
+        };
+        size_t init_count = sizeof(init_arr) / sizeof(init_arr[0]);
+        for (size_t i = 0; i < init_count; i++) {
+            if (init_arr[i] != 0) {
+                printf("[ps4-recomp] Running init constructor at 0x%%llx...\n", (unsigned long long)init_arr[i]);
+                recomp_dispatch(ctx, init_arr[i]);
+            }
         }
     }
 
@@ -441,7 +444,7 @@ int main(int argc, char **argv) {
     recomp_free_runtime(ctx);
     return 0;
 }
-`, e.formatInitArray(), entryName, entryAddr, entryAddr)
+`, entryName, e.formatInitArray(), entryName, entryAddr, entryAddr)
 
 	if _, err := w.WriteString(content); err != nil {
 		return err

@@ -44,7 +44,19 @@ void recomp_register_fn(uint64_t guest_addr, recomp_fn_t fn) {
     g_dispatch_l1[l1_idx][guest_addr & DISPATCH_L2_MASK] = fn;
 }
 
-GuestContext *recomp_init_runtime(const uint8_t *elf_image, size_t image_size) {
+static size_t parse_mem_size_str(const char *str) {
+    if (!str || !*str) return 0;
+    char *end = NULL;
+    unsigned long long val = strtoull(str, &end, 0);
+    if (end && *end) {
+        if (*end == 'g' || *end == 'G') val *= 1024ULL * 1024 * 1024;
+        else if (*end == 'm' || *end == 'M') val *= 1024ULL * 1024;
+        else if (*end == 'k' || *end == 'K') val *= 1024ULL;
+    }
+    return (size_t)val;
+}
+
+GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image, size_t image_size, const char *prog_name) {
     GuestContext *ctx = (GuestContext *)calloc(1, sizeof(GuestContext));
     if (!ctx) {
         perror("calloc GuestContext");
@@ -58,8 +70,27 @@ GuestContext *recomp_init_runtime(const uint8_t *elf_image, size_t image_size) {
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
 
-    // Allocate 1GB guest address space
-    size_t guest_mem_sz = 1ULL << 30; // 1GB
+    // Dynamic memory size calculation without hardcoded limits
+    if (guest_mem_sz == 0) {
+        const char *env_mem = getenv("PS4_RECOMP_MEM");
+        if (env_mem) {
+            guest_mem_sz = parse_mem_size_str(env_mem);
+        }
+    }
+
+    if (guest_mem_sz == 0) {
+        // Dynamic headroom: TLS/Args (128KB) + initial heap headroom (64MB) + stack (16MB)
+        size_t min_headroom = 0x20000ULL + (64ULL * 1024 * 1024) + (16ULL * 1024 * 1024);
+        size_t base_size = image_size > 0 ? image_size : 0;
+        guest_mem_sz = base_size + min_headroom;
+        // Round up to 2MB boundary
+        guest_mem_sz = (guest_mem_sz + 0x1FFFFFULL) & ~0x1FFFFFULL;
+    }
+
+    if (image_size > 0 && guest_mem_sz < image_size + 0x20000ULL) {
+        guest_mem_sz = image_size + 0x20000ULL;
+    }
+
     uint8_t *mem = (uint8_t *)mmap(NULL, guest_mem_sz,
                                    PROT_READ | PROT_WRITE,
                                    MAP_ANON | MAP_PRIVATE, -1, 0);
@@ -74,25 +105,27 @@ GuestContext *recomp_init_runtime(const uint8_t *elf_image, size_t image_size) {
 
     ctx->fpu_cw = 0x037F; // Standard x87 control word default
 
-    // Copy initial ELF memory image
+    // Copy initial ELF memory image if provided
     if (elf_image && image_size > 0) {
         memcpy(ctx->mem_base, elf_image, image_size);
     }
 
-    // Set up guest stack (grow downwards from 0x30000000)
-    ctx->rsp = 0x30000000ULL;
-    ctx->rbp = ctx->rsp;
+    // Dynamic memory layout positioning relative to image boundary:
+    uint64_t image_end = (image_size + 0xFFFFULL) & ~0xFFFFULL;
+    if (image_end < 0x10000ULL) {
+        image_end = 0x10000ULL;
+    }
 
-    // Set up FS segment (Thread Control Block for TLS)
-    uint64_t tcb_addr = 0x10000000ULL;
+    // Set up FS segment (Thread Control Block for TLS) right above image
+    uint64_t tcb_addr = image_end;
     ctx->fs_base = tcb_addr;
-    // System V AMD64 TLS: %fs:0x0 points to the TCB itself
     MEM_U64(tcb_addr) = tcb_addr;
 
-    // Set up process arguments at 0x20000000 for _start_ps4_c
-    uint64_t args_addr = 0x20000000ULL;
-    uint64_t prog_name_addr = 0x20000100ULL;
-    strcpy((char*)(ctx->mem_base + prog_name_addr), "hello_world");
+    // Set up process arguments at tcb_addr + 0x10000 for _start_ps4_c
+    uint64_t args_addr = tcb_addr + 0x10000ULL;
+    uint64_t prog_name_addr = args_addr + 0x100ULL;
+    const char *pname = (prog_name && prog_name[0]) ? prog_name : "ps4_app";
+    strncpy((char*)(ctx->mem_base + prog_name_addr), pname, 255);
 
     // argc = 1
     MEM_U64(args_addr) = 1;
@@ -102,14 +135,24 @@ GuestContext *recomp_init_runtime(const uint8_t *elf_image, size_t image_size) {
     MEM_U64(args_addr + 16) = 0;
     // envp[0] = NULL
     MEM_U64(args_addr + 24) = 0;
+    // auxv[0] = AT_NULL (type = 0, val = 0)
+    MEM_U64(args_addr + 32) = 0;
+    MEM_U64(args_addr + 40) = 0;
 
     // RDI points to the argument structure
     ctx->rdi = args_addr;
 
+    // Initialize guest heap pointer after args area
+    ctx->heap_ptr = (args_addr + 0x10000ULL + 0xFFFULL) & ~0xFFFULL;
+
+    // Set up guest stack at top of allocated guest address space (growing downwards)
+    ctx->rsp = (guest_mem_sz - 0x1000ULL) & ~0xFFULL;
+    ctx->rbp = ctx->rsp;
+
     return ctx;
 }
 
-GuestContext *recomp_init_runtime_file(const char *image_filename) {
+GuestContext *recomp_init_runtime_file(const char *image_filename, size_t requested_mem_sz, const char *prog_name) {
     char path[1024] = {0};
     FILE *fp = NULL;
 
@@ -137,25 +180,21 @@ GuestContext *recomp_init_runtime_file(const char *image_filename) {
         return NULL;
     }
 
-    printf("[ps4-recomp] Loading guest memory image from: %s\n", path);
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
 
-    GuestContext *ctx = recomp_init_runtime(NULL, 0);
+    size_t image_sz = (sz > 0) ? (size_t)sz : 0;
+    GuestContext *ctx = recomp_init_runtime(requested_mem_sz, NULL, image_sz, prog_name);
     if (!ctx) {
         fclose(fp);
         return NULL;
     }
 
-    fseek(fp, 0, SEEK_END);
-    long sz = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    printf("[ps4-recomp] Loading guest memory image (%zu bytes), allocated dynamic address space (%.1f MB)\n",
+           image_sz, (double)ctx->mem_size / (1024.0 * 1024.0));
 
     if (sz > 0) {
-        if ((size_t)sz > ctx->mem_size) {
-            fprintf(stderr, "[ps4-recomp] Guest image size (%ld bytes) exceeds guest memory (1GB)\n", sz);
-            fclose(fp);
-            recomp_free_runtime(ctx);
-            return NULL;
-        }
         size_t nread = fread(ctx->mem_base, 1, sz, fp);
         if (nread != (size_t)sz) {
             fprintf(stderr, "[ps4-recomp] Warning: only read %zu of %ld bytes from %s\n", nread, sz, path);

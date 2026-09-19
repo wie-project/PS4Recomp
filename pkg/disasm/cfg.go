@@ -12,9 +12,10 @@ import (
 
 // Instruction wraps x86asm.Inst with its guest address.
 type Instruction struct {
-	Address uint64
-	Inst    x86asm.Inst
-	Bytes   []byte
+	Address   uint64
+	Inst      x86asm.Inst
+	Bytes     []byte
+	SkipFlags bool
 }
 
 // BasicBlock represents a straight-line sequence of instructions.
@@ -91,6 +92,11 @@ func (d *Disassembler) AnalyzeReachable(entryAddrs []uint64) error {
 	}
 
 	return nil
+}
+
+// DisasmFunction disassembles a single function starting at entryAddr (exported for testing).
+func (d *Disassembler) DisasmFunction(entryAddr uint64) (*Function, []uint64, error) {
+	return d.disasmFunction(entryAddr)
 }
 
 // disasmFunction disassembles a single function starting at entryAddr.
@@ -253,6 +259,7 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 		return fn.BlockOrder[i] < fn.BlockOrder[j]
 	})
 
+	d.analyzeBlockFlagLiveness(fn)
 	return fn, discoveredCalls, nil
 }
 
@@ -453,7 +460,79 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 		return fn.BlockOrder[i] < fn.BlockOrder[j]
 	})
 
+	d.analyzeBlockFlagLiveness(fn)
 	return fn, discoveredCalls, nil
+}
+
+func (d *Disassembler) analyzeBlockFlagLiveness(fn *Function) {
+	for _, block := range fn.Blocks {
+		flagsLive := true // Conservatively assume flags are live at block boundary
+		for i := len(block.Insts) - 1; i >= 0; i-- {
+			inst := &block.Insts[i]
+			op := inst.Inst.Op
+
+			reads := usesFlags(op)
+			definesAll := definesAllFlags(op)
+
+			if definesAll {
+				if !flagsLive {
+					inst.SkipFlags = true
+				}
+				flagsLive = false
+			}
+
+			if reads {
+				flagsLive = true
+			}
+		}
+	}
+}
+
+func usesFlags(op x86asm.Op) bool {
+	if isJcc(op) || isSetcc(op) || isCmovcc(op) {
+		return true
+	}
+	switch op {
+	case x86asm.ADC, x86asm.SBB:
+		return true
+	default:
+		return false
+	}
+}
+
+func definesAllFlags(op x86asm.Op) bool {
+	switch op {
+	case x86asm.ADD, x86asm.SUB, x86asm.CMP, x86asm.TEST,
+		x86asm.AND, x86asm.OR, x86asm.XOR,
+		x86asm.NEG, x86asm.SHL, x86asm.SHR, x86asm.SAR:
+		return true
+	default:
+		return false
+	}
+}
+
+func isSetcc(op x86asm.Op) bool {
+	switch op {
+	case x86asm.SETA, x86asm.SETAE, x86asm.SETB, x86asm.SETBE,
+		x86asm.SETE, x86asm.SETG, x86asm.SETGE, x86asm.SETL,
+		x86asm.SETLE, x86asm.SETNE, x86asm.SETNO, x86asm.SETNP,
+		x86asm.SETNS, x86asm.SETO, x86asm.SETP, x86asm.SETS:
+		return true
+	default:
+		return false
+	}
+}
+
+func isCmovcc(op x86asm.Op) bool {
+	switch op {
+	case x86asm.CMOVA, x86asm.CMOVAE, x86asm.CMOVB, x86asm.CMOVBE,
+		x86asm.CMOVE, x86asm.CMOVG, x86asm.CMOVGE, x86asm.CMOVL,
+		x86asm.CMOVLE, x86asm.CMOVNE, x86asm.CMOVNO, x86asm.CMOVNP,
+		x86asm.CMOVNS, x86asm.CMOVO, x86asm.CMOVP, x86asm.CMOVS:
+		return true
+	default:
+		return false
+	}
 }
 
 func isJcc(op x86asm.Op) bool {

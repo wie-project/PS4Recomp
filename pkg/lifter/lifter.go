@@ -20,6 +20,35 @@ func NewLifter(knownFuncs map[uint64]bool) *Lifter {
 	}
 }
 
+// IsOpcodeSupported returns true if the lifter implements translation for the given x86 opcode.
+func IsOpcodeSupported(op x86asm.Op) bool {
+	switch op {
+	case x86asm.NOP, x86asm.MOV, x86asm.CDQE, x86asm.ROL, x86asm.ROR,
+		x86asm.MOVZX, x86asm.MOVSX, x86asm.MOVSXD, x86asm.LEA,
+		x86asm.PUSH, x86asm.POP, x86asm.ADD, x86asm.SUB, x86asm.AND,
+		x86asm.OR, x86asm.XOR, x86asm.CMP, x86asm.TEST, x86asm.ADC,
+		x86asm.BSF, x86asm.INC, x86asm.DEC, x86asm.NEG, x86asm.NOT,
+		x86asm.SHL, x86asm.SHR, x86asm.SAR, x86asm.XCHG, x86asm.XADD,
+		x86asm.CMPXCHG, x86asm.IMUL, x86asm.MUL, x86asm.CALL, x86asm.RET,
+		x86asm.JMP, x86asm.UD2, x86asm.INT, x86asm.FWAIT,
+		x86asm.MOVUPS, x86asm.MOVAPS, x86asm.MOVDQU, x86asm.MOVDQA,
+		x86asm.PXOR, x86asm.XORPS, x86asm.POR, x86asm.PAND,
+		x86asm.MOVD, x86asm.MOVQ, x86asm.MOVSS, x86asm.PSHUFD,
+		x86asm.PSLLD, x86asm.PSRLD, x86asm.SBB, x86asm.BT, x86asm.DIV,
+		x86asm.HLT, x86asm.MOVSD_XMM, x86asm.MOVSD, x86asm.PANDN,
+		x86asm.PMULUDQ, x86asm.PCMPGTD, x86asm.PUNPCKLDQ,
+		x86asm.FLDZ, x86asm.FLD, x86asm.FILD, x86asm.FST, x86asm.FSTP,
+		x86asm.FIST, x86asm.FISTP, x86asm.FXCH, x86asm.FCHS,
+		x86asm.FADD, x86asm.FADDP, x86asm.FIADD, x86asm.FSUB, x86asm.FSUBP,
+		x86asm.FISUB, x86asm.FMUL, x86asm.FMULP, x86asm.FIMUL,
+		x86asm.FDIV, x86asm.FDIVP, x86asm.FUCOMI, x86asm.FUCOMIP,
+		x86asm.FLDCW, x86asm.FNSTCW:
+		return true
+	default:
+		return isSetcc(op) || isCmovcc(op) || IsJcc(op)
+	}
+}
+
 // LiftInstruction lifts a single instruction into C statements.
 func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *disasm.Function) ([]string, error) {
 	pc := inst.Address
@@ -113,7 +142,7 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 		)
 
 	case x86asm.ADD, x86asm.SUB, x86asm.AND, x86asm.OR, x86asm.XOR, x86asm.CMP, x86asm.TEST, x86asm.ADC:
-		code, err := l.liftAlu(op, args[0], args[1], defMemSz, nextPC)
+		code, err := l.liftAlu(inst, args[0], args[1], defMemSz, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}
@@ -127,14 +156,14 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 		lines = append(lines, code...)
 
 	case x86asm.INC, x86asm.DEC, x86asm.NEG, x86asm.NOT:
-		code, err := l.liftUnary(op, args[0], defMemSz, nextPC)
+		code, err := l.liftUnary(inst, args[0], defMemSz, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}
 		lines = append(lines, code...)
 
 	case x86asm.SHL, x86asm.SHR, x86asm.SAR:
-		code, err := l.liftShift(op, args[0], args[1], defMemSz, nextPC)
+		code, err := l.liftShift(inst, args[0], args[1], defMemSz, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}
@@ -628,7 +657,8 @@ func (l *Lifter) liftExtend(op x86asm.Op, dst, src x86asm.Arg, defMemSz int, nex
 	return []string{"    " + stmt}, nil
 }
 
-func (l *Lifter) liftAlu(op x86asm.Op, dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+func (l *Lifter) liftAlu(inst disasm.Instruction, dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	op := inst.Inst.Op
 	sz := defMemSz
 	if reg, ok := dst.(x86asm.Reg); ok {
 		if info, ok := regMap[reg]; ok && info.Size > 0 {
@@ -659,11 +689,10 @@ func (l *Lifter) liftAlu(op x86asm.Op, dst, src x86asm.Arg, defMemSz int, nextPC
 
 	switch op {
 	case x86asm.ADD:
-		lines = append(
-			lines,
-			"      res = a + b;",
-			fmt.Sprintf("      set_flags_add_u%d(ctx, a, b, res);", sz*8),
-		)
+		lines = append(lines, "      res = a + b;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_add_u%d(ctx, a, b, res);", sz*8))
+		}
 		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
@@ -687,11 +716,10 @@ func (l *Lifter) liftAlu(op x86asm.Op, dst, src x86asm.Arg, defMemSz int, nextPC
 		}
 
 	case x86asm.SUB:
-		lines = append(
-			lines,
-			"      res = a - b;",
-			fmt.Sprintf("      set_flags_sub_u%d(ctx, a, b, res);", sz*8),
-		)
+		lines = append(lines, "      res = a - b;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_sub_u%d(ctx, a, b, res);", sz*8))
+		}
 		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
@@ -715,11 +743,10 @@ func (l *Lifter) liftAlu(op x86asm.Op, dst, src x86asm.Arg, defMemSz int, nextPC
 		)
 
 	case x86asm.AND:
-		lines = append(
-			lines,
-			"      res = a & b;",
-			fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8),
-		)
+		lines = append(lines, "      res = a & b;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
 		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
@@ -729,11 +756,10 @@ func (l *Lifter) liftAlu(op x86asm.Op, dst, src x86asm.Arg, defMemSz int, nextPC
 		}
 
 	case x86asm.OR:
-		lines = append(
-			lines,
-			"      res = a | b;",
-			fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8),
-		)
+		lines = append(lines, "      res = a | b;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
 		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
@@ -743,11 +769,10 @@ func (l *Lifter) liftAlu(op x86asm.Op, dst, src x86asm.Arg, defMemSz int, nextPC
 		}
 
 	case x86asm.XOR:
-		lines = append(
-			lines,
-			"      res = a ^ b;",
-			fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8),
-		)
+		lines = append(lines, "      res = a ^ b;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
 		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
@@ -761,7 +786,8 @@ func (l *Lifter) liftAlu(op x86asm.Op, dst, src x86asm.Arg, defMemSz int, nextPC
 	return lines, nil
 }
 
-func (l *Lifter) liftUnary(op x86asm.Op, dst x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+func (l *Lifter) liftUnary(inst disasm.Instruction, dst x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	op := inst.Inst.Op
 	sz := defMemSz
 	if reg, ok := dst.(x86asm.Reg); ok {
 		if info, ok := regMap[reg]; ok && info.Size > 0 {
@@ -782,23 +808,20 @@ func (l *Lifter) liftUnary(op x86asm.Op, dst x86asm.Arg, defMemSz int, nextPC ui
 
 	switch op {
 	case x86asm.INC:
-		lines = append(
-			lines,
-			"      res = a + 1;",
-			fmt.Sprintf("      set_flags_inc_u%d(ctx, a, res);", sz*8),
-		)
+		lines = append(lines, "      res = a + 1;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_inc_u%d(ctx, a, res);", sz*8))
+		}
 	case x86asm.DEC:
-		lines = append(
-			lines,
-			"      res = a - 1;",
-			fmt.Sprintf("      set_flags_dec_u%d(ctx, a, res);", sz*8),
-		)
+		lines = append(lines, "      res = a - 1;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_dec_u%d(ctx, a, res);", sz*8))
+		}
 	case x86asm.NEG:
-		lines = append(
-			lines,
-			"      res = -a;",
-			fmt.Sprintf("      set_flags_sub_u%d(ctx, 0, a, res);", sz*8),
-		)
+		lines = append(lines, "      res = -a;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_sub_u%d(ctx, 0, a, res);", sz*8))
+		}
 	case x86asm.NOT:
 		lines = append(
 			lines,
@@ -817,7 +840,8 @@ func (l *Lifter) liftUnary(op x86asm.Op, dst x86asm.Arg, defMemSz int, nextPC ui
 	return lines, nil
 }
 
-func (l *Lifter) liftShift(op x86asm.Op, dst, countArg x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+func (l *Lifter) liftShift(inst disasm.Instruction, dst, countArg x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	op := inst.Inst.Op
 	sz := defMemSz
 	if reg, ok := dst.(x86asm.Reg); ok {
 		if info, ok := regMap[reg]; ok && info.Size > 0 {
@@ -842,24 +866,24 @@ func (l *Lifter) liftShift(op x86asm.Op, dst, countArg x86asm.Arg, defMemSz int,
 
 	switch op {
 	case x86asm.SHL:
-		lines = append(
-			lines,
-			"      res = a << count;",
-			fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8),
-		)
+		lines = append(lines, "      res = a << count;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
 	case x86asm.SHR:
-		lines = append(
-			lines,
-			"      res = a >> count;",
-			fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8),
-		)
+		lines = append(lines, "      res = a >> count;")
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
 	case x86asm.SAR:
 		signedType := intType(sz)
 		lines = append(
 			lines,
 			fmt.Sprintf("      res = (%s)(((%s)a) >> count);", cType, signedType),
-			fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8),
 		)
+		if !inst.SkipFlags {
+			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
+		}
 	}
 
 	writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
