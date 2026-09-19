@@ -3,6 +3,7 @@
 
 #include <math.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -16,6 +17,14 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// UnwindFrame tracks active call frames for C++ exception unwinding
+typedef struct UnwindFrame {
+  uint64_t fn_start;
+  uint64_t fn_end;
+  jmp_buf buf;
+  struct UnwindFrame *prev;
+} UnwindFrame;
 
 // 128-bit vector union for XMM registers
 typedef union {
@@ -70,6 +79,9 @@ typedef struct GuestContext {
   uint8_t *mem_base;
   size_t mem_size;
   uint64_t heap_ptr;
+
+  // Active exception unwinding frame stack
+  UnwindFrame *unwind_frame;
 } GuestContext;
 
 // x87 FPU stack helpers
@@ -104,8 +116,6 @@ static inline void set_flags_add_u64(GuestContext *ctx, uint64_t a, uint64_t b,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 63) & 1;
   ctx->of = ((~(a ^ b) & (a ^ res)) >> 63) & 1;
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = ((a ^ b ^ res) & 0x10) != 0;
 }
 
 static inline void set_flags_sub_u64(GuestContext *ctx, uint64_t a, uint64_t b,
@@ -114,8 +124,6 @@ static inline void set_flags_sub_u64(GuestContext *ctx, uint64_t a, uint64_t b,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 63) & 1;
   ctx->of = (((a ^ b) & (a ^ res)) >> 63) & 1;
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = ((a ^ b ^ res) & 0x10) != 0;
 }
 
 static inline void set_flags_logic_u64(GuestContext *ctx, uint64_t res) {
@@ -123,8 +131,6 @@ static inline void set_flags_logic_u64(GuestContext *ctx, uint64_t res) {
   ctx->of = 0;
   ctx->zf = (res == 0);
   ctx->sf = (res >> 63) & 1;
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = 0;
 }
 
 static inline void set_flags_inc_u64(GuestContext *ctx, uint64_t a,
@@ -132,8 +138,6 @@ static inline void set_flags_inc_u64(GuestContext *ctx, uint64_t a,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 63) & 1;
   ctx->of = (res == 0x8000000000000000ULL);
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = ((a ^ 1 ^ res) & 0x10) != 0;
 }
 
 static inline void set_flags_dec_u64(GuestContext *ctx, uint64_t a,
@@ -141,8 +145,6 @@ static inline void set_flags_dec_u64(GuestContext *ctx, uint64_t a,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 63) & 1;
   ctx->of = (a == 0x8000000000000000ULL);
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = ((a ^ 1 ^ res) & 0x10) != 0;
 }
 
 // 32-bit flag setters
@@ -152,8 +154,6 @@ static inline void set_flags_add_u32(GuestContext *ctx, uint32_t a, uint32_t b,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 31) & 1;
   ctx->of = ((~(a ^ b) & (a ^ res)) >> 31) & 1;
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = ((a ^ b ^ res) & 0x10) != 0;
 }
 
 static inline void set_flags_sub_u32(GuestContext *ctx, uint32_t a, uint32_t b,
@@ -162,8 +162,6 @@ static inline void set_flags_sub_u32(GuestContext *ctx, uint32_t a, uint32_t b,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 31) & 1;
   ctx->of = (((a ^ b) & (a ^ res)) >> 31) & 1;
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = ((a ^ b ^ res) & 0x10) != 0;
 }
 
 static inline void set_flags_logic_u32(GuestContext *ctx, uint32_t res) {
@@ -171,8 +169,6 @@ static inline void set_flags_logic_u32(GuestContext *ctx, uint32_t res) {
   ctx->of = 0;
   ctx->zf = (res == 0);
   ctx->sf = (res >> 31) & 1;
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = 0;
 }
 
 static inline void set_flags_inc_u32(GuestContext *ctx, uint32_t a,
@@ -180,8 +176,6 @@ static inline void set_flags_inc_u32(GuestContext *ctx, uint32_t a,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 31) & 1;
   ctx->of = (res == 0x80000000U);
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = ((a ^ 1 ^ res) & 0x10) != 0;
 }
 
 static inline void set_flags_dec_u32(GuestContext *ctx, uint32_t a,
@@ -189,8 +183,6 @@ static inline void set_flags_dec_u32(GuestContext *ctx, uint32_t a,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 31) & 1;
   ctx->of = (a == 0x80000000U);
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = ((a ^ 1 ^ res) & 0x10) != 0;
 }
 
 // 16-bit flag setters
@@ -200,8 +192,6 @@ static inline void set_flags_add_u16(GuestContext *ctx, uint16_t a, uint16_t b,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 15) & 1;
   ctx->of = ((~(a ^ b) & (a ^ res)) >> 15) & 1;
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = ((a ^ b ^ res) & 0x10) != 0;
 }
 
 static inline void set_flags_sub_u16(GuestContext *ctx, uint16_t a, uint16_t b,
@@ -210,8 +200,6 @@ static inline void set_flags_sub_u16(GuestContext *ctx, uint16_t a, uint16_t b,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 15) & 1;
   ctx->of = (((a ^ b) & (a ^ res)) >> 15) & 1;
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = ((a ^ b ^ res) & 0x10) != 0;
 }
 
 static inline void set_flags_logic_u16(GuestContext *ctx, uint16_t res) {
@@ -219,8 +207,6 @@ static inline void set_flags_logic_u16(GuestContext *ctx, uint16_t res) {
   ctx->of = 0;
   ctx->zf = (res == 0);
   ctx->sf = (res >> 15) & 1;
-  ctx->pf = compute_parity((uint8_t)(res & 0xff));
-  ctx->af = 0;
 }
 
 // 8-bit flag setters
@@ -230,8 +216,6 @@ static inline void set_flags_add_u8(GuestContext *ctx, uint8_t a, uint8_t b,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 7) & 1;
   ctx->of = ((~(a ^ b) & (a ^ res)) >> 7) & 1;
-  ctx->pf = compute_parity(res);
-  ctx->af = ((a ^ b ^ res) & 0x10) != 0;
 }
 
 static inline void set_flags_sub_u8(GuestContext *ctx, uint8_t a, uint8_t b,
@@ -240,8 +224,6 @@ static inline void set_flags_sub_u8(GuestContext *ctx, uint8_t a, uint8_t b,
   ctx->zf = (res == 0);
   ctx->sf = (res >> 7) & 1;
   ctx->of = (((a ^ b) & (a ^ res)) >> 7) & 1;
-  ctx->pf = compute_parity(res);
-  ctx->af = ((a ^ b ^ res) & 0x10) != 0;
 }
 
 static inline void set_flags_logic_u8(GuestContext *ctx, uint8_t res) {
@@ -249,8 +231,6 @@ static inline void set_flags_logic_u8(GuestContext *ctx, uint8_t res) {
   ctx->of = 0;
   ctx->zf = (res == 0);
   ctx->sf = (res >> 7) & 1;
-  ctx->pf = compute_parity(res);
-  ctx->af = 0;
 }
 
 // Function pointer type for recompiled functions
@@ -286,6 +266,10 @@ static inline void recomp_dispatch(GuestContext *ctx, uint64_t target) {
           (unsigned long long)target, (unsigned long long)ctx->rip);
   abort();
 }
+
+// Exception unwinding helpers
+#define RECOMP_POP_UNWIND() do { if (__cur_unwind_frame) ctx->unwind_frame = __cur_unwind_frame->prev; } while (0)
+void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip);
 
 // Runtime initialization and memory layout
 GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image, size_t image_size, const char *prog_name);

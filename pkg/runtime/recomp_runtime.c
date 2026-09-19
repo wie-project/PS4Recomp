@@ -11,13 +11,29 @@ GuestContext *g_current_ctx = NULL;
 
 static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
     if (g_current_ctx) {
-        fprintf(stderr, "\nFATAL: Signal %d at host address %p (mem_base=%p, guest RIP=0x%llx, RSP=0x%llx, RBP=0x%llx, RAX=0x%llx, RDI=0x%llx)\n",
+        fprintf(stderr, "\nFATAL: Signal %d at host address %p (mem_base=%p)\n"
+                        "RIP=0x%llx RSP=0x%llx RBP=0x%llx RAX=0x%llx RBX=0x%llx\n"
+                        "RCX=0x%llx RDX=0x%llx RSI=0x%llx RDI=0x%llx\n"
+                        "R8=0x%llx R9=0x%llx R10=0x%llx R11=0x%llx\n"
+                        "R12=0x%llx R13=0x%llx R14=0x%llx R15=0x%llx\n",
                 sig, si->si_addr, g_current_ctx->mem_base,
                 (unsigned long long)g_current_ctx->rip,
                 (unsigned long long)g_current_ctx->rsp,
                 (unsigned long long)g_current_ctx->rbp,
                 (unsigned long long)g_current_ctx->rax,
-                (unsigned long long)g_current_ctx->rdi);
+                (unsigned long long)g_current_ctx->rbx,
+                (unsigned long long)g_current_ctx->rcx,
+                (unsigned long long)g_current_ctx->rdx,
+                (unsigned long long)g_current_ctx->rsi,
+                (unsigned long long)g_current_ctx->rdi,
+                (unsigned long long)g_current_ctx->r8,
+                (unsigned long long)g_current_ctx->r9,
+                (unsigned long long)g_current_ctx->r10,
+                (unsigned long long)g_current_ctx->r11,
+                (unsigned long long)g_current_ctx->r12,
+                (unsigned long long)g_current_ctx->r13,
+                (unsigned long long)g_current_ctx->r14,
+                (unsigned long long)g_current_ctx->r15);
 #if defined(__APPLE__) && defined(__arm64__)
         uint64_t host_pc = ((ucontext_t*)ucontext)->uc_mcontext->__ss.__pc;
         fprintf(stderr, "Host PC: 0x%llx\n", (unsigned long long)host_pc);
@@ -216,4 +232,18 @@ void recomp_free_runtime(GuestContext *ctx) {
         }
     }
     free(ctx);
+}
+
+void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip) {
+    ctx->rip = target_ip;
+    UnwindFrame *f = ctx->unwind_frame;
+    while (f) {
+        if (target_ip >= f->fn_start && target_ip < f->fn_end) {
+            ctx->unwind_frame = f;
+            longjmp(f->buf, 1);
+        }
+        f = f->prev;
+    }
+    fprintf(stderr, "FATAL: Unwind target 0x%llx not found in active unwind frames!\n", (unsigned long long)target_ip);
+    abort();
 }

@@ -2,6 +2,7 @@ package lifter
 
 import (
 	"fmt"
+	"strings"
 
 	"ps4-recomp/pkg/disasm"
 
@@ -233,11 +234,24 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 		}
 
 	case x86asm.RET:
-		lines = append(
-			lines,
-			"    ctx->rsp += 8;",
-			"    return;",
-		)
+		if isJumptoFunction(fn) {
+			lines = append(
+				lines,
+				"    {",
+				"        uint64_t target_ip = MEM_U64(ctx->rsp);",
+				"        ctx->rsp += 8;",
+				"        recomp_unwind_to(ctx, target_ip);",
+				"    }",
+				"    return;",
+			)
+		} else {
+			lines = append(
+				lines,
+				"    RECOMP_POP_UNWIND();",
+				"    ctx->rsp += 8;",
+				"    return;",
+			)
+		}
 
 	case x86asm.JMP:
 		if rel, ok := args[0].(x86asm.Rel); ok {
@@ -247,6 +261,7 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 			} else if l.knownFuncs[target] {
 				lines = append(
 					lines,
+					"    RECOMP_POP_UNWIND();",
 					fmt.Sprintf("    ctx->rip = 0x%xULL;", target),
 					fmt.Sprintf("    fn_0x%x(ctx);", target),
 					"    return;",
@@ -254,6 +269,7 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 			} else {
 				lines = append(
 					lines,
+					"    RECOMP_POP_UNWIND();",
 					fmt.Sprintf("    ctx->rip = 0x%xULL;", target),
 					fmt.Sprintf("    recomp_dispatch(ctx, 0x%xULL);", target),
 					"    return;",
@@ -266,6 +282,7 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 			}
 			lines = append(
 				lines,
+				"    RECOMP_POP_UNWIND();",
 				fmt.Sprintf("    ctx->rip = %s;", targetExpr),
 				fmt.Sprintf("    recomp_dispatch(ctx, %s);", targetExpr),
 				"    return;",
@@ -582,10 +599,15 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 			target := uint64(int64(nextPC) + int64(rel))
 			if _, ok := fn.Blocks[target]; ok {
 				lines = append(lines, fmt.Sprintf("    if (%s) goto loc_0x%x;", cond, target))
+			} else if l.knownFuncs[target] {
+				lines = append(
+					lines,
+					fmt.Sprintf("    if (%s) { RECOMP_POP_UNWIND(); ctx->rip = 0x%xULL; fn_0x%x(ctx); return; }", cond, target, target),
+				)
 			} else {
 				lines = append(
 					lines,
-					fmt.Sprintf("    if (%s) { recomp_dispatch(ctx, 0x%xULL); return; }", cond, target),
+					fmt.Sprintf("    if (%s) { RECOMP_POP_UNWIND(); ctx->rip = 0x%xULL; recomp_dispatch(ctx, 0x%xULL); return; }", cond, target, target),
 				)
 			}
 		} else {
@@ -2147,4 +2169,40 @@ func intType(size int) string {
 	default:
 		return "int64_t"
 	}
+}
+
+// isJumptoFunction returns true if the function is libunwind's context restore
+// routine (e.g. Registers_x86_64::jumpto or unw_resume) that restores registers
+// and returns to a landing pad address pushed to the stack.
+func isJumptoFunction(fn *disasm.Function) bool {
+	if fn == nil {
+		return false
+	}
+	if strings.Contains(fn.Name, "Registers_x86_646jumptoEv") || strings.Contains(fn.Name, "unw_resume") {
+		return true
+	}
+	// Architectural pattern fallback for stripped binaries:
+	// Registers_x86_64::jumpto restores RSP from [RDI+0x38], pops RDI, and RETs.
+	hasMovRsp := false
+	hasPopRdi := false
+	for _, b := range fn.Blocks {
+		for _, inst := range b.Insts {
+			if inst.Inst.Op == x86asm.MOV {
+				if reg, ok := inst.Inst.Args[0].(x86asm.Reg); ok && reg == x86asm.RSP {
+					if mem, ok := inst.Inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RDI && mem.Disp == 0x38 {
+						hasMovRsp = true
+					}
+				}
+			}
+			if hasMovRsp && inst.Inst.Op == x86asm.POP {
+				if reg, ok := inst.Inst.Args[0].(x86asm.Reg); ok && reg == x86asm.RDI {
+					hasPopRdi = true
+				}
+			}
+			if hasPopRdi && inst.Inst.Op == x86asm.RET {
+				return true
+			}
+		}
+	}
+	return false
 }

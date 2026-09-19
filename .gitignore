@@ -1,1 +1,6 @@
 build/
+tools/
+build_exceptions/
+exceptions.elf
+.DS_Store
+*.DS_Store

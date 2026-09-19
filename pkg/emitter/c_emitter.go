@@ -11,6 +11,8 @@ import (
 	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
 	"ps4-recomp/pkg/lifter"
+
+	"golang.org/x/arch/x86/x86asm"
 )
 
 // CEmitter emits C source files from disassembled functions.
@@ -216,18 +218,66 @@ func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 		return err
 	}
 
+	maxEnd := addr
+	for _, b := range fn.Blocks {
+		if b.EndAddr > maxEnd {
+			maxEnd = b.EndAddr
+		}
+	}
+	if sym, ok := e.elf.SymbolByAddr[addr]; ok && sym.Size > 0 && addr+sym.Size > maxEnd {
+		maxEnd = addr + sym.Size
+	}
+
+	needsUnwind := false
 	if len(fn.BlockOrder) > 1 {
-		if _, err := w.WriteString("    switch (ctx->rip) {\n"); err != nil {
+		for _, b := range fn.Blocks {
+			for _, inst := range b.Insts {
+				if inst.Inst.Op == x86asm.CALL {
+					needsUnwind = true
+					break
+				}
+			}
+			if needsUnwind {
+				break
+			}
+		}
+	}
+
+	if needsUnwind {
+		if _, err := fmt.Fprintf(w, "    UnwindFrame __unwind_frame;\n    __unwind_frame.fn_start = 0x%xULL;\n    __unwind_frame.fn_end = 0x%xULL;\n    __unwind_frame.prev = ctx->unwind_frame;\n    ctx->unwind_frame = &__unwind_frame;\n    UnwindFrame *__cur_unwind_frame = &__unwind_frame;\n", addr, maxEnd); err != nil {
+			return err
+		}
+		if _, err := w.WriteString("    if (_setjmp(__unwind_frame.buf) != 0) {\n        switch (ctx->rip) {\n"); err != nil {
 			return err
 		}
 		for _, blockAddr := range fn.BlockOrder {
 			if blockAddr != addr {
-				if _, err := fmt.Fprintf(w, "        case 0x%xULL: goto loc_0x%x;\n", blockAddr, blockAddr); err != nil {
+				if _, err := fmt.Fprintf(w, "            case 0x%xULL: goto loc_0x%x;\n", blockAddr, blockAddr); err != nil {
 					return err
 				}
 			}
 		}
-		if _, err := fmt.Fprintf(w, "        default: goto loc_0x%x;\n    }\n", addr); err != nil {
+		if _, err := fmt.Fprintf(w, "            default: goto loc_0x%x;\n        }\n    }\n", addr); err != nil {
+			return err
+		}
+	} else {
+		if _, err := w.WriteString("    UnwindFrame *__cur_unwind_frame = NULL;\n"); err != nil {
+			return err
+		}
+	}
+
+	if len(fn.BlockOrder) > 1 {
+		if _, err := fmt.Fprintf(w, "    if (ctx->rip != 0x%xULL) {\n        switch (ctx->rip) {\n", addr); err != nil {
+			return err
+		}
+		for _, blockAddr := range fn.BlockOrder {
+			if blockAddr != addr {
+				if _, err := fmt.Fprintf(w, "            case 0x%xULL: goto loc_0x%x;\n", blockAddr, blockAddr); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := fmt.Fprintf(w, "            default: goto loc_0x%x;\n        }\n    }\n", addr); err != nil {
 			return err
 		}
 	}
@@ -261,7 +311,7 @@ func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 		}
 	}
 
-	if _, err := w.WriteString("}\n\n"); err != nil {
+	if _, err := w.WriteString("    RECOMP_POP_UNWIND();\n}\n\n"); err != nil {
 		return err
 	}
 	return nil
