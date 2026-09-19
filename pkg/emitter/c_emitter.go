@@ -15,19 +15,106 @@ import (
 	"golang.org/x/arch/x86/x86asm"
 )
 
+// CanonicalShims maps library/kernel symbol names to host runtime shims.
+var CanonicalShims = map[string]string{
+	"sceKernelUsleep":           "shim_sceKernelUsleep",
+	"sysconf":                   "shim_sysconf",
+	"open":                      "shim_open",
+	"fcntl":                     "shim_fcntl",
+	"__error":                   "shim_error",
+	"mmap":                      "shim_mmap",
+	"munmap":                    "shim_munmap",
+	"madvise":                   "shim_madvise",
+	"sigprocmask":               "shim_sigprocmask",
+	"sigaction":                 "shim_sigaction",
+	"fstat":                     "shim_fstat",
+	"close":                     "shim_close",
+	"read":                      "shim_read",
+	"readv":                     "shim_readv",
+	"write":                     "shim_write",
+	"writev":                    "shim_writev",
+	"ioctl":                     "shim_ioctl",
+	"nanosleep":                 "shim_nanosleep",
+	"lseek":                     "shim_lseek",
+	"exit":                      "shim_exit",
+	"poll":                      "shim_poll",
+	"raise":                     "shim_raise",
+	"sched_yield":               "shim_sched_yield",
+	"pthread_create":            "shim_pthread_create",
+	"pthread_join":              "shim_pthread_join",
+	"pthread_detach":            "shim_pthread_detach",
+	"pthread_self":              "shim_pthread_self",
+	"pthread_equal":             "shim_pthread_equal",
+	"pthread_once":              "shim_pthread_once",
+	"pthread_key_create":        "shim_pthread_key_create",
+	"pthread_setspecific":       "shim_pthread_setspecific",
+	"pthread_getspecific":       "shim_pthread_getspecific",
+	"pthread_mutex_init":        "shim_pthread_mutex_init",
+	"pthread_mutex_lock":        "shim_pthread_mutex_lock",
+	"pthread_mutex_trylock":     "shim_pthread_mutex_trylock",
+	"pthread_mutex_unlock":      "shim_pthread_mutex_unlock",
+	"pthread_mutex_destroy":     "shim_pthread_mutex_destroy",
+	"pthread_mutexattr_init":    "shim_pthread_mutexattr_init",
+	"pthread_mutexattr_settype": "shim_pthread_mutexattr_settype",
+	"pthread_mutexattr_destroy": "shim_pthread_mutexattr_destroy",
+	"pthread_cond_init":         "shim_pthread_cond_init",
+	"pthread_cond_wait":         "shim_pthread_cond_wait",
+	"pthread_cond_timedwait":    "shim_pthread_cond_timedwait",
+	"pthread_cond_signal":       "shim_pthread_cond_signal",
+	"pthread_cond_broadcast":    "shim_pthread_cond_broadcast",
+	"pthread_cond_destroy":      "shim_pthread_cond_destroy",
+	"pthread_rwlock_rdlock":     "shim_pthread_rwlock_rdlock",
+	"pthread_rwlock_wrlock":     "shim_pthread_rwlock_wrlock",
+	"pthread_rwlock_unlock":     "shim_pthread_rwlock_unlock",
+	"syscall":                   "shim_syscall",
+}
+
+// LookupShim looks up a shim name for a symbol name, stripping leading underscores if needed.
+func LookupShim(name string) (string, bool) {
+	if shim, ok := CanonicalShims[name]; ok {
+		return shim, true
+	}
+	stripped := strings.TrimPrefix(name, "_")
+	if shim, ok := CanonicalShims[stripped]; ok {
+		return shim, true
+	}
+	return "", false
+}
+
 // CEmitter emits C source files from disassembled functions.
 type CEmitter struct {
-	elf    *elfloader.LoadedELF
-	disasm *disasm.Disassembler
-	lifter *lifter.Lifter
+	elf     *elfloader.LoadedELF
+	disasm  *disasm.Disassembler
+	lifter  *lifter.Lifter
+	shimMap map[uint64]string
 }
 
 // NewCEmitter creates a new C emitter.
 func NewCEmitter(loaded *elfloader.LoadedELF, d *disasm.Disassembler, l *lifter.Lifter) *CEmitter {
+	shimMap := make(map[uint64]string)
+	for _, rel := range loaded.Relocations {
+		if rel.SymName != "" {
+			if shim, ok := LookupShim(rel.SymName); ok {
+				if rel.PltAddr != 0 {
+					shimMap[rel.PltAddr] = shim
+				}
+				shimMap[rel.Offset] = shim
+			}
+		}
+	}
+	for _, sym := range loaded.Symbols {
+		if sym.Name != "" && sym.Address != 0 {
+			if shim, ok := LookupShim(sym.Name); ok {
+				shimMap[sym.Address] = shim
+			}
+		}
+	}
+
 	return &CEmitter{
-		elf:    loaded,
-		disasm: d,
-		lifter: l,
+		elf:     loaded,
+		disasm:  d,
+		lifter:  l,
+		shimMap: shimMap,
 	}
 }
 
@@ -199,6 +286,12 @@ func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint6
 	}
 	for _, addr := range chunkAddrs {
 		fn := e.disasm.Functions[addr]
+		if shim, isShimmed := e.shimMap[addr]; isShimmed {
+			if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s);\n", addr, shim); err != nil {
+				return err
+			}
+			continue
+		}
 		for _, blockAddr := range fn.BlockOrder {
 			if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x);\n", blockAddr, addr); err != nil {
 				return err
@@ -214,6 +307,13 @@ func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint6
 
 func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 	addr := fn.EntryAddr
+	if shim, isShimmed := e.shimMap[addr]; isShimmed {
+		if _, err := fmt.Fprintf(w, "// Function %s at 0x%x (Forwarded directly to host shim %s)\nvoid fn_0x%x(GuestContext *__restrict__ ctx) {\n    UnwindFrame *__cur_unwind_frame = NULL;\n    (void)__cur_unwind_frame;\n    %s(ctx);\n    return;\n}\n\n", fn.Name, addr, shim, addr, shim); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	if _, err := fmt.Fprintf(w, "// Function %s at 0x%x\nvoid fn_0x%x(GuestContext *__restrict__ ctx) {\n", fn.Name, addr, addr); err != nil {
 		return err
 	}
@@ -303,7 +403,10 @@ func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 				}
 			} else {
 				for _, line := range lines {
-					if _, err := fmt.Fprintf(w, "%s\n", line); err != nil {
+					if _, err := w.WriteString(line); err != nil {
+						return err
+					}
+					if err := w.WriteByte('\n'); err != nil {
 						return err
 					}
 				}
@@ -366,75 +469,9 @@ func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
 }
 
 func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
-	// Map canonical symbol names to runtime shims
-	pltMap := map[string]string{
-		"sceKernelUsleep":           "shim_sceKernelUsleep",
-		"sysconf":                   "shim_sysconf",
-		"open":                      "shim_open",
-		"fcntl":                     "shim_fcntl",
-		"__error":                   "shim_error",
-		"mmap":                      "shim_mmap",
-		"munmap":                    "shim_munmap",
-		"madvise":                   "shim_madvise",
-		"sigprocmask":               "shim_sigprocmask",
-		"sigaction":                 "shim_sigaction",
-		"fstat":                     "shim_fstat",
-		"close":                     "shim_close",
-		"read":                      "shim_read",
-		"readv":                     "shim_readv",
-		"write":                     "shim_write",
-		"writev":                    "shim_writev",
-		"ioctl":                     "shim_ioctl",
-		"nanosleep":                 "shim_nanosleep",
-		"lseek":                     "shim_lseek",
-		"exit":                      "shim_exit",
-		"poll":                      "shim_poll",
-		"raise":                     "shim_raise",
-		"sched_yield":               "shim_sched_yield",
-		"pthread_create":            "shim_pthread_create",
-		"pthread_join":              "shim_pthread_join",
-		"pthread_detach":            "shim_pthread_detach",
-		"pthread_self":              "shim_pthread_self",
-		"pthread_equal":             "shim_pthread_equal",
-		"pthread_once":              "shim_pthread_once",
-		"pthread_key_create":        "shim_pthread_key_create",
-		"pthread_setspecific":       "shim_pthread_setspecific",
-		"pthread_getspecific":       "shim_pthread_getspecific",
-		"pthread_mutex_init":        "shim_pthread_mutex_init",
-		"pthread_mutex_lock":        "shim_pthread_mutex_lock",
-		"pthread_mutex_trylock":     "shim_pthread_mutex_trylock",
-		"pthread_mutex_unlock":      "shim_pthread_mutex_unlock",
-		"pthread_mutex_destroy":     "shim_pthread_mutex_destroy",
-		"pthread_mutexattr_init":    "shim_pthread_mutexattr_init",
-		"pthread_mutexattr_settype": "shim_pthread_mutexattr_settype",
-		"pthread_mutexattr_destroy": "shim_pthread_mutexattr_destroy",
-		"pthread_cond_init":         "shim_pthread_cond_init",
-		"pthread_cond_wait":         "shim_pthread_cond_wait",
-		"pthread_cond_timedwait":    "shim_pthread_cond_timedwait",
-		"pthread_cond_signal":       "shim_pthread_cond_signal",
-		"pthread_cond_broadcast":    "shim_pthread_cond_broadcast",
-		"pthread_cond_destroy":      "shim_pthread_cond_destroy",
-		"pthread_rwlock_rdlock":     "shim_pthread_rwlock_rdlock",
-		"pthread_rwlock_wrlock":     "shim_pthread_rwlock_wrlock",
-		"pthread_rwlock_unlock":     "shim_pthread_rwlock_unlock",
-		"syscall":                   "shim_syscall",
-	}
-
-	lookupShim := func(name string) (string, bool) {
-		if shim, ok := pltMap[name]; ok {
-			return shim, true
-		}
-		// Try stripping leading underscore (e.g. _write -> write, _ioctl -> ioctl)
-		stripped := strings.TrimPrefix(name, "_")
-		if shim, ok := pltMap[stripped]; ok {
-			return shim, true
-		}
-		return "", false
-	}
-
 	for _, rel := range e.elf.Relocations {
 		if rel.SymName != "" {
-			if shim, ok := lookupShim(rel.SymName); ok {
+			if shim, ok := LookupShim(rel.SymName); ok {
 				if rel.PltAddr != 0 {
 					if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s); // PLT %s\n", rel.PltAddr, shim, rel.SymName); err != nil {
 						return err
@@ -450,7 +487,7 @@ func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
 	// Register shims for matching static symbols (e.g. libc stubs like syscall)
 	for _, sym := range e.elf.Symbols {
 		if sym.Name != "" && sym.Address != 0 {
-			if shim, ok := lookupShim(sym.Name); ok {
+			if shim, ok := LookupShim(sym.Name); ok {
 				if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s); // Symbol %s\n", sym.Address, shim, sym.Name); err != nil {
 					return err
 				}

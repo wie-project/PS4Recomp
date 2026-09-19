@@ -30,7 +30,13 @@ static pthread_mutex_t *get_host_mutex_with_type(uint64_t guest_addr, int guest_
 
   pthread_mutexattr_t attr;
   pthread_mutexattr_init(&attr);
-  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  int host_type = PTHREAD_MUTEX_NORMAL;
+  if (guest_type == 2) {
+    host_type = PTHREAD_MUTEX_RECURSIVE;
+  } else if (guest_type == 1) {
+    host_type = PTHREAD_MUTEX_ERRORCHECK;
+  }
+  pthread_mutexattr_settype(&attr, host_type);
   pthread_mutex_init(&node->host_mutex, &attr);
   pthread_mutexattr_destroy(&attr);
 

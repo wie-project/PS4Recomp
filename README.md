@@ -64,29 +64,42 @@ golangci-lint run --no-config ./...
 
 ### 2. Recompile and Run Sample Binaries
 
+You can build and run binaries using the new CLI with built-in execution (`-r`) and watchdog timeout (`-t <seconds>`):
+
 #### A. Hello World (`hello_world.elf`)
 Basic runtime initializers, stdout writing, and microsecond sleep:
 
 ```bash
-go run main.go -elf hello_world.elf -out output_hello -compile
-perl -e 'alarm 4; exec "./output_hello/ps4_app"'
+# Recompile and run with 3-second watchdog:
+go run . hello_world.elf -o output_hello -r -t 3
 ```
 
 Output:
 ```text
-[ps4-recomp] Initializing runtime...
-[ps4-recomp] Loading guest memory image (1146880 bytes), allocated dynamic address space (1090.0 MB)
-[ps4-recomp] Executing _start (0xb0b88)...
+===================================================================
+  PS4Recomp: PlayStation 4 x86-64 to Native ARM64 AOT Recompiler
+===================================================================
+[ps4-recomp] [1/4] Loading ELF: hello_world.elf
+             Entry point: 0xb0b88 | Segments: 4 | Relocations: 3039
+[ps4-recomp] [2/4] Analyzing CFG and discovering reachable code...
+             Discovered 5008 functions, 26025 basic blocks, 181482 instructions
+[ps4-recomp] [3/4] Emitting C source files to 'output_hello/'...
+             Emitted 27 C source files
+[ps4-recomp] [4/4] Compiling native ARM64 binary with clang (-O2, 8 workers)...
+             Compiled binary: output_hello/ps4_app
+[ps4-recomp] All tasks completed successfully
+===================================================================
+[ps4-recomp] Running output_hello/ps4_app (watchdog timeout: 3s)...
 main: Hello world! Waiting 2 seconds!
 main: Done. Infinitely looping...
+[ps4-recomp] Watchdog timeout of 3s reached. Terminated cleanly.
 ```
 
 #### B. C++ Exception Handling (`exceptions.elf`)
 C++ `try`/`catch`/`throw`, DWARF `.eh_frame` table evaluation, and landing pad dispatch:
 
 ```bash
-go run main.go -elf exceptions.elf -out output_exc -compile
-perl -e 'alarm 4; exec "./output_exc/ps4_app"'
+go run . exceptions.elf -o output_exc -r -t 3
 ```
 
 Output:
@@ -105,8 +118,7 @@ main: Infinite looping...
 Concurrent `std::thread` workers, `std::mutex`, atomic `LOCK XADD` (`fetch_add`), and thread joining:
 
 ```bash
-go run main.go -elf tests/threading_test/threading_test.elf -out output_thread -compile
-perl -e 'alarm 4; exec "./output_thread/ps4_app"'
+go run . tests/threading_test/threading_test.elf -o output_thread -r -t 3
 ```
 
 Output:
@@ -118,8 +130,8 @@ main: Starting multi-threading test...
 main: Spawned worker threads, waiting for join...
 Thread 1 started!
 Thread 2 started!
-Thread 2 finished its 50 iterations.
 Thread 1 finished its 50 iterations.
+Thread 2 finished its 50 iterations.
 main: Both threads joined. Final counter = 100 (expected 100)
 main: Multi-threading test PASS
 main: Done. Infinitely looping...
@@ -129,8 +141,7 @@ main: Done. Infinitely looping...
 1,000,000 prime sieve, 128x128 matrix multiplication (2M ops), QuickSort on 50,000 integers, 5,000 container iterations, and 400MB extent churn & address reuse:
 
 ```bash
-go run main.go -elf tests/memory_stress_test/memory_stress_test.elf -out output_mem -compile
-perl -e 'alarm 5; exec "./output_mem/ps4_app"'
+go run . tests/memory_stress_test/memory_stress_test.elf -o output_mem -r -t 5
 ```
 
 Output:
@@ -174,6 +185,7 @@ PS4_RECOMP_MEM=2G perl -e 'alarm 4; exec "./output_hello/ps4_app"'
 ├── cmd/
 │   └── ps4-recomp/        # CLI tool entry point
 ├── pkg/
+│   ├── cli/               # Command-line driver, argument parser, watchdog and pipeline orchestrator
 │   ├── disasm/            # Disassembly, CFG recovery, jump tables, and flag liveness analysis
 │   ├── elfloader/         # ELF segment loader, symbol table parser, and relocation engine
 │   ├── emitter/           # Partitioned C emission and parallel Clang build driver

@@ -22,7 +22,7 @@ func MemAddrExpr(mem x86asm.Mem, nextPC uint64) (string, error) {
 		return fmt.Sprintf("0x%xULL", targetAddr), nil
 	}
 
-	var parts []string
+	parts := make([]string, 0, 3)
 
 	// Segment (e.g. FS for TLS)
 	if mem.Segment == x86asm.FS {
@@ -35,7 +35,7 @@ func MemAddrExpr(mem x86asm.Mem, nextPC uint64) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("unsupported base register: %v", mem.Base)
 		}
-		parts = append(parts, fmt.Sprintf("ctx->%s", info.BaseReg))
+		parts = append(parts, "ctx->"+info.BaseReg)
 	}
 
 	// Index register
@@ -46,7 +46,7 @@ func MemAddrExpr(mem x86asm.Mem, nextPC uint64) (string, error) {
 		}
 		scale := mem.Scale
 		if scale == 0 || scale == 1 {
-			parts = append(parts, fmt.Sprintf("ctx->%s", info.BaseReg))
+			parts = append(parts, "ctx->"+info.BaseReg)
 		} else {
 			parts = append(parts, fmt.Sprintf("(ctx->%s * %dULL)", info.BaseReg, scale))
 		}
@@ -68,13 +68,13 @@ func MemAddrExpr(mem x86asm.Mem, nextPC uint64) (string, error) {
 func MemReadExpr(addrExpr string, size int) (string, error) {
 	switch size {
 	case 1:
-		return fmt.Sprintf("MEM_U8(%s)", addrExpr), nil
+		return "MEM_U8(" + addrExpr + ")", nil
 	case 2:
-		return fmt.Sprintf("MEM_U16(%s)", addrExpr), nil
+		return "MEM_U16(" + addrExpr + ")", nil
 	case 4:
-		return fmt.Sprintf("MEM_U32(%s)", addrExpr), nil
+		return "MEM_U32(" + addrExpr + ")", nil
 	case 8:
-		return fmt.Sprintf("MEM_U64(%s)", addrExpr), nil
+		return "MEM_U64(" + addrExpr + ")", nil
 	default:
 		return "", fmt.Errorf("unsupported memory read size: %d", size)
 	}
@@ -84,13 +84,13 @@ func MemReadExpr(addrExpr string, size int) (string, error) {
 func MemWriteStmt(addrExpr string, size int, valExpr string) (string, error) {
 	switch size {
 	case 1:
-		return fmt.Sprintf("MEM_U8(%s) = (uint8_t)(%s);", addrExpr, valExpr), nil
+		return "MEM_U8(" + addrExpr + ") = (uint8_t)(" + valExpr + ");", nil
 	case 2:
-		return fmt.Sprintf("MEM_U16(%s) = (uint16_t)(%s);", addrExpr, valExpr), nil
+		return "MEM_U16(" + addrExpr + ") = (uint16_t)(" + valExpr + ");", nil
 	case 4:
-		return fmt.Sprintf("MEM_U32(%s) = (uint32_t)(%s);", addrExpr, valExpr), nil
+		return "MEM_U32(" + addrExpr + ") = (uint32_t)(" + valExpr + ");", nil
 	case 8:
-		return fmt.Sprintf("MEM_U64(%s) = (uint64_t)(%s);", addrExpr, valExpr), nil
+		return "MEM_U64(" + addrExpr + ") = (uint64_t)(" + valExpr + ");", nil
 	default:
 		return "", fmt.Errorf("unsupported memory write size: %d", size)
 	}

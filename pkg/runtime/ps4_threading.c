@@ -55,6 +55,16 @@ static void unregister_thread(RecompThread *t) {
   pthread_mutex_unlock(&g_threads_mutex);
 }
 
+static RecompThread g_main_thread_obj = {0};
+
+void recomp_init_main_thread(GuestContext *ctx) {
+  g_main_thread_obj.host_thread = pthread_self();
+  g_main_thread_obj.thread_id = ctx->thread_id ? ctx->thread_id : 1000;
+  g_main_thread_obj.ctx = ctx;
+  g_current_thread = &g_main_thread_obj;
+  register_thread(&g_main_thread_obj);
+}
+
 static void *recomp_host_thread_runner(void *arg) {
   RecompThread *t = (RecompThread *)arg;
   GuestContext *ctx = t->ctx;
@@ -72,6 +82,27 @@ static void *recomp_host_thread_runner(void *arg) {
   recomp_dispatch(ctx, t->start_routine);
 
   t->ret_val = ctx->rax;
+
+  // Run registered pthread TLS key destructors
+  GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+  for (int iter = 0; iter < 4; iter++) {
+    bool has_active = false;
+    for (int k = 0; k < 128; k++) {
+      uint64_t val = ctx->tls_keys[k];
+      uint64_t dtor = proc->tls_destructors[k];
+      if (val != 0 && dtor != 0) {
+        ctx->tls_keys[k] = 0;
+        has_active = true;
+        ctx->rdi = val;
+        ctx->rsp -= 8;
+        MEM_U64(ctx->rsp) = 0xdeadbeefULL;
+        ctx->rip = dtor;
+        recomp_dispatch(ctx, dtor);
+      }
+    }
+    if (!has_active) break;
+  }
+
   t->finished = true;
 
   if (t->detached) {
@@ -181,7 +212,7 @@ void shim_pthread_self(GuestContext *ctx) {
   if (g_current_thread) {
     ctx->rax = (uint64_t)g_current_thread;
   } else {
-    ctx->rax = 1;
+    ctx->rax = (uint64_t)&g_main_thread_obj;
   }
   SHIM_RETURN();
 }
@@ -198,10 +229,17 @@ static pthread_mutex_t g_key_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void shim_pthread_key_create(GuestContext *ctx) {
   uint64_t key_ptr_addr = ctx->rdi;
+  uint64_t destructor_addr = ctx->rsi;
   pthread_mutex_lock(&g_key_lock);
   uint32_t key = g_next_key++;
   pthread_mutex_unlock(&g_key_lock);
-  *(uint32_t *)(ctx->mem_base + key_ptr_addr) = key;
+  if (key_ptr_addr) {
+    *(uint32_t *)(ctx->mem_base + key_ptr_addr) = key;
+  }
+  if (key < 128) {
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    proc->tls_destructors[key] = destructor_addr;
+  }
   ctx->rax = 0;
   SHIM_RETURN();
 }

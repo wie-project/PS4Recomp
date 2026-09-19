@@ -2,6 +2,7 @@ package lifter
 
 import (
 	"fmt"
+	"strconv"
 
 	"ps4-recomp/pkg/disasm"
 
@@ -69,7 +70,7 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 	op := inst.Inst.Op
 	args := inst.Inst.Args
 
-	var lines []string
+	lines := make([]string, 0, 4)
 	lines = append(lines, fmt.Sprintf("    /* 0x%x: %s */", pc, inst.Inst.String()))
 
 	// Determine effective memory/operand size from instruction
@@ -927,7 +928,7 @@ func (l *Lifter) getOperandRead(arg x86asm.Arg, defMemSz int, nextPC uint64) (st
 		expr, err := MemReadExpr(addr, sz)
 		return expr, sz, err
 	case x86asm.Imm:
-		return fmt.Sprintf("0x%xULL", uint64(a)), 8, nil
+		return "0x" + strconv.FormatUint(uint64(a), 16) + "ULL", 8, nil
 	default:
 		return "", 0, fmt.Errorf("unknown operand type: %T", arg)
 	}

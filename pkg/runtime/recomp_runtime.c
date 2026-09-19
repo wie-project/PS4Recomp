@@ -181,6 +181,9 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
     ctx->rsp = (guest_mem_sz - 0x1000ULL) & ~0xFFULL;
     ctx->rbp = ctx->rsp;
 
+    ctx->thread_id = 1000;
+    recomp_init_main_thread(ctx);
+
     return ctx;
 }
 

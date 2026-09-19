@@ -87,6 +87,7 @@ typedef struct GuestContext {
   // Threading and TLS
   uint64_t thread_id;
   uint64_t tls_keys[128];
+  uint64_t tls_destructors[128];
 
   // Process root context (shared across threads)
   struct GuestContext *process_ctx;
@@ -369,6 +370,7 @@ void shim_pthread_self(GuestContext *ctx);
 void shim_pthread_equal(GuestContext *ctx);
 void shim_pthread_detach(GuestContext *ctx);
 void shim_pthread_join(GuestContext *ctx);
+void recomp_init_main_thread(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

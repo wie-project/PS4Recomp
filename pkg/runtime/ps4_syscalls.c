@@ -81,9 +81,38 @@ void shim_error(GuestContext *ctx) {
 // sysconf
 void shim_sysconf(GuestContext *ctx) {
   int name = (int)ctx->rdi;
-  long val = sysconf(name);
+  int host_name = -1;
+  switch (name) {
+  case 47: // FreeBSD _SC_PAGESIZE
+    host_name = _SC_PAGESIZE;
+    break;
+  case 57: // FreeBSD _SC_NPROCESSORS_CONF
+    host_name = _SC_NPROCESSORS_CONF;
+    break;
+  case 58: // FreeBSD _SC_NPROCESSORS_ONLN
+    host_name = _SC_NPROCESSORS_ONLN;
+    break;
+  case 1:  // FreeBSD _SC_ARG_MAX
+    host_name = _SC_ARG_MAX;
+    break;
+  case 2:  // FreeBSD _SC_CHILD_MAX
+    host_name = _SC_CHILD_MAX;
+    break;
+  case 3:  // FreeBSD _SC_CLK_TCK
+    host_name = _SC_CLK_TCK;
+    break;
+  case 5:  // FreeBSD _SC_OPEN_MAX
+    host_name = _SC_OPEN_MAX;
+    break;
+  default:
+    host_name = name;
+    break;
+  }
+  long val = sysconf(host_name);
   if (val < 0) {
-    val = 4096;
+    if (name == 47) val = 4096;
+    else if (name == 57 || name == 58) val = 8;
+    else val = 4096;
   }
   ctx->rax = (uint64_t)val;
   SHIM_RETURN();
@@ -378,7 +407,37 @@ void shim_poll(GuestContext *ctx) {
 }
 
 // sigaction
+struct guest_sigaction {
+  uint64_t handler;
+  int32_t  flags;
+  uint32_t mask[4];
+};
+
+static struct guest_sigaction g_guest_sigactions[64] = {0};
+static pthread_mutex_t g_sigaction_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 void shim_sigaction(GuestContext *ctx) {
+  int sig = (int)ctx->rdi;
+  uint64_t act_addr = ctx->rsi;
+  uint64_t oact_addr = ctx->rdx;
+
+  if (sig <= 0 || sig >= 64) {
+    set_guest_errno(ctx, EINVAL);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+
+  pthread_mutex_lock(&g_sigaction_mutex);
+  if (oact_addr) {
+    struct guest_sigaction *oact = (struct guest_sigaction *)(ctx->mem_base + oact_addr);
+    *oact = g_guest_sigactions[sig];
+  }
+  if (act_addr) {
+    struct guest_sigaction *act = (struct guest_sigaction *)(ctx->mem_base + act_addr);
+    g_guest_sigactions[sig] = *act;
+  }
+  pthread_mutex_unlock(&g_sigaction_mutex);
+
   ctx->rax = 0;
   SHIM_RETURN();
 }

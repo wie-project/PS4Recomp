@@ -6,3 +6,5 @@ build_memstress/
 exceptions.elf
 output_*/
 *.DS_Store
+build/
+ps4-recomp

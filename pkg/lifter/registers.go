@@ -119,68 +119,115 @@ var regMap = map[x86asm.Reg]RegInfo{
 	x86asm.F7: {BaseReg: "FPU_ST(7)", Size: 8},
 }
 
+type regReadEntry struct {
+	expr string
+	size int
+	ok   bool
+}
+
+type regWriteEntry struct {
+	prefix string
+	suffix string
+	ok     bool
+}
+
+var (
+	regReadTable  [256]regReadEntry
+	regWriteTable [256]regWriteEntry
+)
+
+func init() {
+	for r := x86asm.F0; r <= x86asm.F7; r++ {
+		idx := int(r - x86asm.F0)
+		regReadTable[r] = regReadEntry{
+			expr: fmt.Sprintf("FPU_ST(%d)", idx),
+			size: 8,
+			ok:   true,
+		}
+		regWriteTable[r] = regWriteEntry{
+			prefix: fmt.Sprintf("FPU_ST(%d) = (double)(", idx),
+			suffix: ");",
+			ok:     true,
+		}
+	}
+
+	for reg, info := range regMap {
+		var readExpr string
+		var readOk bool
+		var writePrefix, writeSuffix string
+		var writeOk bool
+
+		switch info.Size {
+		case 16:
+			readExpr = "ctx->" + info.BaseReg
+			readOk = true
+			writePrefix = "ctx->" + info.BaseReg + " = "
+			writeSuffix = ";"
+			writeOk = true
+		case 8:
+			readExpr = "ctx->" + info.BaseReg
+			readOk = true
+			writePrefix = "ctx->" + info.BaseReg + " = (uint64_t)("
+			writeSuffix = ");"
+			writeOk = true
+		case 4:
+			readExpr = "((uint32_t)ctx->" + info.BaseReg + ")"
+			readOk = true
+			writePrefix = "ctx->" + info.BaseReg + " = (uint64_t)(uint32_t)("
+			writeSuffix = ");"
+			writeOk = true
+		case 2:
+			readExpr = "((uint16_t)ctx->" + info.BaseReg + ")"
+			readOk = true
+			writePrefix = "ctx->" + info.BaseReg + " = (ctx->" + info.BaseReg + " & ~0xffffULL) | ((uint64_t)(uint16_t)("
+			writeSuffix = "));"
+			writeOk = true
+		case 1:
+			readOk = true
+			writeOk = true
+			if info.High8 {
+				readExpr = "((uint8_t)((ctx->" + info.BaseReg + " >> 8) & 0xff))"
+				writePrefix = "ctx->" + info.BaseReg + " = (ctx->" + info.BaseReg + " & ~0xff00ULL) | (((uint64_t)(uint8_t)("
+				writeSuffix = ")) << 8);"
+			} else {
+				readExpr = "((uint8_t)(ctx->" + info.BaseReg + " & 0xff))"
+				writePrefix = "ctx->" + info.BaseReg + " = (ctx->" + info.BaseReg + " & ~0xffULL) | ((uint64_t)(uint8_t)("
+				writeSuffix = "));"
+			}
+		}
+
+		if readOk {
+			regReadTable[reg] = regReadEntry{
+				expr: readExpr,
+				size: info.Size,
+				ok:   true,
+			}
+		}
+		if writeOk {
+			regWriteTable[reg] = regWriteEntry{
+				prefix: writePrefix,
+				suffix: writeSuffix,
+				ok:     true,
+			}
+		}
+	}
+}
+
 // GetRegReadExpr returns a C expression to read the value of an x86 register.
 func GetRegReadExpr(reg x86asm.Reg) (string, int, error) {
-	if reg >= x86asm.F0 && reg <= x86asm.F7 {
-		return fmt.Sprintf("FPU_ST(%d)", int(reg-x86asm.F0)), 8, nil
-	}
-
-	info, ok := regMap[reg]
-	if !ok {
+	entry := &regReadTable[reg]
+	if !entry.ok {
 		return "", 0, fmt.Errorf("unsupported register: %v", reg)
 	}
-
-	if info.Size == 16 {
-		return fmt.Sprintf("ctx->%s", info.BaseReg), 16, nil
-	}
-	if info.Size == 8 {
-		return fmt.Sprintf("ctx->%s", info.BaseReg), 8, nil
-	}
-	if info.Size == 4 {
-		return fmt.Sprintf("((uint32_t)ctx->%s)", info.BaseReg), 4, nil
-	}
-	if info.Size == 2 {
-		return fmt.Sprintf("((uint16_t)ctx->%s)", info.BaseReg), 2, nil
-	}
-	if info.Size == 1 {
-		if info.High8 {
-			return fmt.Sprintf("((uint8_t)((ctx->%s >> 8) & 0xff))", info.BaseReg), 1, nil
-		}
-		return fmt.Sprintf("((uint8_t)(ctx->%s & 0xff))", info.BaseReg), 1, nil
-	}
-	return "", 0, fmt.Errorf("invalid reg size for %v", reg)
+	return entry.expr, entry.size, nil
 }
 
 // GetRegWriteStmt returns a C statement to write a value into an x86 register.
 // x86-64 Rule: 32-bit register writes ZERO-EXTEND to the full 64-bit register.
 func GetRegWriteStmt(reg x86asm.Reg, valExpr string) (string, error) {
-	if reg >= x86asm.F0 && reg <= x86asm.F7 {
-		return fmt.Sprintf("FPU_ST(%d) = (double)(%s);", int(reg-x86asm.F0), valExpr), nil
-	}
-
-	info, ok := regMap[reg]
-	if !ok {
+	entry := &regWriteTable[reg]
+	if !entry.ok {
 		return "", fmt.Errorf("unsupported register: %v", reg)
 	}
-
-	if info.Size == 16 {
-		return fmt.Sprintf("ctx->%s = %s;", info.BaseReg, valExpr), nil
-	}
-	if info.Size == 8 {
-		return fmt.Sprintf("ctx->%s = (uint64_t)(%s);", info.BaseReg, valExpr), nil
-	}
-	if info.Size == 4 {
-		// Zero-extend 32-bit to 64-bit
-		return fmt.Sprintf("ctx->%s = (uint64_t)(uint32_t)(%s);", info.BaseReg, valExpr), nil
-	}
-	if info.Size == 2 {
-		return fmt.Sprintf("ctx->%s = (ctx->%s & ~0xffffULL) | ((uint64_t)(uint16_t)(%s));", info.BaseReg, info.BaseReg, valExpr), nil
-	}
-	if info.Size == 1 {
-		if info.High8 {
-			return fmt.Sprintf("ctx->%s = (ctx->%s & ~0xff00ULL) | (((uint64_t)(uint8_t)(%s)) << 8);", info.BaseReg, info.BaseReg, valExpr), nil
-		}
-		return fmt.Sprintf("ctx->%s = (ctx->%s & ~0xffULL) | ((uint64_t)(uint8_t)(%s));", info.BaseReg, info.BaseReg, valExpr), nil
-	}
-	return "", fmt.Errorf("invalid reg size for %v", reg)
+	return entry.prefix + valExpr + entry.suffix, nil
 }

@@ -14,7 +14,6 @@ import (
 type Instruction struct {
 	Address   uint64
 	Inst      x86asm.Inst
-	Bytes     []byte
 	SkipFlags bool
 }
 
@@ -55,15 +54,15 @@ func NewDisassembler(loaded *elfloader.LoadedELF) (*Disassembler, error) {
 		elf:       loaded,
 		textStart: textSec.Addr,
 		textEnd:   textSec.Addr + textSec.Size,
-		Functions: make(map[uint64]*Function),
-		Blocks:    make(map[uint64]*BasicBlock),
+		Functions: make(map[uint64]*Function, 1024),
+		Blocks:    make(map[uint64]*BasicBlock, 4096),
 	}, nil
 }
 
 // AnalyzeReachable traverses and discovers all functions reachable from the given entry addresses.
 func (d *Disassembler) AnalyzeReachable(entryAddrs []uint64) error {
-	queue := make([]uint64, 0, len(entryAddrs))
-	visited := make(map[uint64]bool)
+	queue := make([]uint64, 0, len(entryAddrs)*2)
+	visited := make(map[uint64]bool, len(entryAddrs)*2)
 
 	for _, addr := range entryAddrs {
 		if !visited[addr] && addr >= d.textStart && addr < d.textEnd {
@@ -72,13 +71,11 @@ func (d *Disassembler) AnalyzeReachable(entryAddrs []uint64) error {
 		}
 	}
 
-	for len(queue) > 0 {
-		curr := queue[0]
-		queue = queue[1:]
+	for head := 0; head < len(queue); head++ {
+		curr := queue[head]
 
 		fn, newCalls, err := d.disasmFunction(curr)
 		if err != nil {
-			// Log or continue
 			continue
 		}
 		d.Functions[curr] = fn
@@ -115,15 +112,17 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 		symName = sym.Name
 	}
 
+	estInstCount := int(size/4) + 4
 	fn := &Function{
-		Name:      symName,
-		EntryAddr: entryAddr,
-		Blocks:    make(map[uint64]*BasicBlock),
+		Name:       symName,
+		EntryAddr:  entryAddr,
+		Blocks:     make(map[uint64]*BasicBlock, 8),
+		BlockOrder: make([]uint64, 0, 8),
 	}
 
 	fnEnd := entryAddr + size
-	var insts []Instruction
-	var discoveredCalls []uint64
+	insts := make([]Instruction, 0, estInstCount)
+	discoveredCalls := make([]uint64, 0, 8)
 
 	pc := entryAddr
 	for pc < fnEnd {
@@ -136,11 +135,9 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			break
 		}
 
-		instBytes := d.elf.MemoryImage[pc : pc+uint64(inst.Len)]
 		wrapped := Instruction{
 			Address: pc,
 			Inst:    inst,
-			Bytes:   instBytes,
 		}
 		insts = append(insts, wrapped)
 
@@ -242,8 +239,9 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			}
 			currentBlock = &BasicBlock{
 				StartAddr: inst.Address,
-				Insts:     []Instruction{inst},
+				Insts:     make([]Instruction, 0, 8),
 			}
+			currentBlock.Insts = append(currentBlock.Insts, inst)
 		} else {
 			currentBlock.Insts = append(currentBlock.Insts, inst)
 		}
@@ -317,9 +315,8 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	jumpTargets[entryAddr] = true
 
 	// Step 1: Linear sweep along branches within the function
-	for len(blockQueue) > 0 {
-		blockStart := blockQueue[0]
-		blockQueue = blockQueue[1:]
+	for head := 0; head < len(blockQueue); head++ {
+		blockStart := blockQueue[head]
 
 		pc := blockStart
 
@@ -335,11 +332,9 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				break
 			}
 
-			instBytes := d.elf.MemoryImage[offset : offset+uint64(inst.Len)]
 			wrapped := Instruction{
 				Address: pc,
 				Inst:    inst,
-				Bytes:   instBytes,
 			}
 			instAtAddr[pc] = wrapped
 
