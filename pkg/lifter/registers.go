@@ -107,10 +107,24 @@ var regMap = map[x86asm.Reg]RegInfo{
 	x86asm.X13: {BaseReg: "xmm[13]", Size: 16},
 	x86asm.X14: {BaseReg: "xmm[14]", Size: 16},
 	x86asm.X15: {BaseReg: "xmm[15]", Size: 16},
+
+	// x87 FPU ST(0)-ST(7)
+	x86asm.F0: {BaseReg: "FPU_ST(0)", Size: 8},
+	x86asm.F1: {BaseReg: "FPU_ST(1)", Size: 8},
+	x86asm.F2: {BaseReg: "FPU_ST(2)", Size: 8},
+	x86asm.F3: {BaseReg: "FPU_ST(3)", Size: 8},
+	x86asm.F4: {BaseReg: "FPU_ST(4)", Size: 8},
+	x86asm.F5: {BaseReg: "FPU_ST(5)", Size: 8},
+	x86asm.F6: {BaseReg: "FPU_ST(6)", Size: 8},
+	x86asm.F7: {BaseReg: "FPU_ST(7)", Size: 8},
 }
 
 // GetRegReadExpr returns a C expression to read the value of an x86 register.
 func GetRegReadExpr(reg x86asm.Reg) (string, int, error) {
+	if reg >= x86asm.F0 && reg <= x86asm.F7 {
+		return fmt.Sprintf("FPU_ST(%d)", int(reg-x86asm.F0)), 8, nil
+	}
+
 	info, ok := regMap[reg]
 	if !ok {
 		return "", 0, fmt.Errorf("unsupported register: %v", reg)
@@ -140,6 +154,10 @@ func GetRegReadExpr(reg x86asm.Reg) (string, int, error) {
 // GetRegWriteStmt returns a C statement to write a value into an x86 register.
 // x86-64 Rule: 32-bit register writes ZERO-EXTEND to the full 64-bit register.
 func GetRegWriteStmt(reg x86asm.Reg, valExpr string) (string, error) {
+	if reg >= x86asm.F0 && reg <= x86asm.F7 {
+		return fmt.Sprintf("FPU_ST(%d) = (double)(%s);", int(reg-x86asm.F0), valExpr), nil
+	}
+
 	info, ok := regMap[reg]
 	if !ok {
 		return "", fmt.Errorf("unsupported register: %v", reg)

@@ -36,7 +36,6 @@ type Function struct {
 // Disassembler performs CFG recovery and reachability analysis.
 type Disassembler struct {
 	elf       *elfloader.LoadedELF
-	textSec   *elfloader.Segment
 	textStart uint64
 	textEnd   uint64
 
@@ -146,6 +145,16 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			if rel, ok := inst.Args[0].(x86asm.Rel); ok {
 				target := uint64(int64(nextPC) + int64(rel))
 				discoveredCalls = append(discoveredCalls, target)
+			}
+		}
+
+		// Record function pointers loaded via LEA RIP+disp
+		if inst.Op == x86asm.LEA {
+			if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
+				target := uint64(int64(nextPC) + mem.Disp)
+				if target >= d.textStart && target < d.textEnd && (target < entryAddr || target >= fnEnd) {
+					discoveredCalls = append(discoveredCalls, target)
+				}
 			}
 		}
 
@@ -304,12 +313,8 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 		blockQueue = blockQueue[1:]
 
 		pc := blockStart
-		var blockInsts []Instruction
 
-		for {
-			if pc < d.textStart || pc >= d.textEnd {
-				break
-			}
+		for pc >= d.textStart && pc < d.textEnd {
 
 			offset := pc
 			if offset >= uint64(len(d.elf.MemoryImage)) {
@@ -327,7 +332,6 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				Inst:    inst,
 				Bytes:   instBytes,
 			}
-			blockInsts = append(blockInsts, wrapped)
 			instAtAddr[pc] = wrapped
 
 			nextPC := pc + uint64(inst.Len)
@@ -361,6 +365,13 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 					target := uint64(int64(nextPC) + int64(rel))
 					discoveredCalls = append(discoveredCalls, target)
 				}
+			case x86asm.LEA:
+				if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
+					target := uint64(int64(nextPC) + mem.Disp)
+					if target >= d.textStart && target < d.textEnd {
+						discoveredCalls = append(discoveredCalls, target)
+					}
+				}
 			default:
 				// Conditional jumps (Jcc)
 				if isJcc(inst.Op) {
@@ -387,15 +398,51 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				break
 			}
 		}
+	}
 
-		if len(blockInsts) > 0 {
-			bb := &BasicBlock{
-				StartAddr: blockStart,
-				EndAddr:   pc,
-				Insts:     blockInsts,
-			}
-			fn.Blocks[blockStart] = bb
+	if len(instAtAddr) == 0 {
+		return nil, nil, fmt.Errorf("no instructions decoded for function at 0x%x", entryAddr)
+	}
+
+	// Identify basic block leaders
+	leaders := make(map[uint64]bool)
+	leaders[entryAddr] = true
+	for target := range jumpTargets {
+		if _, ok := instAtAddr[target]; ok {
+			leaders[target] = true
 		}
+	}
+
+	// Sort instruction addresses
+	sortedAddrs := make([]uint64, 0, len(instAtAddr))
+	for addr := range instAtAddr {
+		sortedAddrs = append(sortedAddrs, addr)
+	}
+	sort.Slice(sortedAddrs, func(i, j int) bool {
+		return sortedAddrs[i] < sortedAddrs[j]
+	})
+
+	// Build basic blocks
+	var currentBlock *BasicBlock
+	for _, addr := range sortedAddrs {
+		inst := instAtAddr[addr]
+		if leaders[addr] || currentBlock == nil {
+			if currentBlock != nil && len(currentBlock.Insts) > 0 {
+				currentBlock.EndAddr = addr
+				fn.Blocks[currentBlock.StartAddr] = currentBlock
+			}
+			currentBlock = &BasicBlock{
+				StartAddr: addr,
+				Insts:     []Instruction{inst},
+			}
+		} else {
+			currentBlock.Insts = append(currentBlock.Insts, inst)
+		}
+	}
+	if currentBlock != nil && len(currentBlock.Insts) > 0 {
+		lastInst := currentBlock.Insts[len(currentBlock.Insts)-1]
+		currentBlock.EndAddr = lastInst.Address + uint64(lastInst.Inst.Len)
+		fn.Blocks[currentBlock.StartAddr] = currentBlock
 	}
 
 	// Sort block addresses

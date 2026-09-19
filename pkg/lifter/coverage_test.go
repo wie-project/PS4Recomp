@@ -1,13 +1,15 @@
 package lifter_test
 
 import (
+	"fmt"
 	"sort"
 	"testing"
 
-	"golang.org/x/arch/x86/x86asm"
 	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
 	"ps4-recomp/pkg/lifter"
+
+	"golang.org/x/arch/x86/x86asm"
 )
 
 func TestLifterCoverage(t *testing.T) {
@@ -48,7 +50,7 @@ func TestLifterCoverage(t *testing.T) {
 				} else {
 					unsupportedOp[inst.Inst.Op]++
 					if len(firstErrors) < 10 {
-						firstErrors = append(firstErrors, err.Error())
+						firstErrors = append(firstErrors, fmt.Sprintf("0x%x: %s (%v)", inst.Address, inst.Inst.String(), err))
 					}
 				}
 			}
@@ -75,15 +77,7 @@ func TestLifterCoverage(t *testing.T) {
 		return unsuppList[i].count > unsuppList[j].count
 	})
 
-	t.Logf("Unsupported opcodes count: %d", len(unsuppList))
-	for i := 0; i < len(unsuppList) && i < 20; i++ {
-		t.Logf("  Missing #%2d: %-12s (used %d times)", i+1, unsuppList[i].op.String(), unsuppList[i].count)
-	}
-
-	if len(firstErrors) > 0 {
-		t.Logf("Sample errors:")
-		for _, e := range firstErrors {
-			t.Logf("  %s", e)
-		}
+	if len(unsupportedOp) > 0 {
+		t.Errorf("Found %d unsupported instructions out of %d. Samples: %v", len(unsupportedOp), total, firstErrors)
 	}
 }

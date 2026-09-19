@@ -1,8 +1,12 @@
 #include "recomp_runtime.h"
 
 #include <signal.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <libgen.h>
+#endif
 
-recomp_fn_t g_dispatch_table[DISPATCH_TABLE_SIZE] = {0};
+recomp_fn_t *g_dispatch_l1[DISPATCH_L1_SIZE] = {0};
 GuestContext *g_current_ctx = NULL;
 
 static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
@@ -26,9 +30,18 @@ static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
 }
 
 void recomp_register_fn(uint64_t guest_addr, recomp_fn_t fn) {
-    if (guest_addr < DISPATCH_TABLE_SIZE) {
-        g_dispatch_table[guest_addr] = fn;
+    uint64_t l1_idx = guest_addr >> DISPATCH_L1_SHIFT;
+    if (l1_idx >= DISPATCH_L1_SIZE) {
+        return;
     }
+    if (!g_dispatch_l1[l1_idx]) {
+        g_dispatch_l1[l1_idx] = (recomp_fn_t *)calloc(DISPATCH_L2_SIZE, sizeof(recomp_fn_t));
+        if (!g_dispatch_l1[l1_idx]) {
+            perror("calloc dispatch L2 table");
+            abort();
+        }
+    }
+    g_dispatch_l1[l1_idx][guest_addr & DISPATCH_L2_MASK] = fn;
 }
 
 GuestContext *recomp_init_runtime(const uint8_t *elf_image, size_t image_size) {
@@ -58,6 +71,8 @@ GuestContext *recomp_init_runtime(const uint8_t *elf_image, size_t image_size) {
 
     ctx->mem_base = mem;
     ctx->mem_size = guest_mem_sz;
+
+    ctx->fpu_cw = 0x037F; // Standard x87 control word default
 
     // Copy initial ELF memory image
     if (elf_image && image_size > 0) {
@@ -94,10 +109,72 @@ GuestContext *recomp_init_runtime(const uint8_t *elf_image, size_t image_size) {
     return ctx;
 }
 
+GuestContext *recomp_init_runtime_file(const char *image_filename) {
+    char path[1024] = {0};
+    FILE *fp = NULL;
+
+    // 1. Try directly (e.g. current working directory or full path)
+    if (image_filename && access(image_filename, R_OK) == 0) {
+        strncpy(path, image_filename, sizeof(path) - 1);
+        fp = fopen(path, "rb");
+    }
+
+    // 2. If not found, try adjacent to executable
+    if (!fp && image_filename) {
+#if defined(__APPLE__)
+        char exec_path[1024] = {0};
+        uint32_t size = sizeof(exec_path);
+        if (_NSGetExecutablePath(exec_path, &size) == 0) {
+            char *dir = dirname(exec_path);
+            snprintf(path, sizeof(path), "%s/%s", dir, image_filename);
+            fp = fopen(path, "rb");
+        }
+#endif
+    }
+
+    if (!fp) {
+        fprintf(stderr, "[ps4-recomp] Failed to open guest image file: %s\n", image_filename ? image_filename : "(null)");
+        return NULL;
+    }
+
+    printf("[ps4-recomp] Loading guest memory image from: %s\n", path);
+
+    GuestContext *ctx = recomp_init_runtime(NULL, 0);
+    if (!ctx) {
+        fclose(fp);
+        return NULL;
+    }
+
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    if (sz > 0) {
+        if ((size_t)sz > ctx->mem_size) {
+            fprintf(stderr, "[ps4-recomp] Guest image size (%ld bytes) exceeds guest memory (1GB)\n", sz);
+            fclose(fp);
+            recomp_free_runtime(ctx);
+            return NULL;
+        }
+        size_t nread = fread(ctx->mem_base, 1, sz, fp);
+        if (nread != (size_t)sz) {
+            fprintf(stderr, "[ps4-recomp] Warning: only read %zu of %ld bytes from %s\n", nread, sz, path);
+        }
+    }
+    fclose(fp);
+    return ctx;
+}
+
 void recomp_free_runtime(GuestContext *ctx) {
     if (!ctx) return;
     if (ctx->mem_base) {
         munmap(ctx->mem_base, ctx->mem_size);
+    }
+    for (size_t i = 0; i < DISPATCH_L1_SIZE; i++) {
+        if (g_dispatch_l1[i]) {
+            free(g_dispatch_l1[i]);
+            g_dispatch_l1[i] = NULL;
+        }
     }
     free(ctx);
 }

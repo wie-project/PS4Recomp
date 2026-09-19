@@ -41,8 +41,9 @@ go run ./cmd/ps4-recomp -elf hello_world.elf -out build
 ```
 
 This generates:
-- `build/recompiled_code.c`: Lifted guest code functions and dispatch registrations.
-- `build/guest_image.c`: Embedded ELF image and initial memory data.
+- `build/code_*.c`: Chunked lifted guest code functions (partitioned for parallel compilation).
+- `build/dispatch.c`: Unified dispatch table connecting all chunks and PLT/GOT shims.
+- `build/guest_image.bin`: Raw binary guest ELF memory image loaded at runtime.
 - `build/ps4_app`: Native Apple Silicon ARM64 Mach-O binary.
 
 ### 3. Run Recompiled Binary

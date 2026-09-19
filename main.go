@@ -2,12 +2,17 @@ package main
 
 import (
 	"debug/elf"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
 
 	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
@@ -19,6 +24,7 @@ func main() {
 	elfPath := flag.String("elf", "hello_world.elf", "Path to input PS4 ELF binary")
 	outDir := flag.String("out", "build", "Output directory for recompiled C code and binaries")
 	compile := flag.Bool("compile", true, "Compile generated C code to native ARM64 binary with clang")
+	allSymbols := flag.Bool("all-symbols", false, "Recompile all symbols in symbol table even if not reachable")
 	flag.Parse()
 
 	fmt.Printf("[ps4-recomp] Loading ELF: %s\n", *elfPath)
@@ -46,11 +52,8 @@ func main() {
 	var entries []uint64
 	entries = append(entries, loaded.EntryPoint)
 	entries = append(entries, loaded.InitArray...)
-
-	for _, sym := range loaded.Symbols {
-		if sym.Type == elf.STT_FUNC && sym.Address != 0 {
-			entries = append(entries, sym.Address)
-		}
+	if mainSym, ok := loaded.SymbolByName["main"]; ok {
+		entries = append(entries, mainSym.Address)
 	}
 
 	for _, rel := range loaded.Relocations {
@@ -58,6 +61,32 @@ func main() {
 			target := uint64(rel.Addend)
 			if target >= textSec.Addr && target < textSec.Addr+textSec.Size {
 				entries = append(entries, target)
+			}
+		}
+	}
+
+	// Scan data sections for function pointers (vtables, callback tables)
+	dataSecNames := []string{".rodata", ".data.rel.ro", ".data"}
+	for _, secName := range dataSecNames {
+		sec, ok := loaded.Sections[secName]
+		if !ok || sec.Size < 8 {
+			continue
+		}
+		for off := uint64(0); off+8 <= sec.Size; off += 8 {
+			addr := sec.Addr + off
+			if addr+8 <= uint64(len(loaded.MemoryImage)) {
+				val := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
+				if val >= textSec.Addr && val < textSec.Addr+textSec.Size {
+					entries = append(entries, val)
+				}
+			}
+		}
+	}
+
+	if *allSymbols {
+		for _, sym := range loaded.Symbols {
+			if sym.Type == elf.STT_FUNC && sym.Address != 0 {
+				entries = append(entries, sym.Address)
 			}
 		}
 	}
@@ -86,7 +115,7 @@ func main() {
 	l := lifter.NewLifter(knownFuncs)
 	em := emitter.NewCEmitter(loaded, d, l)
 
-	if err := os.MkdirAll(*outDir, 0755); err != nil {
+	if err := os.MkdirAll(*outDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating output dir: %v\n", err)
 		os.Exit(1)
 	}
@@ -102,53 +131,107 @@ func main() {
 		}
 	}
 
-	fmt.Printf("[ps4-recomp] Emitting C source files to %s/...\n", *outDir)
-	if err := em.EmitAll(*outDir); err != nil {
+	fmt.Printf("[ps4-recomp] Emitting modular C source files to %s/...\n", *outDir)
+	cFiles, err := em.EmitAll(*outDir)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error emitting C code: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("[ps4-recomp] C source emission complete.\n")
+
+	cFiles = append(cFiles, filepath.Join(*outDir, "recomp_runtime.c"))
+	cFiles = append(cFiles, filepath.Join(*outDir, "ps4_syscalls.c"))
+	fmt.Printf("[ps4-recomp] C source emission complete (%d source files).\n", len(cFiles))
 
 	if *compile {
 		targetBin := filepath.Join(*outDir, "ps4_app")
-		fmt.Printf("[ps4-recomp] Compiling to native Apple Silicon ARM64 Mach-O: %s\n", targetBin)
-
-		cFiles := []string{
-			filepath.Join(*outDir, "main.c"),
-			filepath.Join(*outDir, "recompiled_code.c"),
-			filepath.Join(*outDir, "guest_image.c"),
-			filepath.Join(*outDir, "recomp_runtime.c"),
-			filepath.Join(*outDir, "ps4_syscalls.c"),
-		}
-
-		args := []string{"-O2", "-target", "arm64-apple-darwin", "-I" + *outDir, "-o", targetBin}
-		args = append(args, cFiles...)
-
-		cmd := exec.Command("clang", args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "Clang compilation failed: %v\n", err)
+		start := time.Now()
+		if err := compileParallel(cFiles, *outDir, targetBin); err != nil {
+			fmt.Fprintf(os.Stderr, "Compilation failed: %v\n", err)
 			os.Exit(1)
 		}
-
-		fmt.Printf("[ps4-recomp] Successfully compiled native ARM64 binary: %s\n", targetBin)
+		fmt.Printf("[ps4-recomp] Successfully compiled native ARM64 binary in %v: %s\n",
+			time.Since(start).Round(time.Millisecond), targetBin)
 	}
 }
 
-func copyFile(src, dst string) error {
+func compileParallel(cFiles []string, outDir, targetBin string) error {
+	numWorkers := runtime.NumCPU()
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	fmt.Printf("[ps4-recomp] Compiling %d C files using %d parallel clang workers...\n", len(cFiles), numWorkers)
+
+	objFiles := make([]string, len(cFiles))
+	errChan := make(chan error, len(cFiles))
+	jobs := make(chan int, len(cFiles))
+
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				cFile := cFiles[idx]
+				objFile := strings.TrimSuffix(cFile, ".c") + ".o"
+				objFiles[idx] = objFile
+
+				args := []string{"-Os", "-fvisibility=hidden", "-target", "arm64-apple-darwin", "-I" + outDir, "-c", cFile, "-o", objFile}
+				cmd := exec.Command("clang", args...)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					errChan <- fmt.Errorf("error compiling %s: %w\n%s", filepath.Base(cFile), err, string(out))
+					return
+				}
+			}
+		}()
+	}
+
+	for i := range cFiles {
+		jobs <- i
+	}
+	close(jobs)
+
+	wg.Wait()
+	close(errChan)
+
+	for err := range errChan {
+		if err != nil {
+			return err
+		}
+	}
+
+	fmt.Printf("[ps4-recomp] Linking native ARM64 binary: %s\n", targetBin)
+	linkArgs := []string{"-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x", "-o", targetBin}
+	linkArgs = append(linkArgs, objFiles...)
+	cmd := exec.Command("clang", linkArgs...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("link error: %w\n%s", err, string(out))
+	}
+	return nil
+}
+
+func copyFile(src, dst string) (err error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() {
+		if cerr := in.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() {
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+	}()
 
-	_, err = io.Copy(out, in)
-	return err
+	if _, err = io.Copy(out, in); err != nil {
+		return err
+	}
+	return nil
 }

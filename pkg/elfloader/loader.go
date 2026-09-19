@@ -62,7 +62,7 @@ func LoadELF(path string) (*LoadedELF, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open elf: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	if file.Class != elf.ELFCLASS64 || file.Machine != elf.EM_X86_64 {
 		return nil, fmt.Errorf("unsupported ELF: must be 64-bit x86-64")
@@ -72,7 +72,7 @@ func LoadELF(path string) (*LoadedELF, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open raw elf file: %w", err)
 	}
-	defer rawFile.Close()
+	defer func() { _ = rawFile.Close() }()
 
 	loaded := &LoadedELF{
 		EntryPoint:   file.Entry,
@@ -174,7 +174,6 @@ func LoadELF(path string) (*LoadedELF, error) {
 			loaded.DynSymbols = append(loaded.DynSymbols, sym)
 		}
 	}
-
 
 	// 4. Process Relocations (.rela.dyn and .rela.plt)
 	relSecNames := []string{".rela.dyn", ".rela.plt"}
