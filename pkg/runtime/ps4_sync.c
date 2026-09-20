@@ -309,3 +309,44 @@ void shim_pthread_once(GuestContext *ctx) {
   ctx->rax = 0;
   SHIM_RETURN();
 }
+
+void ps4_sync_destroy(void) {
+  pthread_mutex_lock(&g_mutex_map_lock);
+  for (int i = 0; i < MUTEX_MAP_SIZE; i++) {
+    MutexNode *curr = g_mutex_map[i];
+    while (curr) {
+      MutexNode *next = curr->next;
+      pthread_mutex_destroy(&curr->host_mutex);
+      free(curr);
+      curr = next;
+    }
+    g_mutex_map[i] = NULL;
+  }
+  pthread_mutex_unlock(&g_mutex_map_lock);
+
+  pthread_mutex_lock(&g_cond_map_lock);
+  for (int i = 0; i < COND_MAP_SIZE; i++) {
+    CondNode *curr = g_cond_map[i];
+    while (curr) {
+      CondNode *next = curr->next;
+      pthread_cond_destroy(&curr->host_cond);
+      free(curr);
+      curr = next;
+    }
+    g_cond_map[i] = NULL;
+  }
+  pthread_mutex_unlock(&g_cond_map_lock);
+
+  pthread_mutex_lock(&g_rwlock_map_lock);
+  for (int i = 0; i < RWLOCK_MAP_SIZE; i++) {
+    RwlockNode *curr = g_rwlock_map[i];
+    while (curr) {
+      RwlockNode *next = curr->next;
+      pthread_rwlock_destroy(&curr->host_rwlock);
+      free(curr);
+      curr = next;
+    }
+    g_rwlock_map[i] = NULL;
+  }
+  pthread_mutex_unlock(&g_rwlock_map_lock);
+}

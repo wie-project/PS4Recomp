@@ -90,6 +90,8 @@ typedef struct GuestContext {
 
   // Threading and TLS
   uint64_t thread_id;
+  uint64_t stack_base;
+  size_t stack_alloc_size;
   uint64_t tls_keys[128];
   uint64_t tls_destructors[128];
 
@@ -396,6 +398,15 @@ void shim_sceVideoOutSetFlipRate(GuestContext *ctx);
 void shim_sceVideoOutAddFlipEvent(GuestContext *ctx);
 void shim_sceVideoOutSubmitFlip(GuestContext *ctx);
 void shim_sceVideoOutGetFlipStatus(GuestContext *ctx);
+
+// Subsystem teardown and lifecycle
+void recomp_free_thread_context(GuestContext *ctx);
+void ps4_direct_mem_destroy(void);
+void ps4_sync_destroy(void);
+void ps4_videoout_destroy(void);
+void ps4_equeue_destroy(void);
+void ps4_metal_screen_destroy(void);
+void ps4_vfs_destroy(void);
 
 #ifdef __cplusplus
 }

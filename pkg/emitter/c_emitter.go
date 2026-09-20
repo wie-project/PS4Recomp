@@ -105,6 +105,7 @@ type CEmitter struct {
 	disasm  *disasm.Disassembler
 	lifter  *lifter.Lifter
 	shimMap map[uint64]string
+	AppDir  string
 }
 
 // NewCEmitter creates a new C emitter.
@@ -538,12 +539,19 @@ func (e *CEmitter) EmitMainRunner(path string) (err error) {
 
 	entryAddr, entryName := e.ResolveEntryAddress()
 
+	vfsInitArg := "NULL"
+	if e.AppDir != "" {
+		vfsInitArg = fmt.Sprintf("%q", e.AppDir)
+	}
+
 	content := fmt.Sprintf(`#include "recomp_runtime.h"
+#include "ps4_vfs.h"
 
 extern void recomp_init_dispatch_table(void);
 
 int main(int argc, char **argv) {
     printf("[ps4-recomp] Initializing runtime...\n");
+    ps4_vfs_init(%s);
     recomp_init_dispatch_table();
 
     const char *prog_name = (argc > 0 && argv[0]) ? argv[0] : "ps4_app";
@@ -575,7 +583,7 @@ int main(int argc, char **argv) {
     recomp_free_runtime(ctx);
     return 0;
 }
-`, entryName, e.formatInitArray(), entryName, entryAddr, entryAddr)
+`, vfsInitArg, entryName, e.formatInitArray(), entryName, entryAddr, entryAddr)
 
 	if _, err := w.WriteString(content); err != nil {
 		return err

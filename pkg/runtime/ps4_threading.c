@@ -107,7 +107,7 @@ static void *recomp_host_thread_runner(void *arg) {
 
   if (t->detached) {
     unregister_thread(t);
-    free(ctx);
+    recomp_free_thread_context(ctx);
     free(t);
   }
   return NULL;
@@ -159,7 +159,7 @@ void shim_pthread_create(GuestContext *ctx) {
   int ret = pthread_create(&t->host_thread, NULL, recomp_host_thread_runner, t);
   if (ret != 0) {
     unregister_thread(t);
-    free(child_ctx);
+    recomp_free_thread_context(child_ctx);
     free(t);
     set_guest_errno(ctx, ret);
     ctx->rax = (uint64_t)ret;
@@ -189,7 +189,7 @@ void shim_pthread_join(GuestContext *ctx) {
 
   unregister_thread(t);
   if (t->ctx) {
-    free(t->ctx);
+    recomp_free_thread_context(t->ctx);
   }
   free(t);
 

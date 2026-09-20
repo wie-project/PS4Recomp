@@ -95,6 +95,22 @@ int sceKernelDeleteEqueue(OrbisKernelEqueue id) {
     return 0;
 }
 
+void ps4_equeue_destroy(void) {
+    pthread_mutex_lock(&g_eq_table_mutex);
+    for (int i = 0; i < MAX_EQUEUES; i++) {
+        if (g_equeues[i].in_use) {
+            pthread_mutex_lock(&g_equeues[i].mutex);
+            g_equeues[i].is_deleted = 1;
+            pthread_cond_broadcast(&g_equeues[i].cond);
+            pthread_mutex_unlock(&g_equeues[i].mutex);
+            pthread_mutex_destroy(&g_equeues[i].mutex);
+            pthread_cond_destroy(&g_equeues[i].cond);
+            g_equeues[i].in_use = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_eq_table_mutex);
+}
+
 int ps4_equeue_post_event(OrbisKernelEqueue id, uint64_t ident, int16_t filter, int64_t data, void *udata) {
     pthread_mutex_lock(&g_eq_table_mutex);
     KernelEqueueInternal *eq = find_equeue_locked(id);

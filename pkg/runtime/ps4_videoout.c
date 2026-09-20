@@ -86,6 +86,17 @@ int32_t sceVideoOutClose(int32_t handle) {
     return 0;
 }
 
+void ps4_videoout_destroy(void) {
+    pthread_mutex_lock(&g_video_table_mutex);
+    for (int i = 0; i < MAX_VIDEO_HANDLES; i++) {
+        if (g_video_handles[i].in_use) {
+            pthread_mutex_destroy(&g_video_handles[i].mutex);
+            g_video_handles[i].in_use = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_video_table_mutex);
+}
+
 void sceVideoOutSetBufferAttribute(OrbisVideoOutBufferAttribute *attr, uint32_t pixelFormat, uint32_t tilingMode, uint32_t aspectRatio, uint32_t width, uint32_t height, uint32_t pitch) {
     if (!attr) return;
     attr->format = (int32_t)pixelFormat;

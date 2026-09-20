@@ -1,4 +1,5 @@
 #include "recomp_runtime.h"
+#include "ps4_vfs.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -255,6 +256,10 @@ void shim_open(GuestContext *ctx) {
   int flags = (int)ctx->rsi;
   mode_t mode = (mode_t)ctx->rdx;
   const char *path = (const char *)(ctx->mem_base + path_addr);
+  char resolved_path[1024];
+  if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
+    path = resolved_path;
+  }
   int ret = open(path, flags, mode);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
@@ -513,10 +518,15 @@ void shim_syscall(GuestContext *ctx) {
     SHIM_RETURN();
   }
   case 5: { // SYS_open
-    uint64_t path = ctx->rsi;
+    uint64_t path_addr = ctx->rsi;
     int flags = (int)ctx->rdx;
     mode_t mode = (mode_t)ctx->rcx;
-    int ret = open((const char *)(ctx->mem_base + path), flags, mode);
+    const char *path = (const char *)(ctx->mem_base + path_addr);
+    char resolved_path[1024];
+    if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
+      path = resolved_path;
+    }
+    int ret = open(path, flags, mode);
     if (ret < 0) set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();

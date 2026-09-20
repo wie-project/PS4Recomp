@@ -34,6 +34,8 @@ type Config struct {
 	AllSymbols bool
 	ChunkSize  int
 	Verbose    bool
+	AppDir     string
+	Asan       bool
 }
 
 const banner = `
@@ -57,6 +59,8 @@ Options:
   -a, -all-symbols        Recompile all symbols in symbol table even if unreachable (default: false)
   -k, -chunk-size <num>   Number of functions per emitted C chunk file (default: 250)
   -v, -verbose            Enable verbose output and detailed timing breakdown (default: false)
+      -app-dir <dir>      Host directory mapping to /app0 for game assets (auto-detected if omitted)
+      -asan               Compile with AddressSanitizer and LeakSanitizer (default: false)
   -h, -help               Show this help message
 `
 
@@ -70,6 +74,7 @@ func normalizeArgs(args []string) ([]string, []string) {
 		"-j": true, "-jobs": true, "--jobs": true,
 		"-O": true, "-opt": true, "--opt": true,
 		"-k": true, "-chunk-size": true, "--chunk-size": true,
+		"-app-dir": true, "--app-dir": true,
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -123,6 +128,8 @@ func ParseArgs(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.AllSymbols, "a", cfg.AllSymbols, "Recompile all symbols (short)")
 	fs.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Number of functions per C chunk")
 	fs.IntVar(&cfg.ChunkSize, "k", cfg.ChunkSize, "Chunk size (short)")
+	fs.StringVar(&cfg.AppDir, "app-dir", "", "Host directory mapping to /app0 for game assets")
+	fs.BoolVar(&cfg.Asan, "asan", false, "Compile with AddressSanitizer and LeakSanitizer")
 	fs.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "Verbose logging")
 	fs.BoolVar(&cfg.Verbose, "v", cfg.Verbose, "Verbose logging (short)")
 	fs.BoolVar(&help, "help", false, "Show help message")
@@ -148,6 +155,24 @@ func ParseArgs(args []string) (*Config, error) {
 
 	if cfg.ElfPath == "" {
 		return nil, fmt.Errorf("no input PS4 ELF binary specified\n%s", usageText)
+	}
+
+	// Auto-detect AppDir (parent directory containing assets/ if omitted)
+	if cfg.AppDir == "" && cfg.ElfPath != "" {
+		dir := filepath.Dir(cfg.ElfPath)
+		for range 5 {
+			if fi, err := os.Stat(filepath.Join(dir, "assets")); err == nil && fi.IsDir() {
+				if absDir, err := filepath.Abs(dir); err == nil {
+					cfg.AppDir = absDir
+				}
+				break
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
 	}
 
 	if cfg.Jobs < 1 {
@@ -265,6 +290,7 @@ func Execute(args []string) error {
 
 	runtimeFiles := []string{
 		"recomp_runtime.h", "recomp_runtime.c",
+		"ps4_vfs.h", "ps4_vfs.c",
 		"ps4_syscalls.c", "ps4_threading.c", "ps4_sync.c",
 		"ps4_direct_mem.h", "ps4_direct_mem.c",
 		"ps4_equeue.h", "ps4_equeue.c",
@@ -286,14 +312,25 @@ func Execute(args []string) error {
 
 	l := lifter.NewLifter(knownFuncs)
 	em := emitter.NewCEmitter(loaded, d, l)
+	em.AppDir = cfg.AppDir
 
 	cFiles, err := em.EmitAll(cfg.OutDir)
 	if err != nil {
 		return fmt.Errorf("failed to emit C code: %w", err)
 	}
 
+	if cfg.AppDir != "" {
+		srcAssets := filepath.Join(cfg.AppDir, "assets")
+		dstAssets := filepath.Join(cfg.OutDir, "assets")
+		if fi, err := os.Stat(srcAssets); err == nil && fi.IsDir() {
+			_ = os.RemoveAll(dstAssets)
+			_ = copyDir(srcAssets, dstAssets)
+		}
+	}
+
 	cFiles = append(cFiles,
 		filepath.Join(cfg.OutDir, "recomp_runtime.c"),
+		filepath.Join(cfg.OutDir, "ps4_vfs.c"),
 		filepath.Join(cfg.OutDir, "ps4_syscalls.c"),
 		filepath.Join(cfg.OutDir, "ps4_threading.c"),
 		filepath.Join(cfg.OutDir, "ps4_sync.c"),
@@ -311,11 +348,24 @@ func Execute(args []string) error {
 		stepStart = time.Now()
 		fmt.Printf("[ps4-recomp] [4/4] Compiling native ARM64 binary with clang (-O%s, %d workers)...\n",
 			cfg.OptLevel, cfg.Jobs)
-		if err := compileParallel(cFiles, cfg.OutDir, targetBin, cfg.Jobs, cfg.OptLevel); err != nil {
+		if err := compileParallel(cFiles, cfg.OutDir, targetBin, cfg.Jobs, cfg.OptLevel, cfg.Asan); err != nil {
 			return fmt.Errorf("compilation failed: %w", err)
 		}
 		fmt.Printf("             Compiled binary: %s | Time: %v\n",
 			targetBin, time.Since(stepStart).Round(time.Millisecond))
+
+		appName := strings.TrimSuffix(filepath.Base(cfg.ElfPath), filepath.Ext(cfg.ElfPath))
+		if appName == "" || appName == "." {
+			appName = "ps4_app"
+		}
+		if runtime.GOOS == "darwin" {
+			bundleDir, err := packageAppBundle(cfg, appName, targetBin)
+			if err != nil {
+				return fmt.Errorf("failed to package macOS app bundle: %w", err)
+			}
+			targetBin = filepath.Join(bundleDir, "Contents", "MacOS", appName)
+			fmt.Printf("             Packaged macOS App Bundle: %s\n", bundleDir)
+		}
 	} else {
 		fmt.Println("[ps4-recomp] [4/4] Clang compilation skipped (--compile=false).")
 	}
@@ -325,7 +375,7 @@ func Execute(args []string) error {
 	// Step 5: Optional Run
 	if cfg.Run && cfg.Compile {
 		fmt.Println("===================================================================")
-		if err := runBinary(targetBin, cfg.TimeoutSec); err != nil {
+		if err := runBinary(targetBin, cfg.TimeoutSec, cfg.AppDir); err != nil {
 			return fmt.Errorf("execution failed: %w", err)
 		}
 	}
@@ -333,7 +383,7 @@ func Execute(args []string) error {
 	return nil
 }
 
-func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, optLevel string) error {
+func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, optLevel string, asan bool) error {
 	objFiles := make([]string, len(cFiles))
 	errChan := make(chan error, len(cFiles))
 	jobs := make(chan int, len(cFiles))
@@ -351,6 +401,9 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 					"-O" + optLevel,
 					"-fvisibility=hidden",
 					"-I" + outDir,
+				}
+				if asan {
+					clangArgs = append(clangArgs, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
 				}
 				if ext == ".m" {
 					clangArgs = append(clangArgs, "-fobjc-arc")
@@ -384,6 +437,9 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 	}
 
 	linkArgs := []string{"-o", targetBin}
+	if asan {
+		linkArgs = append(linkArgs, "-fsanitize=address,undefined")
+	}
 	if runtime.GOOS == "darwin" {
 		linkArgs = append(linkArgs, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
 			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore")
@@ -399,7 +455,7 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 	return nil
 }
 
-func runBinary(targetBin string, timeoutSec int) error {
+func runBinary(targetBin string, timeoutSec int, appDir string) error {
 	ctx := context.Background()
 	var cancel context.CancelFunc
 	if timeoutSec > 0 {
@@ -410,6 +466,10 @@ func runBinary(targetBin string, timeoutSec int) error {
 	cmd := exec.CommandContext(ctx, targetBin)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	if appDir != "" {
+		cmd.Env = append(cmd.Env, "PS4_APP_DIR="+appDir)
+	}
 
 	if timeoutSec > 0 {
 		fmt.Printf("[ps4-recomp] Running %s (watchdog timeout: %ds)...\n", targetBin, timeoutSec)
@@ -484,4 +544,135 @@ func copyFile(src, dst string) (err error) {
 		return err
 	}
 	return nil
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		return copyFile(path, target)
+	})
+}
+
+func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) {
+	if runtime.GOOS != "darwin" {
+		return compiledBin, nil
+	}
+
+	bundleDir := filepath.Join(cfg.OutDir, appName+".app")
+	contentsDir := filepath.Join(bundleDir, "Contents")
+	macosDir := filepath.Join(contentsDir, "MacOS")
+	resourcesDir := filepath.Join(contentsDir, "Resources")
+
+	if err := os.MkdirAll(macosDir, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(resourcesDir, 0o755); err != nil {
+		return "", err
+	}
+
+	// 1. Move/copy the compiled binary into Contents/MacOS/<appName>
+	bundleBin := filepath.Join(macosDir, appName)
+	if err := copyFile(compiledBin, bundleBin); err != nil {
+		return "", fmt.Errorf("failed to copy binary to app bundle: %w", err)
+	}
+	_ = os.Chmod(bundleBin, 0o755)
+
+	// Keep cfg.OutDir/ps4_app as a symlink for backward compatibility
+	compatBin := filepath.Join(cfg.OutDir, "ps4_app")
+	if compatBin != compiledBin {
+		_ = os.Remove(compatBin)
+		_ = os.Symlink(bundleBin, compatBin)
+	}
+
+	// 2. Copy guest_image.bin into Contents/Resources/
+	guestImgSrc := filepath.Join(cfg.OutDir, "guest_image.bin")
+	guestImgDst := filepath.Join(resourcesDir, "guest_image.bin")
+	if fi, err := os.Stat(guestImgSrc); err == nil && !fi.IsDir() {
+		_ = copyFile(guestImgSrc, guestImgDst)
+	}
+
+	// 3. Fully copy assets/ into Contents/Resources/assets/
+	if cfg.AppDir != "" {
+		srcAssets := filepath.Join(cfg.AppDir, "assets")
+		dstAssets := filepath.Join(resourcesDir, "assets")
+		if fi, err := os.Stat(srcAssets); err == nil && fi.IsDir() {
+			_ = os.RemoveAll(dstAssets)
+			if err := copyDir(srcAssets, dstAssets); err != nil {
+				return "", fmt.Errorf("failed to copy assets into app bundle: %w", err)
+			}
+		}
+
+		// Also fully copy sce_sys/ into Contents/Resources/sce_sys/
+		srcSceSys := filepath.Join(cfg.AppDir, "sce_sys")
+		dstSceSys := filepath.Join(resourcesDir, "sce_sys")
+		if fi, err := os.Stat(srcSceSys); err == nil && fi.IsDir() {
+			_ = os.RemoveAll(dstSceSys)
+			if err := copyDir(srcSceSys, dstSceSys); err != nil {
+				return "", fmt.Errorf("failed to copy sce_sys into app bundle: %w", err)
+			}
+		}
+	}
+
+	// 4. Generate AppIcon.icns from icon0.png if present
+	hasIcon := false
+	if cfg.AppDir != "" {
+		iconPath := filepath.Join(cfg.AppDir, "sce_sys", "icon0.png")
+		if _, err := os.Stat(iconPath); err == nil {
+			icnsDst := filepath.Join(resourcesDir, "AppIcon.icns")
+			cmd := exec.Command("sips", "-s", "format", "icns", iconPath, "--out", icnsDst)
+			if err := cmd.Run(); err == nil {
+				hasIcon = true
+			}
+		}
+	}
+
+	// 5. Generate Contents/Info.plist
+	iconXml := ""
+	if hasIcon {
+		iconXml = "    <key>CFBundleIconFile</key>\n    <string>AppIcon</string>\n"
+	}
+
+	plistContent := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>%s</string>
+    <key>CFBundleIdentifier</key>
+    <string>org.ps4recomp.%s</string>
+    <key>CFBundleName</key>
+    <string>%s</string>
+    <key>CFBundleDisplayName</key>
+    <string>%s</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+%s</dict>
+</plist>
+`, appName, appName, appName, appName, iconXml)
+
+	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(plistContent), 0o644); err != nil {
+		return "", fmt.Errorf("failed to write Info.plist: %w", err)
+	}
+
+	return bundleDir, nil
 }

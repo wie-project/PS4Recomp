@@ -38,6 +38,19 @@ int ps4_direct_mem_init(void) {
     return 0;
 }
 
+void ps4_direct_mem_destroy(void) {
+    pthread_mutex_lock(&g_direct_mutex);
+    DirectMemBlock *curr = g_direct_blocks;
+    while (curr) {
+        DirectMemBlock *next = curr->next;
+        free(curr);
+        curr = next;
+    }
+    g_direct_blocks = NULL;
+    g_direct_inited = 0;
+    pthread_mutex_unlock(&g_direct_mutex);
+}
+
 size_t sceKernelGetDirectMemorySize(void) {
     return PS4_DIRECT_MEM_TOTAL_SIZE;
 }

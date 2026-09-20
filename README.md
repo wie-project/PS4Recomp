@@ -2,7 +2,7 @@
 
 A static ahead-of-time (AOT) recompiler that translates PlayStation 4 (x86-64 ELF) binaries into native Apple Silicon (ARM64 macOS) executables without JIT compilation, virtual machines, or MoltenVK overhead.
 
-![PS4Recomp Native Metal Output](images/graphics_test_01.png)
+![PS4Recomp Native Metal Output](images/graphics_test_02.png)
 
 ```text
 ===================================================================
@@ -40,10 +40,21 @@ The graphics and kernel subsystems are architected natively from first principle
 
 ### Key Architectural Components
 
+- **Native macOS `.app` Bundling & Clean GUI Lifecycle (`pkg/cli/cli.go` & `pkg/runtime/ps4_metal_screen.m`)**:
+  - Automatically packages compiled binaries into self-contained macOS Application bundles (`<AppName>.app`).
+  - Embeds full resources (`Contents/Resources/assets`, `guest_image.bin`, `sce_sys`), auto-generates `AppIcon.icns`, and produces `Info.plist`.
+  - Seamless standalone execution via Finder or `open <app>.app`. Clean, immediate termination via <kbd>Cmd</kbd>+<kbd>Q</kbd>, <kbd>Cmd</kbd>+<kbd>W</kbd>, <kbd>Esc</kbd>, or the window close button with zero lingering background processes.
 - **Direct Apple Silicon Metal Presentation (`pkg/runtime/ps4_metal_screen.m`)**:
   - High-performance native macOS windowing (`NSWindow`) and display layer (`CAMetalLayer`).
+  - Native `MTLPixelFormatBGRA8Unorm` pipeline matching PlayStation 4 32-bit framebuffer memory layout with zero color distortion.
   - Zero-copy pixel presentation pipeline using `MTLCommandQueue` and blit encoding.
-  - Built from the ground up to seamlessly scale from 2D framebuffers to heavy 3D rendering pipelines (Unreal Engine 4) without architectural rewrites.
+- **Guest VFS Path Virtualization Layer (`pkg/runtime/ps4_vfs.c`)**:
+  - Transparently maps PS4 guest file paths (`/app0/...`, `/data/...`) to bundled application resources.
+  - Supports `--app-dir` CLI parameter, `PS4_APP_DIR` environment variable, or automatic executable-relative resolution.
+- **Subsystem Lifecycle Teardowns & Zero-Leak Memory Management**:
+  - Strict resource tracking and teardowns for Direct Memory, Event Queues, VideoOut handles, Synchronization Mutex maps, and Metal display layers.
+  - Guest thread stack extent reclamation (`recomp_free_thread_context`) on thread termination and join.
+  - Full AddressSanitizer and LeakSanitizer (`--asan`) verification.
 - **Direct Video Memory Manager (`pkg/runtime/ps4_direct_mem.c`)**:
   - Simulates the PS4 Unified Memory Architecture (UMA) direct physical memory space.
   - Implements physical block allocation (`sceKernelAllocateDirectMemory`, `sceKernelGetDirectMemorySize`, `sceKernelReleaseDirectMemory`).
@@ -109,117 +120,54 @@ go test -v ./...
 golangci-lint run --no-config ./...
 ```
 
-### 2. Recompile and Run Sample Binaries
+### 2. Recompilation and Execution
 
-You can build and run binaries using the CLI with built-in execution (`-r`) and watchdog timeout (`-t <seconds>`):
+The CLI compiles PlayStation 4 ELF binaries into native macOS `.app` bundles, optionally executing them with a watchdog timer (`-r -t <seconds>`):
 
 #### A. Interactive 2D Metal Graphics (`graphics.elf`)
-Renders a high-resolution Mandelbrot fractal directly onto a native macOS Metal window using PS4 direct video memory, double buffering, and flip event synchronization:
+Renders a high-resolution Mandelbrot fractal directly onto a native Metal window using PS4 direct video memory and flip event synchronization:
 
 ```bash
-# Recompile and run with a 4-second watchdog timer:
 go run . tools/OpenOrbis/PS4Toolchain/samples/graphics/graphics/x64/Debug/graphics.elf -o output_graphics -r -t 4
 ```
 
-#### B. Hello World (`hello_world.elf`)
-Basic runtime initializers, stdout writing, and microsecond sleep:
+#### B. PNG Texture Decoding & VFS Asset Loading (`pngdec.elf`)
+Loads `/app0/assets/images/logo.png` from the `.app` bundle via VFS, decodes compressed PNG textures, and presents frames to Metal:
 
 ```bash
-# Recompile and run with 3-second watchdog:
-go run . hello_world.elf -o output_hello -r -t 3
+go run . tools/OpenOrbis/PS4Toolchain/samples/pngdec/pngdec/x64/Debug/pngdec.elf -o output_pngdec -r -t 4
 ```
 
-Output:
-```text
-===================================================================
-  PS4Recomp: PlayStation 4 x86-64 to Native ARM64 AOT Recompiler
-===================================================================
-[ps4-recomp] [1/4] Loading ELF: hello_world.elf
-             Entry point: 0xb0b88 | Segments: 4 | Relocations: 3039
-[ps4-recomp] [2/4] Analyzing CFG and discovering reachable code...
-             Discovered 5008 functions, 26025 basic blocks, 181482 instructions
-[ps4-recomp] [3/4] Emitting C source files to 'output_hello/'...
-             Emitted 27 C source files
-[ps4-recomp] [4/4] Compiling native ARM64 binary with clang (-O2, 8 workers)...
-             Compiled binary: output_hello/ps4_app
-[ps4-recomp] All tasks completed successfully
-===================================================================
-[ps4-recomp] Running output_hello/ps4_app (watchdog timeout: 3s)...
-main: Hello world! Waiting 2 seconds!
-main: Done. Infinitely looping...
-[ps4-recomp] Watchdog timeout of 3s reached. Terminated cleanly.
-```
-
-#### C. C++ Exception Handling (`exceptions.elf`)
-C++ `try`/`catch`/`throw`, DWARF `.eh_frame` table evaluation, and landing pad dispatch:
+#### C. Standalone App Launching & Window Controls
+Recompiled applications are packaged as standalone `.app` bundles that can be launched directly:
 
 ```bash
-go run . exceptions.elf -o output_exc -r -t 3
+# Launch the native macOS app bundle directly
+open output_pngdec/pngdec.app
+
+# Or execute the binary directly from a terminal
+./output_pngdec/pngdec.app/Contents/MacOS/pngdec
 ```
 
-Output:
-```text
-[ps4-recomp] Initializing runtime...
-[ps4-recomp] Loading guest memory image (1277952 bytes), allocated dynamic address space (1090.0 MB)
-[ps4-recomp] Executing _start (0xcb1c8)...
-main: Before testcase...
-testcase: Caught! The exception says: Catch me if you can. :p
-main: .what() = Another one.
-main: Testcase PASS
-main: Infinite looping...
-```
+- **Quit Application**: Press <kbd>Cmd</kbd> + <kbd>Q</kbd> or select **Quit** from the application menu.
+- **Close Window**: Press <kbd>Cmd</kbd> + <kbd>W</kbd>, <kbd>Esc</kbd>, or click the red close button <kbd>⨉</kbd>. The app terminates cleanly with zero lingering background processes.
 
-#### D. Multi-Threading & Synchronization (`tests/threading_test/threading_test.elf`)
-Concurrent `std::thread` workers, `std::mutex`, atomic `LOCK XADD` (`fetch_add`), and thread joining:
-
-```bash
-go run . tests/threading_test/threading_test.elf -o output_thread -r -t 3
-```
-
-Output:
-```text
-[ps4-recomp] Initializing runtime...
-[ps4-recomp] Loading guest memory image (630784 bytes), allocated dynamic address space (1090.0 MB)
-[ps4-recomp] Executing _start (0x5a0f8)...
-main: Starting multi-threading test...
-main: Spawned worker threads, waiting for join...
-Thread 1 started!
-Thread 2 started!
-Thread 1 finished its 50 iterations.
-Thread 2 finished its 50 iterations.
-main: Both threads joined. Final counter = 100 (expected 100)
-main: Multi-threading test PASS
-main: Done. Infinitely looping...
-```
-
-#### E. Memory & Computational Stress Test (`tests/memory_stress_test/memory_stress_test.elf`)
-1,000,000 prime sieve, 128x128 matrix multiplication (2M ops), QuickSort on 50,000 integers, 5,000 container iterations, and 400MB extent churn & address reuse:
-
-```bash
-go run . tests/memory_stress_test/memory_stress_test.elf -o output_mem -r -t 5
-```
-
-Output:
-```text
-[ps4-recomp] Initializing runtime...
-[ps4-recomp] Loading guest memory image (565248 bytes), allocated dynamic address space (1090.0 MB)
-[ps4-recomp] Executing _start (0x50848)...
-main: Starting Aggressive Memory & Loop Stress Test...
-main: Running Sieve of Eratosthenes to 1,000,000...
-main: Primes found = 78498 (expected 78498) -> OK
-main: Running 128x128 Matrix Multiplication (2M operations)...
-main: Matrix total sum = 4194304 (0.0, expected 4194304) -> OK
-main: Running QuickSort on 50,000 64-bit integers...
-main: QuickSort verification -> OK
-main: Running 5,000 dynamic container allocation cycles...
-main: Container churn verification -> OK
-main: Running 400MB mmap/munmap virtual memory extent churn...
-test_mmap_churn: Completed 100 cycles of 4MB (400 MB churn). Address reused 99 times!
-main: VM extent reuse verification -> OK
-
-main: All memory and loop stress tests PASSED!
-main: Done. Infinitely looping...
-```
+#### D. Core Verification Tests
+- **Multi-Threading & Atomicity (`threading_test.elf`)**:
+  ```bash
+  go run . tests/threading_test/threading_test.elf -o output_thread --asan -r -t 3
+  # Result: Multi-worker std::thread join, atomic LOCK XADD, 0 ASan/LSan leaks.
+  ```
+- **C++ Exceptions & DWARF Unwinding (`exceptions.elf`)**:
+  ```bash
+  go run . exceptions.elf -o output_exc -r -t 3
+  # Result: try/catch/throw, .eh_frame table evaluation, and landing pad dispatch.
+  ```
+- **Memory & Compute Stress Test (`memory_stress_test.elf`)**:
+  ```bash
+  go run . tests/memory_stress_test/memory_stress_test.elf -o output_mem -r -t 5
+  # Result: 1M prime sieve, 128x128 matrix mult, 400MB mmap extent churn.
+  ```
 
 ---
 
@@ -266,32 +214,30 @@ PS4_RECOMP_MEM=2G perl -e 'alarm 4; exec "./output_graphics/ps4_app"'
 ├── cmd/
 │   └── ps4-recomp/          # CLI tool entry point
 ├── images/
-│   └── graphics_test_01.png # Native Metal 2D Mandelbrot output
+│   ├── graphics_test_01.png # Initial graphics render
+│   └── graphics_test_02.png # Authentic blue Metal render
 ├── pkg/
-│   ├── cli/                 # Command-line driver, argument parser, watchdog and pipeline orchestrator
-│   ├── disasm/              # Disassembly, CFG recovery, jump tables, and flag liveness analysis
-│   ├── elfloader/           # ELF segment loader, symbol table parser, and relocation engine
-│   ├── emitter/             # Partitioned C emission, shims, and parallel Clang build driver
-│   ├── lifter/              # Modular x86-64 machine instruction lifter
-│   │   ├── alu.go           # Integer ALU, shifts, bit tests, BSWAP, CPUID, atomic operations
-│   │   ├── control_flow.go  # Branching, setcc, cmovcc, exception unwinding detection
-│   │   ├── fpu.go           # x87 FPU stack emulation
-│   │   ├── simd.go          # SSE/AVX vector moves, packed math, scalar/packed floats, VEX opcodes
-│   │   └── lifter.go        # Core instruction dispatch loop and operand primitives
+│   ├── cli/                 # CLI driver, macOS .app packager, watchdog orchestration
+│   ├── disasm/              # Disassembly, CFG recovery, indirect jump tables, flag liveness
+│   ├── elfloader/           # ELF64 segment loader, symbol table parser, relocation engine
+│   ├── emitter/             # Partitioned C emission, shims, parallel Clang compiler driver
+│   ├── lifter/              # Modular AMD64 instruction lifter
+│   │   ├── alu.go           # Integer ALU, bit operations, CPUID, atomic synchronization
+│   │   ├── control_flow.go  # Branching, setcc, cmovcc, exception unwinding frames
+│   │   ├── fpu.go           # IEEE 754 80-bit x87 FPU stack emulation
+│   │   ├── simd.go          # Packed SIMD, vector arithmetic, AVX/VEX instructions
+│   │   └── lifter.go        # Instruction decoder and opcode registry
 │   └── runtime/             # Native host runtime and PS4 kernel ABI
-│       ├── recomp_runtime.h   # Guest context, SIMD unions, extent structs, and prototypes
-│       ├── recomp_runtime.c   # Virtual memory extent manager, flat address space, runtime init
-│       ├── ps4_metal_screen.h # Metal screen presentation header
-│       ├── ps4_metal_screen.m # Native Apple Metal CAMetalLayer & NSWindow renderer
-│       ├── ps4_direct_mem.h   # PS4 direct physical memory allocator header
-│       ├── ps4_direct_mem.c   # Direct memory allocation and mapping (UMA)
-│       ├── ps4_videoout.h     # libSceVideoOut API header
-│       ├── ps4_videoout.c     # Video output, buffer registration, flip submission
-│       ├── ps4_equeue.h       # Kernel event queue header
-│       ├── ps4_equeue.c       # Event queue creation, waiting, and event posting
-│       ├── ps4_syscalls.c     # POSIX syscalls, files, memory, and signals
-│       ├── ps4_threading.c    # Guest thread lifecycle, stacks, TLS keys
-│       └── ps4_sync.c         # Mutexes, condition variables, rwlocks, and pthread_once
+│       ├── recomp_runtime.h # Guest context, SIMD unions, extent tracking
+│       ├── recomp_runtime.c # Virtual memory extent manager, flat address space
+│       ├── ps4_metal_screen.h/m # Native Apple Metal CAMetalLayer & Cocoa window renderer
+│       ├── ps4_direct_mem.h/c   # PS4 direct physical memory allocation & UMA mapping
+│       ├── ps4_videoout.h/c     # libSceVideoOut buffer registration & flip events
+│       ├── ps4_equeue.h/c       # Kernel event queue mechanism
+│       ├── ps4_vfs.h/c          # Guest VFS path virtualization (/app0/ resolution)
+│       ├── ps4_syscalls.c       # FreeBSD/PS4 syscall shims, signals, errno sync
+│       ├── ps4_threading.c      # Guest thread lifecycle, stacks, TLS keys
+│       └── ps4_sync.c           # Mutexes, condition variables, rwlocks, pthread_once
 ├── tests/
 │   ├── threading_test/      # Multi-threaded C++ testcase
 │   └── memory_stress_test/  # Compute and virtual memory stress testcase

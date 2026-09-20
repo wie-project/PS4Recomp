@@ -206,6 +206,11 @@ GuestContext *recomp_init_runtime_file(const char *image_filename, size_t reques
             char *dir = dirname(exec_path);
             snprintf(path, sizeof(path), "%s/%s", dir, image_filename);
             fp = fopen(path, "rb");
+            if (!fp) {
+                // Check inside macOS .app bundle Resources directory
+                snprintf(path, sizeof(path), "%s/../Resources/%s", dir, image_filename);
+                fp = fopen(path, "rb");
+            }
         }
 #endif
     }
@@ -241,6 +246,14 @@ GuestContext *recomp_init_runtime_file(const char *image_filename, size_t reques
 
 void recomp_free_runtime(GuestContext *ctx) {
     if (!ctx) return;
+
+    ps4_metal_screen_destroy();
+    ps4_videoout_destroy();
+    ps4_equeue_destroy();
+    ps4_direct_mem_destroy();
+    ps4_sync_destroy();
+    ps4_vfs_destroy();
+
     if (ctx->mem_base) {
         munmap(ctx->mem_base, ctx->mem_size);
     }
@@ -436,10 +449,21 @@ GuestContext *recomp_create_thread_context(GuestContext *parent, uint64_t stack_
     t_ctx->heap_ptr = parent->heap_ptr;
     t_ctx->fs_base = tcb_base;
     t_ctx->process_ctx = proc;
+    t_ctx->stack_base = stack_base;
+    t_ctx->stack_alloc_size = alloc_total;
     t_ctx->rsp = (stack_base + stack_size - 0x100ULL) & ~0xFFULL;
     t_ctx->rbp = t_ctx->rsp;
     t_ctx->fpu_cw = 0x037F;
 
     return t_ctx;
+}
+
+void recomp_free_thread_context(GuestContext *ctx) {
+    if (!ctx) return;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    if (ctx->stack_base && ctx->stack_alloc_size > 0) {
+        recomp_vm_free(proc, ctx->stack_base, ctx->stack_alloc_size);
+    }
+    free(ctx);
 }
 

@@ -1,8 +1,40 @@
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <stdlib.h>
 #include "ps4_metal_screen.h"
 
+@interface PS4ScreenDelegate : NSObject <NSWindowDelegate, NSApplicationDelegate>
+@end
+
+@implementation PS4ScreenDelegate
+
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    (void)sender;
+    exit(0);
+    return YES;
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    (void)notification;
+    exit(0);
+}
+
+- (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
+    (void)sender;
+    exit(0);
+    return YES;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    (void)sender;
+    exit(0);
+    return NSTerminateNow;
+}
+
+@end
+
+static PS4ScreenDelegate *g_screenDelegate = nil;
 static NSWindow *g_window = nil;
 static CAMetalLayer *g_metalLayer = nil;
 static id<MTLDevice> g_device = nil;
@@ -22,6 +54,37 @@ int ps4_metal_screen_init(int width, int height, const char *title) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+
+        if (!g_screenDelegate) {
+            g_screenDelegate = [[PS4ScreenDelegate alloc] init];
+        }
+        [NSApp setDelegate:g_screenDelegate];
+
+        // Standard macOS Menu Bar with Quit (Cmd+Q) and Close Window (Cmd+W)
+        NSMenu *menubar = [[NSMenu alloc] init];
+        NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
+        [menubar addItem:appMenuItem];
+        [NSApp setMainMenu:menubar];
+
+        NSMenu *appMenu = [[NSMenu alloc] init];
+        NSString *appName = [[NSProcessInfo processInfo] processName];
+        if (!appName || [appName length] == 0) {
+            appName = @"PS4Recomp";
+        }
+        NSString *quitTitle = [@"Quit " stringByAppendingString:appName];
+        NSMenuItem *quitMenuItem = [[NSMenuItem alloc] initWithTitle:quitTitle
+                                                              action:@selector(terminate:)
+                                                       keyEquivalent:@"q"];
+        [quitMenuItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        [appMenu addItem:quitMenuItem];
+
+        NSMenuItem *closeMenuItem = [[NSMenuItem alloc] initWithTitle:@"Close Window"
+                                                               action:@selector(performClose:)
+                                                        keyEquivalent:@"w"];
+        [closeMenuItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+        [appMenu addItem:closeMenuItem];
+
+        [appMenuItem setSubmenu:appMenu];
 
         g_device = MTLCreateSystemDefaultDevice();
         if (!g_device) {
@@ -43,13 +106,14 @@ int ps4_metal_screen_init(int width, int height, const char *title) {
                                                    defer:NO];
         NSString *titleStr = title ? [NSString stringWithUTF8String:title] : @"PS4Recomp - Display";
         [g_window setTitle:titleStr];
+        [g_window setDelegate:g_screenDelegate];
 
         NSView *view = [[NSView alloc] initWithFrame:frame];
         [view setWantsLayer:YES];
 
         g_metalLayer = [CAMetalLayer layer];
         g_metalLayer.device = g_device;
-        g_metalLayer.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        g_metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         g_metalLayer.framebufferOnly = NO;
         g_metalLayer.drawableSize = CGSizeMake(g_width, g_height);
 
@@ -59,7 +123,7 @@ int ps4_metal_screen_init(int width, int height, const char *title) {
         [NSApp activateIgnoringOtherApps:YES];
 
         // Create the backing 2D screen texture
-        MTLTextureDescriptor *texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+        MTLTextureDescriptor *texDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                                            width:g_width
                                                                                           height:g_height
                                                                                        mipmapped:NO];
@@ -122,8 +186,16 @@ void ps4_metal_screen_pump_events(void) {
                                            untilDate:[NSDate distantPast]
                                               inMode:NSDefaultRunLoopMode
                                              dequeue:YES])) {
+            if (event.type == NSEventTypeKeyDown && event.keyCode == 53) { // Escape key
+                exit(0);
+            }
             [NSApp sendEvent:event];
             [NSApp updateWindows];
+        }
+
+        // Failsafe: if window was closed or hidden and not minimized, exit cleanly
+        if (g_inited && g_window && ![g_window isVisible] && ![g_window isMiniaturized]) {
+            exit(0);
         }
     }
 }
