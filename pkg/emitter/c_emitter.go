@@ -172,6 +172,19 @@ var CanonicalShims = map[string]string{
 	"sceMsgDialogProgressBarInc":      "shim_sceMsgDialogProgressBarInc",
 	"sceMsgDialogProgressBarSetMsg":   "shim_sceMsgDialogProgressBarSetMsg",
 	"sceMsgDialogProgressBarSetValue": "shim_sceMsgDialogProgressBarSetValue",
+	// NpTrophy
+	"sceNpTrophyInit":            "shim_sceNpTrophyInit",
+	"sceNpTrophyTerm":            "shim_sceNpTrophyTerm",
+	"sceNpTrophyCreateContext":   "shim_sceNpTrophyCreateContext",
+	"sceNpTrophyDestroyContext":  "shim_sceNpTrophyDestroyContext",
+	"sceNpTrophyCreateHandle":    "shim_sceNpTrophyCreateHandle",
+	"sceNpTrophyDestroyHandle":   "shim_sceNpTrophyDestroyHandle",
+	"sceNpTrophyRegisterContext": "shim_sceNpTrophyRegisterContext",
+	"sceNpTrophyUnlockTrophy":    "shim_sceNpTrophyUnlockTrophy",
+	"sceNpTrophyShowTrophyList":  "shim_sceNpTrophyShowTrophyList",
+	// Dynamic Module Loader
+	"sceKernelLoadStartModule":   "shim_sceKernelLoadStartModule",
+	"sceKernelDlsym":             "shim_sceKernelDlsym",
 }
 
 // LookupShim looks up a shim name for a symbol name, stripping leading underscores if needed.

@@ -430,6 +430,252 @@ func (l *Lifter) liftScalarF32(opStr string, dst, src x86asm.Arg, nextPC uint64)
 	return nil, fmt.Errorf("unsupported scalar f32 operands")
 }
 
+func (l *Lifter) liftPackedF32(op string, dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("packed f32 dst must be XMM register")
+	}
+	infoDst := regMap[dstReg]
+	var lines []string
+	lines = append(lines, "    {")
+	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+		infoSrc := regMap[srcReg]
+		lines = append(lines, fmt.Sprintf("      xmm_reg_t src = ctx->%s;", infoSrc.BaseReg))
+	} else if srcMem, ok := src.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(srcMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(
+			lines,
+			"      xmm_reg_t src;",
+			fmt.Sprintf("      memcpy(&src, ctx->mem_base + (%s), 16);", addr),
+		)
+	} else {
+		return nil, fmt.Errorf("unsupported packed f32 operands")
+	}
+	switch op {
+	case "+", "-", "*", "/":
+		for i := 0; i < 4; i++ {
+			lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] %s= src.f32[%d];", infoDst.BaseReg, i, op, i))
+		}
+	case "min":
+		for i := 0; i < 4; i++ {
+			lines = append(lines, fmt.Sprintf("      if (src.f32[%d] < ctx->%s.f32[%d]) ctx->%s.f32[%d] = src.f32[%d];", i, infoDst.BaseReg, i, infoDst.BaseReg, i, i))
+		}
+	case "max":
+		for i := 0; i < 4; i++ {
+			lines = append(lines, fmt.Sprintf("      if (src.f32[%d] > ctx->%s.f32[%d]) ctx->%s.f32[%d] = src.f32[%d];", i, infoDst.BaseReg, i, infoDst.BaseReg, i, i))
+		}
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftCvtdq2ps(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("cvtdq2ps dst must be XMM register")
+	}
+	infoDst := regMap[dstReg]
+	var lines []string
+	lines = append(lines, "    {")
+	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+		infoSrc := regMap[srcReg]
+		lines = append(lines, fmt.Sprintf("      xmm_reg_t src = ctx->%s;", infoSrc.BaseReg))
+	} else if srcMem, ok := src.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(srcMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(
+			lines,
+			"      xmm_reg_t src;",
+			fmt.Sprintf("      memcpy(&src, ctx->mem_base + (%s), 16);", addr),
+		)
+	} else {
+		return nil, fmt.Errorf("cvtdq2ps invalid src")
+	}
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] = (float)src.s32[%d];", infoDst.BaseReg, i, i))
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftCvtps2dq(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("cvtps2dq dst must be XMM register")
+	}
+	infoDst := regMap[dstReg]
+	var lines []string
+	lines = append(lines, "    {")
+	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+		infoSrc := regMap[srcReg]
+		lines = append(lines, fmt.Sprintf("      xmm_reg_t src = ctx->%s;", infoSrc.BaseReg))
+	} else if srcMem, ok := src.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(srcMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(
+			lines,
+			"      xmm_reg_t src;",
+			fmt.Sprintf("      memcpy(&src, ctx->mem_base + (%s), 16);", addr),
+		)
+	} else {
+		return nil, fmt.Errorf("cvtps2dq invalid src")
+	}
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("      ctx->%s.s32[%d] = (int32_t)roundf(src.f32[%d]);", infoDst.BaseReg, i, i))
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftPavgb(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("pavgb dst must be XMM register")
+	}
+	infoDst := regMap[dstReg]
+	var lines []string
+	lines = append(lines, "    {")
+	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+		infoSrc := regMap[srcReg]
+		lines = append(lines, fmt.Sprintf("      xmm_reg_t src = ctx->%s;", infoSrc.BaseReg))
+	} else if srcMem, ok := src.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(srcMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(
+			lines,
+			"      xmm_reg_t src;",
+			fmt.Sprintf("      memcpy(&src, ctx->mem_base + (%s), 16);", addr),
+		)
+	} else {
+		return nil, fmt.Errorf("pavgb invalid src")
+	}
+	lines = append(
+		lines,
+		fmt.Sprintf("      for (int i = 0; i < 16; i++) ctx->%s.u8[i] = (uint8_t)(((uint32_t)ctx->%s.u8[i] + (uint32_t)src.u8[i] + 1) >> 1);", infoDst.BaseReg, infoDst.BaseReg),
+		"    }",
+	)
+	return lines, nil
+}
+
+func (l *Lifter) liftPavgw(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("pavgw dst must be XMM register")
+	}
+	infoDst := regMap[dstReg]
+	var lines []string
+	lines = append(lines, "    {")
+	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+		infoSrc := regMap[srcReg]
+		lines = append(lines, fmt.Sprintf("      xmm_reg_t src = ctx->%s;", infoSrc.BaseReg))
+	} else if srcMem, ok := src.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(srcMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(
+			lines,
+			"      xmm_reg_t src;",
+			fmt.Sprintf("      memcpy(&src, ctx->mem_base + (%s), 16);", addr),
+		)
+	} else {
+		return nil, fmt.Errorf("pavgw invalid src")
+	}
+	lines = append(
+		lines,
+		fmt.Sprintf("      for (int i = 0; i < 8; i++) ctx->%s.u16[i] = (uint16_t)(((uint32_t)ctx->%s.u16[i] + (uint32_t)src.u16[i] + 1) >> 1);", infoDst.BaseReg, infoDst.BaseReg),
+		"    }",
+	)
+	return lines, nil
+}
+
+func (l *Lifter) liftVbroadcastss(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("vbroadcastss dst must be XMM register")
+	}
+	infoDst := regMap[dstReg]
+	var lines []string
+	lines = append(lines, "    {", "      float val;")
+	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+		infoSrc := regMap[srcReg]
+		lines = append(lines, fmt.Sprintf("      val = ctx->%s.f32[0];", infoSrc.BaseReg))
+	} else if srcMem, ok := src.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(srcMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(
+			lines,
+			fmt.Sprintf("      uint32_t u = MEM_U32(%s);", addr),
+			"      memcpy(&val, &u, 4);",
+		)
+	} else {
+		return nil, fmt.Errorf("vbroadcastss unsupported src operand")
+	}
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] = val;", infoDst.BaseReg, i))
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftHaddps(dst, src1, src2 x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("haddps dst must be XMM register")
+	}
+	infoDst := regMap[dstReg]
+
+	var lines []string
+	lines = append(lines, "    {", "      xmm_reg_t s1, s2;")
+
+	if s1Reg, ok := src1.(x86asm.Reg); ok && isXmm(s1Reg) {
+		infoS1 := regMap[s1Reg]
+		lines = append(lines, fmt.Sprintf("      s1 = ctx->%s;", infoS1.BaseReg))
+	} else if s1Mem, ok := src1.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(s1Mem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, fmt.Sprintf("      memcpy(&s1, ctx->mem_base + (%s), 16);", addr))
+	} else {
+		return nil, fmt.Errorf("haddps invalid src1")
+	}
+
+	if s2Reg, ok := src2.(x86asm.Reg); ok && isXmm(s2Reg) {
+		infoS2 := regMap[s2Reg]
+		lines = append(lines, fmt.Sprintf("      s2 = ctx->%s;", infoS2.BaseReg))
+	} else if s2Mem, ok := src2.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(s2Mem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, fmt.Sprintf("      memcpy(&s2, ctx->mem_base + (%s), 16);", addr))
+	} else {
+		return nil, fmt.Errorf("haddps invalid src2")
+	}
+
+	lines = append(
+		lines,
+		fmt.Sprintf("      ctx->%s.f32[0] = s1.f32[0] + s1.f32[1];", infoDst.BaseReg),
+		fmt.Sprintf("      ctx->%s.f32[1] = s1.f32[2] + s1.f32[3];", infoDst.BaseReg),
+		fmt.Sprintf("      ctx->%s.f32[2] = s2.f32[0] + s2.f32[1];", infoDst.BaseReg),
+		fmt.Sprintf("      ctx->%s.f32[3] = s2.f32[2] + s2.f32[3];", infoDst.BaseReg),
+		"    }",
+	)
+	return lines, nil
+}
+
 func (l *Lifter) liftPackedF64(opStr string, dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok := dst.(x86asm.Reg)
 	if !ok || !isXmm(dstReg) {
@@ -601,6 +847,14 @@ func (l *Lifter) liftPunpckl(elemBytes int, dst, src x86asm.Arg, nextPC uint64) 
 			"      uint16_t d[4], s[4];",
 			fmt.Sprintf("      memcpy(d, ctx->%s.u16, 8); memcpy(s, src.u16, 8);", infoDst.BaseReg),
 			fmt.Sprintf("      for (int i = 0; i < 4; i++) { ctx->%s.u16[2*i] = d[i]; ctx->%s.u16[2*i+1] = s[i]; }", infoDst.BaseReg, infoDst.BaseReg),
+		)
+	case 4:
+		lines = append(
+			lines,
+			"      uint32_t d[2], s[2];",
+			fmt.Sprintf("      memcpy(d, ctx->%s.u32, 8); memcpy(s, src.u32, 8);", infoDst.BaseReg),
+			fmt.Sprintf("      ctx->%s.u32[0] = d[0]; ctx->%s.u32[1] = s[0];", infoDst.BaseReg, infoDst.BaseReg),
+			fmt.Sprintf("      ctx->%s.u32[2] = d[1]; ctx->%s.u32[3] = s[1];", infoDst.BaseReg, infoDst.BaseReg),
 		)
 	}
 	lines = append(lines, "    }")
@@ -1511,7 +1765,7 @@ func (l *Lifter) liftPshufhw(dst, src, immArg x86asm.Arg, nextPC uint64) ([]stri
 func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC uint64) ([]string, error) {
 	// 2-operand moves
 	switch op {
-	case x86asm.VMOVAPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVNTPS:
+	case x86asm.VMOVAPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVNTPS, x86asm.VMOVNTDQ:
 		return l.liftVectorMove(args[0], args[1], nextPC)
 	case x86asm.VMOVD:
 		return l.liftMovd(args[0], args[1], nextPC)
@@ -1525,6 +1779,20 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		return l.liftCvttsd2si(false, args[0], args[1], defMemSz, nextPC)
 	case x86asm.VCVTTSD2SI:
 		return l.liftCvttsd2si(true, args[0], args[1], defMemSz, nextPC)
+	case x86asm.VCVTDQ2PS:
+		src := args[1]
+		if args[2] != nil {
+			src = args[2]
+		}
+		return l.liftCvtdq2ps(args[0], src, nextPC)
+	case x86asm.VCVTPS2DQ:
+		src := args[1]
+		if args[2] != nil {
+			src = args[2]
+		}
+		return l.liftCvtps2dq(args[0], src, nextPC)
+	case x86asm.VBROADCASTSS:
+		return l.liftVbroadcastss(args[0], args[1], nextPC)
 	case x86asm.VPSHUFHW:
 		return l.liftPshufhw(args[0], args[1], args[2], nextPC)
 	case x86asm.VPSHUFLW:
@@ -1644,6 +1912,47 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		}, nil
 	}
 
+	// VROUNDSS dst, src1, src2, imm
+	if op == x86asm.VROUNDSS {
+		dstReg, ok1 := args[0].(x86asm.Reg)
+		src1Reg, ok2 := args[1].(x86asm.Reg)
+		imm, ok3 := args[3].(x86asm.Imm)
+		if !ok1 || !ok2 || !ok3 || !isXmm(dstReg) || !isXmm(src1Reg) {
+			return nil, fmt.Errorf("vroundss invalid operands")
+		}
+		infoDst := regMap[dstReg]
+		infoSrc1 := regMap[src1Reg]
+		var sExpr string
+		if src2Reg, ok := args[2].(x86asm.Reg); ok && isXmm(src2Reg) {
+			infoSrc2 := regMap[src2Reg]
+			sExpr = fmt.Sprintf("ctx->%s.f32[0]", infoSrc2.BaseReg)
+		} else if src2Mem, ok := args[2].(x86asm.Mem); ok {
+			addr, err := MemAddrExpr(src2Mem, nextPC)
+			if err != nil {
+				return nil, err
+			}
+			sExpr = fmt.Sprintf("({ float s; uint32_t u = MEM_U32(%s); memcpy(&s, &u, 4); s; })", addr)
+		} else {
+			return nil, fmt.Errorf("vroundss invalid src2")
+		}
+		roundMode := imm & 3
+		var roundFunc string
+		switch roundMode {
+		case 1:
+			roundFunc = "floorf"
+		case 2:
+			roundFunc = "ceilf"
+		case 3:
+			roundFunc = "truncf"
+		default:
+			roundFunc = "roundf"
+		}
+		return []string{
+			fmt.Sprintf("    ctx->%s = ctx->%s;", infoDst.BaseReg, infoSrc1.BaseReg),
+			fmt.Sprintf("    ctx->%s.f32[0] = %s(%s);", infoDst.BaseReg, roundFunc, sExpr),
+		}, nil
+	}
+
 	// 3-operand VEX operations: dst = src1; op(dst, src2)
 	dstReg, ok1 := args[0].(x86asm.Reg)
 	src1Reg, ok2 := args[1].(x86asm.Reg)
@@ -1677,7 +1986,21 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		code, err = l.liftScalarF32("/", args[0], args[2], nextPC)
 	case x86asm.VDIVSD:
 		code, err = l.liftScalarF64("/", args[0], args[2], nextPC)
-	case x86asm.VXORPS:
+	case x86asm.VADDPS:
+		code, err = l.liftPackedF32("+", args[0], args[2], nextPC)
+	case x86asm.VSUBPS:
+		code, err = l.liftPackedF32("-", args[0], args[2], nextPC)
+	case x86asm.VMULPS:
+		code, err = l.liftPackedF32("*", args[0], args[2], nextPC)
+	case x86asm.VDIVPS:
+		code, err = l.liftPackedF32("/", args[0], args[2], nextPC)
+	case x86asm.VMAXPS:
+		code, err = l.liftPackedF32("max", args[0], args[2], nextPC)
+	case x86asm.VMINPS:
+		code, err = l.liftPackedF32("min", args[0], args[2], nextPC)
+	case x86asm.VHADDPS:
+		code, err = l.liftHaddps(args[0], args[1], args[2], nextPC)
+	case x86asm.VXORPS, x86asm.VPXOR:
 		code, err = l.liftVectorBitwise(" ^ ", args[0], args[2], nextPC)
 	case x86asm.VPOR:
 		code, err = l.liftVectorBitwise(" | ", args[0], args[2], nextPC)
@@ -1689,10 +2012,16 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		code, err = l.liftPsub(2, args[0], args[2], nextPC)
 	case x86asm.VPMULLW:
 		code, err = l.liftPmullw(args[0], args[2], nextPC)
+	case x86asm.VPAVGB:
+		code, err = l.liftPavgb(args[0], args[2], nextPC)
+	case x86asm.VPAVGW:
+		code, err = l.liftPavgw(args[0], args[2], nextPC)
 	case x86asm.VPACKUSWB:
 		code, err = l.liftPack(x86asm.PACKUSWB, args[0], args[2], nextPC)
 	case x86asm.VPACKSSDW:
 		code, err = l.liftPack(x86asm.PACKSSDW, args[0], args[2], nextPC)
+	case x86asm.VPACKSSWB:
+		code, err = l.liftPack(x86asm.PACKSSWB, args[0], args[2], nextPC)
 	case x86asm.VPUNPCKLBW:
 		code, err = l.liftPunpckl(1, args[0], args[2], nextPC)
 	case x86asm.VPUNPCKHBW:
@@ -1701,6 +2030,10 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		code, err = l.liftPunpckl(2, args[0], args[2], nextPC)
 	case x86asm.VPUNPCKHWD:
 		code, err = l.liftPunpckh(2, args[0], args[2], nextPC)
+	case x86asm.VPUNPCKLDQ, x86asm.VUNPCKLPS:
+		code, err = l.liftPunpckl(4, args[0], args[2], nextPC)
+	case x86asm.VPUNPCKHDQ, x86asm.VUNPCKHPS:
+		code, err = l.liftPunpckh(4, args[0], args[2], nextPC)
 	case x86asm.VPSLLW:
 		code, err = l.liftPshiftW(x86asm.PSLLW, args[0], args[2], nextPC)
 	case x86asm.VPSRLW:
@@ -1711,6 +2044,8 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		code, err = l.liftPshift("<<", args[0], args[2], nextPC)
 	case x86asm.VPSRLD:
 		code, err = l.liftPshift(">>", args[0], args[2], nextPC)
+	case x86asm.VPSRAD:
+		code, err = l.liftPsrad(args[0], args[2], nextPC)
 	case x86asm.VCVTSI2SS:
 		code, err = l.liftCvtsi2s(false, args[0], args[2], defMemSz, nextPC)
 	case x86asm.VCVTSI2SD:
@@ -1719,6 +2054,8 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		code, err = l.liftCvtss2sd(args[0], args[2], nextPC)
 	case x86asm.VCVTSD2SS:
 		code, err = l.liftCvtsd2ss(args[0], args[2], nextPC)
+	case x86asm.VSQRTSS:
+		code, err = l.liftSqrt(false, args[0], args[2], nextPC)
 	case x86asm.VSQRTSD:
 		code, err = l.liftSqrt(true, args[0], args[2], nextPC)
 	default:

@@ -115,6 +115,16 @@ The graphics and kernel subsystems are architected natively from first principle
 - **System Dialog Subsystem (`libSceCommonDialog` & `libSceMsgDialog` in `pkg/runtime/ps4_dialog.m`)**:
   - Native Cocoa `NSAlert` modal presentation for PS4 system and user dialogs (`OK`, `Yes/No`, `OK/Cancel`, and custom dual-button choices).
   - Synchronous and asynchronous status polling (`sceMsgDialogUpdateStatus`, `sceMsgDialogGetResult`), with automatic headless fallback for headless/CI environments.
+- **Trophy Subsystem (`libSceNpTrophy` in `pkg/runtime/ps4_trophy.c`)**:
+  - Full PS4 trophy lifecycle management (`sceNpTrophyInit`, `sceNpTrophyCreateContext`, `sceNpTrophyCreateHandle`, `sceNpTrophyRegisterContext`, `sceNpTrophyUnlockTrophy`).
+  - Bitmask tracking for up to 256 trophies, platinum unlock detection, and system notifications for unlocked trophies.
+- **Dynamic PRX Module Loading (`pkg/runtime/ps4_sysmodule.c`)**:
+  - Implementation of `sceKernelLoadStartModule` and `sceKernelDlsym` supporting runtime loading and dynamic symbol binding for external modules and libraries (`.prx`).
+- **PS4 PKG Container & SFO Metadata Engine (`pkg/ps4pkg`)**:
+  - Full container parser for Sony `\x7fCNT` format: header decoding, entry table descriptor parsing (`MetaEntry`), and filename resolution via `ENTRY_NAMES`.
+  - Native Sony PSF / `param.sfo` parser: UTF-8 strings, 32-bit integers, and binary attributes (`TITLE`, `TITLE_ID`, `APP_VER`, `CATEGORY`, `CONTENT_ID`, `SYSTEM_VER`).
+  - Multi-PKG Manager: recursive folder scanning, Title ID grouping (`CUSAxxxxx`), automated categorization (Base Game, Patches/Updates, Add-on Content / DLCs), and overlay/patch hierarchy resolution.
+  - Subcommands: `ps4-recomp pkg info <pkg | dir>` and `ps4-recomp pkg extract <pkg> -o <out_dir>`.
 
 ---
 
@@ -214,15 +224,15 @@ Automated test suite (`pkg/lifter/coverage_test.go`) validates **100.0% opcode c
 | `keyboard.elf` | 21,103 | 686 | **100.0%** (Verified Live on Metal & libSceKeyboard) |
 | `font.elf` | 19,727 | 665 | **100.0%** (Verified Live on Metal & FreeType 2) |
 | `audio-wav.elf` | 10,590 | 118 | **100.0%** (Verified Live: AudioQueue PCM 48kHz) |
-| `system.elf` | 20,011 | 674 | **100.0%** |
+| `system.elf` | 20,011 | 674 | **100.0%** (Verified Live on Metal: FreeType & libSceUserService) |
 | `networking.elf` | 18,913 | 653 | **100.0%** |
 | `exceptions.elf` | 18,699 | 650 | **100.0%** (Verified Live: C++ throw/catch & unwinding) |
 | `hello_world.elf` | 18,423 | 644 | **100.0%** (Verified Live: stdout & libc) |
 | `piglet.elf` | 18,537 | 644 | **100.0%** |
 | `net_http.elf` | 5,396 | 69 | **100.0%** |
-| `trophies.elf` | 3,516 | 41 | **100.0%** |
+| `trophies.elf` | 3,516 | 41 | **100.0%** (Verified Live: libSceNpTrophy & Trophy Unlocks) |
 | `dialogs.elf` | 3,422 | 42 | **100.0%** (Verified Live: Cocoa NSAlert & libSceMsgDialog) |
-| `using_library.elf` | 3,352 | 40 | **100.0%** |
+| `using_library.elf` | 3,352 | 40 | **100.0%** (Verified Live: PRX Module Loading & Dlsym) |
 
 ---
 

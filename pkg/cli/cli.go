@@ -16,10 +16,12 @@ import (
 	"sync"
 	"time"
 
+	"ps4-recomp/pkg/analyzer"
 	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
 	"ps4-recomp/pkg/emitter"
 	"ps4-recomp/pkg/lifter"
+	"ps4-recomp/pkg/ps4pkg"
 )
 
 // Config contains runtime configuration parameters parsed from CLI arguments.
@@ -46,7 +48,9 @@ const banner = `
 const usageText = `
 Usage:
   ps4-recomp [flags] <input.elf>
-  ps4-recomp [flags] -elf <input.elf>
+  ps4-recomp analyze <eboot.bin | input.elf | module.prx>
+  ps4-recomp pkg info <path.pkg | directory>
+  ps4-recomp pkg extract <path.pkg> [-o out_dir]
 
 Options:
   -o, -out <dir>          Output directory for generated C code and binaries (default: "build")
@@ -184,6 +188,21 @@ func ParseArgs(args []string) (*Config, error) {
 
 // Execute runs the complete recompilation and optional execution pipeline.
 func Execute(args []string) error {
+	if len(args) > 0 && args[0] == "pkg" {
+		return handlePkgCommand(args[1:])
+	}
+	if len(args) > 0 && args[0] == "analyze" {
+		if len(args) < 2 {
+			return errors.New("usage: ps4-recomp analyze <binary.elf | eboot.bin | module.prx>")
+		}
+		report, err := analyzer.AnalyzeBinary(args[1])
+		if err != nil {
+			return fmt.Errorf("analysis failed: %w", err)
+		}
+		fmt.Println(report.SummaryString())
+		return nil
+	}
+
 	cfg, err := ParseArgs(args)
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -310,6 +329,7 @@ func Execute(args []string) error {
 		"ps4_audioout.h", "ps4_audioout.c",
 		"ps4_keyboard.h", "ps4_keyboard.m",
 		"ps4_dialog.h", "ps4_dialog.m",
+		"ps4_trophy.h", "ps4_trophy.c",
 	}
 	for _, rf := range runtimeFiles {
 		src := filepath.Join(runtimeDir, rf)
@@ -361,6 +381,7 @@ func Execute(args []string) error {
 		filepath.Join(cfg.OutDir, "ps4_audioout.c"),
 		filepath.Join(cfg.OutDir, "ps4_keyboard.m"),
 		filepath.Join(cfg.OutDir, "ps4_dialog.m"),
+		filepath.Join(cfg.OutDir, "ps4_trophy.c"),
 	)
 	fmt.Printf("             Emitted %d C source files | Time: %v\n",
 		len(cFiles), time.Since(stepStart).Round(time.Millisecond))
@@ -715,3 +736,156 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 
 	return bundleDir, nil
 }
+
+func handlePkgCommand(args []string) error {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		fmt.Println(`Usage: ps4-recomp pkg <subcommand> [args...]
+
+Subcommands:
+  info <file.pkg | directory>     Inspect single PKG or scan directory for multiple PKGs (Base, Patch, DLC)
+  extract <file.pkg> [-o dir]     Extract unencrypted entries (param.sfo, icon0.png, etc.) to directory`)
+		return nil
+	}
+
+	subcmd := args[0]
+	switch subcmd {
+	case "info":
+		if len(args) < 2 {
+			return errors.New("usage: ps4-recomp pkg info <file.pkg | directory>")
+		}
+		target := args[1]
+		fi, err := os.Stat(target)
+		if err != nil {
+			return fmt.Errorf("failed to access '%s': %w", target, err)
+		}
+
+		if fi.IsDir() {
+			fmt.Printf("[ps4-recomp] Scanning directory for PS4 packages: %s\n", target)
+			mgr := ps4pkg.NewMultiPKGManager()
+			defer mgr.Close()
+
+			if err := mgr.ScanDirectory(target); err != nil {
+				return err
+			}
+
+			if len(mgr.Packages) == 0 {
+				fmt.Println("No PS4 PKG files found in directory.")
+				return nil
+			}
+
+			fmt.Println("\n===================================================================")
+			fmt.Println("  PS4 Multi-PKG Package Report")
+			fmt.Println("===================================================================")
+			fmt.Printf("Total PKG Files Scanned: %d | Games Detected: %d\n\n", len(mgr.Packages), len(mgr.GameSets))
+
+			idx := 1
+			for _, set := range mgr.GameSets {
+				fmt.Printf("[%d] %s\n", idx, set.SummaryString())
+				idx++
+			}
+			return nil
+		}
+
+		// Single PKG file
+		pkg, err := ps4pkg.Open(target)
+		if err != nil {
+			return fmt.Errorf("failed to open PKG: %w", err)
+		}
+		defer pkg.Close()
+
+		fmt.Println("\n===================================================================")
+		fmt.Println("  PS4 PKG Container Information")
+		fmt.Println("===================================================================")
+		fmt.Printf("File Path:       %s\n", pkg.FilePath)
+		fmt.Printf("File Size:       %s (%d bytes)\n", ps4pkg.FormatSize(pkg.FileSize), pkg.FileSize)
+		fmt.Printf("Content ID:      %s\n", pkg.ContentID)
+		fmt.Printf("Title ID:        %s\n", pkg.TitleID())
+		fmt.Printf("Title:           %s\n", pkg.Title())
+		fmt.Printf("App Version:     %s\n", pkg.AppVersion())
+		fmt.Printf("Category:        %s\n", pkg.Category())
+		fmt.Printf("Total Entries:   %d (Table offset: 0x%x, size: 0x%x)\n", len(pkg.Entries), pkg.RawHeader.TableOffset, pkg.RawHeader.TableSize)
+
+		if pkg.SFO != nil && len(pkg.SFO.Entries) > 0 {
+			fmt.Println("\n--- PARAM.SFO Metadata ---")
+			for _, k := range pkg.SFO.Keys {
+				v := pkg.SFO.Entries[k]
+				if v.Format == ps4pkg.SFOFormatString || v.Format == ps4pkg.SFOFormatStringAlt {
+					fmt.Printf("  %-24s: %s\n", k, v.StringVal)
+				} else if v.Format == ps4pkg.SFOFormatInteger {
+					fmt.Printf("  %-24s: 0x%08x (%d)\n", k, v.IntegerVal, v.IntegerVal)
+				} else {
+					fmt.Printf("  %-24s: [Binary: %d bytes]\n", k, len(v.BinaryVal))
+				}
+			}
+		}
+
+		fmt.Println("\n--- PKG Entry Table ---")
+		fmt.Printf("  %-10s %-30s %-12s %-10s %-10s\n", "Entry ID", "Name", "Offset", "Size", "Encrypted")
+		fmt.Println("  -------------------------------------------------------------------------")
+		for _, e := range pkg.Entries {
+			name := e.Name
+			if name == "" {
+				name = "(unnamed)"
+			}
+			encStr := "No"
+			if e.IsEncrypted {
+				encStr = fmt.Sprintf("Yes (Key %d)", e.KeyIndex)
+			}
+			fmt.Printf("  0x%08x %-30s 0x%-10x %-10s %-10s\n",
+				e.ID, name, e.DataOffset, ps4pkg.FormatSize(int64(e.DataSize)), encStr)
+		}
+		fmt.Println()
+		return nil
+
+	case "extract":
+		if len(args) < 2 {
+			return errors.New("usage: ps4-recomp pkg extract <file.pkg> [-o out_dir]")
+		}
+		target := args[1]
+		outDir := ""
+		for i := 2; i < len(args); i++ {
+			if (args[i] == "-o" || args[i] == "-out") && i+1 < len(args) {
+				outDir = args[i+1]
+				i++
+			}
+		}
+		if outDir == "" {
+			base := strings.TrimSuffix(filepath.Base(target), filepath.Ext(target))
+			outDir = base + "_extracted"
+		}
+
+		pkg, err := ps4pkg.Open(target)
+		if err != nil {
+			return fmt.Errorf("failed to open PKG: %w", err)
+		}
+		defer pkg.Close()
+
+		if err := os.MkdirAll(outDir, 0755); err != nil {
+			return fmt.Errorf("failed to create output directory %s: %w", outDir, err)
+		}
+
+		fmt.Printf("[ps4-recomp] Extracting unencrypted entries from %s to %s...\n", filepath.Base(target), outDir)
+		extractedCount := 0
+		for _, e := range pkg.Entries {
+			if e.IsEncrypted || e.DataSize == 0 {
+				continue
+			}
+			filename := e.Name
+			if filename == "" {
+				filename = fmt.Sprintf("entry_0x%08x.bin", e.ID)
+			}
+			dst := filepath.Join(outDir, filename)
+			_ = os.MkdirAll(filepath.Dir(dst), 0755)
+			if err := pkg.ExtractEntry(&e, dst); err == nil {
+				extractedCount++
+				fmt.Printf("  -> Extracted: %s (%s)\n", filename, ps4pkg.FormatSize(int64(e.DataSize)))
+			}
+		}
+		fmt.Printf("[ps4-recomp] Successfully extracted %d entries.\n", extractedCount)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown pkg subcommand '%s'. Run 'ps4-recomp pkg help' for usage", subcmd)
+	}
+}
+

@@ -483,6 +483,21 @@ void shim_sceMsgDialogProgressBarInc(GuestContext *ctx);
 void shim_sceMsgDialogProgressBarSetMsg(GuestContext *ctx);
 void shim_sceMsgDialogProgressBarSetValue(GuestContext *ctx);
 
+// Trophy shims
+void shim_sceNpTrophyInit(GuestContext *ctx);
+void shim_sceNpTrophyTerm(GuestContext *ctx);
+void shim_sceNpTrophyCreateContext(GuestContext *ctx);
+void shim_sceNpTrophyDestroyContext(GuestContext *ctx);
+void shim_sceNpTrophyCreateHandle(GuestContext *ctx);
+void shim_sceNpTrophyDestroyHandle(GuestContext *ctx);
+void shim_sceNpTrophyRegisterContext(GuestContext *ctx);
+void shim_sceNpTrophyUnlockTrophy(GuestContext *ctx);
+void shim_sceNpTrophyShowTrophyList(GuestContext *ctx);
+
+// Dynamic module loading shims
+void shim_sceKernelLoadStartModule(GuestContext *ctx);
+void shim_sceKernelDlsym(GuestContext *ctx);
+
 // Subsystem teardown and lifecycle
 void recomp_free_thread_context(GuestContext *ctx);
 void ps4_direct_mem_destroy(void);
