@@ -399,6 +399,20 @@ void shim_sceVideoOutAddFlipEvent(GuestContext *ctx);
 void shim_sceVideoOutSubmitFlip(GuestContext *ctx);
 void shim_sceVideoOutGetFlipStatus(GuestContext *ctx);
 
+// User Service shims
+void shim_sceUserServiceInitialize(GuestContext *ctx);
+void shim_sceUserServiceGetInitialUser(GuestContext *ctx);
+void shim_sceUserServiceGetLoginUserIdList(GuestContext *ctx);
+void shim_sceUserServiceGetUserName(GuestContext *ctx);
+void shim_sceUserServiceTerminate(GuestContext *ctx);
+
+// Pad shims
+void shim_scePadInit(GuestContext *ctx);
+void shim_scePadOpen(GuestContext *ctx);
+void shim_scePadClose(GuestContext *ctx);
+void shim_scePadReadState(GuestContext *ctx);
+void shim_scePadRead(GuestContext *ctx);
+
 // Subsystem teardown and lifecycle
 void recomp_free_thread_context(GuestContext *ctx);
 void ps4_direct_mem_destroy(void);

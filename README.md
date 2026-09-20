@@ -138,7 +138,14 @@ Loads `/app0/assets/images/logo.png` from the `.app` bundle via VFS, decodes com
 go run . tools/OpenOrbis/PS4Toolchain/samples/pngdec/pngdec/x64/Debug/pngdec.elf -o output_pngdec -r -t 4
 ```
 
-#### C. Standalone App Launching & Window Controls
+#### C. Interactive Controller & Gamepad Input (`input.elf`)
+Renders the DualShock 4 controller interface on Metal, receiving live button, stick, and trigger inputs from physical controllers via `GameController.framework` (DualShock 4, DualSense, Xbox, Switch Pro, MFi) or keyboard fallback:
+
+```bash
+go run . tools/OpenOrbis/PS4Toolchain/samples/input/input/x64/Debug/input.elf --app-dir tools/OpenOrbis/PS4Toolchain/samples/input -o output_input -r -t 4
+```
+
+#### D. Standalone App Launching & Window Controls
 Recompiled applications are packaged as standalone `.app` bundles that can be launched directly:
 
 ```bash
@@ -178,9 +185,9 @@ Automated test suite (`pkg/lifter/coverage_test.go`) validates **100.0% opcode c
 | Sample Binary | Instructions | Functions | Status |
 | :--- | :--- | :--- | :--- |
 | `graphics.elf` | 19,348 | 662 | **100.0%** (Verified Live on Metal) |
+| `input.elf` | 42,373 | 862 | **100.0%** (Verified Live on Metal & GameController) |
 | `SDL2.elf` | 242,993 | 1,728 | **100.0%** (AVX / VEX instructions) |
-| `input.elf` | 42,373 | 862 | **100.0%** |
-| `pngdec.elf` | 41,322 | 839 | **100.0%** |
+| `pngdec.elf` | 41,322 | 839 | **100.0%** (Verified Live on Metal) |
 | `threading.elf` | 22,036 | 818 | **100.0%** |
 | `keyboard.elf` | 21,103 | 686 | **100.0%** |
 | `system.elf` | 20,011 | 674 | **100.0%** |

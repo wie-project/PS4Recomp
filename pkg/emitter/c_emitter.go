@@ -85,6 +85,18 @@ var CanonicalShims = map[string]string{
 	"sceVideoOutAddFlipEvent":       "shim_sceVideoOutAddFlipEvent",
 	"sceVideoOutSubmitFlip":         "shim_sceVideoOutSubmitFlip",
 	"sceVideoOutGetFlipStatus":      "shim_sceVideoOutGetFlipStatus",
+	// User Service
+	"sceUserServiceInitialize":        "shim_sceUserServiceInitialize",
+	"sceUserServiceGetInitialUser":     "shim_sceUserServiceGetInitialUser",
+	"sceUserServiceGetLoginUserIdList": "shim_sceUserServiceGetLoginUserIdList",
+	"sceUserServiceGetUserName":        "shim_sceUserServiceGetUserName",
+	"sceUserServiceTerminate":          "shim_sceUserServiceTerminate",
+	// Pad Subsystem
+	"scePadInit":                      "shim_scePadInit",
+	"scePadOpen":                      "shim_scePadOpen",
+	"scePadClose":                     "shim_scePadClose",
+	"scePadReadState":                 "shim_scePadReadState",
+	"scePadRead":                      "shim_scePadRead",
 }
 
 // LookupShim looks up a shim name for a symbol name, stripping leading underscores if needed.

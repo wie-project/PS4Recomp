@@ -296,6 +296,8 @@ func Execute(args []string) error {
 		"ps4_equeue.h", "ps4_equeue.c",
 		"ps4_metal_screen.h", "ps4_metal_screen.m",
 		"ps4_videoout.h", "ps4_videoout.c",
+		"ps4_user_service.h", "ps4_user_service.c",
+		"ps4_pad.h", "ps4_pad.m",
 	}
 	for _, rf := range runtimeFiles {
 		src := filepath.Join(runtimeDir, rf)
@@ -338,6 +340,8 @@ func Execute(args []string) error {
 		filepath.Join(cfg.OutDir, "ps4_equeue.c"),
 		filepath.Join(cfg.OutDir, "ps4_videoout.c"),
 		filepath.Join(cfg.OutDir, "ps4_metal_screen.m"),
+		filepath.Join(cfg.OutDir, "ps4_user_service.c"),
+		filepath.Join(cfg.OutDir, "ps4_pad.m"),
 	)
 	fmt.Printf("             Emitted %d C source files | Time: %v\n",
 		len(cFiles), time.Since(stepStart).Round(time.Millisecond))
@@ -442,7 +446,7 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 	}
 	if runtime.GOOS == "darwin" {
 		linkArgs = append(linkArgs, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
-			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore")
+			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController")
 	} else {
 		linkArgs = append(linkArgs, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
 	}

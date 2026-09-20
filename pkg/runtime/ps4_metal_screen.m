@@ -186,8 +186,15 @@ void ps4_metal_screen_pump_events(void) {
                                            untilDate:[NSDate distantPast]
                                               inMode:NSDefaultRunLoopMode
                                              dequeue:YES])) {
-            if (event.type == NSEventTypeKeyDown && event.keyCode == 53) { // Escape key
-                exit(0);
+            if (event.type == NSEventTypeKeyDown) {
+                if (event.keyCode == 53) { // Escape key
+                    exit(0);
+                }
+                extern void ps4_pad_handle_key(unsigned short keyCode, int isDown);
+                ps4_pad_handle_key(event.keyCode, 1);
+            } else if (event.type == NSEventTypeKeyUp) {
+                extern void ps4_pad_handle_key(unsigned short keyCode, int isDown);
+                ps4_pad_handle_key(event.keyCode, 0);
             }
             [NSApp sendEvent:event];
             [NSApp updateWindows];
