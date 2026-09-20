@@ -552,7 +552,7 @@ void shim_syscall(GuestContext *ctx) {
     ctx->rax = ctx->thread_id ? ctx->thread_id : 1;
     SHIM_RETURN();
   case 477: { // SYS_mmap
-    size_t len = (size_t)ctx->rdx;
+    size_t len = (size_t)ctx->rsi;
     uint64_t alloc_addr = recomp_vm_alloc(ctx, len);
     if (alloc_addr == (uint64_t)-1) {
       set_guest_errno(ctx, ENOMEM);

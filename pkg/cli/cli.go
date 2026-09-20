@@ -76,7 +76,7 @@ func normalizeArgs(args []string) ([]string, []string) {
 		arg := args[i]
 		if strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
-			base := strings.Split(arg, "=")[0]
+			base, _, _ := strings.Cut(arg, "=")
 			if valueFlags[base] && !strings.Contains(arg, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				i++
 				flags = append(flags, args[i])
@@ -263,7 +263,14 @@ func Execute(args []string) error {
 		return fmt.Errorf("runtime directory error: %w", err)
 	}
 
-	runtimeFiles := []string{"recomp_runtime.h", "recomp_runtime.c", "ps4_syscalls.c", "ps4_threading.c", "ps4_sync.c"}
+	runtimeFiles := []string{
+		"recomp_runtime.h", "recomp_runtime.c",
+		"ps4_syscalls.c", "ps4_threading.c", "ps4_sync.c",
+		"ps4_direct_mem.h", "ps4_direct_mem.c",
+		"ps4_equeue.h", "ps4_equeue.c",
+		"ps4_metal_screen.h", "ps4_metal_screen.m",
+		"ps4_videoout.h", "ps4_videoout.c",
+	}
 	for _, rf := range runtimeFiles {
 		src := filepath.Join(runtimeDir, rf)
 		dst := filepath.Join(cfg.OutDir, rf)
@@ -290,6 +297,10 @@ func Execute(args []string) error {
 		filepath.Join(cfg.OutDir, "ps4_syscalls.c"),
 		filepath.Join(cfg.OutDir, "ps4_threading.c"),
 		filepath.Join(cfg.OutDir, "ps4_sync.c"),
+		filepath.Join(cfg.OutDir, "ps4_direct_mem.c"),
+		filepath.Join(cfg.OutDir, "ps4_equeue.c"),
+		filepath.Join(cfg.OutDir, "ps4_videoout.c"),
+		filepath.Join(cfg.OutDir, "ps4_metal_screen.m"),
 	)
 	fmt.Printf("             Emitted %d C source files | Time: %v\n",
 		len(cFiles), time.Since(stepStart).Round(time.Millisecond))
@@ -328,22 +339,23 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 	jobs := make(chan int, len(cFiles))
 
 	var wg sync.WaitGroup
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range numWorkers {
+		wg.Go(func() {
 			for idx := range jobs {
 				cFile := cFiles[idx]
-				objFile := strings.TrimSuffix(cFile, ".c") + ".o"
+				ext := filepath.Ext(cFile)
+				objFile := strings.TrimSuffix(cFile, ext) + ".o"
 				objFiles[idx] = objFile
 
 				clangArgs := []string{
 					"-O" + optLevel,
 					"-fvisibility=hidden",
 					"-I" + outDir,
-					"-c", cFile,
-					"-o", objFile,
 				}
+				if ext == ".m" {
+					clangArgs = append(clangArgs, "-fobjc-arc")
+				}
+				clangArgs = append(clangArgs, "-c", cFile, "-o", objFile)
 				if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 					clangArgs = append([]string{"-target", "arm64-apple-darwin", "-mcpu=apple-m1"}, clangArgs...)
 				}
@@ -354,7 +366,7 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	for i := range cFiles {
@@ -373,7 +385,8 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 
 	linkArgs := []string{"-o", targetBin}
 	if runtime.GOOS == "darwin" {
-		linkArgs = append(linkArgs, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x")
+		linkArgs = append(linkArgs, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
+			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore")
 	} else {
 		linkArgs = append(linkArgs, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
 	}
@@ -425,7 +438,7 @@ func findRuntimeDir() (string, error) {
 
 	if wd, err := os.Getwd(); err == nil {
 		dir := wd
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			candidates = append(candidates, filepath.Join(dir, "pkg", "runtime"))
 			parent := filepath.Dir(dir)
 			if parent == dir {

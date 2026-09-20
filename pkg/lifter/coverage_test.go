@@ -1,6 +1,8 @@
 package lifter_test
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -182,5 +184,72 @@ func TestBinaryCoverage(t *testing.T) {
 
 	if len(unsupportedOp) > 0 {
 		t.Errorf("Binary contains %d unsupported instructions out of %d", len(unsupportedOp), total)
+	}
+}
+
+// TestOpenOrbisSamplesCoverage verifies that all 17 OpenOrbis sample ELFs achieve 100% instruction coverage.
+func TestOpenOrbisSamplesCoverage(t *testing.T) {
+	samplesRoot := "../../tools/OpenOrbis/PS4Toolchain/samples"
+	if _, err := os.Stat(samplesRoot); os.IsNotExist(err) {
+		t.Skip("OpenOrbis samples directory not found")
+	}
+
+	var elfPaths []string
+	_ = filepath.Walk(samplesRoot, func(p string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && strings.HasSuffix(p, ".elf") {
+			elfPaths = append(elfPaths, p)
+		}
+		return nil
+	})
+
+	if len(elfPaths) == 0 {
+		t.Skip("No OpenOrbis sample ELFs found")
+	}
+
+	sort.Strings(elfPaths)
+
+	for _, elfPath := range elfPaths {
+		sampleName := filepath.Base(elfPath)
+		loaded, err := elfloader.LoadELF(elfPath)
+		if err != nil {
+			t.Errorf("sample %s: LoadELF failed: %v", sampleName, err)
+			continue
+		}
+
+		d, err := disasm.NewDisassembler(loaded)
+		if err != nil {
+			t.Errorf("sample %s: NewDisassembler failed: %v", sampleName, err)
+			continue
+		}
+
+		entries := []uint64{loaded.EntryPoint}
+		entries = append(entries, loaded.InitArray...)
+		if mainSym, ok := loaded.SymbolByName["main"]; ok {
+			entries = append(entries, mainSym.Address)
+		}
+
+		if err := d.AnalyzeReachable(entries); err != nil {
+			t.Errorf("sample %s: AnalyzeReachable failed: %v", sampleName, err)
+			continue
+		}
+
+		unsupported := make(map[x86asm.Op]int)
+		total := 0
+		for _, fn := range d.Functions {
+			for _, b := range fn.Blocks {
+				for _, inst := range b.Insts {
+					total++
+					if !lifter.IsOpcodeSupported(inst.Inst.Op) {
+						unsupported[inst.Inst.Op]++
+					}
+				}
+			}
+		}
+
+		if len(unsupported) > 0 {
+			t.Errorf("Sample %s has %d unsupported opcodes: %v", sampleName, len(unsupported), unsupported)
+		} else {
+			t.Logf("Sample %-16s: 100.0%% coverage (%d instructions across %d functions)", sampleName, total, len(d.Functions))
+		}
 	}
 }

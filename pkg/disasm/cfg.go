@@ -3,7 +3,7 @@ package disasm
 import (
 	"encoding/binary"
 	"fmt"
-	"sort"
+	"slices"
 
 	"ps4-recomp/pkg/elfloader"
 
@@ -255,9 +255,7 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 	for addr := range fn.Blocks {
 		fn.BlockOrder = append(fn.BlockOrder, addr)
 	}
-	sort.Slice(fn.BlockOrder, func(i, j int) bool {
-		return fn.BlockOrder[i] < fn.BlockOrder[j]
-	})
+	slices.Sort(fn.BlockOrder)
 
 	d.analyzeBlockFlagLiveness(fn)
 	return fn, discoveredCalls, nil
@@ -423,9 +421,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	for addr := range instAtAddr {
 		sortedAddrs = append(sortedAddrs, addr)
 	}
-	sort.Slice(sortedAddrs, func(i, j int) bool {
-		return sortedAddrs[i] < sortedAddrs[j]
-	})
+	slices.Sort(sortedAddrs)
 
 	// Build basic blocks
 	var currentBlock *BasicBlock
@@ -454,9 +450,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	for addr := range fn.Blocks {
 		fn.BlockOrder = append(fn.BlockOrder, addr)
 	}
-	sort.Slice(fn.BlockOrder, func(i, j int) bool {
-		return fn.BlockOrder[i] < fn.BlockOrder[j]
-	})
+	slices.Sort(fn.BlockOrder)
 
 	d.analyzeBlockFlagLiveness(fn)
 	return fn, discoveredCalls, nil

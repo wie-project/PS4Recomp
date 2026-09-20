@@ -38,16 +38,41 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.PXOR, x86asm.XORPS, x86asm.XORPD, x86asm.POR, x86asm.ORPD, x86asm.ORPS,
 		x86asm.PAND, x86asm.ANDPD, x86asm.ANDPS,
 		x86asm.MOVD, x86asm.MOVQ, x86asm.MOVSS, x86asm.PSHUFD, x86asm.PSHUFLW,
-		x86asm.PSLLD, x86asm.PSRLD, x86asm.SBB, x86asm.BT, x86asm.DIV, x86asm.IDIV,
+		x86asm.PSLLD, x86asm.PSRLD, x86asm.SBB,
+		x86asm.BT, x86asm.BTR, x86asm.BTS, x86asm.BTC,
+		x86asm.BSWAP, x86asm.POPCNT, x86asm.LZCNT, x86asm.TZCNT,
+		x86asm.SHLD, x86asm.SHRD,
+		x86asm.CPUID, x86asm.PAUSE, x86asm.EMMS, x86asm.PUSHFQ, x86asm.POPFQ, x86asm.XGETBV, x86asm.PREFETCHT0,
+		x86asm.DIV, x86asm.IDIV,
 		x86asm.HLT, x86asm.MOVSD_XMM, x86asm.MOVSD, x86asm.PANDN,
 		x86asm.PMULUDQ, x86asm.PCMPGTD, x86asm.PUNPCKLDQ,
 		x86asm.PCMPEQD, x86asm.PCMPEQB, x86asm.PCMPEQW,
 		x86asm.PADDD, x86asm.PADDB, x86asm.PADDW, x86asm.PADDQ,
+		x86asm.PSUBB, x86asm.PSUBW, x86asm.PSUBD, x86asm.PSUBQ,
+		x86asm.PMULLW, x86asm.PMULHW, x86asm.PMADDWD,
+		x86asm.PACKSSDW, x86asm.PACKUSWB, x86asm.PACKSSWB,
+		x86asm.PINSRB, x86asm.PINSRW, x86asm.PINSRD, x86asm.PINSRQ,
+		x86asm.PSLLW, x86asm.PSRLW, x86asm.PSRAW, x86asm.PSRAD,
+		x86asm.PSLLQ, x86asm.PSRLQ, x86asm.PSLLDQ, x86asm.PSRLDQ,
 		x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.UNPCKLPD,
+		x86asm.PUNPCKHBW, x86asm.PUNPCKHWD, x86asm.PUNPCKHDQ, x86asm.PUNPCKLQDQ, x86asm.PUNPCKHQDQ,
+		x86asm.PSHUFHW,
 		x86asm.ADDPD, x86asm.MULPD, x86asm.SUBPD, x86asm.DIVPD,
 		x86asm.ADDSD, x86asm.MULSD, x86asm.SUBSD, x86asm.DIVSD,
 		x86asm.ADDSS, x86asm.MULSS, x86asm.SUBSS, x86asm.DIVSS,
-		x86asm.UCOMISD, x86asm.UCOMISS,
+		x86asm.UCOMISD, x86asm.UCOMISS, x86asm.COMISD, x86asm.COMISS,
+		x86asm.MINSD, x86asm.MINSS, x86asm.MAXSD, x86asm.MAXSS,
+		x86asm.SQRTSS, x86asm.SQRTSD,
+		x86asm.MOVHPD, x86asm.MOVLPD,
+		// AVX / VEX opcodes
+		x86asm.VMOVAPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ, x86asm.VMOVSS, x86asm.VMOVSD, x86asm.VMOVNTPS,
+		x86asm.VADDSS, x86asm.VADDSD, x86asm.VSUBSS, x86asm.VSUBSD, x86asm.VMULSS, x86asm.VMULSD, x86asm.VDIVSS, x86asm.VDIVSD,
+		x86asm.VXORPS, x86asm.VPOR, x86asm.VPAND, x86asm.VPADDW, x86asm.VPSUBW, x86asm.VPMULLW,
+		x86asm.VPINSRW, x86asm.VPINSRB, x86asm.VPINSRD,
+		x86asm.VPSLLW, x86asm.VPSRLW, x86asm.VPSRAW, x86asm.VPSLLD, x86asm.VPSRLD,
+		x86asm.VPACKUSWB, x86asm.VPACKSSDW, x86asm.VPUNPCKLBW, x86asm.VPUNPCKHBW, x86asm.VPUNPCKLWD, x86asm.VPUNPCKHWD,
+		x86asm.VCVTSI2SS, x86asm.VCVTSI2SD, x86asm.VCVTTSS2SI, x86asm.VCVTTSD2SI, x86asm.VCVTSS2SD, x86asm.VCVTSD2SS,
+		x86asm.VUCOMISS, x86asm.VUCOMISD, x86asm.VPSHUFHW, x86asm.VPSHUFLW, x86asm.VROUNDSD, x86asm.VSQRTSD,
 		x86asm.CVTSI2SD, x86asm.CVTSI2SS, x86asm.CVTSS2SD, x86asm.CVTSD2SS,
 		x86asm.CVTTSD2SI, x86asm.CVTTSS2SI, x86asm.CVTSD2SI, x86asm.CVTSS2SI,
 		x86asm.VERW,
@@ -677,8 +702,319 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 		}
 		lines = append(lines, code...)
 
-	case x86asm.BT:
-		code, err := l.liftBt(args[0], args[1], defMemSz, nextPC)
+	case x86asm.BT, x86asm.BTR, x86asm.BTS, x86asm.BTC:
+		code, err := l.liftBitTest(op, args[0], args[1], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.BSWAP:
+		code, err := l.liftBswap(args[0], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.POPCNT:
+		code, err := l.liftPopcnt(args[0], args[1], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.LZCNT:
+		code, err := l.liftLzcnt(args[0], args[1], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.TZCNT:
+		code, err := l.liftTzcnt(args[0], args[1], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.SHLD, x86asm.SHRD:
+		code, err := l.liftDoubleShift(op, args[0], args[1], args[2], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.CPUID:
+		lines = append(lines, l.liftCpuid()...)
+
+	case x86asm.PAUSE, x86asm.PREFETCHT0:
+		// No-op hint
+		lines = append(lines, "    /* pause/prefetch */")
+
+	case x86asm.EMMS:
+		lines = append(lines, "    ctx->fpu_top = 0;")
+
+	case x86asm.PUSHFQ:
+		lines = append(lines, l.liftPushfq()...)
+
+	case x86asm.POPFQ:
+		lines = append(lines, l.liftPopfq()...)
+
+	case x86asm.XGETBV:
+		lines = append(lines, l.liftXgetbv()...)
+
+	case x86asm.PSUBB:
+		code, err := l.liftPsub(1, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PSUBW:
+		code, err := l.liftPsub(2, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PSUBD:
+		code, err := l.liftPsub(4, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PSUBQ:
+		code, err := l.liftPsub(8, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PMULLW:
+		code, err := l.liftPmullw(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PMULHW:
+		code, err := l.liftPmulhw(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PMADDWD:
+		code, err := l.liftPmaddwd(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PACKSSDW, x86asm.PACKUSWB, x86asm.PACKSSWB:
+		code, err := l.liftPack(op, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PINSRB:
+		code, err := l.liftPinsr(1, args[0], args[1], args[2], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PINSRW:
+		code, err := l.liftPinsr(2, args[0], args[1], args[2], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PINSRD:
+		code, err := l.liftPinsr(4, args[0], args[1], args[2], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PINSRQ:
+		code, err := l.liftPinsr(8, args[0], args[1], args[2], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PSLLW, x86asm.PSRLW, x86asm.PSRAW:
+		code, err := l.liftPshiftW(op, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PSRAD:
+		code, err := l.liftPsrad(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PSLLQ:
+		code, err := l.liftPshiftQ("<<", args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PSRLQ:
+		code, err := l.liftPshiftQ(">>", args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PSLLDQ:
+		code, err := l.liftPshiftBytes(true, args[0], args[1])
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PSRLDQ:
+		code, err := l.liftPshiftBytes(false, args[0], args[1])
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PUNPCKHBW:
+		code, err := l.liftPunpckh(1, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PUNPCKHWD:
+		code, err := l.liftPunpckh(2, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PUNPCKHDQ:
+		code, err := l.liftPunpckh(4, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PUNPCKLQDQ:
+		code, err := l.liftPunpcklqdq(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PUNPCKHQDQ:
+		code, err := l.liftPunpckh(8, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PSHUFHW:
+		code, err := l.liftPshufhw(args[0], args[1], args[2], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.COMISD:
+		code, err := l.liftComis(true, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.COMISS:
+		code, err := l.liftComis(false, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.MINSD:
+		code, err := l.liftMinMax(true, true, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.MAXSD:
+		code, err := l.liftMinMax(false, true, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.MINSS:
+		code, err := l.liftMinMax(true, false, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.MAXSS:
+		code, err := l.liftMinMax(false, false, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.SQRTSS:
+		code, err := l.liftSqrt(false, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.SQRTSD:
+		code, err := l.liftSqrt(true, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.MOVHPD:
+		code, err := l.liftMovhpd(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.MOVLPD:
+		code, err := l.liftMovlpd(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.VMOVAPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ,
+		x86asm.VMOVSS, x86asm.VMOVSD, x86asm.VMOVNTPS,
+		x86asm.VADDSS, x86asm.VADDSD, x86asm.VSUBSS, x86asm.VSUBSD,
+		x86asm.VMULSS, x86asm.VMULSD, x86asm.VDIVSS, x86asm.VDIVSD,
+		x86asm.VXORPS, x86asm.VPOR, x86asm.VPAND, x86asm.VPADDW, x86asm.VPSUBW, x86asm.VPMULLW,
+		x86asm.VPINSRW, x86asm.VPINSRB, x86asm.VPINSRD,
+		x86asm.VPSLLW, x86asm.VPSRLW, x86asm.VPSRAW, x86asm.VPSLLD, x86asm.VPSRLD,
+		x86asm.VPACKUSWB, x86asm.VPACKSSDW, x86asm.VPUNPCKLBW, x86asm.VPUNPCKHBW,
+		x86asm.VPUNPCKLWD, x86asm.VPUNPCKHWD,
+		x86asm.VCVTSI2SS, x86asm.VCVTSI2SD, x86asm.VCVTTSS2SI, x86asm.VCVTTSD2SI,
+		x86asm.VCVTSS2SD, x86asm.VCVTSD2SS,
+		x86asm.VUCOMISS, x86asm.VUCOMISD, x86asm.VPSHUFHW, x86asm.VPSHUFLW,
+		x86asm.VROUNDSD, x86asm.VSQRTSD:
+		code, err := l.liftVexOp(op, args, defMemSz, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}

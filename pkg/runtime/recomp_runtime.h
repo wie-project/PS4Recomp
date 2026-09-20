@@ -32,6 +32,10 @@ typedef union {
   uint16_t u16[8];
   uint32_t u32[4];
   uint64_t u64[2];
+  int8_t s8[16];
+  int16_t s16[8];
+  int32_t s32[4];
+  int64_t s64[2];
   __uint128_t u128;
   float f32[4];
   double f64[2];
@@ -371,6 +375,27 @@ void shim_pthread_equal(GuestContext *ctx);
 void shim_pthread_detach(GuestContext *ctx);
 void shim_pthread_join(GuestContext *ctx);
 void recomp_init_main_thread(GuestContext *ctx);
+
+// Direct Memory shims
+void shim_sceKernelAllocateDirectMemory(GuestContext *ctx);
+void shim_sceKernelGetDirectMemorySize(GuestContext *ctx);
+void shim_sceKernelMapDirectMemory(GuestContext *ctx);
+void shim_sceKernelReleaseDirectMemory(GuestContext *ctx);
+
+// Kernel Equeue shims
+void shim_sceKernelCreateEqueue(GuestContext *ctx);
+void shim_sceKernelDeleteEqueue(GuestContext *ctx);
+void shim_sceKernelWaitEqueue(GuestContext *ctx);
+
+// VideoOut display shims
+void shim_sceVideoOutOpen(GuestContext *ctx);
+void shim_sceVideoOutClose(GuestContext *ctx);
+void shim_sceVideoOutSetBufferAttribute(GuestContext *ctx);
+void shim_sceVideoOutRegisterBuffers(GuestContext *ctx);
+void shim_sceVideoOutSetFlipRate(GuestContext *ctx);
+void shim_sceVideoOutAddFlipEvent(GuestContext *ctx);
+void shim_sceVideoOutSubmitFlip(GuestContext *ctx);
+void shim_sceVideoOutGetFlipStatus(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

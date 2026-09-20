@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"ps4-recomp/pkg/disasm"
@@ -67,6 +67,24 @@ var CanonicalShims = map[string]string{
 	"pthread_rwlock_wrlock":     "shim_pthread_rwlock_wrlock",
 	"pthread_rwlock_unlock":     "shim_pthread_rwlock_unlock",
 	"syscall":                   "shim_syscall",
+	// Direct Memory
+	"sceKernelAllocateDirectMemory": "shim_sceKernelAllocateDirectMemory",
+	"sceKernelGetDirectMemorySize":  "shim_sceKernelGetDirectMemorySize",
+	"sceKernelMapDirectMemory":      "shim_sceKernelMapDirectMemory",
+	"sceKernelReleaseDirectMemory":  "shim_sceKernelReleaseDirectMemory",
+	// Event Queue
+	"sceKernelCreateEqueue":         "shim_sceKernelCreateEqueue",
+	"sceKernelDeleteEqueue":         "shim_sceKernelDeleteEqueue",
+	"sceKernelWaitEqueue":           "shim_sceKernelWaitEqueue",
+	// VideoOut display
+	"sceVideoOutOpen":               "shim_sceVideoOutOpen",
+	"sceVideoOutClose":              "shim_sceVideoOutClose",
+	"sceVideoOutSetBufferAttribute": "shim_sceVideoOutSetBufferAttribute",
+	"sceVideoOutRegisterBuffers":    "shim_sceVideoOutRegisterBuffers",
+	"sceVideoOutSetFlipRate":        "shim_sceVideoOutSetFlipRate",
+	"sceVideoOutAddFlipEvent":       "shim_sceVideoOutAddFlipEvent",
+	"sceVideoOutSubmitFlip":         "shim_sceVideoOutSubmitFlip",
+	"sceVideoOutGetFlipStatus":      "shim_sceVideoOutGetFlipStatus",
 }
 
 // LookupShim looks up a shim name for a symbol name, stripping leading underscores if needed.
@@ -192,7 +210,7 @@ func (e *CEmitter) EmitFunctionsHeader(path string) (err error) {
 	for addr := range e.disasm.Functions {
 		fnAddrs = append(fnAddrs, addr)
 	}
-	sort.Slice(fnAddrs, func(i, j int) bool { return fnAddrs[i] < fnAddrs[j] })
+	slices.Sort(fnAddrs)
 
 	for _, addr := range fnAddrs {
 		if _, err := fmt.Fprintf(w, "void fn_0x%x(GuestContext *__restrict__ ctx);\n", addr); err != nil {
@@ -213,7 +231,7 @@ func (e *CEmitter) EmitChunkedCode(outDir string, chunkSize int) ([]string, erro
 	for addr := range e.disasm.Functions {
 		fnAddrs = append(fnAddrs, addr)
 	}
-	sort.Slice(fnAddrs, func(i, j int) bool { return fnAddrs[i] < fnAddrs[j] })
+	slices.Sort(fnAddrs)
 
 	if chunkSize <= 0 {
 		chunkSize = 250
@@ -228,10 +246,7 @@ func (e *CEmitter) EmitChunkedCode(outDir string, chunkSize int) ([]string, erro
 
 	for chunkIdx := 0; chunkIdx < numChunks; chunkIdx++ {
 		start := chunkIdx * chunkSize
-		end := start + chunkSize
-		if end > len(fnAddrs) {
-			end = len(fnAddrs)
-		}
+		end := min(start+chunkSize, len(fnAddrs))
 		chunkAddrs := fnAddrs[start:end]
 
 		chunkFileName := fmt.Sprintf("code_%03d.c", chunkIdx)
@@ -441,7 +456,7 @@ func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
 	if _, err := w.WriteString("#include \"recomp_runtime.h\"\n\n// Forward declarations of chunk registration functions\n"); err != nil {
 		return err
 	}
-	for i := 0; i < numChunks; i++ {
+	for i := range numChunks {
 		if _, err := fmt.Fprintf(w, "void recomp_init_dispatch_chunk_%d(void);\n", i); err != nil {
 			return err
 		}
@@ -451,7 +466,7 @@ func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
 		return err
 	}
 
-	for i := 0; i < numChunks; i++ {
+	for i := range numChunks {
 		if _, err := fmt.Fprintf(w, "    recomp_init_dispatch_chunk_%d();\n", i); err != nil {
 			return err
 		}
