@@ -413,6 +413,21 @@ void shim_scePadClose(GuestContext *ctx);
 void shim_scePadReadState(GuestContext *ctx);
 void shim_scePadRead(GuestContext *ctx);
 
+// Sysmodule shims
+void shim_sceSysmoduleLoadModule(GuestContext *ctx);
+void shim_sceSysmoduleIsLoaded(GuestContext *ctx);
+void shim_sceSysmoduleUnloadModule(GuestContext *ctx);
+void shim_sceSysmoduleLoadModuleInternal(GuestContext *ctx);
+void shim_sceSysmoduleUnloadModuleInternal(GuestContext *ctx);
+
+// FreeType shims
+void shim_FT_Init_FreeType(GuestContext *ctx);
+void shim_FT_New_Face(GuestContext *ctx);
+void shim_FT_Set_Pixel_Sizes(GuestContext *ctx);
+void shim_FT_Get_Char_Index(GuestContext *ctx);
+void shim_FT_Load_Glyph(GuestContext *ctx);
+void shim_FT_Render_Glyph(GuestContext *ctx);
+
 // Subsystem teardown and lifecycle
 void recomp_free_thread_context(GuestContext *ctx);
 void ps4_direct_mem_destroy(void);

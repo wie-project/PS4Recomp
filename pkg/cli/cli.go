@@ -298,6 +298,8 @@ func Execute(args []string) error {
 		"ps4_videoout.h", "ps4_videoout.c",
 		"ps4_user_service.h", "ps4_user_service.c",
 		"ps4_pad.h", "ps4_pad.m",
+		"ps4_sysmodule.h", "ps4_sysmodule.c",
+		"ps4_freetype.h", "ps4_freetype.c",
 	}
 	for _, rf := range runtimeFiles {
 		src := filepath.Join(runtimeDir, rf)
@@ -342,6 +344,8 @@ func Execute(args []string) error {
 		filepath.Join(cfg.OutDir, "ps4_metal_screen.m"),
 		filepath.Join(cfg.OutDir, "ps4_user_service.c"),
 		filepath.Join(cfg.OutDir, "ps4_pad.m"),
+		filepath.Join(cfg.OutDir, "ps4_sysmodule.c"),
+		filepath.Join(cfg.OutDir, "ps4_freetype.c"),
 	)
 	fmt.Printf("             Emitted %d C source files | Time: %v\n",
 		len(cFiles), time.Since(stepStart).Round(time.Millisecond))
@@ -388,6 +392,19 @@ func Execute(args []string) error {
 }
 
 func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, optLevel string, asan bool) error {
+	var ftCflags []string
+	var ftLibs []string
+	if out, err := exec.Command("pkg-config", "--cflags", "freetype2").Output(); err == nil {
+		ftCflags = strings.Fields(string(out))
+	} else if _, err := os.Stat("/opt/homebrew/opt/freetype/include/freetype2"); err == nil {
+		ftCflags = []string{"-I/opt/homebrew/opt/freetype/include/freetype2"}
+	}
+	if out, err := exec.Command("pkg-config", "--libs", "freetype2").Output(); err == nil {
+		ftLibs = strings.Fields(string(out))
+	} else if _, err := os.Stat("/opt/homebrew/opt/freetype/lib"); err == nil {
+		ftLibs = []string{"-L/opt/homebrew/opt/freetype/lib", "-lfreetype"}
+	}
+
 	objFiles := make([]string, len(cFiles))
 	errChan := make(chan error, len(cFiles))
 	jobs := make(chan int, len(cFiles))
@@ -406,6 +423,7 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 					"-fvisibility=hidden",
 					"-I" + outDir,
 				}
+				clangArgs = append(clangArgs, ftCflags...)
 				if asan {
 					clangArgs = append(clangArgs, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
 				}
@@ -450,6 +468,7 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 	} else {
 		linkArgs = append(linkArgs, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
 	}
+	linkArgs = append(linkArgs, ftLibs...)
 	linkArgs = append(linkArgs, objFiles...)
 
 	cmd := exec.Command("clang", linkArgs...)

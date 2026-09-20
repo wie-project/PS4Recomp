@@ -145,7 +145,14 @@ Renders the DualShock 4 controller interface on Metal, receiving live button, st
 go run . tools/OpenOrbis/PS4Toolchain/samples/input/input/x64/Debug/input.elf --app-dir tools/OpenOrbis/PS4Toolchain/samples/input -o output_input -r -t 4
 ```
 
-#### D. Standalone App Launching & Window Controls
+#### D. Vector Font Rasterization & Text Layout (`font.elf`)
+Loads `/app0/assets/fonts/Gontserrat-Regular.ttf` via VFS, rasterizes TrueType vector fonts at multiple sizes with FreeType 2, and renders multi-line antialiased text to Metal:
+
+```bash
+go run . tools/OpenOrbis/PS4Toolchain/samples/font/font/x64/Debug/font.elf --app-dir tools/OpenOrbis/PS4Toolchain/samples/font -o output_font -r -t 4
+```
+
+#### E. Standalone App Launching & Window Controls
 Recompiled applications are packaged as standalone `.app` bundles that can be launched directly:
 
 ```bash
@@ -191,7 +198,7 @@ Automated test suite (`pkg/lifter/coverage_test.go`) validates **100.0% opcode c
 | `threading.elf` | 22,036 | 818 | **100.0%** |
 | `keyboard.elf` | 21,103 | 686 | **100.0%** |
 | `system.elf` | 20,011 | 674 | **100.0%** |
-| `font.elf` | 19,727 | 665 | **100.0%** |
+| `font.elf` | 19,727 | 665 | **100.0%** (Verified Live on Metal & FreeType 2) |
 | `networking.elf` | 18,913 | 653 | **100.0%** |
 | `exceptions.elf` | 18,699 | 650 | **100.0%** |
 | `piglet.elf` | 18,537 | 644 | **100.0%** |

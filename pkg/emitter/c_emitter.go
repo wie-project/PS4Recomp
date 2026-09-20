@@ -97,6 +97,19 @@ var CanonicalShims = map[string]string{
 	"scePadClose":                     "shim_scePadClose",
 	"scePadReadState":                 "shim_scePadReadState",
 	"scePadRead":                      "shim_scePadRead",
+	// Sysmodule
+	"sceSysmoduleLoadModule":          "shim_sceSysmoduleLoadModule",
+	"sceSysmoduleIsLoaded":            "shim_sceSysmoduleIsLoaded",
+	"sceSysmoduleUnloadModule":        "shim_sceSysmoduleUnloadModule",
+	"sceSysmoduleLoadModuleInternal":  "shim_sceSysmoduleLoadModuleInternal",
+	"sceSysmoduleUnloadModuleInternal":"shim_sceSysmoduleUnloadModuleInternal",
+	// FreeType
+	"FT_Init_FreeType":                "shim_FT_Init_FreeType",
+	"FT_New_Face":                     "shim_FT_New_Face",
+	"FT_Set_Pixel_Sizes":              "shim_FT_Set_Pixel_Sizes",
+	"FT_Get_Char_Index":               "shim_FT_Get_Char_Index",
+	"FT_Load_Glyph":                   "shim_FT_Load_Glyph",
+	"FT_Render_Glyph":                 "shim_FT_Render_Glyph",
 }
 
 // LookupShim looks up a shim name for a symbol name, stripping leading underscores if needed.
