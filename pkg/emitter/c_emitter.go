@@ -85,6 +85,47 @@ var CanonicalShims = map[string]string{
 	"sceVideoOutAddFlipEvent":       "shim_sceVideoOutAddFlipEvent",
 	"sceVideoOutSubmitFlip":         "shim_sceVideoOutSubmitFlip",
 	"sceVideoOutGetFlipStatus":      "shim_sceVideoOutGetFlipStatus",
+	"sceVideoOutGetResolutionStatus": "shim_sceVideoOutGetResolutionStatus",
+	"sceVideoOutIsFlipPending":       "shim_sceVideoOutIsFlipPending",
+	"sceVideoOutUnregisterBuffers":   "shim_sceVideoOutUnregisterBuffers",
+	// Stack Protector
+	"__stack_chk_fail": "shim___stack_chk_fail",
+	// Libc aliases with leading underscore
+	"_exit":           "shim_exit",
+	"_fcntl":          "shim_fcntl",
+	"_ioctl":          "shim_ioctl",
+	"_open":           "shim_open",
+	"_read":           "shim_read",
+	"_readv":          "shim_readv",
+	"_write":          "shim_write",
+	"_writev":         "shim_writev",
+	"sceKernelMunmap": "shim_munmap",
+	// Time & Resource
+	"clock_gettime": "shim_clock_gettime",
+	"gettimeofday":  "shim_gettimeofday",
+	"getrusage":     "shim_getrusage",
+	// Pthread attributes & sched
+	"pthread_attr_init":           "shim_pthread_attr_init",
+	"pthread_attr_destroy":        "shim_pthread_attr_destroy",
+	"pthread_attr_setdetachstate": "shim_pthread_attr_setdetachstate",
+	"pthread_attr_setstacksize":   "shim_pthread_attr_setstacksize",
+	"pthread_getschedparam":       "shim_pthread_getschedparam",
+	"pthread_setschedparam":       "shim_pthread_setschedparam",
+	"pthread_setcanceltype":       "shim_pthread_setcanceltype",
+	"sched_get_priority_max":      "shim_sched_get_priority_max",
+	"sched_get_priority_min":      "shim_sched_get_priority_min",
+	// POSIX Semaphores
+	"sem_init":     "shim_sem_init",
+	"sem_destroy":  "shim_sem_destroy",
+	"sem_wait":     "shim_sem_wait",
+	"sem_trywait":  "shim_sem_trywait",
+	"sem_post":     "shim_sem_post",
+	"sem_getvalue": "shim_sem_getvalue",
+	// AudioOut
+	"sceAudioOutInit":   "shim_sceAudioOutInit",
+	"sceAudioOutOpen":   "shim_sceAudioOutOpen",
+	"sceAudioOutOutput": "shim_sceAudioOutOutput",
+	"sceAudioOutClose":  "shim_sceAudioOutClose",
 	// User Service
 	"sceUserServiceInitialize":        "shim_sceUserServiceInitialize",
 	"sceUserServiceGetInitialUser":     "shim_sceUserServiceGetInitialUser",
@@ -92,11 +133,19 @@ var CanonicalShims = map[string]string{
 	"sceUserServiceGetUserName":        "shim_sceUserServiceGetUserName",
 	"sceUserServiceTerminate":          "shim_sceUserServiceTerminate",
 	// Pad Subsystem
-	"scePadInit":                      "shim_scePadInit",
-	"scePadOpen":                      "shim_scePadOpen",
-	"scePadClose":                     "shim_scePadClose",
-	"scePadReadState":                 "shim_scePadReadState",
-	"scePadRead":                      "shim_scePadRead",
+	"scePadInit":      "shim_scePadInit",
+	"scePadOpen":      "shim_scePadOpen",
+	"scePadClose":     "shim_scePadClose",
+	"scePadReadState": "shim_scePadReadState",
+	"scePadRead":      "shim_scePadRead",
+	"scePadGetHandle": "shim_scePadGetHandle",
+	// Keyboard Subsystem
+	"sceKeyboardInit":       "shim_sceKeyboardInit",
+	"sceKeyboardOpen":       "shim_sceKeyboardOpen",
+	"sceKeyboardClose":      "shim_sceKeyboardClose",
+	"sceKeyboardReadState":  "shim_sceKeyboardReadState",
+	"sceKeyboardGetKey2Char":"shim_sceKeyboardGetKey2Char",
+	"sceKeyboardGetHandle":  "shim_sceKeyboardGetHandle",
 	// Sysmodule
 	"sceSysmoduleLoadModule":          "shim_sceSysmoduleLoadModule",
 	"sceSysmoduleIsLoaded":            "shim_sceSysmoduleIsLoaded",
@@ -110,6 +159,19 @@ var CanonicalShims = map[string]string{
 	"FT_Get_Char_Index":               "shim_FT_Get_Char_Index",
 	"FT_Load_Glyph":                   "shim_FT_Load_Glyph",
 	"FT_Render_Glyph":                 "shim_FT_Render_Glyph",
+	// CommonDialog & MsgDialog
+	"sceCommonDialogInitialize":       "shim_sceCommonDialogInitialize",
+	"sceCommonDialogIsUsed":           "shim_sceCommonDialogIsUsed",
+	"sceMsgDialogInitialize":          "shim_sceMsgDialogInitialize",
+	"sceMsgDialogOpen":                "shim_sceMsgDialogOpen",
+	"sceMsgDialogGetResult":           "shim_sceMsgDialogGetResult",
+	"sceMsgDialogGetStatus":           "shim_sceMsgDialogGetStatus",
+	"sceMsgDialogUpdateStatus":        "shim_sceMsgDialogUpdateStatus",
+	"sceMsgDialogClose":               "shim_sceMsgDialogClose",
+	"sceMsgDialogTerminate":           "shim_sceMsgDialogTerminate",
+	"sceMsgDialogProgressBarInc":      "shim_sceMsgDialogProgressBarInc",
+	"sceMsgDialogProgressBarSetMsg":   "shim_sceMsgDialogProgressBarSetMsg",
+	"sceMsgDialogProgressBarSetValue": "shim_sceMsgDialogProgressBarSetValue",
 }
 
 // LookupShim looks up a shim name for a symbol name, stripping leading underscores if needed.
@@ -200,7 +262,7 @@ func (e *CEmitter) EmitAll(outDir string) ([]string, error) {
 		return nil, fmt.Errorf("failed to emit guest_functions.h: %w", err)
 	}
 
-	codeFiles, err := e.EmitChunkedCode(outDir, 250)
+	codeFiles, err := e.EmitChunkedCode(outDir, 15000)
 	if err != nil {
 		return nil, fmt.Errorf("failed to emit chunked code: %w", err)
 	}
@@ -251,30 +313,49 @@ func (e *CEmitter) EmitFunctionsHeader(path string) (err error) {
 }
 
 // EmitChunkedCode partitions recompiled functions across multiple C source files
+// based on an instruction budget to ensure balanced compile times and file sizes,
 // and emits a dispatch.c driver that ties all chunk registrations together.
-func (e *CEmitter) EmitChunkedCode(outDir string, chunkSize int) ([]string, error) {
+func (e *CEmitter) EmitChunkedCode(outDir string, targetBudget int) ([]string, error) {
 	var fnAddrs []uint64
 	for addr := range e.disasm.Functions {
 		fnAddrs = append(fnAddrs, addr)
 	}
 	slices.Sort(fnAddrs)
 
-	if chunkSize <= 0 {
-		chunkSize = 250
+	if targetBudget <= 0 {
+		targetBudget = 15000
+	}
+	const maxFuncsPerChunk = 150
+
+	var chunks [][]uint64
+	var currentChunk []uint64
+	currentInsts := 0
+
+	for _, addr := range fnAddrs {
+		fn := e.disasm.Functions[addr]
+		nInsts := e.functionInstCount(fn)
+
+		if len(currentChunk) > 0 && (currentInsts+nInsts > targetBudget || len(currentChunk) >= maxFuncsPerChunk) {
+			chunks = append(chunks, currentChunk)
+			currentChunk = nil
+			currentInsts = 0
+		}
+
+		currentChunk = append(currentChunk, addr)
+		currentInsts += nInsts
 	}
 
-	numChunks := (len(fnAddrs) + chunkSize - 1) / chunkSize
-	if numChunks == 0 {
-		numChunks = 1
+	if len(currentChunk) > 0 {
+		chunks = append(chunks, currentChunk)
+	}
+
+	if len(chunks) == 0 {
+		chunks = append(chunks, []uint64{})
 	}
 
 	var generatedFiles []string
 
-	for chunkIdx := 0; chunkIdx < numChunks; chunkIdx++ {
-		start := chunkIdx * chunkSize
-		end := min(start+chunkSize, len(fnAddrs))
-		chunkAddrs := fnAddrs[start:end]
-
+	for chunkIdx, chunkAddrs := range chunks {
 		chunkFileName := fmt.Sprintf("code_%03d.c", chunkIdx)
 		chunkPath := filepath.Join(outDir, chunkFileName)
 		if err := e.emitSingleChunk(chunkPath, chunkIdx, chunkAddrs); err != nil {
@@ -284,12 +365,23 @@ func (e *CEmitter) EmitChunkedCode(outDir string, chunkSize int) ([]string, erro
 	}
 
 	dispatchPath := filepath.Join(outDir, "dispatch.c")
-	if err := e.emitDispatch(dispatchPath, numChunks); err != nil {
+	if err := e.emitDispatch(dispatchPath, len(chunks)); err != nil {
 		return nil, fmt.Errorf("failed to emit dispatch.c: %w", err)
 	}
 	generatedFiles = append(generatedFiles, dispatchPath)
 
 	return generatedFiles, nil
+}
+
+func (e *CEmitter) functionInstCount(fn *disasm.Function) int {
+	if fn == nil {
+		return 0
+	}
+	count := 0
+	for _, b := range fn.Blocks {
+		count += len(b.Insts)
+	}
+	return count
 }
 
 func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint64) (err error) {

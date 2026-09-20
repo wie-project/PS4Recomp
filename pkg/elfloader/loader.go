@@ -234,6 +234,28 @@ func LoadELF(path string) (*LoadedELF, error) {
 					binary.LittleEndian.PutUint64(loaded.MemoryImage[offset:offset+8], uint64(addend))
 				}
 			}
+
+			// Apply R_X86_64_GLOB_DAT for external data symbols like __stack_chk_guard
+			const R_X86_64_GLOB_DAT = 6
+			if relType == R_X86_64_GLOB_DAT {
+				if symName == "__stack_chk_guard" {
+					// Allocate guest page for canary if needed
+					guardAddr := (loaded.MaxVAddr + 4095) &^ 4095
+					if uint64(len(loaded.MemoryImage)) < guardAddr+4096 {
+						newImg := make([]byte, guardAddr+4096)
+						copy(newImg, loaded.MemoryImage)
+						loaded.MemoryImage = newImg
+						loaded.MaxVAddr = guardAddr + 4096
+					}
+					// Write canary value into guest canary location
+					const canaryValue = uint64(0x595e9fbd94fda766)
+					binary.LittleEndian.PutUint64(loaded.MemoryImage[guardAddr:guardAddr+8], canaryValue)
+					// Set GOT entry to point to the canary variable
+					if offset+8 <= uint64(len(loaded.MemoryImage)) {
+						binary.LittleEndian.PutUint64(loaded.MemoryImage[offset:offset+8], guardAddr)
+					}
+				}
+			}
 			loaded.Relocations = append(loaded.Relocations, rel)
 		}
 	}

@@ -86,6 +86,7 @@ int32_t scePadOpen(int32_t userID, int32_t type, int32_t index, void *param);
 int32_t scePadClose(int32_t handle);
 int32_t scePadReadState(int32_t handle, OrbisPadData *data);
 int32_t scePadRead(int32_t handle, OrbisPadData *data, int32_t count);
+int32_t scePadGetHandle(int32_t userID, int32_t type, int32_t index);
 
 // Host input helper (called by window event pump)
 void ps4_pad_handle_key(unsigned short keyCode, int isDown);
@@ -96,6 +97,7 @@ void shim_scePadOpen(GuestContext *ctx);
 void shim_scePadClose(GuestContext *ctx);
 void shim_scePadReadState(GuestContext *ctx);
 void shim_scePadRead(GuestContext *ctx);
+void shim_scePadGetHandle(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

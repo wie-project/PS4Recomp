@@ -101,44 +101,85 @@ int32_t scePadClose(int32_t handle) {
   return -EINVAL;
 }
 
+static int g_key_up = 0;
+static int g_key_down = 0;
+static int g_key_left = 0;
+static int g_key_right = 0;
+static int g_key_rx_up = 0;
+static int g_key_rx_down = 0;
+static int g_key_rx_left = 0;
+static int g_key_rx_right = 0;
+
 void ps4_pad_handle_key(unsigned short keyCode, int isDown) {
   pthread_mutex_lock(&g_pad_mutex);
 
   uint32_t btn = 0;
   switch (keyCode) {
+  // --- Directional / Left Stick ---
   case 126: // Up Arrow
   case 13:  // W
-    btn = ORBIS_PAD_BUTTON_UP;
+    g_key_up = isDown ? 1 : 0;
     break;
   case 125: // Down Arrow
   case 1:   // S
-    btn = ORBIS_PAD_BUTTON_DOWN;
+    g_key_down = isDown ? 1 : 0;
     break;
   case 123: // Left Arrow
   case 0:   // A
-    btn = ORBIS_PAD_BUTTON_LEFT;
+    g_key_left = isDown ? 1 : 0;
     break;
   case 124: // Right Arrow
   case 2:   // D
-    btn = ORBIS_PAD_BUTTON_RIGHT;
+    g_key_right = isDown ? 1 : 0;
     break;
-  case 34: // I
-  case 16: // Y
-    btn = ORBIS_PAD_BUTTON_TRIANGLE;
+
+  // --- Right Stick ---
+  case 91:  // Numpad 8
+  case 116: // Page Up
+    g_key_rx_up = isDown ? 1 : 0;
     break;
-  case 37: // L
-  case 31: // O
-    btn = ORBIS_PAD_BUTTON_CIRCLE;
+  case 84:  // Numpad 2
+  case 87:  // Numpad 5
+  case 121: // Page Down
+    g_key_rx_down = isDown ? 1 : 0;
     break;
+  case 86:  // Numpad 4
+  case 115: // Home
+    g_key_rx_left = isDown ? 1 : 0;
+    break;
+  case 88:  // Numpad 6
+  case 119: // End
+    g_key_rx_right = isDown ? 1 : 0;
+    break;
+
+  // --- Face Buttons ---
+  // Cross (X) - Bottom: Space, Return, K, Z
   case 49: // Space
-  case 40: // K
   case 36: // Return
+  case 40: // K
+  case 6:  // Z
     btn = ORBIS_PAD_BUTTON_CROSS;
     break;
+  // Circle (O) - Right: L, O, X
+  case 37: // L
+  case 31: // O
+  case 7:  // X
+    btn = ORBIS_PAD_BUTTON_CIRCLE;
+    break;
+  // Square (□) - Left: J, U, C
   case 38: // J
   case 32: // U
+  case 8:  // C
     btn = ORBIS_PAD_BUTTON_SQUARE;
     break;
+  // Triangle (△) - Top: I, Y, V
+  case 34: // I
+  case 16: // Y
+  case 9:  // V
+    btn = ORBIS_PAD_BUTTON_TRIANGLE;
+    break;
+
+  // --- Shoulder Buttons & Triggers ---
   case 12: // Q
     btn = ORBIS_PAD_BUTTON_L1;
     break;
@@ -146,28 +187,100 @@ void ps4_pad_handle_key(unsigned short keyCode, int isDown) {
     btn = ORBIS_PAD_BUTTON_R1;
     break;
   case 18: // 1
+  case 56: // Left Shift
     btn = ORBIS_PAD_BUTTON_L2;
     g_key_l2 = isDown ? 255 : 0;
     break;
   case 20: // 3
+  case 19: // 2
+  case 59: // Left Control
+  case 60: // Right Shift
     btn = ORBIS_PAD_BUTTON_R2;
     g_key_r2 = isDown ? 255 : 0;
     break;
-  case 6: // Z
+
+  // --- Stick Clicks ---
+  case 3:  // F
     btn = ORBIS_PAD_BUTTON_L3;
     break;
-  case 8: // C
+  case 5:  // G
+  case 11: // B
     btn = ORBIS_PAD_BUTTON_R3;
     break;
+
+  // --- Menu / Options / Restart ---
+  case 15: // R (Restart in SDL2, Options)
   case 48: // Tab
+  case 53: // Escape
+  case 35: // P (Pause)
+  case 46: // M (Menu)
     btn = ORBIS_PAD_BUTTON_OPTIONS;
     break;
+
+  // --- Touchpad Click ---
   case 17: // T
-  case 35: // P
+  case 50: // ` (Backtick)
     btn = ORBIS_PAD_BUTTON_TOUCH_PAD;
     break;
+
   default:
     break;
+  }
+
+  // Update analog left stick axes based on directional keys
+  if (g_key_left && !g_key_right) {
+    g_key_lx = 0;
+  } else if (g_key_right && !g_key_left) {
+    g_key_lx = 255;
+  } else {
+    g_key_lx = 128;
+  }
+
+  if (g_key_up && !g_key_down) {
+    g_key_ly = 0;
+  } else if (g_key_down && !g_key_up) {
+    g_key_ly = 255;
+  } else {
+    g_key_ly = 128;
+  }
+
+  // Update analog right stick axes
+  if (g_key_rx_left && !g_key_rx_right) {
+    g_key_rx = 0;
+  } else if (g_key_rx_right && !g_key_rx_left) {
+    g_key_rx = 255;
+  } else {
+    g_key_rx = 128;
+  }
+
+  if (g_key_rx_up && !g_key_rx_down) {
+    g_key_ry = 0;
+  } else if (g_key_rx_down && !g_key_rx_up) {
+    g_key_ry = 255;
+  } else {
+    g_key_ry = 128;
+  }
+
+  // Update digital D-pad button states
+  if (g_key_up) {
+    g_key_buttons |= ORBIS_PAD_BUTTON_UP;
+  } else {
+    g_key_buttons &= ~ORBIS_PAD_BUTTON_UP;
+  }
+  if (g_key_down) {
+    g_key_buttons |= ORBIS_PAD_BUTTON_DOWN;
+  } else {
+    g_key_buttons &= ~ORBIS_PAD_BUTTON_DOWN;
+  }
+  if (g_key_left) {
+    g_key_buttons |= ORBIS_PAD_BUTTON_LEFT;
+  } else {
+    g_key_buttons &= ~ORBIS_PAD_BUTTON_LEFT;
+  }
+  if (g_key_right) {
+    g_key_buttons |= ORBIS_PAD_BUTTON_RIGHT;
+  } else {
+    g_key_buttons &= ~ORBIS_PAD_BUTTON_RIGHT;
   }
 
   if (btn != 0) {
@@ -353,5 +466,26 @@ void shim_scePadRead(GuestContext *ctx) {
 
   int32_t ret = scePadRead(handle, data, count);
   ctx->rax = (uint64_t)(int64_t)ret;
+  SHIM_RETURN();
+}
+
+int32_t scePadGetHandle(int32_t userID, int32_t type, int32_t index) {
+  pthread_mutex_lock(&g_pad_mutex);
+  for (int i = 0; i < MAX_PAD_HANDLES; i++) {
+    if (g_pad_slots[i].in_use && g_pad_slots[i].userId == userID) {
+      int32_t h = g_pad_slots[i].handle;
+      pthread_mutex_unlock(&g_pad_mutex);
+      return h;
+    }
+  }
+  pthread_mutex_unlock(&g_pad_mutex);
+  return scePadOpen(userID, type, index, NULL);
+}
+
+void shim_scePadGetHandle(GuestContext *ctx) {
+  int32_t userID = (int32_t)ctx->rdi;
+  int32_t type = (int32_t)ctx->rsi;
+  int32_t index = (int32_t)ctx->rdx;
+  ctx->rax = (uint64_t)(int64_t)scePadGetHandle(userID, type, index);
   SHIM_RETURN();
 }

@@ -6,7 +6,9 @@
 #include <sched.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <time.h>
 
 // PS4 specific: sceKernelUsleep sleeps for microseconds
@@ -572,10 +574,130 @@ void shim_syscall(GuestContext *ctx) {
     }
     SHIM_RETURN();
   }
+  case 116: { // SYS_gettimeofday
+    shim_gettimeofday(ctx);
+    return;
+  }
+  case 118: { // SYS_getrusage
+    shim_getrusage(ctx);
+    return;
+  }
+  case 232: { // SYS_clock_gettime
+    shim_clock_gettime(ctx);
+    return;
+  }
   default:
     // Honest unsupported syscall: return -1 with ENOSYS
     set_guest_errno(ctx, ENOSYS);
     ctx->rax = (uint64_t)-1;
     SHIM_RETURN();
   }
+}
+
+// Stack protector canary check failure
+void shim___stack_chk_fail(GuestContext *ctx) {
+  (void)ctx;
+  fprintf(stderr, "*** stack smashing detected ***: terminated\n");
+  abort();
+}
+
+// clock_gettime(clockid_t clk_id, struct timespec *tp)
+void shim_clock_gettime(GuestContext *ctx) {
+  int clk_id = (int)ctx->rdi;
+  uint64_t tp_addr = ctx->rsi;
+  if (!tp_addr) {
+    set_guest_errno(ctx, EFAULT);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+
+  clockid_t host_clk = CLOCK_REALTIME;
+  // FreeBSD clock IDs:
+  // 0: CLOCK_REALTIME
+  // 4: CLOCK_MONOTONIC
+  // 5: CLOCK_UPTIME
+  if (clk_id == 4 || clk_id == 5) {
+    host_clk = CLOCK_MONOTONIC;
+  }
+
+  struct timespec host_ts;
+  int ret = clock_gettime(host_clk, &host_ts);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    struct guest_timespec {
+      int64_t tv_sec;
+      int64_t tv_nsec;
+    };
+    struct guest_timespec *g_ts = (struct guest_timespec *)(ctx->mem_base + tp_addr);
+    g_ts->tv_sec = (int64_t)host_ts.tv_sec;
+    g_ts->tv_nsec = (int64_t)host_ts.tv_nsec;
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// gettimeofday(struct timeval *tv, struct timezone *tz)
+void shim_gettimeofday(GuestContext *ctx) {
+  uint64_t tv_addr = ctx->rdi;
+  uint64_t tz_addr = ctx->rsi;
+
+  struct timeval host_tv;
+  struct timezone host_tz;
+  struct timezone *tz_ptr = tz_addr ? &host_tz : NULL;
+
+  int ret = gettimeofday(&host_tv, tz_ptr);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    if (tv_addr) {
+      struct guest_timeval {
+        int64_t tv_sec;
+        int64_t tv_usec;
+      };
+      struct guest_timeval *g_tv = (struct guest_timeval *)(ctx->mem_base + tv_addr);
+      g_tv->tv_sec = (int64_t)host_tv.tv_sec;
+      g_tv->tv_usec = (int64_t)host_tv.tv_usec;
+    }
+    if (tz_addr) {
+      struct timezone *g_tz = (struct timezone *)(ctx->mem_base + tz_addr);
+      *g_tz = host_tz;
+    }
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// getrusage(int who, struct rusage *usage)
+void shim_getrusage(GuestContext *ctx) {
+  int who = (int)ctx->rdi;
+  uint64_t usage_addr = ctx->rsi;
+  if (!usage_addr) {
+    set_guest_errno(ctx, EFAULT);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+
+  // Map FreeBSD who (0 = RUSAGE_SELF, -1 = RUSAGE_CHILDREN)
+  int host_who = RUSAGE_SELF;
+  if (who == -1) {
+    host_who = RUSAGE_CHILDREN;
+  }
+
+  struct rusage host_ru;
+  int ret = getrusage(host_who, &host_ru);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    struct rusage *g_ru = (struct rusage *)(ctx->mem_base + usage_addr);
+    memset(g_ru, 0, sizeof(struct rusage));
+    g_ru->ru_utime = host_ru.ru_utime;
+    g_ru->ru_stime = host_ru.ru_stime;
+    g_ru->ru_maxrss = host_ru.ru_maxrss;
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
 }

@@ -132,7 +132,20 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 
 		inst, err := x86asm.Decode(d.elf.MemoryImage[pc:], 64)
 		if err != nil || inst.Len == 0 {
-			break
+			// Do not truncate the rest of the function on an unexpected byte or decode failure.
+			// Insert a 1-byte UD2 placeholder so execution traps if reached, and continue
+			// decoding subsequent instructions so that leaders, subsequent blocks, and
+			// function epilogues (e.g. pop rbp; ret) are preserved.
+			wrapped := Instruction{
+				Address: pc,
+				Inst: x86asm.Inst{
+					Op:  x86asm.UD2,
+					Len: 1,
+				},
+			}
+			insts = append(insts, wrapped)
+			pc++
+			continue
 		}
 
 		wrapped := Instruction{

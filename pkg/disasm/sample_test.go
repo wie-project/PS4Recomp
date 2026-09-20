@@ -96,3 +96,48 @@ func TestCheckEntryPoint(t *testing.T) {
 		t.Logf("  Func 0x%x: %s (blocks: %d)", fAddr, fn.Name, len(fn.Blocks))
 	}
 }
+
+func TestBMIDecoding(t *testing.T) {
+	// bextr %ecx, %eax, %eax: c4 e2 70 f7 c0
+	bextrBytes := []byte{0xc4, 0xe2, 0x70, 0xf7, 0xc0}
+	inst, err := x86asm.Decode(bextrBytes, 64)
+	if err != nil {
+		t.Fatalf("decode bextr failed: %v", err)
+	}
+	if inst.Op != x86asm.BEXTR {
+		t.Fatalf("expected BEXTR op, got %v", inst.Op)
+	}
+	if inst.Len != 5 {
+		t.Fatalf("expected len 5, got %d", inst.Len)
+	}
+	t.Logf("decoded successfully: %s", inst.String())
+
+	testCases := []struct {
+		name string
+		raw  []byte
+		op   x86asm.Op
+	}{
+		{"ANDN", []byte{0xc4, 0xe2, 0x70, 0xf2, 0xc2}, x86asm.ANDN},
+		{"BZHI", []byte{0xc4, 0xe2, 0x70, 0xf5, 0xc2}, x86asm.BZHI},
+		{"BLSR", []byte{0xc4, 0xe2, 0x78, 0xf3, 0xcb}, x86asm.BLSR},
+		{"BLSMSK", []byte{0xc4, 0xe2, 0x78, 0xf3, 0xd3}, x86asm.BLSMSK},
+		{"BLSI", []byte{0xc4, 0xe2, 0x78, 0xf3, 0xdb}, x86asm.BLSI},
+		{"SHLX", []byte{0xc4, 0xe2, 0x71, 0xf7, 0xc6}, x86asm.SHLX},
+		{"SHRX", []byte{0xc4, 0xe2, 0x73, 0xf7, 0xc6}, x86asm.SHRX},
+		{"SARX", []byte{0xc4, 0xe2, 0x72, 0xf7, 0xc6}, x86asm.SARX},
+		{"RORX", []byte{0xc4, 0xe3, 0x7b, 0xf0, 0xc6, 0x04}, x86asm.RORX},
+		{"MULX", []byte{0xc4, 0xe2, 0x73, 0xf6, 0xc6}, x86asm.MULX},
+	}
+
+	for _, tc := range testCases {
+		decoded, err := x86asm.Decode(tc.raw, 64)
+		if err != nil {
+			t.Errorf("%s decode failed: %v", tc.name, err)
+			continue
+		}
+		if decoded.Op != tc.op {
+			t.Errorf("%s: expected op %v, got %v", tc.name, tc.op, decoded.Op)
+		}
+		t.Logf("%s decoded: %s", tc.name, decoded.String())
+	}
+}

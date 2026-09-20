@@ -96,10 +96,25 @@ The graphics and kernel subsystems are architected natively from first principle
     - Strict `errno` synchronization: All failing syscalls and shims sync `errno` directly to guest TLS (`ctx->fs_base + 0x100`).
     - Unknown syscalls strictly return `-1` with `errno = ENOSYS`.
 - **Optimized C Emitter (`pkg/emitter`)**:
-  - Emits partitioned C source files for multi-threaded Clang compilation.
+  - Emits partitioned C source files for multi-threaded Clang compilation with instruction budget balancing (~15,000 instructions per chunk) to eliminate single-core compilation bottlenecks.
   - **Fast-path function entry**: Direct fallthrough on normal function entry (`ctx->rip == addr`), bypassing basic block switches.
   - **Selective unwinding**: Leaf functions skip `UnwindFrame` and `_setjmp` overhead completely.
   - **Optimized flag computation**: Hot integer ALU operations prune auxiliary (`af`) and parity (`pf`) calculations.
+- **Audio Subsystem (`libSceAudioOut` in `pkg/runtime/ps4_audioout.c`)**:
+  - Native macOS `AudioToolbox` / `AudioQueue` streaming architecture for Linear PCM audio output (`sceAudioOutOpen`, `sceAudioOutOutput`, `sceAudioOutClose`).
+  - Sample-accurate timing and pacing synchronized with hardware audio frames via `mach_absolute_time()`, eliminating buffer underrun/overrun.
+- **Gamepad & Input Subsystem (`libScePad` in `pkg/runtime/ps4_pad.m`)**:
+  - Native `GameController.framework` support for physical controllers (DualShock 4, DualSense, Xbox, Switch Pro, MFi).
+  - Comprehensive ergonomic keyboard mapping for all controller components: Left/Right analog sticks, digital D-pad, face buttons (Cross, Circle, Square, Triangle), analog triggers (L2/R2), bumpers (L1/R1), stick clicks (L3/R3), touchpad click, and Options/Restart button (<kbd>R</kbd>).
+- **Keyboard Subsystem (`libSceKeyboard` in `pkg/runtime/ps4_keyboard.m`)**:
+  - Full `libSceKeyboard` implementation (`sceKeyboardInit`, `sceKeyboardOpen`, `sceKeyboardReadState`, `sceKeyboardGetKey2Char`, `sceKeyboardGetHandle`).
+  - Hardware USB HID keycode translation and modifier state handling for PS4 guest applications.
+- **Bit Manipulation Instruction Sets (BMI1 / BMI2 in `pkg/lifter/bmi.go`)**:
+  - Full support for x86-64 BMI1 and BMI2 extensions: `BEXTR`, `BZHI`, `ANDN`, `BLSR`, `BLSMSK`, `BLSI`, `SHLX`, `SHRX`, `SARX`, `RORX`, `MULX`.
+  - Vendored and extended disassembler (`vendor/golang.org/x/arch/x86/x86asm/bmi.go`) ensuring out-of-the-box decoding of modern compiler output.
+- **System Dialog Subsystem (`libSceCommonDialog` & `libSceMsgDialog` in `pkg/runtime/ps4_dialog.m`)**:
+  - Native Cocoa `NSAlert` modal presentation for PS4 system and user dialogs (`OK`, `Yes/No`, `OK/Cancel`, and custom dual-button choices).
+  - Synchronous and asynchronous status polling (`sceMsgDialogUpdateStatus`, `sceMsgDialogGetResult`), with automatic headless fallback for headless/CI environments.
 
 ---
 
@@ -193,20 +208,20 @@ Automated test suite (`pkg/lifter/coverage_test.go`) validates **100.0% opcode c
 | :--- | :--- | :--- | :--- |
 | `graphics.elf` | 19,348 | 662 | **100.0%** (Verified Live on Metal) |
 | `input.elf` | 42,373 | 862 | **100.0%** (Verified Live on Metal & GameController) |
-| `SDL2.elf` | 242,993 | 1,728 | **100.0%** (AVX / VEX instructions) |
+| `SDL2.elf` | 242,993 | 1,728 | **100.0%** (Verified Live: Game, Sound, Keyboard/Pad) |
 | `pngdec.elf` | 41,322 | 839 | **100.0%** (Verified Live on Metal) |
-| `threading.elf` | 22,036 | 818 | **100.0%** |
-| `keyboard.elf` | 21,103 | 686 | **100.0%** |
-| `system.elf` | 20,011 | 674 | **100.0%** |
+| `threading.elf` | 22,036 | 818 | **100.0%** (Verified Live: std::thread & mutex) |
+| `keyboard.elf` | 21,103 | 686 | **100.0%** (Verified Live on Metal & libSceKeyboard) |
 | `font.elf` | 19,727 | 665 | **100.0%** (Verified Live on Metal & FreeType 2) |
+| `audio-wav.elf` | 10,590 | 118 | **100.0%** (Verified Live: AudioQueue PCM 48kHz) |
+| `system.elf` | 20,011 | 674 | **100.0%** |
 | `networking.elf` | 18,913 | 653 | **100.0%** |
-| `exceptions.elf` | 18,699 | 650 | **100.0%** |
+| `exceptions.elf` | 18,699 | 650 | **100.0%** (Verified Live: C++ throw/catch & unwinding) |
+| `hello_world.elf` | 18,423 | 644 | **100.0%** (Verified Live: stdout & libc) |
 | `piglet.elf` | 18,537 | 644 | **100.0%** |
-| `hello_world.elf` | 18,423 | 644 | **100.0%** |
-| `audio-wav.elf` | 10,590 | 118 | **100.0%** |
 | `net_http.elf` | 5,396 | 69 | **100.0%** |
 | `trophies.elf` | 3,516 | 41 | **100.0%** |
-| `dialogs.elf` | 3,422 | 42 | **100.0%** |
+| `dialogs.elf` | 3,422 | 42 | **100.0%** (Verified Live: Cocoa NSAlert & libSceMsgDialog) |
 | `using_library.elf` | 3,352 | 40 | **100.0%** |
 
 ---

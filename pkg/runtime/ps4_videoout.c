@@ -314,3 +314,51 @@ void shim_sceVideoOutGetFlipStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceVideoOutGetFlipStatus(handle, status);
     SHIM_RETURN();
 }
+
+int32_t sceVideoOutGetResolutionStatus(int32_t handle, OrbisVideoOutResolutionStatus *status) {
+    (void)handle;
+    if (!status) {
+        return -EINVAL;
+    }
+    memset(status, 0, sizeof(*status));
+    status->width = 1920;
+    status->height = 1080;
+    status->paneWidth = 1920;
+    status->paneHeight = 1080;
+    status->refreshRate = 60;
+    status->screenSize = 55.0f;
+    return 0;
+}
+
+int32_t sceVideoOutIsFlipPending(int32_t handle) {
+    (void)handle;
+    return 0;
+}
+
+int32_t sceVideoOutUnregisterBuffers(int32_t handle, int32_t setIndex) {
+    (void)handle;
+    (void)setIndex;
+    return 0;
+}
+
+void shim_sceVideoOutGetResolutionStatus(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    uint64_t statusGuest = ctx->rsi;
+    OrbisVideoOutResolutionStatus *status = statusGuest ? (OrbisVideoOutResolutionStatus *)(ctx->mem_base + statusGuest) : NULL;
+
+    ctx->rax = (uint64_t)(int64_t)sceVideoOutGetResolutionStatus(handle, status);
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutIsFlipPending(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)sceVideoOutIsFlipPending(handle);
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutUnregisterBuffers(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    int32_t setIndex = (int32_t)ctx->rsi;
+    ctx->rax = (uint64_t)(int64_t)sceVideoOutUnregisterBuffers(handle, setIndex);
+    SHIM_RETURN();
+}

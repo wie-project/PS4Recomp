@@ -348,6 +348,10 @@ void shim_sigprocmask(GuestContext *ctx);
 void shim_raise(GuestContext *ctx);
 void shim_poll(GuestContext *ctx);
 void shim_syscall(GuestContext *ctx);
+void shim___stack_chk_fail(GuestContext *ctx);
+void shim_clock_gettime(GuestContext *ctx);
+void shim_gettimeofday(GuestContext *ctx);
+void shim_getrusage(GuestContext *ctx);
 
 // Pthread shims
 void shim_pthread_create(GuestContext *ctx);
@@ -376,7 +380,24 @@ void shim_pthread_self(GuestContext *ctx);
 void shim_pthread_equal(GuestContext *ctx);
 void shim_pthread_detach(GuestContext *ctx);
 void shim_pthread_join(GuestContext *ctx);
+void shim_pthread_attr_init(GuestContext *ctx);
+void shim_pthread_attr_destroy(GuestContext *ctx);
+void shim_pthread_attr_setdetachstate(GuestContext *ctx);
+void shim_pthread_attr_setstacksize(GuestContext *ctx);
+void shim_pthread_getschedparam(GuestContext *ctx);
+void shim_pthread_setschedparam(GuestContext *ctx);
+void shim_pthread_setcanceltype(GuestContext *ctx);
+void shim_sched_get_priority_max(GuestContext *ctx);
+void shim_sched_get_priority_min(GuestContext *ctx);
 void recomp_init_main_thread(GuestContext *ctx);
+
+// POSIX Semaphores
+void shim_sem_init(GuestContext *ctx);
+void shim_sem_destroy(GuestContext *ctx);
+void shim_sem_wait(GuestContext *ctx);
+void shim_sem_trywait(GuestContext *ctx);
+void shim_sem_post(GuestContext *ctx);
+void shim_sem_getvalue(GuestContext *ctx);
 
 // Direct Memory shims
 void shim_sceKernelAllocateDirectMemory(GuestContext *ctx);
@@ -389,6 +410,12 @@ void shim_sceKernelCreateEqueue(GuestContext *ctx);
 void shim_sceKernelDeleteEqueue(GuestContext *ctx);
 void shim_sceKernelWaitEqueue(GuestContext *ctx);
 
+// AudioOut shims
+void shim_sceAudioOutInit(GuestContext *ctx);
+void shim_sceAudioOutOpen(GuestContext *ctx);
+void shim_sceAudioOutOutput(GuestContext *ctx);
+void shim_sceAudioOutClose(GuestContext *ctx);
+
 // VideoOut display shims
 void shim_sceVideoOutOpen(GuestContext *ctx);
 void shim_sceVideoOutClose(GuestContext *ctx);
@@ -398,6 +425,12 @@ void shim_sceVideoOutSetFlipRate(GuestContext *ctx);
 void shim_sceVideoOutAddFlipEvent(GuestContext *ctx);
 void shim_sceVideoOutSubmitFlip(GuestContext *ctx);
 void shim_sceVideoOutGetFlipStatus(GuestContext *ctx);
+void shim_sceVideoOutGetResolutionStatus(GuestContext *ctx);
+void shim_sceVideoOutIsFlipPending(GuestContext *ctx);
+void shim_sceVideoOutUnregisterBuffers(GuestContext *ctx);
+
+// Pad shims
+void shim_scePadGetHandle(GuestContext *ctx);
 
 // User Service shims
 void shim_sceUserServiceInitialize(GuestContext *ctx);
@@ -412,6 +445,14 @@ void shim_scePadOpen(GuestContext *ctx);
 void shim_scePadClose(GuestContext *ctx);
 void shim_scePadReadState(GuestContext *ctx);
 void shim_scePadRead(GuestContext *ctx);
+
+// Keyboard shims
+void shim_sceKeyboardInit(GuestContext *ctx);
+void shim_sceKeyboardOpen(GuestContext *ctx);
+void shim_sceKeyboardClose(GuestContext *ctx);
+void shim_sceKeyboardReadState(GuestContext *ctx);
+void shim_sceKeyboardGetKey2Char(GuestContext *ctx);
+void shim_sceKeyboardGetHandle(GuestContext *ctx);
 
 // Sysmodule shims
 void shim_sceSysmoduleLoadModule(GuestContext *ctx);
@@ -428,6 +469,20 @@ void shim_FT_Get_Char_Index(GuestContext *ctx);
 void shim_FT_Load_Glyph(GuestContext *ctx);
 void shim_FT_Render_Glyph(GuestContext *ctx);
 
+// CommonDialog & MsgDialog shims
+void shim_sceCommonDialogInitialize(GuestContext *ctx);
+void shim_sceCommonDialogIsUsed(GuestContext *ctx);
+void shim_sceMsgDialogInitialize(GuestContext *ctx);
+void shim_sceMsgDialogOpen(GuestContext *ctx);
+void shim_sceMsgDialogGetResult(GuestContext *ctx);
+void shim_sceMsgDialogGetStatus(GuestContext *ctx);
+void shim_sceMsgDialogUpdateStatus(GuestContext *ctx);
+void shim_sceMsgDialogClose(GuestContext *ctx);
+void shim_sceMsgDialogTerminate(GuestContext *ctx);
+void shim_sceMsgDialogProgressBarInc(GuestContext *ctx);
+void shim_sceMsgDialogProgressBarSetMsg(GuestContext *ctx);
+void shim_sceMsgDialogProgressBarSetValue(GuestContext *ctx);
+
 // Subsystem teardown and lifecycle
 void recomp_free_thread_context(GuestContext *ctx);
 void ps4_direct_mem_destroy(void);
@@ -435,6 +490,7 @@ void ps4_sync_destroy(void);
 void ps4_videoout_destroy(void);
 void ps4_equeue_destroy(void);
 void ps4_metal_screen_destroy(void);
+void ps4_keyboard_destroy(void);
 void ps4_vfs_destroy(void);
 
 #ifdef __cplusplus

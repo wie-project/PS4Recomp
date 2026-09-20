@@ -266,3 +266,75 @@ void shim_pthread_getspecific(GuestContext *ctx) {
   }
   SHIM_RETURN();
 }
+
+void shim_pthread_attr_init(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  if (attr_addr) {
+    memset(ctx->mem_base + attr_addr, 0, 64);
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_attr_destroy(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_attr_setdetachstate(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_attr_setstacksize(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_getschedparam(GuestContext *ctx) {
+  uint64_t pol_addr = ctx->rsi;
+  uint64_t param_addr = ctx->rdx;
+  if (pol_addr) {
+    *(int *)(ctx->mem_base + pol_addr) = SCHED_OTHER;
+  }
+  if (param_addr) {
+    struct sched_param *sp = (struct sched_param *)(ctx->mem_base + param_addr);
+    sp->sched_priority = 0;
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_setschedparam(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_setcanceltype(GuestContext *ctx) {
+  uint64_t old_addr = ctx->rsi;
+  if (old_addr) {
+    *(int *)(ctx->mem_base + old_addr) = 0;
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_sched_get_priority_max(GuestContext *ctx) {
+  int policy = (int)ctx->rdi;
+  int ret = sched_get_priority_max(policy);
+  if (ret < 0) {
+    ret = 0;
+  }
+  ctx->rax = (uint64_t)ret;
+  SHIM_RETURN();
+}
+
+void shim_sched_get_priority_min(GuestContext *ctx) {
+  int policy = (int)ctx->rdi;
+  int ret = sched_get_priority_min(policy);
+  if (ret < 0) {
+    ret = 0;
+  }
+  ctx->rax = (uint64_t)ret;
+  SHIM_RETURN();
+}

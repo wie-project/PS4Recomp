@@ -82,7 +82,10 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.FISUB, x86asm.FMUL, x86asm.FMULP, x86asm.FIMUL,
 		x86asm.FDIV, x86asm.FDIVP, x86asm.FDIVR, x86asm.FIDIV,
 		x86asm.FUCOMI, x86asm.FUCOMIP, x86asm.FCOMI, x86asm.FCOMIP,
-		x86asm.FLDCW, x86asm.FNSTCW:
+		x86asm.FLDCW, x86asm.FNSTCW,
+		// BMI1 / BMI2 opcodes
+		x86asm.ANDN, x86asm.BEXTR, x86asm.BLSI, x86asm.BLSMSK, x86asm.BLSR, x86asm.BZHI,
+		x86asm.MULX, x86asm.RORX, x86asm.SARX, x86asm.SHLX, x86asm.SHRX:
 		return true
 	default:
 		return isSetcc(op) || isCmovcc(op) || IsJcc(op)
@@ -196,6 +199,14 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 
 	case x86asm.BSF:
 		code, err := l.liftBsf(args[0], args[1], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.ANDN, x86asm.BEXTR, x86asm.BLSI, x86asm.BLSMSK, x86asm.BLSR, x86asm.BZHI,
+		x86asm.MULX, x86asm.RORX, x86asm.SARX, x86asm.SHLX, x86asm.SHRX:
+		code, err := l.liftBMI(inst, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}

@@ -356,13 +356,22 @@ func (l *Lifter) liftPshift(shiftOp string, dst, countArg x86asm.Arg, nextPC uin
 	if !ok {
 		return nil, fmt.Errorf("vector shift destination must be register")
 	}
-	countVal, _, err := l.getOperandRead(countArg, 1, nextPC)
-	if err != nil {
-		return nil, err
+	var cntExpr string
+	if reg, ok := countArg.(x86asm.Reg); ok && isXmm(reg) {
+		infoC := regMap[reg]
+		cntExpr = fmt.Sprintf("ctx->%s.u64[0]", infoC.BaseReg)
+	} else if imm, ok := countArg.(x86asm.Imm); ok {
+		cntExpr = fmt.Sprintf("%d", imm)
+	} else {
+		cRead, _, err := l.getOperandRead(countArg, 1, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		cntExpr = cRead
 	}
 	infoDst := regMap[dstReg]
 	return []string{
-		fmt.Sprintf("    { uint32_t shift = (uint32_t)(%s);", countVal),
+		fmt.Sprintf("    { uint32_t shift = (uint32_t)(%s);", cntExpr),
 		"      if (shift < 32) {",
 		fmt.Sprintf("        ctx->%s.u32[0] %s= shift; ctx->%s.u32[1] %s= shift;", infoDst.BaseReg, shiftOp, infoDst.BaseReg, shiftOp),
 		fmt.Sprintf("        ctx->%s.u32[2] %s= shift; ctx->%s.u32[3] %s= shift;", infoDst.BaseReg, shiftOp, infoDst.BaseReg, shiftOp),

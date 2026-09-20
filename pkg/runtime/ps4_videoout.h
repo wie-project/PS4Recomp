@@ -32,6 +32,18 @@ typedef struct OrbisVideoOutFlipStatus {
     uint32_t reserved1;
 } OrbisVideoOutFlipStatus;
 
+typedef struct OrbisVideoOutResolutionStatus {
+    uint32_t width;
+    uint32_t height;
+    uint32_t paneWidth;
+    uint32_t paneHeight;
+    uint64_t refreshRate;
+    float screenSize;
+    uint16_t flags;
+    uint16_t reserved0;
+    uint32_t reserved1[3];
+} OrbisVideoOutResolutionStatus;
+
 int32_t sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index, const void *param);
 int32_t sceVideoOutClose(int32_t handle);
 void sceVideoOutSetBufferAttribute(OrbisVideoOutBufferAttribute *attr, uint32_t pixelFormat, uint32_t tilingMode, uint32_t aspectRatio, uint32_t width, uint32_t height, uint32_t pitch);
@@ -40,6 +52,9 @@ int32_t sceVideoOutSetFlipRate(int32_t handle, int32_t fliprate);
 int32_t sceVideoOutAddFlipEvent(OrbisKernelEqueue eq, int32_t handle, void *flipArg);
 int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferIndex, uint32_t flipMode, int64_t flipArg);
 int32_t sceVideoOutGetFlipStatus(int32_t handle, OrbisVideoOutFlipStatus *status);
+int32_t sceVideoOutGetResolutionStatus(int32_t handle, OrbisVideoOutResolutionStatus *status);
+int32_t sceVideoOutIsFlipPending(int32_t handle);
+int32_t sceVideoOutUnregisterBuffers(int32_t handle, int32_t setIndex);
 
 void shim_sceVideoOutOpen(GuestContext *ctx);
 void shim_sceVideoOutClose(GuestContext *ctx);
@@ -49,6 +64,9 @@ void shim_sceVideoOutSetFlipRate(GuestContext *ctx);
 void shim_sceVideoOutAddFlipEvent(GuestContext *ctx);
 void shim_sceVideoOutSubmitFlip(GuestContext *ctx);
 void shim_sceVideoOutGetFlipStatus(GuestContext *ctx);
+void shim_sceVideoOutGetResolutionStatus(GuestContext *ctx);
+void shim_sceVideoOutIsFlipPending(GuestContext *ctx);
+void shim_sceVideoOutUnregisterBuffers(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

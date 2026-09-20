@@ -225,38 +225,44 @@ func Execute(args []string) error {
 		entries = append(entries, mainSym.Address)
 	}
 
-	for _, rel := range loaded.Relocations {
-		if rel.Addend > 0 {
-			target := uint64(rel.Addend)
-			if target >= textSec.Addr && target < textSec.Addr+textSec.Size {
-				entries = append(entries, target)
-			}
-		}
-	}
-
-	// Scan data sections for function pointers (vtables, callback tables)
-	dataSecNames := []string{".rodata", ".data.rel.ro", ".data"}
-	for _, secName := range dataSecNames {
-		sec, ok := loaded.Sections[secName]
-		if !ok || sec.Size < 8 {
-			continue
-		}
-		for off := uint64(0); off+8 <= sec.Size; off += 8 {
-			addr := sec.Addr + off
-			if addr+8 <= uint64(len(loaded.MemoryImage)) {
-				val := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
-				if val >= textSec.Addr && val < textSec.Addr+textSec.Size {
-					entries = append(entries, val)
-				}
-			}
-		}
-	}
-
 	// Seed defined function symbols as entry points
+	hasFuncSymbols := false
 	for _, sym := range loaded.Symbols {
 		if sym.Type == elf.STT_FUNC && sym.Address != 0 {
 			if cfg.AllSymbols || (sym.Address >= textSec.Addr && sym.Address < textSec.Addr+textSec.Size) {
 				entries = append(entries, sym.Address)
+				hasFuncSymbols = true
+			}
+		}
+	}
+
+	// If no function symbols are present (e.g. stripped binary), discover functions from
+	// relocations and data sections (vtables, callback tables).
+	if !hasFuncSymbols {
+		for _, rel := range loaded.Relocations {
+			if rel.Addend > 0 {
+				target := uint64(rel.Addend)
+				if target >= textSec.Addr+0x1000 && target < textSec.Addr+textSec.Size {
+					entries = append(entries, target)
+				}
+			}
+		}
+
+		dataSecNames := []string{".rodata", ".data.rel.ro", ".data"}
+		for _, secName := range dataSecNames {
+			sec, ok := loaded.Sections[secName]
+			if !ok || sec.Size < 8 {
+				continue
+			}
+			for off := uint64(0); off+8 <= sec.Size; off += 8 {
+				addr := sec.Addr + off
+				if addr+8 <= uint64(len(loaded.MemoryImage)) {
+					val := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
+					// Function pointers must be aligned and past the ELF header / null page
+					if val >= textSec.Addr+0x1000 && val < textSec.Addr+textSec.Size && (val%4 == 0) {
+						entries = append(entries, val)
+					}
+				}
 			}
 		}
 	}
@@ -300,6 +306,10 @@ func Execute(args []string) error {
 		"ps4_pad.h", "ps4_pad.m",
 		"ps4_sysmodule.h", "ps4_sysmodule.c",
 		"ps4_freetype.h", "ps4_freetype.c",
+		"ps4_semaphore.h", "ps4_semaphore.c",
+		"ps4_audioout.h", "ps4_audioout.c",
+		"ps4_keyboard.h", "ps4_keyboard.m",
+		"ps4_dialog.h", "ps4_dialog.m",
 	}
 	for _, rf := range runtimeFiles {
 		src := filepath.Join(runtimeDir, rf)
@@ -332,7 +342,8 @@ func Execute(args []string) error {
 		}
 	}
 
-	cFiles = append(cFiles,
+	cFiles = append(
+		cFiles,
 		filepath.Join(cfg.OutDir, "recomp_runtime.c"),
 		filepath.Join(cfg.OutDir, "ps4_vfs.c"),
 		filepath.Join(cfg.OutDir, "ps4_syscalls.c"),
@@ -346,6 +357,10 @@ func Execute(args []string) error {
 		filepath.Join(cfg.OutDir, "ps4_pad.m"),
 		filepath.Join(cfg.OutDir, "ps4_sysmodule.c"),
 		filepath.Join(cfg.OutDir, "ps4_freetype.c"),
+		filepath.Join(cfg.OutDir, "ps4_semaphore.c"),
+		filepath.Join(cfg.OutDir, "ps4_audioout.c"),
+		filepath.Join(cfg.OutDir, "ps4_keyboard.m"),
+		filepath.Join(cfg.OutDir, "ps4_dialog.m"),
 	)
 	fmt.Printf("             Emitted %d C source files | Time: %v\n",
 		len(cFiles), time.Since(stepStart).Round(time.Millisecond))
@@ -464,7 +479,7 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 	}
 	if runtime.GOOS == "darwin" {
 		linkArgs = append(linkArgs, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
-			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController")
+			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox")
 	} else {
 		linkArgs = append(linkArgs, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
 	}
@@ -513,7 +528,8 @@ func findRuntimeDir() (string, error) {
 
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
-		candidates = append(candidates,
+		candidates = append(
+			candidates,
 			filepath.Join(exeDir, "pkg", "runtime"),
 			filepath.Join(exeDir, "..", "pkg", "runtime"),
 		)

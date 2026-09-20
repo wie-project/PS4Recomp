@@ -37,4 +37,24 @@ func TestMemoryAddressing(t *testing.T) {
 	if err != nil || addrExpr != "ctx->fs_base" {
 		t.Errorf("unexpected FS mem: %q, %v", addrExpr, err)
 	}
+
+	// VEX RIP-relative (x86asm sets Base=0, Index=0 for VEX [RIP+disp32]): [RIP+0x1000] at nextPC 0x2000 -> 0x3000
+	vexRipMem := x86asm.Mem{
+		Base: 0,
+		Disp: 0x1000,
+	}
+	addrExpr, err = lifter.MemAddrExpr(vexRipMem, 0x2000)
+	if err != nil || addrExpr != "0x3000ULL" {
+		t.Errorf("unexpected VEX RIP addr: %q, %v", addrExpr, err)
+	}
+
+	// VEX RIP-relative negative displacement: [RIP-0x20] at nextPC 0x2000 -> 0x1fe0
+	vexRipNegMem := x86asm.Mem{
+		Base: 0,
+		Disp: -0x20,
+	}
+	addrExpr, err = lifter.MemAddrExpr(vexRipNegMem, 0x2000)
+	if err != nil || addrExpr != "0x1fe0ULL" {
+		t.Errorf("unexpected VEX RIP negative addr: %q, %v", addrExpr, err)
+	}
 }

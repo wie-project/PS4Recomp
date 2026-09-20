@@ -15,6 +15,7 @@
 
 typedef struct {
     FT_FaceRec guest_face;
+    FT_SizeRec guest_size;
     FT_GlyphSlotRec guest_slot;
     uint8_t bitmap_buffer[GLYPH_BITMAP_MAX];
 } GuestFaceSlot;
@@ -122,11 +123,16 @@ int ps4_ft_new_face(GuestContext *ctx, uint64_t libGuest, uint64_t pathGuest, in
     memset(slot, 0, sizeof(GuestFaceSlot));
 
     uint64_t slot_guest_addr = guest_addr + offsetof(GuestFaceSlot, guest_slot);
+    uint64_t size_guest_addr = guest_addr + offsetof(GuestFaceSlot, guest_size);
     uint64_t bitmap_guest_addr = guest_addr + offsetof(GuestFaceSlot, bitmap_buffer);
 
     slot->guest_face.glyph = (FT_GlyphSlot)slot_guest_addr;
+    slot->guest_face.size = (FT_Size)size_guest_addr;
     slot->guest_slot.bitmap.buffer = (unsigned char *)bitmap_guest_addr;
     slot->guest_slot.face = (FT_Face)guest_addr;
+    if (hostFace->size) {
+        slot->guest_size = *(hostFace->size);
+    }
 
     entry->in_use = 1;
     entry->guest_addr = guest_addr;
@@ -139,7 +145,6 @@ int ps4_ft_new_face(GuestContext *ctx, uint64_t libGuest, uint64_t pathGuest, in
 }
 
 int ps4_ft_set_pixel_sizes(GuestContext *ctx, uint64_t faceGuest, uint32_t width, uint32_t height) {
-    (void)ctx;
     pthread_mutex_lock(&g_ft_mutex);
     FT_Face hostFace = find_host_face_locked(faceGuest);
     if (!hostFace) {
@@ -147,6 +152,10 @@ int ps4_ft_set_pixel_sizes(GuestContext *ctx, uint64_t faceGuest, uint32_t width
         return -EINVAL;
     }
     int error = FT_Set_Pixel_Sizes(hostFace, width, height);
+    if (!error && hostFace->size && ctx && ctx->mem_base) {
+        GuestFaceSlot *slot = (GuestFaceSlot *)(ctx->mem_base + faceGuest);
+        slot->guest_size = *(hostFace->size);
+    }
     pthread_mutex_unlock(&g_ft_mutex);
     return error;
 }
@@ -173,6 +182,11 @@ int ps4_ft_load_glyph(GuestContext *ctx, uint64_t faceGuest, uint32_t glyphIndex
         return -EINVAL;
     }
     int error = FT_Load_Glyph(hostFace, glyphIndex, loadFlags);
+    if (!error && hostFace->glyph && ctx && ctx->mem_base) {
+        GuestFaceSlot *slot = (GuestFaceSlot *)(ctx->mem_base + faceGuest);
+        slot->guest_slot.metrics = hostFace->glyph->metrics;
+        slot->guest_slot.advance = hostFace->glyph->advance;
+    }
     pthread_mutex_unlock(&g_ft_mutex);
     return error;
 }
@@ -197,6 +211,7 @@ int ps4_ft_render_glyph(GuestContext *ctx, uint64_t slotGuest, int32_t renderMod
     GuestFaceSlot *slot = (GuestFaceSlot *)(ctx->mem_base + entry->guest_addr);
     FT_GlyphSlot hostSlot = hostFace->glyph;
 
+    slot->guest_slot.metrics = hostSlot->metrics;
     slot->guest_slot.bitmap.rows = hostSlot->bitmap.rows;
     slot->guest_slot.bitmap.width = hostSlot->bitmap.width;
     slot->guest_slot.bitmap.pitch = hostSlot->bitmap.pitch;

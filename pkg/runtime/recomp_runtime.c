@@ -4,6 +4,7 @@
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <libgen.h>
+#include <execinfo.h>
 #endif
 
 recomp_fn_t *g_dispatch_l1[DISPATCH_L1_SIZE] = {0};
@@ -39,8 +40,16 @@ static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
         uint64_t host_pc = ((ucontext_t*)ucontext)->uc_mcontext->__ss.__pc;
         fprintf(stderr, "Host PC: 0x%llx\n", (unsigned long long)host_pc);
 #endif
+        void *callstack[64];
+        int frames = backtrace(callstack, 64);
+        fprintf(stderr, "Call stack (%d frames):\n", frames);
+        backtrace_symbols_fd(callstack, frames, 2);
     } else {
         fprintf(stderr, "\nFATAL: Signal %d at host address %p (no guest context)\n", sig, si->si_addr);
+        void *callstack[64];
+        int frames = backtrace(callstack, 64);
+        fprintf(stderr, "Call stack (%d frames):\n", frames);
+        backtrace_symbols_fd(callstack, frames, 2);
     }
     fflush(stderr);
     exit(1);
@@ -248,6 +257,7 @@ void recomp_free_runtime(GuestContext *ctx) {
     if (!ctx) return;
 
     ps4_metal_screen_destroy();
+    ps4_keyboard_destroy();
     ps4_videoout_destroy();
     ps4_equeue_destroy();
     ps4_direct_mem_destroy();

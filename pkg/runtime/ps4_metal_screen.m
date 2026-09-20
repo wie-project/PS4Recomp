@@ -34,8 +34,19 @@
 
 @end
 
+@interface PS4MetalView : NSView
+@end
+
+@implementation PS4MetalView
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)canBecomeKeyView { return YES; }
+- (void)keyDown:(NSEvent *)event { (void)event; }
+- (void)keyUp:(NSEvent *)event { (void)event; }
+@end
+
 static PS4ScreenDelegate *g_screenDelegate = nil;
 static NSWindow *g_window = nil;
+static PS4MetalView *g_view = nil;
 static CAMetalLayer *g_metalLayer = nil;
 static id<MTLDevice> g_device = nil;
 static id<MTLCommandQueue> g_commandQueue = nil;
@@ -108,8 +119,8 @@ int ps4_metal_screen_init(int width, int height, const char *title) {
         [g_window setTitle:titleStr];
         [g_window setDelegate:g_screenDelegate];
 
-        NSView *view = [[NSView alloc] initWithFrame:frame];
-        [view setWantsLayer:YES];
+        g_view = [[PS4MetalView alloc] initWithFrame:frame];
+        [g_view setWantsLayer:YES];
 
         g_metalLayer = [CAMetalLayer layer];
         g_metalLayer.device = g_device;
@@ -117,8 +128,9 @@ int ps4_metal_screen_init(int width, int height, const char *title) {
         g_metalLayer.framebufferOnly = NO;
         g_metalLayer.drawableSize = CGSizeMake(g_width, g_height);
 
-        [view setLayer:g_metalLayer];
-        [g_window setContentView:view];
+        [g_view setLayer:g_metalLayer];
+        [g_window setContentView:g_view];
+        [g_window makeFirstResponder:g_view];
         [g_window makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
 
@@ -192,9 +204,26 @@ void ps4_metal_screen_pump_events(void) {
                 }
                 extern void ps4_pad_handle_key(unsigned short keyCode, int isDown);
                 ps4_pad_handle_key(event.keyCode, 1);
+                extern void ps4_keyboard_handle_key(unsigned short keyCode, int isDown, NSUInteger modifierFlags);
+                ps4_keyboard_handle_key(event.keyCode, 1, event.modifierFlags);
+
+                if (event.modifierFlags & NSEventModifierFlagCommand) {
+                    [NSApp sendEvent:event];
+                }
+                continue;
             } else if (event.type == NSEventTypeKeyUp) {
                 extern void ps4_pad_handle_key(unsigned short keyCode, int isDown);
                 ps4_pad_handle_key(event.keyCode, 0);
+                extern void ps4_keyboard_handle_key(unsigned short keyCode, int isDown, NSUInteger modifierFlags);
+                ps4_keyboard_handle_key(event.keyCode, 0, event.modifierFlags);
+
+                if (event.modifierFlags & NSEventModifierFlagCommand) {
+                    [NSApp sendEvent:event];
+                }
+                continue;
+            } else if (event.type == NSEventTypeFlagsChanged) {
+                extern void ps4_keyboard_handle_flags(NSUInteger modifierFlags);
+                ps4_keyboard_handle_flags(event.modifierFlags);
             }
             [NSApp sendEvent:event];
             [NSApp updateWindows];

@@ -9,15 +9,15 @@ import (
 
 // MemAddrExpr returns a C uint64_t expression representing the guest virtual address of a memory operand.
 func MemAddrExpr(mem x86asm.Mem, nextPC uint64) (string, error) {
-	disp := mem.Disp
-	if mem.Base != 0 || mem.Index != 0 {
-		// In x86-64 ModR/M and SIB, displacements are at most 32-bit and are ALWAYS sign-extended to 64-bit.
-		// x86asm can decode 32-bit negative displacements as unsigned uint32 values stored in int64.
-		disp = int64(int32(disp))
-	}
+	// In x86-64 ModR/M and SIB, displacements are at most 32-bit and are ALWAYS sign-extended to 64-bit.
+	// x86asm can decode 32-bit negative displacements as unsigned uint32 values stored in int64.
+	disp := int64(int32(mem.Disp))
 
-	// Check RIP-relative
-	if mem.Base == x86asm.RIP {
+	// Check RIP-relative:
+	// x86asm sets Base = x86asm.RIP for legacy instructions, but leaves Base = 0, Index = 0
+	// for VEX-encoded ModR/M instructions with mod=00, r/m=101 ([RIP+disp32]).
+	// In x86-64 mode, an addressing operand without base and index (and without segment override) is RIP-relative.
+	if mem.Base == x86asm.RIP || (mem.Segment == 0 && mem.Base == 0 && mem.Index == 0 && mem.Disp != 0) {
 		targetAddr := uint64(int64(nextPC) + disp)
 		return fmt.Sprintf("0x%xULL", targetAddr), nil
 	}
