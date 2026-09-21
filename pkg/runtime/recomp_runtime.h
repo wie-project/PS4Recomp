@@ -253,6 +253,21 @@ static inline void set_flags_logic_u16(GuestContext *ctx, uint16_t res) {
   ctx->sf = (res >> 15) & 1;
 }
 
+static inline void set_flags_inc_u16(GuestContext *ctx, uint16_t a,
+                                     uint16_t res) {
+  (void)a;
+  ctx->zf = (res == 0);
+  ctx->sf = (res >> 15) & 1;
+  ctx->of = (res == 0x8000);
+}
+
+static inline void set_flags_dec_u16(GuestContext *ctx, uint16_t a,
+                                     uint16_t res) {
+  ctx->zf = (res == 0);
+  ctx->sf = (res >> 15) & 1;
+  ctx->of = (a == 0x8000);
+}
+
 // 8-bit flag setters
 static inline void set_flags_add_u8(GuestContext *ctx, uint8_t a, uint8_t b,
                                     uint8_t res) {
@@ -275,6 +290,19 @@ static inline void set_flags_logic_u8(GuestContext *ctx, uint8_t res) {
   ctx->of = 0;
   ctx->zf = (res == 0);
   ctx->sf = (res >> 7) & 1;
+}
+
+static inline void set_flags_inc_u8(GuestContext *ctx, uint8_t a, uint8_t res) {
+  (void)a;
+  ctx->zf = (res == 0);
+  ctx->sf = (res >> 7) & 1;
+  ctx->of = (res == 0x80);
+}
+
+static inline void set_flags_dec_u8(GuestContext *ctx, uint8_t a, uint8_t res) {
+  ctx->zf = (res == 0);
+  ctx->sf = (res >> 7) & 1;
+  ctx->of = (a == 0x80);
 }
 
 // Function pointer type for recompiled functions
@@ -311,6 +339,14 @@ static inline void recomp_dispatch(GuestContext *ctx, uint64_t target) {
   abort();
 }
 
+// Invoke a guest function that returns with RET. Guest RET pops a return
+// address, so a dummy slot must be present or the caller's stack is corrupted.
+static inline void recomp_call_guest(GuestContext *ctx, uint64_t target) {
+  ctx->rsp -= 8;
+  MEM_U64(ctx->rsp) = 0;
+  recomp_dispatch(ctx, target);
+}
+
 // Exception unwinding helpers
 #define RECOMP_POP_UNWIND() do { if (__cur_unwind_frame) ctx->unwind_frame = __cur_unwind_frame->prev; } while (0)
 void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip);
@@ -327,6 +363,13 @@ int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size);
 void shim_sceKernelUsleep(GuestContext *ctx);
 void shim_write(GuestContext *ctx);
 void shim_writev(GuestContext *ctx);
+void shim_memcpy(GuestContext *ctx);
+void shim_memmove(GuestContext *ctx);
+void shim_memset(GuestContext *ctx);
+void shim_strlen(GuestContext *ctx);
+void shim_strcpy(GuestContext *ctx);
+void shim_strncpy(GuestContext *ctx);
+void shim_strcmp(GuestContext *ctx);
 void shim_read(GuestContext *ctx);
 void shim_readv(GuestContext *ctx);
 void shim_open(GuestContext *ctx);
@@ -352,6 +395,8 @@ void shim___stack_chk_fail(GuestContext *ctx);
 void shim_clock_gettime(GuestContext *ctx);
 void shim_gettimeofday(GuestContext *ctx);
 void shim_getrusage(GuestContext *ctx);
+void shim_getrlimit(GuestContext *ctx);
+void shim_cpuset_getaffinity(GuestContext *ctx);
 
 // Pthread shims
 void shim_pthread_create(GuestContext *ctx);
@@ -387,6 +432,7 @@ void shim_pthread_attr_setstacksize(GuestContext *ctx);
 void shim_pthread_getschedparam(GuestContext *ctx);
 void shim_pthread_setschedparam(GuestContext *ctx);
 void shim_pthread_setcanceltype(GuestContext *ctx);
+void shim_pthread_sigmask(GuestContext *ctx);
 void shim_sched_get_priority_max(GuestContext *ctx);
 void shim_sched_get_priority_min(GuestContext *ctx);
 void recomp_init_main_thread(GuestContext *ctx);

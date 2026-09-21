@@ -1,7 +1,6 @@
 package analyzer
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,31 +43,7 @@ func AnalyzeBinary(path string) (*AnalysisReport, error) {
 		return nil, fmt.Errorf("failed to stat binary: %w", err)
 	}
 
-	rawBytes, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read binary: %w", err)
-	}
-
-	targetPath := path
-	// If file starts with SELF magic (0x1D3D154F), find embedded ELF
-	if len(rawBytes) >= 4 && rawBytes[0] == 0x4F && rawBytes[1] == 0x15 && rawBytes[2] == 0x3D && rawBytes[3] == 0x1D {
-		elfOffset := bytes.Index(rawBytes, []byte("\x7fELF"))
-		if elfOffset > 0 {
-			tmpFile, err := os.CreateTemp("", "ps4_extracted_*.elf")
-			if err != nil {
-				return nil, fmt.Errorf("failed to create temporary ELF file: %w", err)
-			}
-			defer os.Remove(tmpFile.Name())
-			if _, err := tmpFile.Write(rawBytes[elfOffset:]); err != nil {
-				tmpFile.Close()
-				return nil, fmt.Errorf("failed to write extracted ELF: %w", err)
-			}
-			tmpFile.Close()
-			targetPath = tmpFile.Name()
-		}
-	}
-
-	loaded, err := elfloader.LoadELF(targetPath)
+	loaded, err := elfloader.LoadELF(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load ELF: %w", err)
 	}

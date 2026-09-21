@@ -46,11 +46,11 @@ type SFOEntryRecord struct {
 
 // SFOValue represents an individual parsed parameter from an SFO file.
 type SFOValue struct {
-	Key         string
-	Format      SFOParamFormat
-	StringVal   string
-	IntegerVal  uint32
-	BinaryVal   []byte
+	Key        string
+	Format     SFOParamFormat
+	StringVal  string
+	IntegerVal uint32
+	BinaryVal  []byte
 }
 
 // SFO represents a fully parsed Sony PlayStation SFO file.
@@ -179,7 +179,7 @@ func (s *SFO) Title() string {
 	return s.GetString("TITLE_00")
 }
 
-// TitleID returns the PS4 Title ID (e.g., CUSA12771).
+// TitleID returns the PS4 Title ID from the TITLE_ID SFO key.
 func (s *SFO) TitleID() string {
 	return s.GetString("TITLE_ID")
 }
@@ -202,7 +202,7 @@ func (s *SFO) Category() string {
 	return s.GetString("CATEGORY")
 }
 
-// ContentID returns the Sony Content ID (e.g., EP1018-CUSA12771_00-HOGWARTSLEGACY01).
+// ContentID returns the Sony Content ID.
 func (s *SFO) ContentID() string {
 	return s.GetString("CONTENT_ID")
 }

@@ -65,4 +65,3 @@ func TestLinearSweepAllFunctions(t *testing.T) {
 	}
 	t.Logf("Linear sweep results: %d succeeded, %d had decode errors", success, decodeErrors)
 }
-

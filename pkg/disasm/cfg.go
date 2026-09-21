@@ -1,7 +1,7 @@
 package disasm
 
 import (
-	"encoding/binary"
+	"debug/elf"
 	"fmt"
 	"slices"
 
@@ -41,22 +41,101 @@ type Disassembler struct {
 
 	Functions map[uint64]*Function
 	Blocks    map[uint64]*BasicBlock
+
+	// funcSymAddrs is the sorted unique set of STT_FUNC addresses, used to
+	// bound jump-table recovery when a function has no symbol size.
+	funcSymAddrs []uint64
 }
 
 // NewDisassembler creates a new disassembler for the given loaded ELF.
 func NewDisassembler(loaded *elfloader.LoadedELF) (*Disassembler, error) {
-	textSec, ok := loaded.Sections[".text"]
-	if !ok {
-		return nil, fmt.Errorf("no .text section found in ELF")
+	start, end := executableBounds(loaded)
+	if start >= end {
+		return nil, fmt.Errorf("ELF has no executable mapped segments")
 	}
 
 	return &Disassembler{
-		elf:       loaded,
-		textStart: textSec.Addr,
-		textEnd:   textSec.Addr + textSec.Size,
-		Functions: make(map[uint64]*Function, 1024),
-		Blocks:    make(map[uint64]*BasicBlock, 4096),
+		elf:          loaded,
+		textStart:    start,
+		textEnd:      end,
+		Functions:    make(map[uint64]*Function, 1024),
+		Blocks:       make(map[uint64]*BasicBlock, 4096),
+		funcSymAddrs: collectFuncSymAddrs(loaded),
 	}, nil
+}
+
+func collectFuncSymAddrs(loaded *elfloader.LoadedELF) []uint64 {
+	if loaded == nil || len(loaded.Symbols) == 0 {
+		return nil
+	}
+	seen := make(map[uint64]struct{}, 256)
+	addrs := make([]uint64, 0, 256)
+	for _, s := range loaded.Symbols {
+		if s.Type != elf.STT_FUNC || s.Address == 0 {
+			continue
+		}
+		if _, ok := seen[s.Address]; ok {
+			continue
+		}
+		seen[s.Address] = struct{}{}
+		addrs = append(addrs, s.Address)
+	}
+	slices.Sort(addrs)
+	return addrs
+}
+
+// functionEnd is the exclusive upper bound for intra-function jump-table
+// targets: symbol size if present, otherwise the next STT_FUNC, otherwise
+// the end of executable memory.
+func (d *Disassembler) functionEnd(entry, size uint64) uint64 {
+	if size > 0 {
+		return entry + size
+	}
+	n := len(d.funcSymAddrs)
+	i, found := slices.BinarySearch(d.funcSymAddrs, entry)
+	if found {
+		i++
+	}
+	if i < n && d.funcSymAddrs[i] > entry {
+		return d.funcSymAddrs[i]
+	}
+	return d.textEnd
+}
+
+func executableBounds(loaded *elfloader.LoadedELF) (uint64, uint64) {
+	if loaded == nil {
+		return 0, 0
+	}
+	if len(loaded.ExecRanges) > 0 {
+		start := loaded.ExecRanges[0].Start
+		end := loaded.ExecRanges[0].End
+		for _, r := range loaded.ExecRanges[1:] {
+			if r.Start < start {
+				start = r.Start
+			}
+			if r.End > end {
+				end = r.End
+			}
+		}
+		return start, end
+	}
+	if textSec, ok := loaded.Sections[".text"]; ok && textSec.Size > 0 {
+		return textSec.Addr, textSec.Addr + textSec.Size
+	}
+	return 0, 0
+}
+
+func (d *Disassembler) inCode(addr uint64) bool {
+	if d == nil || d.elf == nil {
+		return false
+	}
+	if addr >= uint64(len(d.elf.MemoryImage)) {
+		return false
+	}
+	if len(d.elf.ExecRanges) > 0 {
+		return d.elf.InExecutable(addr)
+	}
+	return addr >= d.textStart && addr < d.textEnd
 }
 
 // AnalyzeReachable traverses and discovers all functions reachable from the given entry addresses.
@@ -65,7 +144,7 @@ func (d *Disassembler) AnalyzeReachable(entryAddrs []uint64) error {
 	visited := make(map[uint64]bool, len(entryAddrs)*2)
 
 	for _, addr := range entryAddrs {
-		if !visited[addr] && addr >= d.textStart && addr < d.textEnd {
+		if !visited[addr] && d.inCode(addr) {
 			queue = append(queue, addr)
 			visited[addr] = true
 		}
@@ -81,7 +160,7 @@ func (d *Disassembler) AnalyzeReachable(entryAddrs []uint64) error {
 		d.Functions[curr] = fn
 
 		for _, target := range newCalls {
-			if !visited[target] && target >= d.textStart && target < d.textEnd {
+			if !visited[target] && d.inCode(target) {
 				visited[target] = true
 				queue = append(queue, target)
 			}
@@ -126,7 +205,7 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 
 	pc := entryAddr
 	for pc < fnEnd {
-		if pc < d.textStart || pc >= d.textEnd || pc >= uint64(len(d.elf.MemoryImage)) {
+		if !d.inCode(pc) {
 			break
 		}
 
@@ -164,12 +243,14 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			}
 		}
 
-		// Record function pointers loaded via LEA RIP+disp
+		// Record function pointers loaded via LEA RIP+disp.
+		// Jump tables also use LEA; only seed a call if the target looks like a prologue.
 		if inst.Op == x86asm.LEA {
 			if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
 				disp := int64(int32(mem.Disp))
 				target := uint64(int64(nextPC) + disp)
-				if target >= d.textStart && target < d.textEnd && (target < entryAddr || target >= fnEnd) {
+				if d.inCode(target) && (target < entryAddr || target >= fnEnd) &&
+					looksLikeFuncStart(d.elf.MemoryImage, target) {
 					discoveredCalls = append(discoveredCalls, target)
 				}
 			}
@@ -186,7 +267,7 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 	leaders := make(map[uint64]bool)
 	leaders[entryAddr] = true
 
-	for _, inst := range insts {
+	for i, inst := range insts {
 		nextPC := inst.Address + uint64(inst.Inst.Len)
 
 		switch {
@@ -221,12 +302,22 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			}
 
 		case inst.Inst.Op == x86asm.LEA:
-			// Check if LEA references a jump table in .rodata
 			if mem, ok := inst.Inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
 				disp := int64(int32(mem.Disp))
 				tableAddr := uint64(int64(nextPC) + disp)
 				for _, target := range d.findJumpTableTargets(tableAddr, entryAddr, fnEnd) {
 					leaders[target] = true
+				}
+			}
+
+		case isIndirectJump(inst.Inst):
+			if sw, ok := matchPICSwitch(insts[:i+1]); ok {
+				for _, target := range d.jumpTableTargets(sw, entryAddr, fnEnd) {
+					if target >= entryAddr && target < fnEnd {
+						leaders[target] = true
+					} else {
+						discoveredCalls = append(discoveredCalls, target)
+					}
 				}
 			}
 		}
@@ -274,32 +365,11 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 	return fn, discoveredCalls, nil
 }
 
-// findJumpTableTargets scans .rodata at tableAddr for 32-bit relative offsets pointing within [fnStart, fnEnd).
+// findJumpTableTargets reads a 32-bit PIC jump table at tableAddr. Entries are
+// signed offsets from the table itself; recovery does not depend on section names
+// (SELF/PRX images often have no section headers).
 func (d *Disassembler) findJumpTableTargets(tableAddr uint64, fnStart, fnEnd uint64) []uint64 {
-	rodataSec, ok := d.elf.Sections[".rodata"]
-	if !ok {
-		return nil
-	}
-	rodataStart := rodataSec.Addr
-	rodataEnd := rodataSec.Addr + rodataSec.Size
-
-	if tableAddr < rodataStart || tableAddr >= rodataEnd {
-		return nil
-	}
-
-	var targets []uint64
-	curr := tableAddr
-	for curr+4 <= rodataEnd && curr+4 <= uint64(len(d.elf.MemoryImage)) {
-		offset := int32(binary.LittleEndian.Uint32(d.elf.MemoryImage[curr : curr+4]))
-		target := tableAddr + uint64(int64(offset))
-		if target >= fnStart && target < fnEnd {
-			targets = append(targets, target)
-			curr += 4
-		} else {
-			break
-		}
-	}
-	return targets
+	return d.readPIC32Targets(tableAddr, tableAddr, 0, fnStart, fnEnd)
 }
 
 // disasmBranchFollowing disassembles a single function starting at entryAddr (fallback).
@@ -325,13 +395,26 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	jumpTargets := make(map[uint64]bool)
 	jumpTargets[entryAddr] = true
 
+	const recentCap = 24
+	recent := make([]Instruction, 0, recentCap)
+	enqueueBlock := func(target uint64) {
+		if target == 0 || !d.inCode(target) {
+			return
+		}
+		jumpTargets[target] = true
+		if !blockVisited[target] {
+			blockVisited[target] = true
+			blockQueue = append(blockQueue, target)
+		}
+	}
+
 	// Step 1: Linear sweep along branches within the function
 	for head := 0; head < len(blockQueue); head++ {
 		blockStart := blockQueue[head]
 
 		pc := blockStart
 
-		for pc >= d.textStart && pc < d.textEnd {
+		for d.inCode(pc) {
 
 			offset := pc
 			if offset >= uint64(len(d.elf.MemoryImage)) {
@@ -348,6 +431,12 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				Inst:    inst,
 			}
 			instAtAddr[pc] = wrapped
+			if len(recent) == recentCap {
+				copy(recent, recent[1:])
+				recent[recentCap-1] = wrapped
+			} else {
+				recent = append(recent, wrapped)
+			}
 
 			nextPC := pc + uint64(inst.Len)
 
@@ -361,12 +450,15 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				isTerminal = true
 				if rel, ok := inst.Args[0].(x86asm.Rel); ok {
 					target := uint64(int64(nextPC) + int64(rel))
-					// Check if target is inside this function or a tail call
-					// For now, if within reasonable function boundaries or before next symbol
-					jumpTargets[target] = true
-					if !blockVisited[target] && target >= d.textStart && target < d.textEnd {
-						blockVisited[target] = true
-						blockQueue = append(blockQueue, target)
+					enqueueBlock(target)
+				} else if sw, ok := matchPICSwitch(recent); ok {
+					fnEnd := d.functionEnd(entryAddr, 0)
+					for _, target := range d.jumpTableTargets(sw, entryAddr, fnEnd) {
+						if target >= entryAddr && (fnEnd == 0 || target < fnEnd) {
+							enqueueBlock(target)
+						} else {
+							discoveredCalls = append(discoveredCalls, target)
+						}
 					}
 				}
 			case x86asm.RET:
@@ -384,7 +476,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
 					disp := int64(int32(mem.Disp))
 					target := uint64(int64(nextPC) + disp)
-					if target >= d.textStart && target < d.textEnd {
+					if d.inCode(target) && looksLikeFuncStart(d.elf.MemoryImage, target) {
 						discoveredCalls = append(discoveredCalls, target)
 					}
 				}
@@ -393,19 +485,9 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				if isJcc(inst.Op) {
 					isBranch = true
 					if rel, ok := inst.Args[0].(x86asm.Rel); ok {
-						target := uint64(int64(nextPC) + int64(rel))
-						jumpTargets[target] = true
-						if !blockVisited[target] && target >= d.textStart && target < d.textEnd {
-							blockVisited[target] = true
-							blockQueue = append(blockQueue, target)
-						}
+						enqueueBlock(uint64(int64(nextPC) + int64(rel)))
 					}
-					// Fallthrough block
-					jumpTargets[nextPC] = true
-					if !blockVisited[nextPC] && nextPC >= d.textStart && nextPC < d.textEnd {
-						blockVisited[nextPC] = true
-						blockQueue = append(blockQueue, nextPC)
-					}
+					enqueueBlock(nextPC)
 				}
 			}
 

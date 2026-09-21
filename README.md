@@ -131,8 +131,9 @@ The graphics and kernel subsystems are architected natively from first principle
 ## Prerequisites
 
 - macOS running on Apple Silicon (ARM64)
-- Go 1.21 or newer
+- Go 1.22 or newer (the module is built with Go 1.27)
 - Xcode Command Line Tools (`clang`)
+- FreeType 2 headers and library for samples that rasterize fonts (`font`, `system`, `SDL2`, `threading`)
 
 ---
 
@@ -191,7 +192,17 @@ open output_pngdec/pngdec.app
 - **Quit Application**: Press <kbd>Cmd</kbd> + <kbd>Q</kbd> or select **Quit** from the application menu.
 - **Close Window**: Press <kbd>Cmd</kbd> + <kbd>W</kbd>, <kbd>Esc</kbd>, or click the red close button <kbd>⨉</kbd>. The app terminates cleanly with zero lingering background processes.
 
-#### D. Core Verification Tests
+#### F. Dynamic PRX loading (`using_library.elf`)
+Loads `/app0/sce_module/libExample.prx` through `sceKernelLoadStartModule`, resolves `_Z19testLibraryFunctionPcmi` with `sceKernelDlsym`, and prints a `std::ostringstream` string built inside the PRX. The PRX must live in the app's `sce_module` directory (map guest `/app0` with `--app-dir`):
+
+```bash
+go run . tools/OpenOrbis/PS4Toolchain/samples/using_library/using_library/x64/Debug/using_library.elf \
+  --app-dir tools/OpenOrbis/PS4Toolchain/samples/using_library -o output_using_library -r -t 4
+# Opened exampleLib: 1 | Jumping to 0x20020
+# test string: Hi I'm from the library! You passed: 13371338 | rv = 0x00000000
+```
+
+#### G. Core Verification Tests
 - **Multi-Threading & Atomicity (`threading_test.elf`)**:
   ```bash
   go run . tests/threading_test/threading_test.elf -o output_thread --asan -r -t 3
@@ -210,29 +221,30 @@ open output_pngdec/pngdec.app
 
 ---
 
-## Verified OpenOrbis Sample Coverage
+## Verified Sample Runs
 
-Automated test suite (`pkg/lifter/coverage_test.go`) validates **100.0% opcode coverage** across all built samples:
+`pkg/lifter/coverage_test.go` checks that every opcode in the built samples has a lifter. Live runs below used `go run . <elf> -o <dir> -r -t 3..5` after the PRX / jump-table / DT_INIT stack work.
 
-| Sample Binary | Instructions | Functions | Status |
-| :--- | :--- | :--- | :--- |
-| `graphics.elf` | 19,348 | 662 | **100.0%** (Verified Live on Metal) |
-| `input.elf` | 42,373 | 862 | **100.0%** (Verified Live on Metal & GameController) |
-| `SDL2.elf` | 242,993 | 1,728 | **100.0%** (Verified Live: Game, Sound, Keyboard/Pad) |
-| `pngdec.elf` | 41,322 | 839 | **100.0%** (Verified Live on Metal) |
-| `threading.elf` | 22,036 | 818 | **100.0%** (Verified Live: std::thread & mutex) |
-| `keyboard.elf` | 21,103 | 686 | **100.0%** (Verified Live on Metal & libSceKeyboard) |
-| `font.elf` | 19,727 | 665 | **100.0%** (Verified Live on Metal & FreeType 2) |
-| `audio-wav.elf` | 10,590 | 118 | **100.0%** (Verified Live: AudioQueue PCM 48kHz) |
-| `system.elf` | 20,011 | 674 | **100.0%** (Verified Live on Metal: FreeType & libSceUserService) |
-| `networking.elf` | 18,913 | 653 | **100.0%** |
-| `exceptions.elf` | 18,699 | 650 | **100.0%** (Verified Live: C++ throw/catch & unwinding) |
-| `hello_world.elf` | 18,423 | 644 | **100.0%** (Verified Live: stdout & libc) |
-| `piglet.elf` | 18,537 | 644 | **100.0%** |
-| `net_http.elf` | 5,396 | 69 | **100.0%** |
-| `trophies.elf` | 3,516 | 41 | **100.0%** (Verified Live: libSceNpTrophy & Trophy Unlocks) |
-| `dialogs.elf` | 3,422 | 42 | **100.0%** (Verified Live: Cocoa NSAlert & libSceMsgDialog) |
-| `using_library.elf` | 3,352 | 40 | **100.0%** (Verified Live: PRX Module Loading & Dlsym) |
+| Binary | Live run |
+| :--- | :--- |
+| `hello_world.elf` | Prints `Hello world!` then waits |
+| `exceptions.elf` | C++ `throw` / `catch`, prints `Testcase PASS` |
+| `tests/threading_test.elf` | Two workers, atomic counter 100 |
+| `tests/memory_stress_test.elf` | Sieve, matmul, qsort, mmap churn |
+| `using_library.elf` | Loads `libExample.prx`, prints the full library string |
+| `graphics.elf` | Metal present loop |
+| `pngdec.elf` | VFS PNG + Metal present loop |
+| `input.elf` | Controller UI + Metal present loop |
+| `keyboard.elf` | Keyboard UI + Metal present loop |
+| `font.elf` | FreeType text + Metal present loop |
+| `system.elf` | User service + FreeType + Metal present loop |
+| `threading.elf` | std::thread sample + Metal present loop |
+| `audio-wav.elf` | AudioQueue playback (watchdog clean) |
+| `SDL2.elf` | SDL window, TTF, pad, Metal present loop |
+| `trophies.elf` | Unlocks trophy ID 1 |
+| `dialogs.elf` | Starts; Cocoa alert if a display is attached |
+
+`networking.elf` and `net_http.elf` still abort (`sceNet` is unimplemented). `piglet.elf` aborts because `libScePigletv2VSH.sprx` / precompiled shaders are not AOT-linked.
 
 ---
 
@@ -283,3 +295,22 @@ PS4_RECOMP_MEM=2G perl -e 'alarm 4; exec "./output_graphics/ps4_app"'
 ├── hello_world.elf          # Testcase 1: Standard I/O, usleep, global initializers
 └── exceptions.elf           # Testcase 2: C++ throw/catch, DWARF unwinding, stringstream
 ```
+
+---
+
+## License
+
+This project is licensed under the GNU General Public License version 2. See [LICENSE](LICENSE).
+
+---
+
+## Acknowledgements
+
+Work on the loader, NID hashing, and sample binaries follows formats and tools published by other projects:
+
+- [OpenOrbis PS4 Toolchain](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain) — SDK samples used as live test binaries, `create-fself`, and the Sony NID hash (`SHA-1(name ‖ 518D64A635DED8C1E6B039B1C3E55230)`).
+- [golang.org/x/arch](https://pkg.go.dev/golang.org/x/arch/x86/x86asm) — x86-64 decoder; BMI1/BMI2 opcodes are extended in `vendor/golang.org/x/arch/x86/x86asm`.
+- musl and LLVM libc++ — the C and C++ runtimes statically linked into OpenOrbis ELF/PRX images that the recompiler executes as guest code.
+- [FreeType](https://freetype.org/) — host rasterizer behind the `FT_*` shims for font samples.
+- Apple Metal, Cocoa, GameController, and AudioToolbox — native presentation, input, and audio used by the runtime instead of a Vulkan translation layer.
+- Community documentation of Sony `\x7fCNT` PKG, PFS/PFSC, SELF (`0x1D3D154F`), and `PT_SCE_*` program headers, as implemented in `pkg/ps4pkg` and `pkg/elfloader`.

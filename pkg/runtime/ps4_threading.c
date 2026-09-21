@@ -1,6 +1,7 @@
 #include "recomp_runtime.h"
 #include <errno.h>
 #include <sched.h>
+#include <signal.h>
 
 // Multi-threading runtime support
 typedef struct RecompThread {
@@ -336,5 +337,37 @@ void shim_sched_get_priority_min(GuestContext *ctx) {
     ret = 0;
   }
   ctx->rax = (uint64_t)ret;
+  SHIM_RETURN();
+}
+
+void shim_pthread_sigmask(GuestContext *ctx) {
+  int how = (int)ctx->rdi;
+  uint64_t set_addr = ctx->rsi;
+  uint64_t oldset_addr = ctx->rdx;
+
+  sigset_t host_set, host_oldset;
+  sigset_t *p_set = NULL;
+  sigset_t *p_old = oldset_addr ? &host_oldset : NULL;
+
+  if (set_addr) {
+    uint32_t *guest_bits = (uint32_t *)(ctx->mem_base + set_addr);
+    host_set = (sigset_t)guest_bits[0];
+    p_set = &host_set;
+  }
+
+  int ret = pthread_sigmask(how, p_set, p_old);
+  if (ret != 0) {
+    set_guest_errno(ctx, ret);
+    ctx->rax = (uint64_t)ret;
+    SHIM_RETURN();
+  }
+  if (oldset_addr) {
+    uint32_t *guest_old = (uint32_t *)(ctx->mem_base + oldset_addr);
+    guest_old[0] = (uint32_t)host_oldset;
+    guest_old[1] = 0;
+    guest_old[2] = 0;
+    guest_old[3] = 0;
+  }
+  ctx->rax = 0;
   SHIM_RETURN();
 }

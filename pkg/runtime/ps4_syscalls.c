@@ -701,3 +701,165 @@ void shim_getrusage(GuestContext *ctx) {
   }
   SHIM_RETURN();
 }
+
+// FreeBSD rlim_t is signed; RLIM_INFINITY is 0x7fffffffffffffff.
+static uint64_t guest_rlim(rlim_t v) {
+  if (v == RLIM_INFINITY) {
+    return 0x7fffffffffffffffULL;
+  }
+  return (uint64_t)v;
+}
+
+static int host_rlimit_resource(int freebsd_res) {
+  switch (freebsd_res) {
+  case 0:
+    return RLIMIT_CPU;
+  case 1:
+    return RLIMIT_FSIZE;
+  case 2:
+    return RLIMIT_DATA;
+  case 3:
+    return RLIMIT_STACK;
+  case 4:
+    return RLIMIT_CORE;
+  case 5:
+#ifdef RLIMIT_RSS
+    return RLIMIT_RSS;
+#else
+    return RLIMIT_AS;
+#endif
+  case 6:
+    return RLIMIT_MEMLOCK;
+  case 7:
+    return RLIMIT_NPROC;
+  case 8:
+    return RLIMIT_NOFILE;
+  case 10:
+    return RLIMIT_AS;
+  default:
+    return -1;
+  }
+}
+
+// getrlimit(int resource, struct rlimit *rlp)
+void shim_getrlimit(GuestContext *ctx) {
+  int resource = (int)ctx->rdi;
+  uint64_t rlp = ctx->rsi;
+  if (!rlp) {
+    set_guest_errno(ctx, EFAULT);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+
+  int host_res = host_rlimit_resource(resource);
+  uint64_t *out = (uint64_t *)(ctx->mem_base + rlp);
+  if (host_res < 0) {
+    out[0] = 0x7fffffffffffffffULL;
+    out[1] = 0x7fffffffffffffffULL;
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+
+  struct rlimit lim;
+  if (getrlimit(host_res, &lim) != 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+  out[0] = guest_rlim(lim.rlim_cur);
+  out[1] = guest_rlim(lim.rlim_max);
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+// cpuset_getaffinity(cpulevel_t, cpuwhich_t, id_t, size_t, cpuset_t *)
+void shim_cpuset_getaffinity(GuestContext *ctx) {
+  size_t setsize = (size_t)ctx->rcx;
+  uint64_t mask_addr = ctx->r8;
+  if (!mask_addr || setsize == 0 || mask_addr + setsize > ctx->mem_size) {
+    set_guest_errno(ctx, EFAULT);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+
+  uint8_t *mask = ctx->mem_base + mask_addr;
+  memset(mask, 0, setsize);
+
+  long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+  if (ncpu < 1) {
+    ncpu = 1;
+  }
+  for (long i = 0; i < ncpu; i++) {
+    size_t word = (size_t)i / 64;
+    unsigned shift = (unsigned)i % 64;
+    size_t off = word * 8;
+    if (off + 8 > setsize) {
+      break;
+    }
+    uint64_t bits;
+    memcpy(&bits, mask + off, 8);
+    bits |= (uint64_t)1 << shift;
+    memcpy(mask + off, &bits, 8);
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_memcpy(GuestContext *ctx) {
+  uint64_t dst = ctx->rdi;
+  uint64_t src = ctx->rsi;
+  size_t n = (size_t)ctx->rdx;
+  memcpy(ctx->mem_base + dst, ctx->mem_base + src, n);
+  ctx->rax = dst;
+  SHIM_RETURN();
+}
+
+void shim_memmove(GuestContext *ctx) {
+  uint64_t dst = ctx->rdi;
+  uint64_t src = ctx->rsi;
+  size_t n = (size_t)ctx->rdx;
+  memmove(ctx->mem_base + dst, ctx->mem_base + src, n);
+  ctx->rax = dst;
+  SHIM_RETURN();
+}
+
+void shim_memset(GuestContext *ctx) {
+  uint64_t dst = ctx->rdi;
+  int c = (int)(uint8_t)ctx->rsi;
+  size_t n = (size_t)ctx->rdx;
+  memset(ctx->mem_base + dst, c, n);
+  ctx->rax = dst;
+  SHIM_RETURN();
+}
+
+void shim_strlen(GuestContext *ctx) {
+  const char *s = (const char *)(ctx->mem_base + ctx->rdi);
+  ctx->rax = (uint64_t)strlen(s);
+  SHIM_RETURN();
+}
+
+void shim_strcpy(GuestContext *ctx) {
+  uint64_t dst = ctx->rdi;
+  char *d = (char *)(ctx->mem_base + dst);
+  const char *s = (const char *)(ctx->mem_base + ctx->rsi);
+  strcpy(d, s);
+  ctx->rax = dst;
+  SHIM_RETURN();
+}
+
+void shim_strncpy(GuestContext *ctx) {
+  uint64_t dst = ctx->rdi;
+  char *d = (char *)(ctx->mem_base + dst);
+  const char *s = (const char *)(ctx->mem_base + ctx->rsi);
+  size_t n = (size_t)ctx->rdx;
+  strncpy(d, s, n);
+  ctx->rax = dst;
+  SHIM_RETURN();
+}
+
+void shim_strcmp(GuestContext *ctx) {
+  const char *a = (const char *)(ctx->mem_base + ctx->rdi);
+  const char *b = (const char *)(ctx->mem_base + ctx->rsi);
+  ctx->rax = (uint64_t)(uint32_t)(int32_t)strcmp(a, b);
+  SHIM_RETURN();
+}

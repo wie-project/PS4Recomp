@@ -70,11 +70,11 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.MOVHPD, x86asm.MOVLPD, x86asm.MOVLPS, x86asm.MOVHPS,
 		x86asm.MOVNTDQ, x86asm.UNPCKLPS, x86asm.UNPCKHPS, x86asm.INSB,
 		// AVX / VEX opcodes
-		x86asm.VMOVAPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ, x86asm.VMOVSS, x86asm.VMOVSD,
+		x86asm.VMOVAPS, x86asm.VMOVUPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ, x86asm.VMOVSS, x86asm.VMOVSD,
 		x86asm.VMOVNTPS, x86asm.VMOVNTDQ, x86asm.VBROADCASTSS,
 		x86asm.VADDSS, x86asm.VADDSD, x86asm.VSUBSS, x86asm.VSUBSD, x86asm.VMULSS, x86asm.VMULSD, x86asm.VDIVSS, x86asm.VDIVSD,
 		x86asm.VADDPS, x86asm.VSUBPS, x86asm.VMULPS, x86asm.VDIVPS, x86asm.VMAXPS, x86asm.VMINPS, x86asm.VHADDPS,
-		x86asm.VXORPS, x86asm.VPXOR, x86asm.VPOR, x86asm.VPAND, x86asm.VPADDW, x86asm.VPSUBW, x86asm.VPMULLW,
+		x86asm.VXORPS, x86asm.VANDPS, x86asm.VPXOR, x86asm.VPOR, x86asm.VPAND, x86asm.VPADDW, x86asm.VPSUBW, x86asm.VPMULLW,
 		x86asm.VPAVGB, x86asm.VPAVGW,
 		x86asm.VPINSRW, x86asm.VPINSRB, x86asm.VPINSRD,
 		x86asm.VPSLLW, x86asm.VPSRLW, x86asm.VPSRAW, x86asm.VPSLLD, x86asm.VPSRLD, x86asm.VPSRAD,
@@ -85,6 +85,10 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.VCVTSI2SS, x86asm.VCVTSI2SD, x86asm.VCVTTSS2SI, x86asm.VCVTTSD2SI, x86asm.VCVTSS2SD, x86asm.VCVTSD2SS,
 		x86asm.VUCOMISS, x86asm.VUCOMISD, x86asm.VPSHUFHW, x86asm.VPSHUFLW, x86asm.VROUNDSD, x86asm.VROUNDSS,
 		x86asm.VSQRTSS, x86asm.VSQRTSD,
+		x86asm.VPERMILPS, x86asm.VPERMILPD, x86asm.VCMPPS, x86asm.VSHUFPS,
+		x86asm.VINSERTPS, x86asm.VMOVSHDUP, x86asm.VMOVLPS, x86asm.VMOVMSKPS,
+		x86asm.VBLENDPS, x86asm.VBLENDVPS, x86asm.SHUFPS,
+		x86asm.CLC, x86asm.STC, x86asm.CLD, x86asm.STD, x86asm.MOVSB, x86asm.STOSB, x86asm.SCASB,
 		x86asm.CVTSI2SD, x86asm.CVTSI2SS, x86asm.CVTSS2SD, x86asm.CVTSD2SS,
 		x86asm.CVTTSD2SI, x86asm.CVTTSS2SI, x86asm.CVTSD2SI, x86asm.CVTSS2SI,
 		x86asm.VERW,
@@ -1117,13 +1121,31 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 		}
 		lines = append(lines, code...)
 
-	case x86asm.VMOVAPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ,
+	case x86asm.CLC:
+		lines = append(lines, "    ctx->cf = 0;")
+	case x86asm.STC:
+		lines = append(lines, "    ctx->cf = 1;")
+	case x86asm.CLD, x86asm.STD:
+		lines = append(lines, "    /* direction flag is not modeled; string ops increment */")
+	case x86asm.MOVSB:
+		lines = append(lines, l.liftMovsByte(inst.Inst)...)
+	case x86asm.STOSB:
+		lines = append(lines, l.liftStosByte(inst.Inst)...)
+	case x86asm.SCASB:
+		lines = append(lines, l.liftScasByte(inst.Inst)...)
+	case x86asm.SHUFPS:
+		code, err := l.liftShufps(args[0], args[0], args[1], args[2], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+	case x86asm.VMOVAPS, x86asm.VMOVUPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ,
 		x86asm.VMOVSS, x86asm.VMOVSD, x86asm.VMOVNTPS, x86asm.VMOVNTDQ, x86asm.VBROADCASTSS,
 		x86asm.VADDSS, x86asm.VADDSD, x86asm.VSUBSS, x86asm.VSUBSD,
 		x86asm.VMULSS, x86asm.VMULSD, x86asm.VDIVSS, x86asm.VDIVSD,
 		x86asm.VADDPS, x86asm.VSUBPS, x86asm.VMULPS, x86asm.VDIVPS,
 		x86asm.VMAXPS, x86asm.VMINPS, x86asm.VHADDPS,
-		x86asm.VXORPS, x86asm.VPXOR, x86asm.VPOR, x86asm.VPAND, x86asm.VPADDW, x86asm.VPSUBW, x86asm.VPMULLW,
+		x86asm.VXORPS, x86asm.VANDPS, x86asm.VPXOR, x86asm.VPOR, x86asm.VPAND, x86asm.VPADDW, x86asm.VPSUBW, x86asm.VPMULLW,
 		x86asm.VPAVGB, x86asm.VPAVGW,
 		x86asm.VPINSRW, x86asm.VPINSRB, x86asm.VPINSRD,
 		x86asm.VPSLLW, x86asm.VPSRLW, x86asm.VPSRAW, x86asm.VPSLLD, x86asm.VPSRLD, x86asm.VPSRAD,
@@ -1134,7 +1156,10 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 		x86asm.VCVTSI2SS, x86asm.VCVTSI2SD, x86asm.VCVTTSS2SI, x86asm.VCVTTSD2SI,
 		x86asm.VCVTSS2SD, x86asm.VCVTSD2SS,
 		x86asm.VUCOMISS, x86asm.VUCOMISD, x86asm.VPSHUFHW, x86asm.VPSHUFLW,
-		x86asm.VROUNDSD, x86asm.VROUNDSS, x86asm.VSQRTSS, x86asm.VSQRTSD:
+		x86asm.VROUNDSD, x86asm.VROUNDSS, x86asm.VSQRTSS, x86asm.VSQRTSD,
+		x86asm.VPERMILPS, x86asm.VPERMILPD, x86asm.VCMPPS, x86asm.VSHUFPS,
+		x86asm.VINSERTPS, x86asm.VMOVSHDUP, x86asm.VMOVLPS, x86asm.VMOVMSKPS,
+		x86asm.VBLENDPS, x86asm.VBLENDVPS:
 		code, err := l.liftVexOp(op, args, defMemSz, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
@@ -1439,5 +1464,3 @@ func intType(size int) string {
 		return "int64_t"
 	}
 }
-
-

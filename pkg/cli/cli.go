@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"debug/elf"
-	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -227,65 +225,17 @@ func Execute(args []string) error {
 	// Step 2: Disassembly and CFG Analysis
 	stepStart = time.Now()
 	fmt.Printf("[ps4-recomp] [2/4] Analyzing CFG and discovering reachable code...\n")
+	moduleInfos, err := loadCompanionModules(cfg, loaded)
+	if err != nil {
+		return err
+	}
+
 	d, err := disasm.NewDisassembler(loaded)
 	if err != nil {
 		return fmt.Errorf("failed to initialize disassembler: %w", err)
 	}
 
-	textSec, ok := loaded.Sections[".text"]
-	if !ok {
-		return fmt.Errorf("ELF '%s' is missing .text section", cfg.ElfPath)
-	}
-
-	var entries []uint64
-	entries = append(entries, loaded.EntryPoint)
-	entries = append(entries, loaded.InitArray...)
-	if mainSym, ok := loaded.SymbolByName["main"]; ok {
-		entries = append(entries, mainSym.Address)
-	}
-
-	// Seed defined function symbols as entry points
-	hasFuncSymbols := false
-	for _, sym := range loaded.Symbols {
-		if sym.Type == elf.STT_FUNC && sym.Address != 0 {
-			if cfg.AllSymbols || (sym.Address >= textSec.Addr && sym.Address < textSec.Addr+textSec.Size) {
-				entries = append(entries, sym.Address)
-				hasFuncSymbols = true
-			}
-		}
-	}
-
-	// If no function symbols are present (e.g. stripped binary), discover functions from
-	// relocations and data sections (vtables, callback tables).
-	if !hasFuncSymbols {
-		for _, rel := range loaded.Relocations {
-			if rel.Addend > 0 {
-				target := uint64(rel.Addend)
-				if target >= textSec.Addr+0x1000 && target < textSec.Addr+textSec.Size {
-					entries = append(entries, target)
-				}
-			}
-		}
-
-		dataSecNames := []string{".rodata", ".data.rel.ro", ".data"}
-		for _, secName := range dataSecNames {
-			sec, ok := loaded.Sections[secName]
-			if !ok || sec.Size < 8 {
-				continue
-			}
-			for off := uint64(0); off+8 <= sec.Size; off += 8 {
-				addr := sec.Addr + off
-				if addr+8 <= uint64(len(loaded.MemoryImage)) {
-					val := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
-					// Function pointers must be aligned and past the ELF header / null page
-					if val >= textSec.Addr+0x1000 && val < textSec.Addr+textSec.Size && (val%4 == 0) {
-						entries = append(entries, val)
-					}
-				}
-			}
-		}
-	}
-
+	entries := disasm.SeedEntryPoints(loaded, cfg.AllSymbols)
 	if err := d.AnalyzeReachable(entries); err != nil {
 		return fmt.Errorf("CFG analysis error: %w", err)
 	}
@@ -347,6 +297,8 @@ func Execute(args []string) error {
 	l := lifter.NewLifter(knownFuncs)
 	em := emitter.NewCEmitter(loaded, d, l)
 	em.AppDir = cfg.AppDir
+	em.Modules = moduleInfos
+	em.ChunkSize = cfg.ChunkSize
 
 	cFiles, err := em.EmitAll(cfg.OutDir)
 	if err != nil {
@@ -542,6 +494,59 @@ func runBinary(targetBin string, timeoutSec int, appDir string) error {
 		return nil
 	}
 	return err
+}
+
+func loadCompanionModules(cfg *Config, main *elfloader.LoadedELF) ([]emitter.GuestModule, error) {
+	refs := elfloader.DiscoverCompanionModules(cfg.ElfPath, cfg.AppDir, main.MemoryImage)
+	referenced := elfloader.ReferencedModuleNames(main.MemoryImage)
+	found := make(map[string]struct{})
+	for _, ref := range refs {
+		found[strings.ToLower(filepath.Base(ref.Path))] = struct{}{}
+		for _, alias := range ref.Aliases {
+			found[strings.ToLower(filepath.Base(alias))] = struct{}{}
+		}
+	}
+	for _, name := range referenced {
+		if _, ok := found[strings.ToLower(filepath.Base(name))]; ok {
+			continue
+		}
+		fmt.Printf("             Referenced module %s was not found for AOT linking\n", name)
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+
+	nextBase := (main.MaxVAddr + 0xFFFF) &^ 0xFFFF
+	if nextBase < 0x10000 {
+		nextBase = 0x10000
+	}
+	var modules []emitter.GuestModule
+	for _, ref := range refs {
+		mod, err := elfloader.LoadELF(ref.Path)
+		if err != nil {
+			fmt.Printf("             Skipping module %s: %v\n", filepath.Base(ref.Path), err)
+			continue
+		}
+		if elfloader.Overlaps(main, mod) {
+			if err := mod.ApplyBias(nextBase - mod.MinVAddr); err != nil {
+				return nil, fmt.Errorf("failed to relocate module %s: %w", filepath.Base(ref.Path), err)
+			}
+		}
+		if err := elfloader.MergeImages(main, mod); err != nil {
+			return nil, fmt.Errorf("failed to merge module %s: %w", filepath.Base(ref.Path), err)
+		}
+		nextBase = (main.MaxVAddr + 0xFFFF) &^ 0xFFFF
+		exports := mod.ExportedFunctions()
+		modules = append(modules, emitter.GuestModule{
+			FileName: mod.FileName,
+			Aliases:  ref.Aliases,
+			Exports:  exports,
+			Init:     append([]uint64(nil), mod.InitArray...),
+		})
+		fmt.Printf("             Linked module %s (%d exports, load 0x%x-0x%x)\n",
+			mod.FileName, len(exports), mod.MinVAddr, mod.MaxVAddr)
+	}
+	return modules, nil
 }
 
 func findRuntimeDir() (string, error) {
@@ -743,7 +748,15 @@ func handlePkgCommand(args []string) error {
 
 Subcommands:
   info <file.pkg | directory>     Inspect single PKG or scan directory for multiple PKGs (Base, Patch, DLC)
-  extract <file.pkg> [-o dir]     Extract unencrypted entries (param.sfo, icon0.png, etc.) to directory`)
+  extract <file.pkg> [options]    Extract inner PFS game files (eboot.bin, sce_sys, assets)
+  list <file.pkg>                 List files in the inner PFS without writing them
+
+Extract options:
+  -o, -out <dir>                  Output directory (default: <pkg>_extracted)
+  --passcode <32-char>            PKG passcode (fake packages are decrypted automatically)
+  --executables                   Extract only eboot.bin, PRX modules, sce_sys and sce_module
+  --meta                          Also dump unencrypted PKG table entries into sce_sys
+  --list                          List inner PFS files without extracting`)
 		return nil
 	}
 
@@ -803,7 +816,16 @@ Subcommands:
 		fmt.Printf("Title:           %s\n", pkg.Title())
 		fmt.Printf("App Version:     %s\n", pkg.AppVersion())
 		fmt.Printf("Category:        %s\n", pkg.Category())
+		fmt.Printf("DRM Type:        0x%x\n", pkg.DrmType)
+		fmt.Printf("Content Type:    0x%x\n", pkg.ContentType)
+		fmt.Printf("PFS Image:       offset 0x%x, size %s\n", pkg.PfsImageOffset, ps4pkg.FormatSize(int64(pkg.PfsImageSize)))
+		fmt.Printf("PFS Flags:       0x%x\n", pkg.PfsFlags)
 		fmt.Printf("Total Entries:   %d (Table offset: 0x%x, size: 0x%x)\n", len(pkg.Entries), pkg.RawHeader.TableOffset, pkg.RawHeader.TableSize)
+		if ekpfs, err := pkg.GetEkpfs(); err == nil {
+			fmt.Printf("EKPFS:           recovered from fake IMAGE_KEY (%d bytes)\n", len(ekpfs))
+		} else {
+			fmt.Printf("EKPFS:           %v\n", err)
+		}
 
 		if pkg.SFO != nil && len(pkg.SFO.Entries) > 0 {
 			fmt.Println("\n--- PARAM.SFO Metadata ---")
@@ -837,55 +859,91 @@ Subcommands:
 		fmt.Println()
 		return nil
 
+	case "list":
+		if len(args) < 2 {
+			return errors.New("usage: ps4-recomp pkg list <file.pkg> [--passcode <code>]")
+		}
+		return runPkgExtract(args[1], args[2:], true)
+
 	case "extract":
 		if len(args) < 2 {
-			return errors.New("usage: ps4-recomp pkg extract <file.pkg> [-o out_dir]")
+			return errors.New("usage: ps4-recomp pkg extract <file.pkg> [-o out_dir] [--executables] [--passcode <code>]")
 		}
-		target := args[1]
-		outDir := ""
-		for i := 2; i < len(args); i++ {
-			if (args[i] == "-o" || args[i] == "-out") && i+1 < len(args) {
-				outDir = args[i+1]
-				i++
-			}
-		}
-		if outDir == "" {
-			base := strings.TrimSuffix(filepath.Base(target), filepath.Ext(target))
-			outDir = base + "_extracted"
-		}
-
-		pkg, err := ps4pkg.Open(target)
-		if err != nil {
-			return fmt.Errorf("failed to open PKG: %w", err)
-		}
-		defer pkg.Close()
-
-		if err := os.MkdirAll(outDir, 0755); err != nil {
-			return fmt.Errorf("failed to create output directory %s: %w", outDir, err)
-		}
-
-		fmt.Printf("[ps4-recomp] Extracting unencrypted entries from %s to %s...\n", filepath.Base(target), outDir)
-		extractedCount := 0
-		for _, e := range pkg.Entries {
-			if e.IsEncrypted || e.DataSize == 0 {
-				continue
-			}
-			filename := e.Name
-			if filename == "" {
-				filename = fmt.Sprintf("entry_0x%08x.bin", e.ID)
-			}
-			dst := filepath.Join(outDir, filename)
-			_ = os.MkdirAll(filepath.Dir(dst), 0755)
-			if err := pkg.ExtractEntry(&e, dst); err == nil {
-				extractedCount++
-				fmt.Printf("  -> Extracted: %s (%s)\n", filename, ps4pkg.FormatSize(int64(e.DataSize)))
-			}
-		}
-		fmt.Printf("[ps4-recomp] Successfully extracted %d entries.\n", extractedCount)
-		return nil
+		return runPkgExtract(args[1], args[2:], false)
 
 	default:
 		return fmt.Errorf("unknown pkg subcommand '%s'. Run 'ps4-recomp pkg help' for usage", subcmd)
 	}
 }
 
+func runPkgExtract(target string, args []string, listOnly bool) error {
+	outDir := ""
+	passcode := ""
+	executables := false
+	meta := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-o", "-out", "--out":
+			if i+1 >= len(args) {
+				return fmt.Errorf("%s requires a directory argument", args[i])
+			}
+			outDir = args[i+1]
+			i++
+		case "--passcode":
+			if i+1 >= len(args) {
+				return errors.New("--passcode requires a 32-character passcode")
+			}
+			passcode = args[i+1]
+			i++
+		case "--executables":
+			executables = true
+		case "--meta":
+			meta = true
+		case "--list":
+			listOnly = true
+		default:
+			return fmt.Errorf("unknown extract option %q", args[i])
+		}
+	}
+	if outDir == "" && !listOnly {
+		base := strings.TrimSuffix(filepath.Base(target), filepath.Ext(target))
+		outDir = base + "_extracted"
+	}
+
+	pkg, err := ps4pkg.Open(target)
+	if err != nil {
+		return fmt.Errorf("failed to open PKG: %w", err)
+	}
+	defer pkg.Close()
+
+	if !listOnly {
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return fmt.Errorf("failed to create output directory %s: %w", outDir, err)
+		}
+		fmt.Printf("[ps4-recomp] Extracting %s -> %s\n", filepath.Base(target), outDir)
+	} else {
+		fmt.Printf("[ps4-recomp] Listing files in %s\n", filepath.Base(target))
+	}
+
+	n, err := pkg.Extract(ps4pkg.ExtractOptions{
+		OutputDir:   outDir,
+		Passcode:    passcode,
+		ListOnly:    listOnly,
+		Executables: executables,
+		MetaEntries: meta && !listOnly,
+		OnFile: func(path string, size int64) {
+			if listOnly || executables {
+				fmt.Printf("  %s (%s)\n", path, ps4pkg.FormatSize(size))
+			}
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if listOnly {
+		fmt.Printf("[ps4-recomp] %d files in inner PFS\n", n)
+	} else {
+		fmt.Printf("[ps4-recomp] Extracted %d files.\n", n)
+	}
+	return nil
+}

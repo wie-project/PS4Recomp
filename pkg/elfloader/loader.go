@@ -1,12 +1,41 @@
 package elfloader
 
 import (
+	"bytes"
 	"debug/elf"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 )
+
+const (
+	PT_SCE_DYNLIBDATA elf.ProgType = 0x61000000
+	PT_SCE_RELRO      elf.ProgType = 0x61000010
+
+	R_X86_64_JUMP_SLOT = 7
+	R_X86_64_RELATIVE  = 8
+	R_X86_64_GLOB_DAT  = 6
+	R_X86_64_64        = 1
+
+	DT_SCE_JMPREL   int64 = 0x61000029
+	DT_SCE_PLTRELSZ int64 = 0x6100002d
+	DT_SCE_RELA     int64 = 0x6100002f
+	DT_SCE_RELASZ   int64 = 0x61000031
+	DT_SCE_STRTAB   int64 = 0x61000035
+	DT_SCE_STRSZ    int64 = 0x61000037
+	DT_SCE_SYMTAB   int64 = 0x61000039
+	DT_SCE_SYMENT   int64 = 0x6100003b
+	DT_SCE_SYMTABSZ int64 = 0x6100003f
+
+	DT_INIT = 12
+	DT_FINI = 13
+)
+
+// AddrRange is a half-open [Start, End) guest virtual address interval.
+type AddrRange struct {
+	Start uint64
+	End   uint64
+}
 
 // Segment represents a loaded memory segment.
 type Segment struct {
@@ -19,12 +48,12 @@ type Segment struct {
 
 // Relocation represents a dynamic or static relocation record.
 type Relocation struct {
-	Offset  uint64 // Virtual address of the location to patch
-	Type    uint32 // Relocation type (e.g. R_X86_64_RELATIVE)
-	SymIdx  uint32 // Symbol index in dynsym/symtab
-	SymName string // Symbol name, if resolved
-	Addend  int64  // Addend value
-	PltAddr uint64 // Address in .plt section if R_X86_64_JUMP_SLOT
+	Offset  uint64
+	Type    uint32
+	SymIdx  uint32
+	SymName string
+	Addend  int64
+	PltAddr uint64
 }
 
 // Symbol represents an exported or local symbol.
@@ -38,6 +67,8 @@ type Symbol struct {
 
 // LoadedELF holds the parsed ELF metadata and initial memory layout.
 type LoadedELF struct {
+	Path         string
+	FileName     string
 	EntryPoint   uint64
 	Segments     []*Segment
 	Sections     map[string]*elf.Section
@@ -47,32 +78,48 @@ type LoadedELF struct {
 	DynSymbols   []Symbol
 	Relocations  []Relocation
 	InitArray    []uint64
+	ExecRanges   []AddrRange
+	DynlibData   []byte
 
-	// MinVAddr and MaxVAddr define the guest virtual address range.
 	MinVAddr uint64
 	MaxVAddr uint64
 
-	// MemoryImage holds the pre-mapped guest memory image with R_X86_64_RELATIVE applied.
+	// MemoryImage holds the pre-mapped guest memory image with relative relocs applied.
 	MemoryImage []byte
 }
 
-// LoadELF reads and parses a 64-bit ELF binary.
+// LoadELF reads and parses a 64-bit ELF binary. PS4 SELF/FSELF containers are unwrapped first.
 func LoadELF(path string) (*LoadedELF, error) {
-	file, err := elf.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open elf: %w", err)
+		return nil, fmt.Errorf("failed to read '%s': %w", path, err)
+	}
+	if IsSELF(data) {
+		data, err = ExtractELFFromSELF(data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract ELF from SELF '%s': %w", path, err)
+		}
+	}
+	loaded, err := LoadELFBytes(data)
+	if err != nil {
+		return nil, err
+	}
+	loaded.Path = path
+	loaded.FileName = basename(path)
+	return loaded, nil
+}
+
+// LoadELFBytes parses a 64-bit x86-64 ELF image from memory.
+func LoadELFBytes(data []byte) (*LoadedELF, error) {
+	file, err := elf.NewFile(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse elf: %w", err)
 	}
 	defer func() { _ = file.Close() }()
 
 	if file.Class != elf.ELFCLASS64 || file.Machine != elf.EM_X86_64 {
 		return nil, fmt.Errorf("unsupported ELF: must be 64-bit x86-64")
 	}
-
-	rawFile, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open raw elf file: %w", err)
-	}
-	defer func() { _ = rawFile.Close() }()
 
 	loaded := &LoadedELF{
 		EntryPoint:   file.Entry,
@@ -83,31 +130,29 @@ func LoadELF(path string) (*LoadedELF, error) {
 		MaxVAddr:     0,
 	}
 
-	// 1. Process Program Headers (LOAD segments)
+	type pendingSeg struct {
+		prog *elf.Prog
+		off  uint64
+		fsz  uint64
+	}
+	var pending []pendingSeg
+
 	for _, prog := range file.Progs {
-		if prog.Type != elf.PT_LOAD || prog.Memsz == 0 {
+		if prog.Type == PT_SCE_DYNLIBDATA && prog.Filesz > 0 && prog.Off+prog.Filesz <= uint64(len(data)) {
+			loaded.DynlibData = data[prog.Off : prog.Off+prog.Filesz]
+		}
+		if !isMappedProg(prog.Type) || prog.Memsz == 0 {
 			continue
 		}
-
-		segData := make([]byte, prog.Memsz)
-		if prog.Filesz > 0 {
-			if _, err := rawFile.Seek(int64(prog.Off), io.SeekStart); err != nil {
-				return nil, fmt.Errorf("failed to seek segment at offset 0x%x: %w", prog.Off, err)
-			}
-			if _, err := io.ReadFull(rawFile, segData[:prog.Filesz]); err != nil {
-				return nil, fmt.Errorf("failed to read segment data at 0x%x: %w", prog.Vaddr, err)
+		fsz := prog.Filesz
+		if prog.Off+fsz > uint64(len(data)) {
+			if prog.Off >= uint64(len(data)) {
+				fsz = 0
+			} else {
+				fsz = uint64(len(data)) - prog.Off
 			}
 		}
-
-		seg := &Segment{
-			Vaddr:  prog.Vaddr,
-			Memsz:  prog.Memsz,
-			Filesz: prog.Filesz,
-			Flags:  prog.Flags,
-			Data:   segData,
-		}
-		loaded.Segments = append(loaded.Segments, seg)
-
+		pending = append(pending, pendingSeg{prog: prog, off: prog.Off, fsz: fsz})
 		if prog.Vaddr < loaded.MinVAddr {
 			loaded.MinVAddr = prog.Vaddr
 		}
@@ -115,53 +160,58 @@ func LoadELF(path string) (*LoadedELF, error) {
 		if end > loaded.MaxVAddr {
 			loaded.MaxVAddr = end
 		}
+		if prog.Flags&elf.PF_X != 0 {
+			loaded.ExecRanges = append(loaded.ExecRanges, AddrRange{Start: prog.Vaddr, End: end})
+		}
 	}
 
-	if len(loaded.Segments) == 0 {
+	if len(pending) == 0 {
 		return nil, fmt.Errorf("no PT_LOAD segments found in ELF")
 	}
 
-	// Round memory image size up to 4096-byte page boundary
 	pageSize := uint64(4096)
 	totalMemSize := (loaded.MaxVAddr + pageSize - 1) &^ (pageSize - 1)
 	loaded.MemoryImage = make([]byte, totalMemSize)
 
-	// Copy segments into MemoryImage
-	for _, seg := range loaded.Segments {
-		copy(loaded.MemoryImage[seg.Vaddr:seg.Vaddr+seg.Filesz], seg.Data[:seg.Filesz])
+	for _, p := range pending {
+		if p.fsz > 0 {
+			end := p.prog.Vaddr + p.fsz
+			if end > uint64(len(loaded.MemoryImage)) {
+				return nil, fmt.Errorf("segment at 0x%x exceeds memory image", p.prog.Vaddr)
+			}
+			copy(loaded.MemoryImage[p.prog.Vaddr:end], data[p.off:p.off+p.fsz])
+		}
+		seg := &Segment{
+			Vaddr:  p.prog.Vaddr,
+			Memsz:  p.prog.Memsz,
+			Filesz: p.fsz,
+			Flags:  p.prog.Flags,
+		}
+		memEnd := p.prog.Vaddr + p.prog.Memsz
+		if memEnd > uint64(len(loaded.MemoryImage)) {
+			memEnd = uint64(len(loaded.MemoryImage))
+		}
+		seg.Data = loaded.MemoryImage[p.prog.Vaddr:memEnd]
+		loaded.Segments = append(loaded.Segments, seg)
 	}
 
-	// 2. Process Sections
 	for _, sec := range file.Sections {
 		loaded.Sections[sec.Name] = sec
 	}
 
-	// 3. Process Symbols (.symtab and .dynsym)
-	syms, err := file.Symbols()
-	if err == nil {
+	if syms, err := file.Symbols(); err == nil {
 		for _, s := range syms {
-			sym := Symbol{
+			addSymbol(loaded, Symbol{
 				Name:    s.Name,
 				Address: s.Value,
 				Size:    s.Size,
 				Type:    elf.ST_TYPE(s.Info),
 				Section: s.Section,
-			}
-			loaded.Symbols = append(loaded.Symbols, sym)
-			if sym.Name != "" {
-				loaded.SymbolByName[sym.Name] = sym
-			}
-			if sym.Address != 0 {
-				loaded.SymbolByAddr[sym.Address] = sym
-			}
+			})
 		}
 	}
 
-	dynSyms, err := file.DynamicSymbols()
-	if err == nil {
-		// debug/elf drops the STN_UNDEF (entry 0) symbol from DynamicSymbols().
-		// Since ELF relocation entries store 1-based symbol indices (info >> 32),
-		// we insert an empty Symbol{} at index 0 so that loaded.DynSymbols[symIdx] is 1-to-1.
+	if dynSyms, err := file.DynamicSymbols(); err == nil {
 		loaded.DynSymbols = append(loaded.DynSymbols, Symbol{})
 		for _, s := range dynSyms {
 			sym := Symbol{
@@ -172,10 +222,45 @@ func LoadELF(path string) (*LoadedELF, error) {
 				Section: s.Section,
 			}
 			loaded.DynSymbols = append(loaded.DynSymbols, sym)
+			if sym.Address != 0 {
+				addSymbol(loaded, sym)
+			}
 		}
 	}
 
-	// 4. Process Relocations (.rela.dyn and .rela.plt)
+	parseSCEDynamic(loaded, data, file)
+	parseRelocations(loaded, file)
+	parseInitArray(loaded)
+
+	if len(loaded.ExecRanges) == 0 {
+		for _, seg := range loaded.Segments {
+			if seg.Flags&elf.PF_X != 0 {
+				loaded.ExecRanges = append(loaded.ExecRanges, AddrRange{Start: seg.Vaddr, End: seg.Vaddr + seg.Memsz})
+			}
+		}
+	}
+	return loaded, nil
+}
+
+func isMappedProg(t elf.ProgType) bool {
+	return t == elf.PT_LOAD || t == PT_SCE_RELRO
+}
+
+func addSymbol(loaded *LoadedELF, sym Symbol) {
+	loaded.Symbols = append(loaded.Symbols, sym)
+	if sym.Name != "" {
+		if existing, ok := loaded.SymbolByName[sym.Name]; !ok || existing.Address == 0 {
+			loaded.SymbolByName[sym.Name] = sym
+		}
+	}
+	if sym.Address != 0 {
+		if existing, ok := loaded.SymbolByAddr[sym.Address]; !ok || existing.Name == "" {
+			loaded.SymbolByAddr[sym.Address] = sym
+		}
+	}
+}
+
+func parseRelocations(loaded *LoadedELF, file *elf.File) {
 	relSecNames := []string{".rela.dyn", ".rela.plt"}
 	for _, name := range relSecNames {
 		sec, ok := loaded.Sections[name]
@@ -184,98 +269,258 @@ func LoadELF(path string) (*LoadedELF, error) {
 		}
 		relData, err := sec.Data()
 		if err != nil {
-			return nil, fmt.Errorf("failed to read %s: %w", name, err)
+			continue
 		}
+		applyRelaTable(loaded, relData, name == ".rela.plt")
+	}
 
-		// ELF64 Rela is 24 bytes:
-		// Elf64_Addr   r_offset (8 bytes)
-		// Elf64_Xword  r_info   (8 bytes: sym = info >> 32, type = info & 0xffffffff)
-		// Elf64_Sxword r_addend (8 bytes)
-		entrySize := 24
-		for i := 0; i+entrySize <= len(relData); i += entrySize {
-			offset := binary.LittleEndian.Uint64(relData[i : i+8])
-			info := binary.LittleEndian.Uint64(relData[i+8 : i+16])
-			addend := int64(binary.LittleEndian.Uint64(relData[i+16 : i+24]))
-
-			relType := uint32(info & 0xffffffff)
-			symIdx := uint32(info >> 32)
-
-			var symName string
-			if int(symIdx) < len(loaded.DynSymbols) {
-				symName = loaded.DynSymbols[symIdx].Name
-			}
-
-			rel := Relocation{
-				Offset:  offset,
-				Type:    relType,
-				SymIdx:  symIdx,
-				SymName: symName,
-				Addend:  addend,
-			}
-
-			// If this is in .rela.plt (R_X86_64_JUMP_SLOT), calculate corresponding PLT entry
-			const R_X86_64_JUMP_SLOT = 7
-			if relType == R_X86_64_JUMP_SLOT && name == ".rela.plt" {
-				if pltSec, ok := loaded.Sections[".plt"]; ok {
-					entryIdx := i / entrySize
-					pltAddr := pltSec.Addr + 16*uint64(entryIdx+1)
-					rel.PltAddr = pltAddr
-					if offset+8 <= uint64(len(loaded.MemoryImage)) {
-						binary.LittleEndian.PutUint64(loaded.MemoryImage[offset:offset+8], pltAddr)
-					}
+	if pltSec, ok := loaded.Sections[".plt"]; ok {
+		entryIdx := 0
+		for i := range loaded.Relocations {
+			rel := &loaded.Relocations[i]
+			if rel.Type == R_X86_64_JUMP_SLOT && rel.PltAddr == 0 {
+				rel.PltAddr = pltSec.Addr + 16*uint64(entryIdx+1)
+				entryIdx++
+				if rel.Offset+8 <= uint64(len(loaded.MemoryImage)) {
+					binary.LittleEndian.PutUint64(loaded.MemoryImage[rel.Offset:rel.Offset+8], rel.PltAddr)
 				}
 			}
+		}
+	}
+}
 
-			// Apply R_X86_64_RELATIVE statically into memory image
-			// R_X86_64_RELATIVE: *offset = B + A (where B is base address = 0 for default guest mapping)
-			const R_X86_64_RELATIVE = 8
-			if relType == R_X86_64_RELATIVE {
+func applyRelaTable(loaded *LoadedELF, relData []byte, isPlt bool) {
+	const entrySize = 24
+	for i := 0; i+entrySize <= len(relData); i += entrySize {
+		offset := binary.LittleEndian.Uint64(relData[i : i+8])
+		info := binary.LittleEndian.Uint64(relData[i+8 : i+16])
+		addend := int64(binary.LittleEndian.Uint64(relData[i+16 : i+24]))
+		relType := uint32(info & 0xffffffff)
+		symIdx := uint32(info >> 32)
+
+		var symName string
+		if int(symIdx) < len(loaded.DynSymbols) {
+			symName = loaded.DynSymbols[symIdx].Name
+		}
+
+		rel := Relocation{
+			Offset:  offset,
+			Type:    relType,
+			SymIdx:  symIdx,
+			SymName: symName,
+			Addend:  addend,
+		}
+
+		if relType == R_X86_64_JUMP_SLOT && isPlt {
+			if pltSec, ok := loaded.Sections[".plt"]; ok {
+				entryIdx := i / entrySize
+				rel.PltAddr = pltSec.Addr + 16*uint64(entryIdx+1)
 				if offset+8 <= uint64(len(loaded.MemoryImage)) {
-					binary.LittleEndian.PutUint64(loaded.MemoryImage[offset:offset+8], uint64(addend))
+					binary.LittleEndian.PutUint64(loaded.MemoryImage[offset:offset+8], rel.PltAddr)
 				}
 			}
+		}
 
-			// Apply R_X86_64_GLOB_DAT for external data symbols like __stack_chk_guard
-			const R_X86_64_GLOB_DAT = 6
-			if relType == R_X86_64_GLOB_DAT {
-				if symName == "__stack_chk_guard" {
-					// Allocate guest page for canary if needed
-					guardAddr := (loaded.MaxVAddr + 4095) &^ 4095
-					if uint64(len(loaded.MemoryImage)) < guardAddr+4096 {
-						newImg := make([]byte, guardAddr+4096)
-						copy(newImg, loaded.MemoryImage)
-						loaded.MemoryImage = newImg
-						loaded.MaxVAddr = guardAddr + 4096
-					}
-					// Write canary value into guest canary location
-					const canaryValue = uint64(0x595e9fbd94fda766)
-					binary.LittleEndian.PutUint64(loaded.MemoryImage[guardAddr:guardAddr+8], canaryValue)
-					// Set GOT entry to point to the canary variable
-					if offset+8 <= uint64(len(loaded.MemoryImage)) {
-						binary.LittleEndian.PutUint64(loaded.MemoryImage[offset:offset+8], guardAddr)
-					}
-				}
+		if relType == R_X86_64_RELATIVE {
+			if offset+8 <= uint64(len(loaded.MemoryImage)) {
+				binary.LittleEndian.PutUint64(loaded.MemoryImage[offset:offset+8], uint64(addend))
 			}
-			loaded.Relocations = append(loaded.Relocations, rel)
+		}
+
+		if relType == R_X86_64_GLOB_DAT && symName == "__stack_chk_guard" {
+			applyStackCanary(loaded, offset)
+		}
+
+		if relType == R_X86_64_64 && int(symIdx) < len(loaded.DynSymbols) {
+			sym := loaded.DynSymbols[symIdx]
+			if sym.Address != 0 && offset+8 <= uint64(len(loaded.MemoryImage)) {
+				binary.LittleEndian.PutUint64(loaded.MemoryImage[offset:offset+8], sym.Address+uint64(addend))
+			}
+		}
+
+		loaded.Relocations = append(loaded.Relocations, rel)
+	}
+}
+
+func applyStackCanary(loaded *LoadedELF, gotOffset uint64) {
+	guardAddr := (loaded.MaxVAddr + 4095) &^ 4095
+	if uint64(len(loaded.MemoryImage)) < guardAddr+4096 {
+		newImg := make([]byte, guardAddr+4096)
+		copy(newImg, loaded.MemoryImage)
+		loaded.MemoryImage = newImg
+		loaded.MaxVAddr = guardAddr + 4096
+		for _, seg := range loaded.Segments {
+			end := seg.Vaddr + seg.Memsz
+			if end > uint64(len(loaded.MemoryImage)) {
+				end = uint64(len(loaded.MemoryImage))
+			}
+			if seg.Vaddr < end {
+				seg.Data = loaded.MemoryImage[seg.Vaddr:end]
+			}
 		}
 	}
+	const canaryValue = uint64(0x595e9fbd94fda766)
+	binary.LittleEndian.PutUint64(loaded.MemoryImage[guardAddr:guardAddr+8], canaryValue)
+	if gotOffset+8 <= uint64(len(loaded.MemoryImage)) {
+		binary.LittleEndian.PutUint64(loaded.MemoryImage[gotOffset:gotOffset+8], guardAddr)
+	}
+}
 
-	// 5. Parse .init_array
+func parseInitArray(loaded *LoadedELF) {
 	if initSec, ok := loaded.Sections[".init_array"]; ok && initSec.Size > 0 {
-		initData, err := initSec.Data()
-		if err == nil {
-			for i := 0; i+8 <= len(initData); i += 8 {
-				addr := binary.LittleEndian.Uint64(initData[i : i+8])
-				// If relocation was applied, fetch from MemoryImage at initSec.Addr + i
-				if initSec.Addr+uint64(i)+8 <= uint64(len(loaded.MemoryImage)) {
-					addr = binary.LittleEndian.Uint64(loaded.MemoryImage[initSec.Addr+uint64(i) : initSec.Addr+uint64(i)+8])
+		for i := uint64(0); i+8 <= initSec.Size; i += 8 {
+			addr := initSec.Addr + i
+			if addr+8 <= uint64(len(loaded.MemoryImage)) {
+				fn := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
+				if fn != 0 {
+					loaded.InitArray = append(loaded.InitArray, fn)
 				}
-				if addr != 0 {
-					loaded.InitArray = append(loaded.InitArray, addr)
-				}
+			}
+		}
+		return
+	}
+	// Fall back to scanning mapped pointers later in SeedEntryPoints.
+}
+
+func parseSCEDynamic(loaded *LoadedELF, data []byte, file *elf.File) {
+	var dynOff, dynSz uint64
+	for _, prog := range file.Progs {
+		if prog.Type == elf.PT_DYNAMIC {
+			dynOff = prog.Off
+			dynSz = prog.Filesz
+			break
+		}
+	}
+	if dynSz < 16 || dynOff+dynSz > uint64(len(data)) {
+		return
+	}
+	dyn := data[dynOff : dynOff+dynSz]
+
+	tags := make(map[int64]uint64, 32)
+	for i := 0; i+16 <= len(dyn); i += 16 {
+		tag := int64(binary.LittleEndian.Uint64(dyn[i : i+8]))
+		val := binary.LittleEndian.Uint64(dyn[i+8 : i+16])
+		if tag == 0 {
+			break
+		}
+		tags[tag] = val
+	}
+
+	base := loaded.DynlibData
+	if len(base) == 0 {
+		return
+	}
+
+	strtabOff, strtabSz := tags[DT_SCE_STRTAB], tags[DT_SCE_STRSZ]
+	symtabOff, symtabSz := tags[DT_SCE_SYMTAB], tags[DT_SCE_SYMTABSZ]
+	syment := tags[DT_SCE_SYMENT]
+	if syment == 0 {
+		syment = 24
+	}
+	if strtabOff >= uint64(len(base)) || symtabOff >= uint64(len(base)) {
+		return
+	}
+
+	strtab := base[strtabOff:]
+	if strtabSz > 0 && strtabOff+strtabSz <= uint64(len(base)) {
+		strtab = base[strtabOff : strtabOff+strtabSz]
+	}
+	symBytes := base[symtabOff:]
+	if symtabSz > 0 && symtabOff+symtabSz <= uint64(len(base)) {
+		symBytes = base[symtabOff : symtabOff+symtabSz]
+	}
+
+	// SCE SYMTAB already includes the STN_UNDEF entry at index 0. Prepending
+	// another dummy shifts every JUMP_SLOT onto the previous import.
+	if len(loaded.DynSymbols) == 0 {
+		for i := 0; i+int(syment) <= len(symBytes); i += int(syment) {
+			raw := symBytes[i : i+int(syment)]
+			nameOff := binary.LittleEndian.Uint32(raw[0:4])
+			info := raw[4]
+			shndx := binary.LittleEndian.Uint16(raw[6:8])
+			value := binary.LittleEndian.Uint64(raw[8:16])
+			size := binary.LittleEndian.Uint64(raw[16:24])
+			name := cstringAt(strtab, int(nameOff))
+			sym := Symbol{
+				Name:    name,
+				Address: value,
+				Size:    size,
+				Type:    elf.ST_TYPE(info),
+				Section: elf.SectionIndex(shndx),
+			}
+			loaded.DynSymbols = append(loaded.DynSymbols, sym)
+			if value != 0 && name != "" {
+				addSymbol(loaded, sym)
 			}
 		}
 	}
 
-	return loaded, nil
+	_, hasRelaDyn := loaded.Sections[".rela.dyn"]
+	_, hasRelaPlt := loaded.Sections[".rela.plt"]
+	if !hasRelaDyn {
+		if relaOff, ok := tags[DT_SCE_RELA]; ok {
+			relaSz := tags[DT_SCE_RELASZ]
+			if relaOff < uint64(len(base)) {
+				end := relaOff + relaSz
+				if relaSz == 0 || end > uint64(len(base)) {
+					end = uint64(len(base))
+				}
+				applyRelaTable(loaded, base[relaOff:end], false)
+			}
+		}
+	}
+	if initAddr, ok := tags[DT_INIT]; ok && initAddr != 0 {
+		loaded.InitArray = append(loaded.InitArray, initAddr)
+	}
+
+	if !hasRelaPlt {
+		if jmpOff, ok := tags[DT_SCE_JMPREL]; ok {
+			jmpSz := tags[DT_SCE_PLTRELSZ]
+			if jmpOff < uint64(len(base)) {
+				end := jmpOff + jmpSz
+				if jmpSz == 0 || end > uint64(len(base)) {
+					end = uint64(len(base))
+				}
+				applyRelaTable(loaded, base[jmpOff:end], true)
+			}
+		}
+	}
+}
+
+func cstringAt(buf []byte, off int) string {
+	if off < 0 || off >= len(buf) {
+		return ""
+	}
+	end := off
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	return string(buf[off:end])
+}
+
+func basename(path string) string {
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '/' || path[i] == '\\' {
+			return path[i+1:]
+		}
+	}
+	return path
+}
+
+// InExecutable reports whether addr falls in an executable mapped range.
+func (l *LoadedELF) InExecutable(addr uint64) bool {
+	if l == nil {
+		return false
+	}
+	for _, r := range l.ExecRanges {
+		if addr >= r.Start && addr < r.End {
+			return true
+		}
+	}
+	return false
+}
+
+// ContainsVA reports whether addr is inside the loaded memory image.
+func (l *LoadedELF) ContainsVA(addr uint64) bool {
+	return l != nil && addr < uint64(len(l.MemoryImage))
 }

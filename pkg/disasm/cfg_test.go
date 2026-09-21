@@ -3,9 +3,9 @@ package disasm_test
 import (
 	"testing"
 
+	"golang.org/x/arch/x86/x86asm"
 	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
-	"golang.org/x/arch/x86/x86asm"
 )
 
 func TestCFGAnalysis(t *testing.T) {

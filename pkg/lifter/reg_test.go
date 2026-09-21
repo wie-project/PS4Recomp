@@ -62,6 +62,18 @@ func TestLiftNewInstructions(t *testing.T) {
 			contains: []string{"/* insb */"},
 		},
 		{
+			name: "REP MOVSB",
+			inst: disasm.Instruction{
+				Address: 0x1100,
+				Inst: x86asm.Inst{
+					Op:     x86asm.MOVSB,
+					Prefix: x86asm.Prefixes{x86asm.PrefixREP},
+					Len:    2,
+				},
+			},
+			contains: []string{"memmove(ctx->mem_base + ctx->rdi"},
+		},
+		{
 			name: "VADDPS",
 			inst: disasm.Instruction{
 				Address: 0x1004,

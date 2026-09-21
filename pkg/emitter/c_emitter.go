@@ -2,6 +2,7 @@ package emitter
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,14 @@ import (
 
 	"golang.org/x/arch/x86/x86asm"
 )
+
+// GuestModule is a recompiled PRX/SPRX whose exports are published to sceKernelDlsym.
+type GuestModule struct {
+	FileName string
+	Aliases  []string
+	Exports  []elfloader.Symbol
+	Init     []uint64
+}
 
 // CanonicalShims maps library/kernel symbol names to host runtime shims.
 var CanonicalShims = map[string]string{
@@ -39,6 +48,9 @@ var CanonicalShims = map[string]string{
 	"exit":                      "shim_exit",
 	"poll":                      "shim_poll",
 	"raise":                     "shim_raise",
+	"pthread_sigmask":           "shim_pthread_sigmask",
+	"cpuset_getaffinity":        "shim_cpuset_getaffinity",
+	"getrlimit":                 "shim_getrlimit",
 	"sched_yield":               "shim_sched_yield",
 	"pthread_create":            "shim_pthread_create",
 	"pthread_join":              "shim_pthread_join",
@@ -67,24 +79,34 @@ var CanonicalShims = map[string]string{
 	"pthread_rwlock_wrlock":     "shim_pthread_rwlock_wrlock",
 	"pthread_rwlock_unlock":     "shim_pthread_rwlock_unlock",
 	"syscall":                   "shim_syscall",
+	// Guest libc memory primitives. SELF/PRX images statically link musl
+	// copies and export them by NID; bind those addresses to host shims so
+	// every module uses one implementation that copies through mem_base.
+	"memcpy":  "shim_memcpy",
+	"memmove": "shim_memmove",
+	"memset":  "shim_memset",
+	"strlen":  "shim_strlen",
+	"strcpy":  "shim_strcpy",
+	"strncpy": "shim_strncpy",
+	"strcmp":  "shim_strcmp",
 	// Direct Memory
 	"sceKernelAllocateDirectMemory": "shim_sceKernelAllocateDirectMemory",
 	"sceKernelGetDirectMemorySize":  "shim_sceKernelGetDirectMemorySize",
 	"sceKernelMapDirectMemory":      "shim_sceKernelMapDirectMemory",
 	"sceKernelReleaseDirectMemory":  "shim_sceKernelReleaseDirectMemory",
 	// Event Queue
-	"sceKernelCreateEqueue":         "shim_sceKernelCreateEqueue",
-	"sceKernelDeleteEqueue":         "shim_sceKernelDeleteEqueue",
-	"sceKernelWaitEqueue":           "shim_sceKernelWaitEqueue",
+	"sceKernelCreateEqueue": "shim_sceKernelCreateEqueue",
+	"sceKernelDeleteEqueue": "shim_sceKernelDeleteEqueue",
+	"sceKernelWaitEqueue":   "shim_sceKernelWaitEqueue",
 	// VideoOut display
-	"sceVideoOutOpen":               "shim_sceVideoOutOpen",
-	"sceVideoOutClose":              "shim_sceVideoOutClose",
-	"sceVideoOutSetBufferAttribute": "shim_sceVideoOutSetBufferAttribute",
-	"sceVideoOutRegisterBuffers":    "shim_sceVideoOutRegisterBuffers",
-	"sceVideoOutSetFlipRate":        "shim_sceVideoOutSetFlipRate",
-	"sceVideoOutAddFlipEvent":       "shim_sceVideoOutAddFlipEvent",
-	"sceVideoOutSubmitFlip":         "shim_sceVideoOutSubmitFlip",
-	"sceVideoOutGetFlipStatus":      "shim_sceVideoOutGetFlipStatus",
+	"sceVideoOutOpen":                "shim_sceVideoOutOpen",
+	"sceVideoOutClose":               "shim_sceVideoOutClose",
+	"sceVideoOutSetBufferAttribute":  "shim_sceVideoOutSetBufferAttribute",
+	"sceVideoOutRegisterBuffers":     "shim_sceVideoOutRegisterBuffers",
+	"sceVideoOutSetFlipRate":         "shim_sceVideoOutSetFlipRate",
+	"sceVideoOutAddFlipEvent":        "shim_sceVideoOutAddFlipEvent",
+	"sceVideoOutSubmitFlip":          "shim_sceVideoOutSubmitFlip",
+	"sceVideoOutGetFlipStatus":       "shim_sceVideoOutGetFlipStatus",
 	"sceVideoOutGetResolutionStatus": "shim_sceVideoOutGetResolutionStatus",
 	"sceVideoOutIsFlipPending":       "shim_sceVideoOutIsFlipPending",
 	"sceVideoOutUnregisterBuffers":   "shim_sceVideoOutUnregisterBuffers",
@@ -127,7 +149,7 @@ var CanonicalShims = map[string]string{
 	"sceAudioOutOutput": "shim_sceAudioOutOutput",
 	"sceAudioOutClose":  "shim_sceAudioOutClose",
 	// User Service
-	"sceUserServiceInitialize":        "shim_sceUserServiceInitialize",
+	"sceUserServiceInitialize":         "shim_sceUserServiceInitialize",
 	"sceUserServiceGetInitialUser":     "shim_sceUserServiceGetInitialUser",
 	"sceUserServiceGetLoginUserIdList": "shim_sceUserServiceGetLoginUserIdList",
 	"sceUserServiceGetUserName":        "shim_sceUserServiceGetUserName",
@@ -140,25 +162,25 @@ var CanonicalShims = map[string]string{
 	"scePadRead":      "shim_scePadRead",
 	"scePadGetHandle": "shim_scePadGetHandle",
 	// Keyboard Subsystem
-	"sceKeyboardInit":       "shim_sceKeyboardInit",
-	"sceKeyboardOpen":       "shim_sceKeyboardOpen",
-	"sceKeyboardClose":      "shim_sceKeyboardClose",
-	"sceKeyboardReadState":  "shim_sceKeyboardReadState",
-	"sceKeyboardGetKey2Char":"shim_sceKeyboardGetKey2Char",
-	"sceKeyboardGetHandle":  "shim_sceKeyboardGetHandle",
+	"sceKeyboardInit":        "shim_sceKeyboardInit",
+	"sceKeyboardOpen":        "shim_sceKeyboardOpen",
+	"sceKeyboardClose":       "shim_sceKeyboardClose",
+	"sceKeyboardReadState":   "shim_sceKeyboardReadState",
+	"sceKeyboardGetKey2Char": "shim_sceKeyboardGetKey2Char",
+	"sceKeyboardGetHandle":   "shim_sceKeyboardGetHandle",
 	// Sysmodule
-	"sceSysmoduleLoadModule":          "shim_sceSysmoduleLoadModule",
-	"sceSysmoduleIsLoaded":            "shim_sceSysmoduleIsLoaded",
-	"sceSysmoduleUnloadModule":        "shim_sceSysmoduleUnloadModule",
-	"sceSysmoduleLoadModuleInternal":  "shim_sceSysmoduleLoadModuleInternal",
-	"sceSysmoduleUnloadModuleInternal":"shim_sceSysmoduleUnloadModuleInternal",
+	"sceSysmoduleLoadModule":           "shim_sceSysmoduleLoadModule",
+	"sceSysmoduleIsLoaded":             "shim_sceSysmoduleIsLoaded",
+	"sceSysmoduleUnloadModule":         "shim_sceSysmoduleUnloadModule",
+	"sceSysmoduleLoadModuleInternal":   "shim_sceSysmoduleLoadModuleInternal",
+	"sceSysmoduleUnloadModuleInternal": "shim_sceSysmoduleUnloadModuleInternal",
 	// FreeType
-	"FT_Init_FreeType":                "shim_FT_Init_FreeType",
-	"FT_New_Face":                     "shim_FT_New_Face",
-	"FT_Set_Pixel_Sizes":              "shim_FT_Set_Pixel_Sizes",
-	"FT_Get_Char_Index":               "shim_FT_Get_Char_Index",
-	"FT_Load_Glyph":                   "shim_FT_Load_Glyph",
-	"FT_Render_Glyph":                 "shim_FT_Render_Glyph",
+	"FT_Init_FreeType":   "shim_FT_Init_FreeType",
+	"FT_New_Face":        "shim_FT_New_Face",
+	"FT_Set_Pixel_Sizes": "shim_FT_Set_Pixel_Sizes",
+	"FT_Get_Char_Index":  "shim_FT_Get_Char_Index",
+	"FT_Load_Glyph":      "shim_FT_Load_Glyph",
+	"FT_Render_Glyph":    "shim_FT_Render_Glyph",
 	// CommonDialog & MsgDialog
 	"sceCommonDialogInitialize":       "shim_sceCommonDialogInitialize",
 	"sceCommonDialogIsUsed":           "shim_sceCommonDialogIsUsed",
@@ -183,11 +205,33 @@ var CanonicalShims = map[string]string{
 	"sceNpTrophyUnlockTrophy":    "shim_sceNpTrophyUnlockTrophy",
 	"sceNpTrophyShowTrophyList":  "shim_sceNpTrophyShowTrophyList",
 	// Dynamic Module Loader
-	"sceKernelLoadStartModule":   "shim_sceKernelLoadStartModule",
-	"sceKernelDlsym":             "shim_sceKernelDlsym",
+	"sceKernelLoadStartModule": "shim_sceKernelLoadStartModule",
+	"sceKernelDlsym":           "shim_sceKernelDlsym",
 }
 
-// LookupShim looks up a shim name for a symbol name, stripping leading underscores if needed.
+func nidPrefix(name string) string {
+	if i := strings.IndexByte(name, '#'); i >= 0 {
+		return name[:i]
+	}
+	return ""
+}
+
+func shimByNID(nid string) (string, bool) {
+	if nid == "" {
+		return "", false
+	}
+	for plain, shim := range CanonicalShims {
+		if elfloader.CalculateNID(plain) == nid {
+			return shim, true
+		}
+		if !strings.HasPrefix(plain, "_") && elfloader.CalculateNID("_"+plain) == nid {
+			return shim, true
+		}
+	}
+	return "", false
+}
+
+// LookupShim looks up a host shim for a symbol name or Sony NID (hash#lib#mod).
 func LookupShim(name string) (string, bool) {
 	if shim, ok := CanonicalShims[name]; ok {
 		return shim, true
@@ -196,37 +240,71 @@ func LookupShim(name string) (string, bool) {
 	if shim, ok := CanonicalShims[stripped]; ok {
 		return shim, true
 	}
+	if nid := nidPrefix(name); nid != "" {
+		if shim, ok := shimByNID(nid); ok {
+			return shim, true
+		}
+	}
 	return "", false
 }
 
 // CEmitter emits C source files from disassembled functions.
 type CEmitter struct {
-	elf     *elfloader.LoadedELF
-	disasm  *disasm.Disassembler
-	lifter  *lifter.Lifter
-	shimMap map[uint64]string
-	AppDir  string
+	elf       *elfloader.LoadedELF
+	disasm    *disasm.Disassembler
+	lifter    *lifter.Lifter
+	shimMap   map[uint64]string
+	AppDir    string
+	Modules   []GuestModule
+	ChunkSize int
 }
 
 // NewCEmitter creates a new C emitter.
 func NewCEmitter(loaded *elfloader.LoadedELF, d *disasm.Disassembler, l *lifter.Lifter) *CEmitter {
 	shimMap := make(map[uint64]string)
-	for _, rel := range loaded.Relocations {
-		if rel.SymName != "" {
-			if shim, ok := LookupShim(rel.SymName); ok {
-				if rel.PltAddr != 0 {
-					shimMap[rel.PltAddr] = shim
-				}
-				shimMap[rel.Offset] = shim
-			}
+	bindAddr := func(name string, addr uint64) {
+		if name == "" || addr == 0 {
+			return
+		}
+		if shim, ok := LookupShim(name); ok {
+			shimMap[addr] = shim
 		}
 	}
-	for _, sym := range loaded.Symbols {
-		if sym.Name != "" && sym.Address != 0 {
-			if shim, ok := LookupShim(sym.Name); ok {
-				shimMap[sym.Address] = shim
+	for _, rel := range loaded.Relocations {
+		if rel.Type == elfloader.R_X86_64_JUMP_SLOT && rel.Offset+8 <= uint64(len(loaded.MemoryImage)) {
+			if rel.SymName != "" {
+				if shim, ok := LookupShim(rel.SymName); ok {
+					if rel.PltAddr != 0 {
+						shimMap[rel.PltAddr] = shim
+					}
+					shimMap[rel.Offset] = shim
+					// call *[GOT] loads the slot; store the GOT VA so dispatch hits the shim.
+					binary.LittleEndian.PutUint64(loaded.MemoryImage[rel.Offset:rel.Offset+8], rel.Offset)
+					continue
+				}
 			}
+			binary.LittleEndian.PutUint64(loaded.MemoryImage[rel.Offset:rel.Offset+8], 0)
+			continue
 		}
+		if rel.SymName == "" {
+			continue
+		}
+		shim, ok := LookupShim(rel.SymName)
+		if !ok {
+			continue
+		}
+		if rel.PltAddr != 0 {
+			shimMap[rel.PltAddr] = shim
+		}
+		shimMap[rel.Offset] = shim
+	}
+	for _, sym := range loaded.Symbols {
+		bindAddr(sym.Name, sym.Address)
+	}
+	// SELF/PRX files often have empty section symbols; the Sony dynsym
+	// table still names statically linked libc routines by NID.
+	for _, sym := range loaded.DynSymbols {
+		bindAddr(sym.Name, sym.Address)
 	}
 
 	return &CEmitter{
@@ -238,16 +316,15 @@ func NewCEmitter(loaded *elfloader.LoadedELF, d *disasm.Disassembler, l *lifter.
 }
 
 // ResolveEntryAddress dynamically resolves the primary guest entry point.
-// It prioritizes the ELF EntryPoint (_start), falls back to the "main" symbol,
-// and defaults to 0x60 if no metadata is present.
-func (e *CEmitter) ResolveEntryAddress() (uint64, string) {
+// It prioritizes the ELF EntryPoint (_start) and falls back to the "main" symbol.
+func (e *CEmitter) ResolveEntryAddress() (uint64, string, error) {
 	if e.elf.EntryPoint != 0 {
-		return e.elf.EntryPoint, "_start"
+		return e.elf.EntryPoint, "_start", nil
 	}
 	if mainSym, ok := e.elf.SymbolByName["main"]; ok && mainSym.Address != 0 {
-		return mainSym.Address, "main"
+		return mainSym.Address, "main", nil
 	}
-	return 0x60, "entry"
+	return 0, "", fmt.Errorf("ELF has no entry point and no main symbol")
 }
 
 // EmitAll generates all C files and guest image in the target directory,
@@ -280,6 +357,12 @@ func (e *CEmitter) EmitAll(outDir string) ([]string, error) {
 		return nil, fmt.Errorf("failed to emit chunked code: %w", err)
 	}
 	cFiles = append(cFiles, codeFiles...)
+
+	modPath := filepath.Join(outDir, "guest_modules.c")
+	if err := e.EmitGuestModules(modPath); err != nil {
+		return nil, fmt.Errorf("failed to emit guest_modules.c: %w", err)
+	}
+	cFiles = append(cFiles, modPath)
 
 	return cFiles, nil
 }
@@ -338,7 +421,10 @@ func (e *CEmitter) EmitChunkedCode(outDir string, targetBudget int) ([]string, e
 	if targetBudget <= 0 {
 		targetBudget = 15000
 	}
-	const maxFuncsPerChunk = 150
+	maxFuncsPerChunk := e.ChunkSize
+	if maxFuncsPerChunk <= 0 {
+		maxFuncsPerChunk = 150
+	}
 
 	var chunks [][]uint64
 	var currentChunk []uint64
@@ -584,7 +670,7 @@ func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
 		}
 	}()
 
-	if _, err := w.WriteString("#include \"recomp_runtime.h\"\n\n// Forward declarations of chunk registration functions\n"); err != nil {
+	if _, err := w.WriteString("#include \"recomp_runtime.h\"\n\nvoid recomp_register_guest_modules(void);\n\n// Forward declarations of chunk registration functions\n"); err != nil {
 		return err
 	}
 	for i := range numChunks {
@@ -604,6 +690,10 @@ func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
 	}
 
 	if err := e.emitPLTRegistrations(w); err != nil {
+		return err
+	}
+
+	if _, err := w.WriteString("    recomp_register_guest_modules();\n"); err != nil {
 		return err
 	}
 
@@ -630,14 +720,31 @@ func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
 		}
 	}
 
-	// Register shims for matching static symbols (e.g. libc stubs like syscall)
+	// Register shims for matching static and dynamic symbols (e.g. libc memcpy).
+	seen := make(map[uint64]struct{})
+	registerSym := func(sym elfloader.Symbol) error {
+		if sym.Name == "" || sym.Address == 0 {
+			return nil
+		}
+		if _, ok := seen[sym.Address]; ok {
+			return nil
+		}
+		shim, ok := LookupShim(sym.Name)
+		if !ok {
+			return nil
+		}
+		seen[sym.Address] = struct{}{}
+		_, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s); // Symbol %s\n", sym.Address, shim, sym.Name)
+		return err
+	}
 	for _, sym := range e.elf.Symbols {
-		if sym.Name != "" && sym.Address != 0 {
-			if shim, ok := LookupShim(sym.Name); ok {
-				if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s); // Symbol %s\n", sym.Address, shim, sym.Name); err != nil {
-					return err
-				}
-			}
+		if err := registerSym(sym); err != nil {
+			return err
+		}
+	}
+	for _, sym := range e.elf.DynSymbols {
+		if err := registerSym(sym); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -667,7 +774,10 @@ func (e *CEmitter) EmitMainRunner(path string) (err error) {
 		}
 	}()
 
-	entryAddr, entryName := e.ResolveEntryAddress()
+	entryAddr, entryName, err := e.ResolveEntryAddress()
+	if err != nil {
+		return err
+	}
 
 	vfsInitArg := "NULL"
 	if e.AppDir != "" {
@@ -701,7 +811,7 @@ int main(int argc, char **argv) {
         for (size_t i = 0; i < init_count; i++) {
             if (init_arr[i] != 0) {
                 printf("[ps4-recomp] Running init constructor at 0x%%llx...\n", (unsigned long long)init_arr[i]);
-                recomp_dispatch(ctx, init_arr[i]);
+                recomp_call_guest(ctx, init_arr[i]);
             }
         }
     }
@@ -730,4 +840,150 @@ func (e *CEmitter) formatInitArray() string {
 		return "        0"
 	}
 	return strings.Join(lines, "\n")
+}
+
+// EmitGuestModules writes the runtime export tables used by sceKernelDlsym.
+func (e *CEmitter) EmitGuestModules(path string) (err error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	w := bufio.NewWriter(f)
+	defer func() {
+		if ferr := w.Flush(); err == nil {
+			err = ferr
+		}
+	}()
+
+	if _, err := w.WriteString("#include \"recomp_runtime.h\"\n#include \"ps4_sysmodule.h\"\n\n"); err != nil {
+		return err
+	}
+
+	shimAddr := make(map[string]uint64)
+	for addr, shim := range e.shimMap {
+		for name, target := range CanonicalShims {
+			if target == shim {
+				if _, exists := shimAddr[name]; !exists {
+					shimAddr[name] = addr
+				}
+			}
+		}
+	}
+
+	nextSynth := (e.elf.MaxVAddr + 0xFFF) &^ 0xFFF
+	if nextSynth < 0x1000 {
+		nextSynth = 0x1000
+	}
+	var synthRegs []string
+	shimNames := make([]string, 0, len(CanonicalShims))
+	for name := range CanonicalShims {
+		shimNames = append(shimNames, name)
+	}
+	slices.Sort(shimNames)
+	for _, name := range shimNames {
+		if _, ok := shimAddr[name]; ok {
+			continue
+		}
+		shimAddr[name] = nextSynth
+		synthRegs = append(synthRegs, fmt.Sprintf("    recomp_register_fn(0x%xULL, %s);\n", nextSynth, CanonicalShims[name]))
+		nextSynth += 16
+	}
+
+	if _, err := w.WriteString("static const RecompModuleExport recomp_host_shim_exports[] = {\n"); err != nil {
+		return err
+	}
+	for _, name := range shimNames {
+		if _, err := fmt.Fprintf(w, "    { %q, 0x%xULL },\n", name, shimAddr[name]); err != nil {
+			return err
+		}
+	}
+	if _, err := w.WriteString("    { NULL, 0 }\n};\n\n"); err != nil {
+		return err
+	}
+
+	for i, mod := range e.Modules {
+		if _, err := fmt.Fprintf(w, "static const RecompModuleExport recomp_module_exports_%d[] = {\n", i); err != nil {
+			return err
+		}
+		for _, exp := range mod.Exports {
+			if _, err := fmt.Fprintf(w, "    { %q, 0x%xULL },\n", exp.Name, exp.Address); err != nil {
+				return err
+			}
+		}
+		if _, err := w.WriteString("    { NULL, 0 }\n};\n\n"); err != nil {
+			return err
+		}
+		if len(mod.Init) > 0 {
+			if _, err := fmt.Fprintf(w, "static const uint64_t recomp_module_init_%d[] = {\n", i); err != nil {
+				return err
+			}
+			for _, addr := range mod.Init {
+				if _, err := fmt.Fprintf(w, "    0x%xULL,\n", addr); err != nil {
+					return err
+				}
+			}
+			if _, err := w.WriteString("};\n\n"); err != nil {
+				return err
+			}
+		}
+	}
+
+	if _, err := w.WriteString("void recomp_register_guest_modules(void) {\n"); err != nil {
+		return err
+	}
+	for _, line := range synthRegs {
+		if _, err := w.WriteString(line); err != nil {
+			return err
+		}
+	}
+	hostNames := []string{"libc.prx", "libSceLibcInternal.prx", "libkernel.prx", "libSceFios2.prx"}
+	for _, name := range hostNames {
+		if _, err := fmt.Fprintf(w, "    recomp_module_register(%q, recomp_host_shim_exports);\n", name); err != nil {
+			return err
+		}
+	}
+	for i, mod := range e.Modules {
+		names := uniqueModuleNames(mod.FileName, mod.Aliases)
+		for _, name := range names {
+			if _, err := fmt.Fprintf(w, "    recomp_module_register(%q, recomp_module_exports_%d);\n", name, i); err != nil {
+				return err
+			}
+			if len(mod.Init) > 0 {
+				if _, err := fmt.Fprintf(w, "    recomp_module_register_init(%q, recomp_module_init_%d, %d);\n", name, i, len(mod.Init)); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if _, err := w.WriteString("}\n"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func uniqueModuleNames(fileName string, aliases []string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		key := strings.ToLower(filepath.Base(s))
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, filepath.Base(s))
+	}
+	add(fileName)
+	for _, a := range aliases {
+		add(a)
+	}
+	return out
 }

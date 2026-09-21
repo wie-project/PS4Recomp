@@ -1,0 +1,61 @@
+package emitter
+
+import (
+	"os"
+	"testing"
+
+	"ps4-recomp/pkg/elfloader"
+)
+
+func TestLookupShimByNID(t *testing.T) {
+	cases := []struct {
+		plain string
+		nid   string
+		shim  string
+	}{
+		{"pthread_sigmask", "JZKw5+Wrnaw", "shim_pthread_sigmask"},
+		{"cpuset_getaffinity", "Pdgml4rbxYk", "shim_cpuset_getaffinity"},
+		{"getrlimit", "Wh7HbV7JFqc", "shim_getrlimit"},
+		{"raise", "0t0-MxQNwK4", "shim_raise"},
+		{"memcpy", "Q3VBxCXhUHs", "shim_memcpy"},
+		{"memset", "8zTFvBIAIN8", "shim_memset"},
+		{"strlen", "j4ViWNHEgww", "shim_strlen"},
+		{"strncpy", "6sJWiWSRuqk", "shim_strncpy"},
+	}
+	for _, tc := range cases {
+		if got := elfloader.CalculateNID(tc.plain); got != tc.nid {
+			t.Fatalf("%s NID=%s want %s", tc.plain, got, tc.nid)
+		}
+		encoded := tc.nid + "#B#B"
+		shim, ok := LookupShim(encoded)
+		if !ok || shim != tc.shim {
+			t.Fatalf("LookupShim(%s)=%q ok=%v want %s", encoded, shim, ok, tc.shim)
+		}
+	}
+}
+
+func TestPRXDynsymBindsMemcpyShim(t *testing.T) {
+	path := "../../tools/OpenOrbis/PS4Toolchain/samples/using_library/sce_module/libExample.prx"
+	if _, err := os.Stat(path); err != nil {
+		t.Skip("libExample.prx not present")
+	}
+	loaded, err := elfloader.LoadELF(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := NewCEmitter(loaded, nil, nil)
+	wantNID := elfloader.CalculateNID("memcpy")
+	var memcpyAddr uint64
+	for _, sym := range loaded.DynSymbols {
+		if elfloader.NIDPrefix(sym.Name) == wantNID && sym.Address != 0 {
+			memcpyAddr = sym.Address
+			break
+		}
+	}
+	if memcpyAddr == 0 {
+		t.Fatal("PRX dynsym has no memcpy")
+	}
+	if e.shimMap[memcpyAddr] != "shim_memcpy" {
+		t.Fatalf("shimMap[0x%x]=%q want shim_memcpy", memcpyAddr, e.shimMap[memcpyAddr])
+	}
+}

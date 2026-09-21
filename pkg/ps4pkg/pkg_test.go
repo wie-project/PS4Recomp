@@ -2,8 +2,12 @@ package ps4pkg
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/binary"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -176,11 +180,93 @@ func TestSyntheticPKGParser(t *testing.T) {
 	}
 }
 
-func TestLiveHogwartsLegacyPKGs(t *testing.T) {
-	testDir := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition"
-	if _, err := os.ReadDir(testDir); err != nil {
-		t.Skipf("Live test path %s not accessible (sandbox or unmounted), skipping: %v", testDir, err)
+func TestTitleIDFromContentID(t *testing.T) {
+	cases := []struct {
+		id   string
+		want string
+	}{
+		{"EP1018-CUSA99999_00-TESTGAME00000001", "CUSA99999"},
+		{"JP0001-PLJS36001_00-JAPANESEGAME0001", "PLJS36001"},
+		{"HP0001-PCAS00001_00-ASIAGAME00000001", "PCAS00001"},
+		{"invalid", ""},
+		{"", ""},
 	}
+	for _, tc := range cases {
+		if got := TitleIDFromContentID(tc.id); got != tc.want {
+			t.Errorf("TitleIDFromContentID(%q)=%q, want %q", tc.id, got, tc.want)
+		}
+	}
+}
+
+func TestComputeKeysLength(t *testing.T) {
+	k, err := ComputeKeys("EP0000-CUSA99999_00-TESTGAME00000001", "00000000000000000000000000000000", 1)
+	if err != nil {
+		t.Fatalf("ComputeKeys: %v", err)
+	}
+	if len(k) != 32 {
+		t.Fatalf("expected 32-byte EKPFS, got %d", len(k))
+	}
+}
+
+func TestXTSRoundTrip(t *testing.T) {
+	dataKey := bytes.Repeat([]byte{0x11}, 16)
+	tweakKey := bytes.Repeat([]byte{0x22}, 16)
+	plain := bytes.Repeat([]byte{0xAB}, xtsSectorSize)
+	plain[0], plain[100], plain[4095] = 1, 2, 3
+	enc := append([]byte(nil), plain...)
+
+	data, err := aes.NewCipher(dataKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tweak, err := aes.NewCipher(tweakKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tb, et [16]byte
+	encryptXTSSector(data, tweak, enc, 16, &tb, &et)
+	if bytes.Equal(enc, plain) {
+		t.Fatal("XTS encrypt left plaintext unchanged")
+	}
+	decryptXTSSector(data, tweak, enc, 16, &tb, &et)
+	if !bytes.Equal(enc, plain) {
+		t.Fatal("XTS decrypt did not restore plaintext")
+	}
+}
+
+func encryptXTSSector(data, tweak cipher.Block, sector []byte, sectorNum uint64, tweakBuf, encTweak *[16]byte) {
+	for i := range tweakBuf {
+		tweakBuf[i] = 0
+	}
+	binary.LittleEndian.PutUint64(tweakBuf[:8], sectorNum)
+	tweak.Encrypt(encTweak[:], tweakBuf[:])
+	var block [16]byte
+	for off := 0; off < len(sector); off += 16 {
+		for i := 0; i < 16; i++ {
+			block[i] = sector[off+i] ^ encTweak[i]
+		}
+		data.Encrypt(block[:], block[:])
+		for i := 0; i < 16; i++ {
+			sector[off+i] = block[i] ^ encTweak[i]
+		}
+		gf128Double(encTweak)
+	}
+}
+
+func livePKGDir(t *testing.T) string {
+	t.Helper()
+	testDir := os.Getenv("PS4RECOMP_PKG_DIR")
+	if testDir == "" {
+		t.Skip("PS4RECOMP_PKG_DIR is not set; skipping live PKG tests")
+	}
+	if _, err := os.ReadDir(testDir); err != nil {
+		t.Skipf("PS4RECOMP_PKG_DIR %s is not accessible: %v", testDir, err)
+	}
+	return testDir
+}
+
+func TestLiveMultiPKGScan(t *testing.T) {
+	testDir := livePKGDir(t)
 
 	mgr := NewMultiPKGManager()
 	defer mgr.Close()
@@ -193,17 +279,118 @@ func TestLiveHogwartsLegacyPKGs(t *testing.T) {
 		t.Fatalf("Expected packages to be found in %s", testDir)
 	}
 
-	set, ok := mgr.GameSets["CUSA12771"]
-	if !ok {
-		t.Fatalf("Expected CUSA12771 to be found in GameSets")
+	if len(mgr.GameSets) == 0 {
+		t.Fatalf("Expected at least one title in GameSets")
 	}
 
-	if set.Title == "" {
-		t.Errorf("Expected non-empty Title for CUSA12771")
+	var set *GamePackageSet
+	for _, s := range mgr.GameSets {
+		set = s
+		break
 	}
-	if len(set.DLCs) == 0 {
-		t.Errorf("Expected DLCs to be detected for CUSA12771, got 0")
+	if set.TitleID == "" {
+		t.Errorf("Expected non-empty TitleID")
+	}
+	if set.Title == "" {
+		t.Errorf("Expected non-empty Title for %s", set.TitleID)
 	}
 
 	t.Logf("\n--- Multi-PKG Manager Report ---\n%s", set.SummaryString())
+}
+
+func TestLivePKGUnpackAndEboot(t *testing.T) {
+	testDir := livePKGDir(t)
+
+	var pkgPath string
+	err := filepath.Walk(testDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return err
+		}
+		if strings.HasSuffix(strings.ToLower(info.Name()), ".pkg") {
+			pkgPath = path
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+	if pkgPath == "" {
+		t.Skip("no .pkg files under PS4RECOMP_PKG_DIR")
+	}
+
+	pkg, err := Open(pkgPath)
+	if err != nil {
+		t.Fatalf("Open PKG %s: %v", pkgPath, err)
+	}
+	defer pkg.Close()
+
+	ekpfs, err := pkg.GetEkpfs()
+	if err != nil {
+		t.Fatalf("GetEkpfs: %v", err)
+	}
+	if len(ekpfs) != 32 {
+		t.Fatalf("EKPFS length %d", len(ekpfs))
+	}
+
+	if pkg.PfsImageSize == 0 {
+		t.Skip("PKG has no inner PFS image")
+	}
+	t.Logf("PKG title=%q titleID=%s app=%s pfs_off=0x%x pfs_size=%s",
+		pkg.Title(), pkg.TitleID(), pkg.AppVersion(), pkg.PfsImageOffset, FormatSize(int64(pkg.PfsImageSize)))
+
+	gameFS, err := pkg.OpenGameFS("")
+	if err != nil {
+		t.Fatalf("OpenGameFS: %v", err)
+	}
+	eboot := gameFS.Lookup("eboot.bin")
+	if eboot == nil || eboot.IsDir {
+		for _, f := range gameFS.AllFiles() {
+			if strings.EqualFold(f.Name, "eboot.bin") {
+				eboot = f
+				break
+			}
+		}
+	}
+	if eboot == nil {
+		var sample []string
+		for i, f := range gameFS.AllFiles() {
+			if i >= 30 {
+				break
+			}
+			sample = append(sample, f.Path)
+		}
+		t.Skipf("eboot.bin not in this PKG; sample files: %s", strings.Join(sample, ", "))
+	}
+	t.Logf("Found eboot.bin path=%s size=%s", eboot.Path, FormatSize(eboot.Size))
+	if eboot.Size < 1024 {
+		t.Fatalf("eboot.bin too small: %d", eboot.Size)
+	}
+
+	outDir := t.TempDir()
+	dst := filepath.Join(outDir, "eboot.bin")
+	rel := strings.TrimPrefix(eboot.Path, "uroot/")
+	if err := pkg.ExtractFile("", rel, dst); err != nil {
+		t.Fatalf("ExtractFile eboot.bin: %v", err)
+	}
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("stat extracted eboot: %v", err)
+	}
+	if fi.Size() != eboot.Size {
+		t.Fatalf("extracted size %d != pfs size %d", fi.Size(), eboot.Size)
+	}
+	hdr := make([]byte, 4)
+	f, err := os.Open(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Read(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if string(hdr) != "\x7fELF" && (hdr[0] != 0x4F || hdr[1] != 0x15 || hdr[2] != 0x3D || hdr[3] != 0x1D) {
+		t.Fatalf("extracted eboot.bin has unexpected magic %x", hdr)
+	}
+	t.Logf("Extracted eboot.bin magic=%x size=%d", hdr, fi.Size())
 }

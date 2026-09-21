@@ -1765,8 +1765,89 @@ func (l *Lifter) liftPshufhw(dst, src, immArg x86asm.Arg, nextPC uint64) ([]stri
 func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC uint64) ([]string, error) {
 	// 2-operand moves
 	switch op {
-	case x86asm.VMOVAPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVNTPS, x86asm.VMOVNTDQ:
+	case x86asm.VMOVAPS, x86asm.VMOVUPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVNTPS, x86asm.VMOVNTDQ:
 		return l.liftVectorMove(args[0], args[1], nextPC)
+	case x86asm.VMOVLPS:
+		if args[2] == nil {
+			return l.liftMovlpd(args[0], args[1], nextPC)
+		}
+		dstReg, ok1 := args[0].(x86asm.Reg)
+		src1Reg, ok2 := args[1].(x86asm.Reg)
+		if !ok1 || !ok2 || !isXmm(dstReg) || !isXmm(src1Reg) {
+			return nil, fmt.Errorf("vmovlps invalid registers")
+		}
+		infoDst := regMap[dstReg]
+		infoSrc1 := regMap[src1Reg]
+		lines := []string{fmt.Sprintf("    ctx->%s = ctx->%s;", infoDst.BaseReg, infoSrc1.BaseReg)}
+		code, err := l.liftMovlpd(args[0], args[2], nextPC)
+		if err != nil {
+			return nil, err
+		}
+		return append(lines, code...), nil
+	case x86asm.VMOVSHDUP:
+		return l.liftMovshdup(args[0], args[1], nextPC)
+	case x86asm.VMOVMSKPS:
+		return l.liftMovmskps(args[0], args[1], nextPC)
+	case x86asm.VPERMILPS:
+		if _, ok := args[2].(x86asm.Imm); ok {
+			return l.liftPermilpsImm(args[0], args[1], args[2], nextPC)
+		}
+		dstReg, ok1 := args[0].(x86asm.Reg)
+		if !ok1 || !isXmm(dstReg) {
+			return nil, fmt.Errorf("vpermilps destination must be XMM")
+		}
+		infoDst := regMap[dstReg]
+		lines := []string{"    {"}
+		s1, err := l.loadXmmArg(args[1], nextPC, "src")
+		if err != nil {
+			return nil, err
+		}
+		s2, err := l.loadXmmArg(args[2], nextPC, "sel")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, s1...)
+		lines = append(lines, s2...)
+		for i := 0; i < 4; i++ {
+			lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] = src.f32[sel.u32[%d] & 3];", infoDst.BaseReg, i, i))
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	case x86asm.VPERMILPD:
+		if _, ok := args[2].(x86asm.Imm); ok {
+			return l.liftPermilpdImm(args[0], args[1], args[2], nextPC)
+		}
+		dstReg, ok1 := args[0].(x86asm.Reg)
+		if !ok1 || !isXmm(dstReg) {
+			return nil, fmt.Errorf("vpermilpd destination must be XMM")
+		}
+		infoDst := regMap[dstReg]
+		lines := []string{"    {"}
+		s1, err := l.loadXmmArg(args[1], nextPC, "src")
+		if err != nil {
+			return nil, err
+		}
+		s2, err := l.loadXmmArg(args[2], nextPC, "sel")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, s1...)
+		lines = append(lines, s2...)
+		for i := 0; i < 2; i++ {
+			lines = append(lines, fmt.Sprintf("      ctx->%s.f64[%d] = src.f64[(sel.u64[%d] >> 1) & 1];", infoDst.BaseReg, i, i))
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	case x86asm.VSHUFPS:
+		return l.liftShufps(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VINSERTPS:
+		return l.liftInsertps(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VBLENDPS:
+		return l.liftBlendps(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VBLENDVPS:
+		return l.liftBlendvps(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VCMPPS:
+		return l.liftCmpps(args[0], args[1], args[2], args[3], nextPC)
 	case x86asm.VMOVD:
 		return l.liftMovd(args[0], args[1], nextPC)
 	case x86asm.VMOVQ:
@@ -2004,7 +2085,7 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		code, err = l.liftVectorBitwise(" ^ ", args[0], args[2], nextPC)
 	case x86asm.VPOR:
 		code, err = l.liftVectorBitwise(" | ", args[0], args[2], nextPC)
-	case x86asm.VPAND:
+	case x86asm.VPAND, x86asm.VANDPS:
 		code, err = l.liftVectorBitwise(" & ", args[0], args[2], nextPC)
 	case x86asm.VPADDW:
 		code, err = l.liftPadd(2, args[0], args[2], nextPC)
