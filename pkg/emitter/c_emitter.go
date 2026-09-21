@@ -257,6 +257,10 @@ type CEmitter struct {
 	AppDir    string
 	Modules   []GuestModule
 	ChunkSize int
+	// Funcs is an optional compact index of reachable functions. When set,
+	// emission re-disassembles each address instead of requiring d.Functions.
+	Funcs []disasm.ReachableFunc
+	HLE   *HLEReport
 }
 
 // NewCEmitter creates a new C emitter.
@@ -390,11 +394,7 @@ func (e *CEmitter) EmitFunctionsHeader(path string) (err error) {
 		return err
 	}
 
-	var fnAddrs []uint64
-	for addr := range e.disasm.Functions {
-		fnAddrs = append(fnAddrs, addr)
-	}
-	slices.Sort(fnAddrs)
+	fnAddrs := e.functionAddrs()
 
 	for _, addr := range fnAddrs {
 		if _, err := fmt.Fprintf(w, "void fn_0x%x(GuestContext *__restrict__ ctx);\n", addr); err != nil {
@@ -411,12 +411,52 @@ func (e *CEmitter) EmitFunctionsHeader(path string) (err error) {
 // EmitChunkedCode partitions recompiled functions across multiple C source files
 // based on an instruction budget to ensure balanced compile times and file sizes,
 // and emits a dispatch.c driver that ties all chunk registrations together.
-func (e *CEmitter) EmitChunkedCode(outDir string, targetBudget int) ([]string, error) {
-	var fnAddrs []uint64
-	for addr := range e.disasm.Functions {
-		fnAddrs = append(fnAddrs, addr)
+func (e *CEmitter) functionAddrs() []uint64 {
+	if len(e.Funcs) > 0 {
+		addrs := make([]uint64, len(e.Funcs))
+		for i, f := range e.Funcs {
+			addrs[i] = f.Addr
+		}
+		return addrs
 	}
-	slices.Sort(fnAddrs)
+	addrs := make([]uint64, 0, len(e.disasm.Functions))
+	for addr := range e.disasm.Functions {
+		addrs = append(addrs, addr)
+	}
+	slices.Sort(addrs)
+	return addrs
+}
+
+func (e *CEmitter) instCountByAddr() map[uint64]int {
+	if len(e.Funcs) > 0 {
+		m := make(map[uint64]int, len(e.Funcs))
+		for _, f := range e.Funcs {
+			m[f.Addr] = f.Insts
+		}
+		return m
+	}
+	m := make(map[uint64]int, len(e.disasm.Functions))
+	for addr, fn := range e.disasm.Functions {
+		m[addr] = e.functionInstCount(fn)
+	}
+	return m
+}
+
+func (e *CEmitter) loadFunction(addr uint64) (*disasm.Function, error) {
+	if e.disasm.Functions != nil {
+		if fn := e.disasm.Functions[addr]; fn != nil {
+			return fn, nil
+		}
+	}
+	fn, _, err := e.disasm.DisasmFunction(addr)
+	if err != nil {
+		return nil, err
+	}
+	return fn, nil
+}
+
+func (e *CEmitter) EmitChunkedCode(outDir string, targetBudget int) ([]string, error) {
+	fnAddrs := e.functionAddrs()
 
 	if targetBudget <= 0 {
 		targetBudget = 15000
@@ -430,9 +470,9 @@ func (e *CEmitter) EmitChunkedCode(outDir string, targetBudget int) ([]string, e
 	var currentChunk []uint64
 	currentInsts := 0
 
+	insts := e.instCountByAddr()
 	for _, addr := range fnAddrs {
-		fn := e.disasm.Functions[addr]
-		nInsts := e.functionInstCount(fn)
+		nInsts := insts[addr]
 
 		if len(currentChunk) > 0 && (currentInsts+nInsts > targetBudget || len(currentChunk) >= maxFuncsPerChunk) {
 			chunks = append(chunks, currentChunk)
@@ -505,8 +545,13 @@ func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint6
 		return err
 	}
 
-	for _, addr := range chunkAddrs {
-		fn := e.disasm.Functions[addr]
+	loaded := make([]*disasm.Function, len(chunkAddrs))
+	for i, addr := range chunkAddrs {
+		fn, err := e.loadFunction(addr)
+		if err != nil {
+			return fmt.Errorf("0x%x: %w", addr, err)
+		}
+		loaded[i] = fn
 		if err := e.emitFunction(w, fn); err != nil {
 			return err
 		}
@@ -516,8 +561,8 @@ func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint6
 	if _, err := fmt.Fprintf(w, "// Registration for chunk %d\nvoid recomp_init_dispatch_chunk_%d(void) {\n", chunkIdx, chunkIdx); err != nil {
 		return err
 	}
-	for _, addr := range chunkAddrs {
-		fn := e.disasm.Functions[addr]
+	for i, addr := range chunkAddrs {
+		fn := loaded[i]
 		if shim, isShimmed := e.shimMap[addr]; isShimmed {
 			if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s);\n", addr, shim); err != nil {
 				return err
@@ -623,6 +668,9 @@ func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 			return err
 		}
 
+		if e.HLE != nil {
+			e.HLE.ObserveBlock(block.Insts, e.shimMap)
+		}
 		for _, inst := range block.Insts {
 			nextPC := inst.Address + uint64(inst.Inst.Len)
 			lines, err := e.lifter.LiftInstruction(inst, nextPC, fn)

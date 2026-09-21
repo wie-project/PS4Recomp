@@ -32,6 +32,18 @@ func TestCFGAnalysis(t *testing.T) {
 	}
 
 	t.Logf("Discovered %d reachable functions", len(d.Functions))
+
+	d2, err := disasm.NewDisassembler(loaded)
+	if err != nil {
+		t.Fatalf("failed to create disasm: %v", err)
+	}
+	index, err := d2.DiscoverReachable(entries, nil)
+	if err != nil {
+		t.Fatalf("DiscoverReachable failed: %v", err)
+	}
+	if len(index) != len(d.Functions) {
+		t.Fatalf("DiscoverReachable found %d functions, AnalyzeReachable found %d", len(index), len(d.Functions))
+	}
 	totalBlocks := 0
 	totalInsts := 0
 	for _, fn := range d.Functions {

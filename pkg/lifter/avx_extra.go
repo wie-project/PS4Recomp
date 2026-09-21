@@ -959,6 +959,79 @@ func (l *Lifter) liftCwd() []string {
 	}
 }
 
+func (l *Lifter) liftCvttps2dq(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("cvttps2dq dst must be XMM")
+	}
+	infoDst := regMap[dstReg]
+	lines := []string{"    {"}
+	s, err := l.loadXmmArg(src, nextPC, "src")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, s...)
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("      ctx->%s.s32[%d] = (int32_t)truncf(src.f32[%d]);", infoDst.BaseReg, i, i))
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftPmovsxzx(signed bool, srcElem, dstElem int, dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("pmovsx/zx destination must be XMM")
+	}
+	infoDst := regMap[dstReg]
+	n := 16 / dstElem
+	srcField, dstField := "u16", "u32"
+	switch {
+	case signed && srcElem == 2 && dstElem == 4:
+		srcField, dstField = "s16", "s32"
+	case !signed && srcElem == 2 && dstElem == 4:
+		srcField, dstField = "u16", "u32"
+	case signed && srcElem == 1 && dstElem == 2:
+		srcField, dstField = "s8", "s16"
+	case !signed && srcElem == 1 && dstElem == 2:
+		srcField, dstField = "u8", "u16"
+	case signed && srcElem == 1 && dstElem == 4:
+		srcField, dstField = "s8", "s32"
+	case !signed && srcElem == 1 && dstElem == 4:
+		srcField, dstField = "u8", "u32"
+	}
+	lines := []string{"    {"}
+	s, err := l.loadXmmArg(src, nextPC, "src")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, s...)
+	for i := 0; i < n; i++ {
+		lines = append(lines, fmt.Sprintf("      ctx->%s.%s[%d] = src.%s[%d];", infoDst.BaseReg, dstField, i, srcField, i))
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftPmulld(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("pmulld destination must be XMM")
+	}
+	infoDst := regMap[dstReg]
+	lines := []string{"    {"}
+	s, err := l.loadXmmArg(src, nextPC, "src")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, s...)
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("      ctx->%s.s32[%d] *= src.s32[%d];", infoDst.BaseReg, i, i))
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
 func (l *Lifter) liftMovnti(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
 	val, sz, err := l.getOperandRead(src, defMemSz, nextPC)
 	if err != nil {

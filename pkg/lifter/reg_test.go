@@ -490,6 +490,42 @@ func TestLiftNewInstructions(t *testing.T) {
 			contains: []string{"(int16_t)ctx->rax < 0"},
 		},
 		{
+			name: "VCVTTPS2DQ",
+			inst: disasm.Instruction{
+				Address: 0x10A0,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VCVTTPS2DQ,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: []string{"(int32_t)truncf(src.f32[0])"},
+		},
+		{
+			name: "VPMOVZXWD",
+			inst: disasm.Instruction{
+				Address: 0x10A4,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VPMOVZXWD,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  5,
+				},
+			},
+			contains: []string{"ctx->xmm[0].u32[0] = src.u16[0];"},
+		},
+		{
+			name: "VPMULLD",
+			inst: disasm.Instruction{
+				Address: 0x10A9,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VPMULLD,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1, x86asm.X2},
+					Len:  5,
+				},
+			},
+			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].s32[0] *= src.s32[0];"},
+		},
+		{
 			name: "VSQRTPS",
 			inst: disasm.Instruction{
 				Address: 0x1095,

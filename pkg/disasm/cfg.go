@@ -142,8 +142,16 @@ func (d *Disassembler) inCode(addr uint64) bool {
 	return addr >= d.textStart && addr < d.textEnd
 }
 
-// AnalyzeReachable traverses and discovers all functions reachable from the given entry addresses.
-func (d *Disassembler) AnalyzeReachable(entryAddrs []uint64) error {
+// ReachableFunc is a compact index entry for a discovered function.
+type ReachableFunc struct {
+	Addr  uint64
+	Insts int
+}
+
+// WalkReachable disassembles each reachable function and invokes visit, then
+// drops the IR unless visit retains it. Call targets discovered in the
+// function are enqueued. Decode errors skip that entry.
+func (d *Disassembler) WalkReachable(entryAddrs []uint64, visit func(fn *Function) error) error {
 	queue := make([]uint64, 0, len(entryAddrs)*2)
 	visited := make(map[uint64]bool, len(entryAddrs)*2)
 
@@ -161,7 +169,11 @@ func (d *Disassembler) AnalyzeReachable(entryAddrs []uint64) error {
 		if err != nil {
 			continue
 		}
-		d.Functions[curr] = fn
+		if visit != nil {
+			if err := visit(fn); err != nil {
+				return err
+			}
+		}
 
 		for _, target := range newCalls {
 			if !visited[target] && d.inCode(target) {
@@ -172,6 +184,50 @@ func (d *Disassembler) AnalyzeReachable(entryAddrs []uint64) error {
 	}
 
 	return nil
+}
+
+// AnalyzeReachable traverses and discovers all functions reachable from the given entry addresses.
+func (d *Disassembler) AnalyzeReachable(entryAddrs []uint64) error {
+	return d.WalkReachable(entryAddrs, func(fn *Function) error {
+		d.Functions[fn.EntryAddr] = fn
+		return nil
+	})
+}
+
+// DiscoverReachable returns a compact address index of reachable functions
+// without retaining their IR. Flag liveness is skipped during the walk.
+func (d *Disassembler) DiscoverReachable(entryAddrs []uint64, progress func(nFn, nInst int)) ([]ReachableFunc, error) {
+	prev := d.SkipFlagLiveness
+	d.SkipFlagLiveness = true
+	defer func() { d.SkipFlagLiveness = prev }()
+
+	out := make([]ReachableFunc, 0, 1024)
+	nInst := 0
+	err := d.WalkReachable(entryAddrs, func(fn *Function) error {
+		n := 0
+		for _, b := range fn.Blocks {
+			n += len(b.Insts)
+		}
+		out = append(out, ReachableFunc{Addr: fn.EntryAddr, Insts: n})
+		nInst += n
+		if progress != nil {
+			progress(len(out), nInst)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(out, func(a, b ReachableFunc) int {
+		if a.Addr < b.Addr {
+			return -1
+		}
+		if a.Addr > b.Addr {
+			return 1
+		}
+		return 0
+	})
+	return out, nil
 }
 
 // DisasmFunction disassembles a single function starting at entryAddr (exported for testing).
@@ -412,8 +468,18 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 		}
 	}
 
+	// Stripped SELF images have no STT_FUNC sizes, so functionEnd is the whole
+	// RX range. Without a cap, a fallthrough into data is decoded as one
+	// multi-megabyte "function". Real compiler basic blocks and functions
+	// are far smaller than these limits.
+	const maxBlockBytes = 8192
+	const maxFnInsts = 32768
+
 	// Step 1: Linear sweep along branches within the function
 	for head := 0; head < len(blockQueue); head++ {
+		if len(instAtAddr) >= maxFnInsts {
+			break
+		}
 		blockStart := blockQueue[head]
 
 		pc := blockStart
@@ -497,6 +563,9 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 
 			pc = nextPC
 			if isTerminal || isBranch {
+				break
+			}
+			if pc-blockStart >= maxBlockBytes || len(instAtAddr) >= maxFnInsts {
 				break
 			}
 		}

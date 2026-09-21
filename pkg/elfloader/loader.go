@@ -17,15 +17,18 @@ const (
 	R_X86_64_GLOB_DAT  = 6
 	R_X86_64_64        = 1
 
-	DT_SCE_JMPREL   int64 = 0x61000029
-	DT_SCE_PLTRELSZ int64 = 0x6100002d
-	DT_SCE_RELA     int64 = 0x6100002f
-	DT_SCE_RELASZ   int64 = 0x61000031
-	DT_SCE_STRTAB   int64 = 0x61000035
-	DT_SCE_STRSZ    int64 = 0x61000037
-	DT_SCE_SYMTAB   int64 = 0x61000039
-	DT_SCE_SYMENT   int64 = 0x6100003b
-	DT_SCE_SYMTABSZ int64 = 0x6100003f
+	DT_SCE_NEEDED_MODULE int64 = 0x6100000f
+	DT_SCE_EXPORT_LIB    int64 = 0x61000013
+	DT_SCE_IMPORT_LIB    int64 = 0x61000015
+	DT_SCE_JMPREL        int64 = 0x61000029
+	DT_SCE_PLTRELSZ      int64 = 0x6100002d
+	DT_SCE_RELA          int64 = 0x6100002f
+	DT_SCE_RELASZ        int64 = 0x61000031
+	DT_SCE_STRTAB        int64 = 0x61000035
+	DT_SCE_STRSZ         int64 = 0x61000037
+	DT_SCE_SYMTAB        int64 = 0x61000039
+	DT_SCE_SYMENT        int64 = 0x6100003b
+	DT_SCE_SYMTABSZ      int64 = 0x6100003f
 
 	DT_INIT = 12
 	DT_FINI = 13
@@ -78,8 +81,12 @@ type LoadedELF struct {
 	DynSymbols   []Symbol
 	Relocations  []Relocation
 	InitArray    []uint64
-	ExecRanges   []AddrRange
-	DynlibData   []byte
+	NeededLibs   []string
+	// ImportLibs maps the 16-bit SCE library ID (DT_SCE_IMPORT_LIB LID)
+	// onto the plaintext library name in the SCE string table.
+	ImportLibs map[uint16]string
+	ExecRanges []AddrRange
+	DynlibData []byte
 
 	MinVAddr uint64
 	MaxVAddr uint64
@@ -229,6 +236,11 @@ func LoadELFBytes(data []byte) (*LoadedELF, error) {
 	}
 
 	parseSCEDynamic(loaded, data, file)
+	if len(loaded.NeededLibs) == 0 {
+		if needed, err := file.DynString(elf.DT_NEEDED); err == nil {
+			loaded.NeededLibs = needed
+		}
+	}
 	parseRelocations(loaded, file)
 	parseInitArray(loaded)
 
@@ -471,6 +483,34 @@ func parseSCEDynamic(loaded *LoadedELF, data []byte, file *elf.File) {
 	}
 	if initAddr, ok := tags[DT_INIT]; ok && initAddr != 0 {
 		loaded.InitArray = append(loaded.InitArray, initAddr)
+	}
+
+	if loaded.ImportLibs == nil {
+		loaded.ImportLibs = make(map[uint16]string)
+	}
+	const dtNeeded int64 = 1
+	for i := 0; i+16 <= len(dyn); i += 16 {
+		tag := int64(binary.LittleEndian.Uint64(dyn[i : i+8]))
+		val := binary.LittleEndian.Uint64(dyn[i+8 : i+16])
+		if tag == 0 {
+			break
+		}
+		switch tag {
+		case dtNeeded:
+			name := cstringAt(strtab, int(val))
+			if name != "" {
+				loaded.NeededLibs = append(loaded.NeededLibs, name)
+			}
+		case DT_SCE_IMPORT_LIB, DT_SCE_EXPORT_LIB:
+			id := uint16(val >> 48)
+			name := cstringAt(strtab, int(val&0xffffffff))
+			if name == "" {
+				name = cstringAt(strtab, int(val&0xfff))
+			}
+			if name != "" {
+				loaded.ImportLibs[id] = name
+			}
+		}
 	}
 
 	if !hasRelaPlt {

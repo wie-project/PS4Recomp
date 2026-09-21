@@ -1942,6 +1942,16 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 			src = args[2]
 		}
 		return l.liftCvtps2dq(args[0], src, nextPC)
+	case x86asm.VCVTTPS2DQ:
+		src := args[1]
+		if args[2] != nil {
+			src = args[2]
+		}
+		return l.liftCvttps2dq(args[0], src, nextPC)
+	case x86asm.VPMOVZXWD:
+		return l.liftPmovsxzx(false, 2, 4, args[0], args[1], nextPC)
+	case x86asm.VPMOVSXWD:
+		return l.liftPmovsxzx(true, 2, 4, args[0], args[1], nextPC)
 	case x86asm.VBROADCASTSS:
 		return l.liftVbroadcastss(args[0], args[1], nextPC)
 	case x86asm.VPSHUFHW:
@@ -2177,8 +2187,10 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		code, err = l.liftVectorBitwise(" & ", args[0], args[2], nextPC)
 	case x86asm.VXORPD:
 		code, err = l.liftVectorBitwise(" ^ ", args[0], args[2], nextPC)
-	case x86asm.VANDNPS, x86asm.VANDNPD:
+	case x86asm.VANDNPS, x86asm.VANDNPD, x86asm.VPANDN:
 		code, err = l.liftPandn(args[0], args[2], nextPC)
+	case x86asm.VPMULLD:
+		code, err = l.liftPmulld(args[0], args[2], nextPC)
 	case x86asm.VPADDB:
 		code, err = l.liftPadd(1, args[0], args[2], nextPC)
 	case x86asm.VPADDD:

@@ -492,7 +492,7 @@ void shim_raise(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-// syscall
+// syscall — numbers must match emitter.ImplementedSyscalls.
 void shim_syscall(GuestContext *ctx) {
   int num = (int)ctx->rdi;
   switch (num) {

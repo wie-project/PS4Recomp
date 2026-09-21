@@ -229,6 +229,8 @@ func Execute(args []string) error {
 	if err != nil {
 		return err
 	}
+	hle := emitter.NewHLEReport(loaded, moduleInfos)
+	fmt.Print(hle.ImportSummary())
 
 	d, err := disasm.NewDisassembler(loaded)
 	if err != nil {
@@ -236,20 +238,23 @@ func Execute(args []string) error {
 	}
 
 	entries := disasm.SeedEntryPoints(loaded, cfg.AllSymbols)
-	if err := d.AnalyzeReachable(entries); err != nil {
+	lastReport := time.Now()
+	funcs, err := d.DiscoverReachable(entries, func(nFn, nInst int) {
+		if time.Since(lastReport) >= 2*time.Second {
+			fmt.Printf("             ... %d functions, %d instructions\n", nFn, nInst)
+			lastReport = time.Now()
+		}
+	})
+	if err != nil {
 		return fmt.Errorf("CFG analysis error: %w", err)
 	}
 
-	totalBlocks := 0
 	totalInsts := 0
-	for _, fn := range d.Functions {
-		totalBlocks += len(fn.Blocks)
-		for _, b := range fn.Blocks {
-			totalInsts += len(b.Insts)
-		}
+	for _, f := range funcs {
+		totalInsts += f.Insts
 	}
-	fmt.Printf("             Discovered %d functions, %d basic blocks, %d instructions | Time: %v\n",
-		len(d.Functions), totalBlocks, totalInsts, time.Since(stepStart).Round(time.Millisecond))
+	fmt.Printf("             Discovered %d functions, %d instructions | Time: %v\n",
+		len(funcs), totalInsts, time.Since(stepStart).Round(time.Millisecond))
 
 	// Step 3: C Source Code Generation
 	stepStart = time.Now()
@@ -289,9 +294,9 @@ func Execute(args []string) error {
 		}
 	}
 
-	knownFuncs := make(map[uint64]bool, len(d.Functions))
-	for addr := range d.Functions {
-		knownFuncs[addr] = true
+	knownFuncs := make(map[uint64]bool, len(funcs))
+	for _, f := range funcs {
+		knownFuncs[f.Addr] = true
 	}
 
 	l := lifter.NewLifter(knownFuncs)
@@ -299,11 +304,19 @@ func Execute(args []string) error {
 	em.AppDir = cfg.AppDir
 	em.Modules = moduleInfos
 	em.ChunkSize = cfg.ChunkSize
+	em.Funcs = funcs
+	em.HLE = hle
 
 	cFiles, err := em.EmitAll(cfg.OutDir)
 	if err != nil {
 		return fmt.Errorf("failed to emit C code: %w", err)
 	}
+	hlePath := filepath.Join(cfg.OutDir, "hle_report.txt")
+	if err := hle.WriteFile(hlePath); err != nil {
+		return fmt.Errorf("failed to write HLE report: %w", err)
+	}
+	fmt.Print(hle.SyscallSummary())
+	fmt.Printf("             Wrote %s\n", hlePath)
 
 	if cfg.AppDir != "" {
 		srcAssets := filepath.Join(cfg.AppDir, "assets")

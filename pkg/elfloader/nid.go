@@ -32,3 +32,44 @@ func NIDPrefix(encoded string) string {
 	}
 	return encoded
 }
+
+// Sony base64 alphabet used for library/module IDs appended to NIDs.
+const sceIDAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-"
+
+func decodeSCEID(enc string) (uint16, bool) {
+	if enc == "" {
+		return 0, false
+	}
+	n := 0
+	for i := 0; i < len(enc); i++ {
+		idx := strings.IndexByte(sceIDAlphabet, enc[i])
+		if idx < 0 {
+			return 0, false
+		}
+		n = n*64 + idx
+	}
+	if n > 0xffff {
+		return 0, false
+	}
+	return uint16(n), true
+}
+
+// LibraryForNID maps a dynsym name ("hash#libid#modid" or plaintext) onto the
+// imported library name from DT_SCE_IMPORT_LIB when that table is present.
+func (l *LoadedELF) LibraryForNID(name string) string {
+	parts := strings.Split(name, "#")
+	if len(parts) < 2 || parts[1] == "" {
+		return "plaintext"
+	}
+	if l == nil || len(l.ImportLibs) == 0 {
+		return parts[1]
+	}
+	id, ok := decodeSCEID(parts[1])
+	if !ok {
+		return parts[1]
+	}
+	if lib, ok := l.ImportLibs[id]; ok {
+		return lib
+	}
+	return parts[1]
+}

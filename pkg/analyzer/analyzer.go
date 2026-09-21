@@ -9,6 +9,7 @@ import (
 
 	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
+	"ps4-recomp/pkg/emitter"
 	"ps4-recomp/pkg/lifter"
 
 	"golang.org/x/arch/x86/x86asm"
@@ -36,6 +37,7 @@ type AnalysisReport struct {
 	MissingUniqueOps    int
 	MissingOpcodes      []OpcodeFrequency
 	TopSupportedOpcodes []OpcodeFrequency
+	HLE                 *emitter.HLEReport
 }
 
 // AnalyzeBinary recovers the reachable CFG (the same seeding the recompiler uses)
@@ -81,13 +83,21 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 	}
 	seedCount := len(queue)
 
+	hle := emitter.NewHLEReport(loaded, nil)
+	syscallShims := emitter.ImportShimMap(loaded, "shim_syscall")
+
 	for head := 0; head < len(queue); head++ {
+		if head == 0 || head%10000 == 0 || head == len(queue)-1 {
+			fmt.Printf("[*] Progress: %d / %d functions analyzed (Queue capacity: %d)\n",
+				head, functionCount, len(queue))
+		}
 		fn, calls, err := d.DisasmFunction(queue[head])
 		if err != nil || fn == nil {
 			continue
 		}
 		functionCount++
 		for _, b := range fn.Blocks {
+			hle.ObserveBlock(b.Insts, syscallShims)
 			for _, inst := range b.Insts {
 				op := inst.Inst.Op
 				opCounts[op]++
@@ -157,6 +167,7 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 		MissingUniqueOps:    len(missingFreqs),
 		MissingOpcodes:      missingFreqs,
 		TopSupportedOpcodes: supportedFreqs,
+		HLE:                 hle,
 	}, nil
 }
 
@@ -199,6 +210,14 @@ func (r *AnalysisReport) SummaryString() string {
 		}
 	} else {
 		sb.WriteString("\nAll reachable instructions in this binary are supported by the lifter.\n")
+	}
+
+	if r.HLE != nil {
+		sb.WriteString("\n-------------------------------------------------------------------\n")
+		sb.WriteString("  Host shims, imported symbols, and recovered syscalls\n")
+		sb.WriteString("-------------------------------------------------------------------\n")
+		sb.WriteString(r.HLE.ImportSummary())
+		sb.WriteString(r.HLE.SyscallSummary())
 	}
 
 	return sb.String()
