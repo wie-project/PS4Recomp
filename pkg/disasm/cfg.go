@@ -42,6 +42,10 @@ type Disassembler struct {
 	Functions map[uint64]*Function
 	Blocks    map[uint64]*BasicBlock
 
+	// SkipFlagLiveness omits dead-flag analysis. The opcode coverage analyzer
+	// uses this; the recompiler leaves it false so SkipFlags stays accurate.
+	SkipFlagLiveness bool
+
 	// funcSymAddrs is the sorted unique set of STT_FUNC addresses, used to
 	// bound jump-table recovery when a function has no symbol size.
 	funcSymAddrs []uint64
@@ -552,6 +556,9 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 }
 
 func (d *Disassembler) analyzeBlockFlagLiveness(fn *Function) {
+	if d == nil || d.SkipFlagLiveness || fn == nil {
+		return
+	}
 	for _, block := range fn.Blocks {
 		flagsLive := true // Conservatively assume flags are live at block boundary
 		for i := len(block.Insts) - 1; i >= 0; i-- {

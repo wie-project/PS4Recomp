@@ -13,7 +13,8 @@ type ExtractOptions struct {
 	OutputDir   string
 	Passcode    string
 	ListOnly    bool
-	Executables bool
+	Executables bool // extract eboot, PRX/SPRX/ELF, sce_sys, sce_module
+	Resources   bool // also extract remaining PFS files (paks, movies, assets)
 	MetaEntries bool
 	OnFile      func(path string, size int64)
 }
@@ -24,6 +25,19 @@ func isExecutablePath(p string) bool {
 		return true
 	}
 	return strings.HasPrefix(p, "sce_sys/") || strings.HasPrefix(p, "sce_module/")
+}
+
+// ShouldExtractPath reports whether a uroot-relative PFS path is selected by opts.
+// Resources selects every file. Executables (without Resources) selects eboot, PRX/SPRX/ELF,
+// sce_sys and sce_module. With neither flag the caller receives the full inner PFS.
+func ShouldExtractPath(rel string, opts ExtractOptions) bool {
+	if opts.Resources {
+		return true
+	}
+	if opts.Executables {
+		return isExecutablePath(rel)
+	}
+	return true
 }
 
 // Extract writes game files from the inner PFS (and optionally PKG table entries) to OutputDir.
@@ -54,7 +68,7 @@ func (p *PKG) Extract(opts ExtractOptions) (int, error) {
 		if rel == "" {
 			continue
 		}
-		if opts.Executables && !isExecutablePath(rel) {
+		if !ShouldExtractPath(rel, opts) {
 			continue
 		}
 		if opts.OnFile != nil {

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
 	"ps4-recomp/pkg/lifter"
 
@@ -22,22 +23,29 @@ type OpcodeFrequency struct {
 
 // AnalysisReport contains statistics about instruction support for a binary.
 type AnalysisReport struct {
-	BinaryPath            string
-	BinarySize            int64
-	TotalInstructions     int
-	SupportedCount        int
-	UnsupportedCount      int
-	CoveragePercent       float64
-	UniqueOpcodes         int
-	SupportedUniqueOps    int
-	MissingUniqueOps      int
-	MissingOpcodes        []OpcodeFrequency
-	TopSupportedOpcodes   []OpcodeFrequency
+	BinaryPath          string
+	BinarySize          int64
+	SeedCount           int
+	FunctionCount       int
+	TotalInstructions   int
+	SupportedCount      int
+	UnsupportedCount    int
+	CoveragePercent     float64
+	UniqueOpcodes       int
+	SupportedUniqueOps  int
+	MissingUniqueOps    int
+	MissingOpcodes      []OpcodeFrequency
+	TopSupportedOpcodes []OpcodeFrequency
 }
 
-// AnalyzeBinary scans all executable machine code in an ELF or FSELF binary
-// and checks each instruction against the recompilation lifter.
+// AnalyzeBinary recovers the reachable CFG (the same seeding the recompiler uses)
+// and checks each lifted instruction against the opcode registry.
 func AnalyzeBinary(path string) (*AnalysisReport, error) {
+	return AnalyzeBinarySeeded(path, false)
+}
+
+// AnalyzeBinarySeeded is AnalyzeBinary with an explicit all-symbols seed.
+func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat binary: %w", err)
@@ -48,45 +56,56 @@ func AnalyzeBinary(path string) (*AnalysisReport, error) {
 		return nil, fmt.Errorf("failed to load ELF: %w", err)
 	}
 
+	d, err := disasm.NewDisassembler(loaded)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize disassembler: %w", err)
+	}
+	d.SkipFlagLiveness = true
+	entries := disasm.SeedEntryPoints(loaded, allSymbols)
+
 	opCounts := make(map[x86asm.Op]int)
 	missingCounts := make(map[x86asm.Op]int)
-
 	totalInsts := 0
 	supportedInsts := 0
 	unsupportedInsts := 0
+	functionCount := 0
 
-	// Scan through all executable segments/sections
-	for _, seg := range loaded.Segments {
-		// Only scan executable segments (PF_X = 1)
-		if (seg.Flags & 1) == 0 {
+	visited := make(map[uint64]bool, len(entries)*2)
+	queue := make([]uint64, 0, len(entries)*2)
+	for _, addr := range entries {
+		if addr == 0 || !loaded.InExecutable(addr) || visited[addr] {
 			continue
 		}
+		visited[addr] = true
+		queue = append(queue, addr)
+	}
+	seedCount := len(queue)
 
-		data := seg.Data
-		if len(data) > int(seg.Filesz) {
-			data = data[:seg.Filesz]
+	for head := 0; head < len(queue); head++ {
+		fn, calls, err := d.DisasmFunction(queue[head])
+		if err != nil || fn == nil {
+			continue
 		}
-
-		offset := 0
-		for offset < len(data) {
-			inst, err := x86asm.Decode(data[offset:], 64)
-			if err != nil || inst.Len == 0 {
-				offset++
+		functionCount++
+		for _, b := range fn.Blocks {
+			for _, inst := range b.Insts {
+				op := inst.Inst.Op
+				opCounts[op]++
+				totalInsts++
+				if lifter.IsOpcodeSupported(op) {
+					supportedInsts++
+				} else {
+					unsupportedInsts++
+					missingCounts[op]++
+				}
+			}
+		}
+		for _, target := range calls {
+			if target == 0 || !loaded.InExecutable(target) || visited[target] {
 				continue
 			}
-
-			op := inst.Op
-			opCounts[op]++
-			totalInsts++
-
-			if lifter.IsOpcodeSupported(op) {
-				supportedInsts++
-			} else {
-				unsupportedInsts++
-				missingCounts[op]++
-			}
-
-			offset += inst.Len
+			visited[target] = true
+			queue = append(queue, target)
 		}
 	}
 
@@ -124,9 +143,11 @@ func AnalyzeBinary(path string) (*AnalysisReport, error) {
 		return supportedFreqs[i].Count > supportedFreqs[j].Count
 	})
 
-	report := &AnalysisReport{
+	return &AnalysisReport{
 		BinaryPath:          path,
 		BinarySize:          fi.Size(),
+		SeedCount:           seedCount,
+		FunctionCount:       functionCount,
 		TotalInstructions:   totalInsts,
 		SupportedCount:      supportedInsts,
 		UnsupportedCount:    unsupportedInsts,
@@ -136,19 +157,19 @@ func AnalyzeBinary(path string) (*AnalysisReport, error) {
 		MissingUniqueOps:    len(missingFreqs),
 		MissingOpcodes:      missingFreqs,
 		TopSupportedOpcodes: supportedFreqs,
-	}
-
-	return report, nil
+	}, nil
 }
 
 // SummaryString formats the analysis report into a human-readable text document.
 func (r *AnalysisReport) SummaryString() string {
 	var sb strings.Builder
 	sb.WriteString("===================================================================\n")
-	sb.WriteString("  PS4 Binary Machine Code Instruction Coverage Analysis\n")
+	sb.WriteString("  PS4 Binary Reachable CFG Instruction Coverage Analysis\n")
 	sb.WriteString("===================================================================\n")
 	sb.WriteString(fmt.Sprintf("Binary File:            %s\n", filepath.Base(r.BinaryPath)))
 	sb.WriteString(fmt.Sprintf("Binary Size:            %.2f MB (%d bytes)\n", float64(r.BinarySize)/(1024*1024), r.BinarySize))
+	sb.WriteString(fmt.Sprintf("CFG Seeds:              %d\n", r.SeedCount))
+	sb.WriteString(fmt.Sprintf("Reachable Functions:    %d\n", r.FunctionCount))
 	sb.WriteString(fmt.Sprintf("Total Disassembled:     %d instructions\n", r.TotalInstructions))
 	sb.WriteString(fmt.Sprintf("Unique Opcodes:         %d\n", r.UniqueOpcodes))
 	sb.WriteString(fmt.Sprintf("Supported by Lifter:    %d instructions (%.2f%%)\n", r.SupportedCount, r.CoveragePercent))
@@ -161,19 +182,23 @@ func (r *AnalysisReport) SummaryString() string {
 		sb.WriteString("-------------------------------------------------------------------\n")
 		sb.WriteString("  Rank  Opcode                  Occurrences   Percentage\n")
 		sb.WriteString("  -----------------------------------------------------------------\n")
+		limit := 50
 		for i, m := range r.MissingOpcodes {
 			pct := 0.0
 			if r.TotalInstructions > 0 {
 				pct = (float64(m.Count) / float64(r.TotalInstructions)) * 100.0
 			}
 			sb.WriteString(fmt.Sprintf("  [%-2d]  %-22s  %-12d  (%.3f%%)\n", i+1, m.Name, m.Count, pct))
-			if i >= 30 {
-				sb.WriteString(fmt.Sprintf("  ... and %d more missing opcodes\n", len(r.MissingOpcodes)-31))
+			if i+1 >= limit {
+				rest := len(r.MissingOpcodes) - limit
+				if rest > 0 {
+					sb.WriteString(fmt.Sprintf("  ... and %d more missing opcodes\n", rest))
+				}
 				break
 			}
 		}
 	} else {
-		sb.WriteString("\n✓ All instructions in this binary are 100.0% supported by the lifter!\n")
+		sb.WriteString("\nAll reachable instructions in this binary are supported by the lifter.\n")
 	}
 
 	return sb.String()

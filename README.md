@@ -124,7 +124,8 @@ The graphics and kernel subsystems are architected natively from first principle
   - Full container parser for Sony `\x7fCNT` format: header decoding, entry table descriptor parsing (`MetaEntry`), and filename resolution via `ENTRY_NAMES`.
   - Native Sony PSF / `param.sfo` parser: UTF-8 strings, 32-bit integers, and binary attributes (`TITLE`, `TITLE_ID`, `APP_VER`, `CATEGORY`, `CONTENT_ID`, `SYSTEM_VER`).
   - Multi-PKG Manager: recursive folder scanning, Title ID grouping (`CUSAxxxxx`), automated categorization (Base Game, Patches/Updates, Add-on Content / DLCs), and overlay/patch hierarchy resolution.
-  - Subcommands: `ps4-recomp pkg info <pkg | dir>` and `ps4-recomp pkg extract <pkg> -o <out_dir>`.
+  - Subcommands: `ps4-recomp pkg info <pkg | dir>`, `ps4-recomp pkg list <pkg>`, and `ps4-recomp pkg extract <pkg> -o <out_dir>`.
+  - Extract writes `eboot.bin`, PRX/SPRX modules, `sce_sys`, and `sce_module` by default. Pass `--resources` (or `--all`) to also dump remaining inner PFS files.
 
 ---
 
@@ -151,6 +152,7 @@ golangci-lint run --no-config ./...
 The CLI compiles PlayStation 4 ELF binaries into native macOS `.app` bundles, optionally executing them with a watchdog timer (`-r -t <seconds>`):
 
 #### A. Interactive 2D Metal Graphics (`graphics.elf`)
+
 Renders a high-resolution Mandelbrot fractal directly onto a native Metal window using PS4 direct video memory and flip event synchronization:
 
 ```bash
@@ -158,6 +160,7 @@ go run . tools/OpenOrbis/PS4Toolchain/samples/graphics/graphics/x64/Debug/graphi
 ```
 
 #### B. PNG Texture Decoding & VFS Asset Loading (`pngdec.elf`)
+
 Loads `/app0/assets/images/logo.png` from the `.app` bundle via VFS, decodes compressed PNG textures, and presents frames to Metal:
 
 ```bash
@@ -165,6 +168,7 @@ go run . tools/OpenOrbis/PS4Toolchain/samples/pngdec/pngdec/x64/Debug/pngdec.elf
 ```
 
 #### C. Interactive Controller & Gamepad Input (`input.elf`)
+
 Renders the DualShock 4 controller interface on Metal, receiving live button, stick, and trigger inputs from physical controllers via `GameController.framework` (DualShock 4, DualSense, Xbox, Switch Pro, MFi) or keyboard fallback:
 
 ```bash
@@ -172,6 +176,7 @@ go run . tools/OpenOrbis/PS4Toolchain/samples/input/input/x64/Debug/input.elf --
 ```
 
 #### D. Vector Font Rasterization & Text Layout (`font.elf`)
+
 Loads `/app0/assets/fonts/Gontserrat-Regular.ttf` via VFS, rasterizes TrueType vector fonts at multiple sizes with FreeType 2, and renders multi-line antialiased text to Metal:
 
 ```bash
@@ -179,6 +184,7 @@ go run . tools/OpenOrbis/PS4Toolchain/samples/font/font/x64/Debug/font.elf --app
 ```
 
 #### E. Standalone App Launching & Window Controls
+
 Recompiled applications are packaged as standalone `.app` bundles that can be launched directly:
 
 ```bash
@@ -193,6 +199,7 @@ open output_pngdec/pngdec.app
 - **Close Window**: Press <kbd>Cmd</kbd> + <kbd>W</kbd>, <kbd>Esc</kbd>, or click the red close button <kbd>⨉</kbd>. The app terminates cleanly with zero lingering background processes.
 
 #### F. Dynamic PRX loading (`using_library.elf`)
+
 Loads `/app0/sce_module/libExample.prx` through `sceKernelLoadStartModule`, resolves `_Z19testLibraryFunctionPcmi` with `sceKernelDlsym`, and prints a `std::ostringstream` string built inside the PRX. The PRX must live in the app's `sce_module` directory (map guest `/app0` with `--app-dir`):
 
 ```bash
@@ -203,6 +210,7 @@ go run . tools/OpenOrbis/PS4Toolchain/samples/using_library/using_library/x64/De
 ```
 
 #### G. Core Verification Tests
+
 - **Multi-Threading & Atomicity (`threading_test.elf`)**:
   ```bash
   go run . tests/threading_test/threading_test.elf -o output_thread --asan -r -t 3
@@ -225,24 +233,24 @@ go run . tools/OpenOrbis/PS4Toolchain/samples/using_library/using_library/x64/De
 
 `pkg/lifter/coverage_test.go` checks that every opcode in the built samples has a lifter. Live runs below used `go run . <elf> -o <dir> -r -t 3..5` after the PRX / jump-table / DT_INIT stack work.
 
-| Binary | Live run |
-| :--- | :--- |
-| `hello_world.elf` | Prints `Hello world!` then waits |
-| `exceptions.elf` | C++ `throw` / `catch`, prints `Testcase PASS` |
-| `tests/threading_test.elf` | Two workers, atomic counter 100 |
-| `tests/memory_stress_test.elf` | Sieve, matmul, qsort, mmap churn |
-| `using_library.elf` | Loads `libExample.prx`, prints the full library string |
-| `graphics.elf` | Metal present loop |
-| `pngdec.elf` | VFS PNG + Metal present loop |
-| `input.elf` | Controller UI + Metal present loop |
-| `keyboard.elf` | Keyboard UI + Metal present loop |
-| `font.elf` | FreeType text + Metal present loop |
-| `system.elf` | User service + FreeType + Metal present loop |
-| `threading.elf` | std::thread sample + Metal present loop |
-| `audio-wav.elf` | AudioQueue playback (watchdog clean) |
-| `SDL2.elf` | SDL window, TTF, pad, Metal present loop |
-| `trophies.elf` | Unlocks trophy ID 1 |
-| `dialogs.elf` | Starts; Cocoa alert if a display is attached |
+| Binary                         | Live run                                               |
+| :----------------------------- | :----------------------------------------------------- |
+| `hello_world.elf`              | Prints `Hello world!` then waits                       |
+| `exceptions.elf`               | C++ `throw` / `catch`, prints `Testcase PASS`          |
+| `tests/threading_test.elf`     | Two workers, atomic counter 100                        |
+| `tests/memory_stress_test.elf` | Sieve, matmul, qsort, mmap churn                       |
+| `using_library.elf`            | Loads `libExample.prx`, prints the full library string |
+| `graphics.elf`                 | Metal present loop                                     |
+| `pngdec.elf`                   | VFS PNG + Metal present loop                           |
+| `input.elf`                    | Controller UI + Metal present loop                     |
+| `keyboard.elf`                 | Keyboard UI + Metal present loop                       |
+| `font.elf`                     | FreeType text + Metal present loop                     |
+| `system.elf`                   | User service + FreeType + Metal present loop           |
+| `threading.elf`                | std::thread sample + Metal present loop                |
+| `audio-wav.elf`                | AudioQueue playback (watchdog clean)                   |
+| `SDL2.elf`                     | SDL window, TTF, pad, Metal present loop               |
+| `trophies.elf`                 | Unlocks trophy ID 1                                    |
+| `dialogs.elf`                  | Starts; Cocoa alert if a display is attached           |
 
 `networking.elf` and `net_http.elf` still abort (`sceNet` is unimplemented). `piglet.elf` aborts because `libScePigletv2VSH.sprx` / precompiled shaders are not AOT-linked.
 

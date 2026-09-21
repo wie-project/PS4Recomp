@@ -700,12 +700,27 @@ func (l *Lifter) liftPackedF64(opStr string, dst, src x86asm.Arg, nextPC uint64)
 	} else {
 		return nil, fmt.Errorf("unsupported packed f64 operands")
 	}
-	lines = append(
-		lines,
-		fmt.Sprintf("      ctx->%s.f64[0] %s= src.f64[0];", infoDst.BaseReg, opStr),
-		fmt.Sprintf("      ctx->%s.f64[1] %s= src.f64[1];", infoDst.BaseReg, opStr),
-		"    }",
-	)
+	switch opStr {
+	case "+", "-", "*", "/":
+		lines = append(
+			lines,
+			fmt.Sprintf("      ctx->%s.f64[0] %s= src.f64[0];", infoDst.BaseReg, opStr),
+			fmt.Sprintf("      ctx->%s.f64[1] %s= src.f64[1];", infoDst.BaseReg, opStr),
+		)
+	case "min":
+		lines = append(
+			lines,
+			fmt.Sprintf("      if (src.f64[0] < ctx->%s.f64[0]) ctx->%s.f64[0] = src.f64[0];", infoDst.BaseReg, infoDst.BaseReg),
+			fmt.Sprintf("      if (src.f64[1] < ctx->%s.f64[1]) ctx->%s.f64[1] = src.f64[1];", infoDst.BaseReg, infoDst.BaseReg),
+		)
+	case "max":
+		lines = append(
+			lines,
+			fmt.Sprintf("      if (src.f64[0] > ctx->%s.f64[0]) ctx->%s.f64[0] = src.f64[0];", infoDst.BaseReg, infoDst.BaseReg),
+			fmt.Sprintf("      if (src.f64[1] > ctx->%s.f64[1]) ctx->%s.f64[1] = src.f64[1];", infoDst.BaseReg, infoDst.BaseReg),
+		)
+	}
+	lines = append(lines, "    }")
 	return lines, nil
 }
 
@@ -1765,7 +1780,7 @@ func (l *Lifter) liftPshufhw(dst, src, immArg x86asm.Arg, nextPC uint64) ([]stri
 func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC uint64) ([]string, error) {
 	// 2-operand moves
 	switch op {
-	case x86asm.VMOVAPS, x86asm.VMOVUPS, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVNTPS, x86asm.VMOVNTDQ:
+	case x86asm.VMOVAPS, x86asm.VMOVUPS, x86asm.VMOVUPD, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVNTPS, x86asm.VMOVNTDQ:
 		return l.liftVectorMove(args[0], args[1], nextPC)
 	case x86asm.VMOVLPS:
 		if args[2] == nil {
@@ -1786,6 +1801,61 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		return append(lines, code...), nil
 	case x86asm.VMOVSHDUP:
 		return l.liftMovshdup(args[0], args[1], nextPC)
+	case x86asm.VMOVSLDUP:
+		return l.liftMovsldup(args[0], args[1], nextPC)
+	case x86asm.VEXTRACTPS:
+		return l.liftExtractps(args[0], args[1], args[2], nextPC)
+	case x86asm.VCMPSS:
+		return l.liftVcmpss(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VCMPSD:
+		return l.liftVcmpsd(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VPBLENDVB:
+		return l.liftVpblendvb(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VSHUFPD:
+		return l.liftShufpd(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VPSHUFD:
+		return l.liftPshufd(args[0], args[1], args[2], nextPC)
+	case x86asm.VPSHUFB:
+		return l.liftPshufb(args[0], args[1], args[2], nextPC)
+	case x86asm.VPALIGNR:
+		return l.liftPalignr(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VMOVLHPS:
+		return l.liftMovlhps(args[0], args[1], args[2])
+	case x86asm.VMOVHLPS:
+		return l.liftMovhlps(args[0], args[1], args[2])
+	case x86asm.VPEXTRB:
+		return l.liftPextr(1, args[0], args[1], args[2], nextPC)
+	case x86asm.VPEXTRW:
+		return l.liftPextr(2, args[0], args[1], args[2], nextPC)
+	case x86asm.VPEXTRD:
+		return l.liftPextr(4, args[0], args[1], args[2], nextPC)
+	case x86asm.VPEXTRQ:
+		return l.liftPextr(8, args[0], args[1], args[2], nextPC)
+	case x86asm.VSQRTPS:
+		return l.liftPackedSqrt(false, args[0], args[1], nextPC)
+	case x86asm.VSQRTPD:
+		return l.liftPackedSqrt(true, args[0], args[1], nextPC)
+	case x86asm.VROUNDPS:
+		return l.liftRoundps(args[0], args[1], args[2], nextPC)
+	case x86asm.VPTEST:
+		return l.liftPtest(args[0], args[1], nextPC)
+	case x86asm.VMOVHPD, x86asm.VMOVHPS:
+		if args[2] == nil {
+			return l.liftMovhpd(args[0], args[1], nextPC)
+		}
+		dstReg, ok1 := args[0].(x86asm.Reg)
+		src1Reg, ok2 := args[1].(x86asm.Reg)
+		if !ok1 || !ok2 || !isXmm(dstReg) || !isXmm(src1Reg) {
+			return nil, fmt.Errorf("vmovhpd invalid registers")
+		}
+		infoDst := regMap[dstReg]
+		infoSrc1 := regMap[src1Reg]
+		lines := []string{fmt.Sprintf("    ctx->%s = ctx->%s;", infoDst.BaseReg, infoSrc1.BaseReg)}
+		code, err := l.liftMovhpd(args[0], args[2], nextPC)
+		if err != nil {
+			return nil, err
+		}
+		return append(lines, code...), nil
 	case x86asm.VMOVMSKPS:
 		return l.liftMovmskps(args[0], args[1], nextPC)
 	case x86asm.VPERMILPS:
@@ -1925,7 +1995,7 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 	}
 
 	// 4-operand VPINSR
-	if op == x86asm.VPINSRB || op == x86asm.VPINSRW || op == x86asm.VPINSRD {
+	if op == x86asm.VPINSRB || op == x86asm.VPINSRW || op == x86asm.VPINSRD || op == x86asm.VPINSRQ {
 		dstReg, ok1 := args[0].(x86asm.Reg)
 		src1Reg, ok2 := args[1].(x86asm.Reg)
 		if !ok1 || !ok2 || !isXmm(dstReg) || !isXmm(src1Reg) {
@@ -1939,6 +2009,8 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 			elemBytes = 1
 		case x86asm.VPINSRD:
 			elemBytes = 4
+		case x86asm.VPINSRQ:
+			elemBytes = 8
 		default:
 			elemBytes = 2
 		}
@@ -2079,6 +2151,78 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		code, err = l.liftPackedF32("max", args[0], args[2], nextPC)
 	case x86asm.VMINPS:
 		code, err = l.liftPackedF32("min", args[0], args[2], nextPC)
+	case x86asm.VMAXSS:
+		code, err = l.liftMinMax(false, false, args[0], args[2], nextPC)
+	case x86asm.VMINSS:
+		code, err = l.liftMinMax(true, false, args[0], args[2], nextPC)
+	case x86asm.VORPS, x86asm.VORPD:
+		code, err = l.liftVectorBitwise(" | ", args[0], args[2], nextPC)
+	case x86asm.VADDPD:
+		code, err = l.liftPackedF64("+", args[0], args[2], nextPC)
+	case x86asm.VSUBPD:
+		code, err = l.liftPackedF64("-", args[0], args[2], nextPC)
+	case x86asm.VMULPD:
+		code, err = l.liftPackedF64("*", args[0], args[2], nextPC)
+	case x86asm.VDIVPD:
+		code, err = l.liftPackedF64("/", args[0], args[2], nextPC)
+	case x86asm.VMINPD:
+		code, err = l.liftPackedF64("min", args[0], args[2], nextPC)
+	case x86asm.VMAXPD:
+		code, err = l.liftPackedF64("max", args[0], args[2], nextPC)
+	case x86asm.VMINSD:
+		code, err = l.liftMinMax(true, true, args[0], args[2], nextPC)
+	case x86asm.VMAXSD:
+		code, err = l.liftMinMax(false, true, args[0], args[2], nextPC)
+	case x86asm.VANDPD:
+		code, err = l.liftVectorBitwise(" & ", args[0], args[2], nextPC)
+	case x86asm.VXORPD:
+		code, err = l.liftVectorBitwise(" ^ ", args[0], args[2], nextPC)
+	case x86asm.VANDNPS, x86asm.VANDNPD:
+		code, err = l.liftPandn(args[0], args[2], nextPC)
+	case x86asm.VPADDB:
+		code, err = l.liftPadd(1, args[0], args[2], nextPC)
+	case x86asm.VPADDD:
+		code, err = l.liftPadd(4, args[0], args[2], nextPC)
+	case x86asm.VPADDQ:
+		code, err = l.liftPadd(8, args[0], args[2], nextPC)
+	case x86asm.VPSUBB:
+		code, err = l.liftPsub(1, args[0], args[2], nextPC)
+	case x86asm.VPSUBD:
+		code, err = l.liftPsub(4, args[0], args[2], nextPC)
+	case x86asm.VPSUBQ:
+		code, err = l.liftPsub(8, args[0], args[2], nextPC)
+	case x86asm.VPCMPEQB:
+		code, err = l.liftPcmpeq(1, args[0], args[2], nextPC)
+	case x86asm.VPCMPEQW:
+		code, err = l.liftPcmpeq(2, args[0], args[2], nextPC)
+	case x86asm.VPCMPEQD:
+		code, err = l.liftPcmpeq(4, args[0], args[2], nextPC)
+	case x86asm.VPCMPGTD:
+		code, err = l.liftPcmpgtd(args[0], args[2], nextPC)
+	case x86asm.VPUNPCKLQDQ, x86asm.VUNPCKLPD:
+		code, err = l.liftPunpcklqdq(args[0], args[2], nextPC)
+	case x86asm.VPUNPCKHQDQ, x86asm.VUNPCKHPD:
+		code, err = l.liftPunpckh(8, args[0], args[2], nextPC)
+	case x86asm.VPSLLQ:
+		code, err = l.liftPshiftQ("<<", args[0], args[2], nextPC)
+	case x86asm.VPSRLQ:
+		code, err = l.liftPshiftQ(">>", args[0], args[2], nextPC)
+	case x86asm.VPSLLDQ:
+		code, err = l.liftPshiftBytes(true, args[0], args[2])
+	case x86asm.VPSRLDQ:
+		code, err = l.liftPshiftBytes(false, args[0], args[2])
+	case x86asm.VPMINSD:
+		code, err = l.liftPminmax(true, true, 4, args[0], args[2], nextPC)
+	case x86asm.VPMAXSD:
+		code, err = l.liftPminmax(false, true, 4, args[0], args[2], nextPC)
+	case x86asm.VPMINUD:
+		code, err = l.liftPminmax(true, false, 4, args[0], args[2], nextPC)
+	case x86asm.VPMAXUD:
+		code, err = l.liftPminmax(false, false, 4, args[0], args[2], nextPC)
+	case x86asm.VPMINSB:
+		code, err = l.liftPminmax(true, true, 1, args[0], args[2], nextPC)
+	case x86asm.VPMAXSB:
+		code, err = l.liftPminmax(false, true, 1, args[0], args[2], nextPC)
 	case x86asm.VHADDPS:
 		code, err = l.liftHaddps(args[0], args[1], args[2], nextPC)
 	case x86asm.VXORPS, x86asm.VPXOR:

@@ -48,7 +48,7 @@ Usage:
   ps4-recomp [flags] <input.elf>
   ps4-recomp analyze <eboot.bin | input.elf | module.prx>
   ps4-recomp pkg info <path.pkg | directory>
-  ps4-recomp pkg extract <path.pkg> [-o out_dir]
+  ps4-recomp pkg extract <path.pkg> [-o out_dir] [--resources]
 
 Options:
   -o, -out <dir>          Output directory for generated C code and binaries (default: "build")
@@ -748,13 +748,15 @@ func handlePkgCommand(args []string) error {
 
 Subcommands:
   info <file.pkg | directory>     Inspect single PKG or scan directory for multiple PKGs (Base, Patch, DLC)
-  extract <file.pkg> [options]    Extract inner PFS game files (eboot.bin, sce_sys, assets)
+  extract <file.pkg> [options]    Extract inner PFS files (executables by default)
   list <file.pkg>                 List files in the inner PFS without writing them
 
 Extract options:
   -o, -out <dir>                  Output directory (default: <pkg>_extracted)
   --passcode <32-char>            PKG passcode (fake packages are decrypted automatically)
-  --executables                   Extract only eboot.bin, PRX modules, sce_sys and sce_module
+  --executables                   Extract eboot.bin, PRX/SPRX, sce_sys and sce_module (default)
+  --resources                     Also extract remaining PFS files (paks, movies, assets)
+  --all                           Extract every inner PFS file (same as --resources)
   --meta                          Also dump unencrypted PKG table entries into sce_sys
   --list                          List inner PFS files without extracting`)
 		return nil
@@ -867,7 +869,7 @@ Extract options:
 
 	case "extract":
 		if len(args) < 2 {
-			return errors.New("usage: ps4-recomp pkg extract <file.pkg> [-o out_dir] [--executables] [--passcode <code>]")
+			return errors.New("usage: ps4-recomp pkg extract <file.pkg> [-o out_dir] [--executables] [--resources] [--passcode <code>]")
 		}
 		return runPkgExtract(args[1], args[2:], false)
 
@@ -879,7 +881,8 @@ Extract options:
 func runPkgExtract(target string, args []string, listOnly bool) error {
 	outDir := ""
 	passcode := ""
-	executables := false
+	wantExecutables := false
+	wantResources := false
 	meta := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -896,7 +899,9 @@ func runPkgExtract(target string, args []string, listOnly bool) error {
 			passcode = args[i+1]
 			i++
 		case "--executables":
-			executables = true
+			wantExecutables = true
+		case "--resources", "--all":
+			wantResources = true
 		case "--meta":
 			meta = true
 		case "--list":
@@ -904,6 +909,15 @@ func runPkgExtract(target string, args []string, listOnly bool) error {
 		default:
 			return fmt.Errorf("unknown extract option %q", args[i])
 		}
+	}
+	// Extract defaults to executables so a 50+ GiB asset dump is opt-in.
+	// List defaults to the full inner PFS unless --executables is passed.
+	executables := false
+	resources := wantResources
+	if wantResources {
+		executables = false
+	} else if wantExecutables || !listOnly {
+		executables = true
 	}
 	if outDir == "" && !listOnly {
 		base := strings.TrimSuffix(filepath.Base(target), filepath.Ext(target))
@@ -929,12 +943,11 @@ func runPkgExtract(target string, args []string, listOnly bool) error {
 		OutputDir:   outDir,
 		Passcode:    passcode,
 		ListOnly:    listOnly,
-		Executables: executables,
+		Executables: executables && !resources,
+		Resources:   resources,
 		MetaEntries: meta && !listOnly,
 		OnFile: func(path string, size int64) {
-			if listOnly || executables {
-				fmt.Printf("  %s (%s)\n", path, ps4pkg.FormatSize(size))
-			}
+			fmt.Printf("  %s (%s)\n", path, ps4pkg.FormatSize(size))
 		},
 	})
 	if err != nil {

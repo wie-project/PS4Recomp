@@ -70,12 +70,14 @@ func TestGlobalX86OpcodeCoverage(t *testing.T) {
 		},
 		"Multiply & Divide": {
 			x86asm.MUL, x86asm.IMUL, x86asm.DIV, x86asm.IDIV,
-			x86asm.CDQ, x86asm.CQO, x86asm.CWD, x86asm.CBW,
+			x86asm.CDQ, x86asm.CQO, x86asm.CWD, x86asm.CBW, x86asm.CWDE,
 		},
 		"String & Block Operations": {
 			x86asm.MOVSB, x86asm.MOVSW, x86asm.MOVSD, x86asm.MOVSQ,
 			x86asm.STOSB, x86asm.STOSW, x86asm.STOSD, x86asm.STOSQ,
-			x86asm.CMPSB, x86asm.LODSB, x86asm.SCASB,
+			x86asm.CMPSB, x86asm.CMPSW, x86asm.CMPSD, x86asm.CMPSQ,
+			x86asm.LODSB, x86asm.LODSW, x86asm.LODSD, x86asm.LODSQ,
+			x86asm.SCASB, x86asm.SCASW, x86asm.SCASD, x86asm.SCASQ,
 		},
 		"Bit Manipulation": {
 			x86asm.BSF, x86asm.BSR, x86asm.BT, x86asm.BTS, x86asm.BTR, x86asm.BTC,
