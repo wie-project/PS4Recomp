@@ -49,6 +49,18 @@ type Disassembler struct {
 	// funcSymAddrs is the sorted unique set of STT_FUNC addresses, used to
 	// bound jump-table recovery when a function has no symbol size.
 	funcSymAddrs []uint64
+
+	// CapHits counts functions whose decode stopped on the safety cap
+	// (maxBlockBytes / maxFnInsts) rather than on control flow or an unwind bound.
+	CapHits int
+	// PrivilegedStops counts user-mode-illegal opcodes that ended a block.
+	// Those bytes are data decoded on the wrong boundary.
+	PrivilegedStops int
+
+	// pendingData holds jump-table bytes for the function currently being
+	// decoded. The ranges are dropped with the function: keeping them would
+	// hide a later entry on the second disassembly pass.
+	pendingData []elfloader.AddrRange
 }
 
 // NewDisassembler creates a new disassembler for the given loaded ELF.
@@ -88,22 +100,28 @@ func collectFuncSymAddrs(loaded *elfloader.LoadedELF) []uint64 {
 	return addrs
 }
 
-// functionEnd is the exclusive upper bound for intra-function jump-table
-// targets: symbol size if present, otherwise the next STT_FUNC, otherwise
-// the end of executable memory.
+// functionEnd is the exclusive upper bound for bytes that belong to the
+// function at entry. A symbol size, an .eh_frame extent, and the next known
+// function start each tighten it. The fallback is the end of executable memory.
 func (d *Disassembler) functionEnd(entry, size uint64) uint64 {
-	if size > 0 {
-		return entry + size
+	end := d.textEnd
+	if size > 0 && entry+size < end {
+		end = entry + size
+	}
+	if d.elf != nil {
+		if ceil := d.elf.CodeCeiling(entry); ceil > entry && ceil < end {
+			end = ceil
+		}
 	}
 	n := len(d.funcSymAddrs)
 	i, found := slices.BinarySearch(d.funcSymAddrs, entry)
 	if found {
 		i++
 	}
-	if i < n && d.funcSymAddrs[i] > entry {
-		return d.funcSymAddrs[i]
+	if i < n && d.funcSymAddrs[i] > entry && d.funcSymAddrs[i] < end {
+		end = d.funcSymAddrs[i]
 	}
-	return d.textEnd
+	return end
 }
 
 func executableBounds(loaded *elfloader.LoadedELF) (uint64, uint64) {
@@ -129,6 +147,11 @@ func executableBounds(loaded *elfloader.LoadedELF) (uint64, uint64) {
 	return 0, 0
 }
 
+// InCode reports whether addr is a guest instruction boundary the CFG may enter.
+func (d *Disassembler) InCode(addr uint64) bool {
+	return d.inCode(addr)
+}
+
 func (d *Disassembler) inCode(addr uint64) bool {
 	if d == nil || d.elf == nil {
 		return false
@@ -136,10 +159,59 @@ func (d *Disassembler) inCode(addr uint64) bool {
 	if addr >= uint64(len(d.elf.MemoryImage)) {
 		return false
 	}
+	exec := addr >= d.textStart && addr < d.textEnd
 	if len(d.elf.ExecRanges) > 0 {
-		return d.elf.InExecutable(addr)
+		exec = d.elf.InExecutable(addr)
 	}
-	return addr >= d.textStart && addr < d.textEnd
+	if !exec || d.elf.InData(addr) || pendingRangeHas(d.pendingData, addr) {
+		return false
+	}
+	return true
+}
+
+func pendingRangeHas(rs []elfloader.AddrRange, addr uint64) bool {
+	for _, r := range rs {
+		if addr >= r.Start && addr < r.End {
+			return true
+		}
+	}
+	return false
+}
+
+// noteData records [start, end) as bytes the decoder must not enter.
+// Extents that overlap an unwind function are left alone: those bytes are code.
+func (d *Disassembler) noteData(start, end uint64) {
+	if d == nil || end <= start || d.overlapsFunc(start, end) {
+		return
+	}
+	d.pendingData = append(d.pendingData, elfloader.AddrRange{Start: start, End: end})
+}
+
+func (d *Disassembler) overlapsFunc(start, end uint64) bool {
+	if d.elf == nil || len(d.elf.FuncBounds) == 0 {
+		return false
+	}
+	b := d.elf.FuncBounds
+	i, ok := slices.BinarySearchFunc(b, start, func(r elfloader.AddrRange, addr uint64) int {
+		if addr >= r.End {
+			return -1
+		}
+		if addr < r.Start {
+			return 1
+		}
+		return 0
+	})
+	if ok {
+		return true
+	}
+	return i < len(b) && b[i].Start < end
+}
+
+func (d *Disassembler) flushData() {
+	if d == nil || len(d.pendingData) == 0 {
+		return
+	}
+	d.pendingData = d.pendingData[:0]
 }
 
 // ReachableFunc is a compact index entry for a discovered function.
@@ -182,8 +254,21 @@ func (d *Disassembler) WalkReachable(entryAddrs []uint64, visit func(fn *Functio
 			}
 		}
 	}
-
+	d.flushData()
 	return nil
+}
+
+// seedableFunc reports whether a RIP-relative address is worth queuing as a
+// new function. With unwind extents, only real entries qualify. Otherwise the
+// prologue heuristic is the filter.
+func (d *Disassembler) seedableFunc(addr uint64) bool {
+	if d == nil || d.elf == nil || !d.inCode(addr) {
+		return false
+	}
+	if d.elf.InUnwindScope(addr) {
+		return d.elf.IsFuncEntry(addr)
+	}
+	return looksLikeFuncStart(d.elf.MemoryImage, addr)
 }
 
 // AnalyzeReachable traverses and discovers all functions reachable from the given entry addresses.
@@ -237,8 +322,18 @@ func (d *Disassembler) DisasmFunction(entryAddr uint64) (*Function, []uint64, er
 
 // disasmFunction disassembles a single function starting at entryAddr.
 func (d *Disassembler) disasmFunction(entryAddr uint64) (*Function, []uint64, error) {
-	if sym, ok := d.elf.SymbolByAddr[entryAddr]; ok && sym.Size > 0 {
-		return d.disasmLinearFunction(entryAddr, sym.Size)
+	d.flushData()
+	var size uint64
+	if d.elf != nil {
+		if sym, ok := d.elf.SymbolByAddr[entryAddr]; ok && sym.Size > 0 {
+			size = sym.Size
+		}
+	}
+	if size > 0 {
+		end := d.functionEnd(entryAddr, size)
+		if end > entryAddr {
+			return d.disasmLinearFunction(entryAddr, end-entryAddr)
+		}
 	}
 	return d.disasmBranchFollowing(entryAddr)
 }
@@ -286,7 +381,6 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			pc++
 			continue
 		}
-
 		wrapped := Instruction{
 			Address: pc,
 			Inst:    inst,
@@ -309,8 +403,7 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
 				disp := int64(int32(mem.Disp))
 				target := uint64(int64(nextPC) + disp)
-				if d.inCode(target) && (target < entryAddr || target >= fnEnd) &&
-					looksLikeFuncStart(d.elf.MemoryImage, target) {
+				if (target < entryAddr || target >= fnEnd) && d.seedableFunc(target) {
 					discoveredCalls = append(discoveredCalls, target)
 				}
 			}
@@ -350,6 +443,8 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 				target := uint64(int64(nextPC) + int64(rel))
 				if target >= entryAddr && target < fnEnd {
 					leaders[target] = true
+				} else if d.inCode(target) {
+					discoveredCalls = append(discoveredCalls, target)
 				}
 			}
 			if nextPC < fnEnd {
@@ -468,31 +563,46 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 		}
 	}
 
-	// Stripped SELF images have no STT_FUNC sizes, so functionEnd is the whole
-	// RX range. Without a cap, a fallthrough into data is decoded as one
-	// multi-megabyte "function". Real compiler basic blocks and functions
-	// are far smaller than these limits.
+	// Without a symbol size or an unwind extent, functionEnd is the whole RX
+	// range. The caps stop a fallthrough into data from becoming one
+	// multi-megabyte function. Real compiler blocks are far smaller.
 	const maxBlockBytes = 8192
 	const maxFnInsts = 32768
+	fnEnd := d.functionEnd(entryAddr, 0)
+	inside := func(addr uint64) bool {
+		return addr >= entryAddr && addr < fnEnd && d.inCode(addr)
+	}
+	// A direct transfer past the function is a tail call, not another block.
+	edge := func(target uint64) {
+		if inside(target) {
+			enqueueBlock(target)
+			return
+		}
+		if target != 0 && d.inCode(target) {
+			discoveredCalls = append(discoveredCalls, target)
+		}
+	}
 
-	// Step 1: Linear sweep along branches within the function
+	capped := false
 	for head := 0; head < len(blockQueue); head++ {
 		if len(instAtAddr) >= maxFnInsts {
+			capped = true
 			break
 		}
 		blockStart := blockQueue[head]
-
 		pc := blockStart
 
-		for d.inCode(pc) {
-
-			offset := pc
-			if offset >= uint64(len(d.elf.MemoryImage)) {
+		for pc < fnEnd && d.inCode(pc) {
+			if pc >= uint64(len(d.elf.MemoryImage)) {
 				break
 			}
 
-			inst, err := x86asm.Decode(d.elf.MemoryImage[offset:], 64)
+			inst, err := x86asm.Decode(d.elf.MemoryImage[pc:], 64)
 			if err != nil || inst.Len == 0 {
+				break
+			}
+			if isPrivileged(inst.Op) {
+				d.PrivilegedStops++
 				break
 			}
 
@@ -510,7 +620,6 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 
 			nextPC := pc + uint64(inst.Len)
 
-			// Check control flow changes
 			isBranch := false
 			isTerminal := false
 
@@ -519,16 +628,10 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				isBranch = true
 				isTerminal = true
 				if rel, ok := inst.Args[0].(x86asm.Rel); ok {
-					target := uint64(int64(nextPC) + int64(rel))
-					enqueueBlock(target)
+					edge(uint64(int64(nextPC) + int64(rel)))
 				} else if sw, ok := matchPICSwitch(recent); ok {
-					fnEnd := d.functionEnd(entryAddr, 0)
 					for _, target := range d.jumpTableTargets(sw, entryAddr, fnEnd) {
-						if target >= entryAddr && (fnEnd == 0 || target < fnEnd) {
-							enqueueBlock(target)
-						} else {
-							discoveredCalls = append(discoveredCalls, target)
-						}
+						edge(target)
 					}
 				}
 			case x86asm.RET:
@@ -537,7 +640,6 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				isTerminal = true
 			case x86asm.CALL:
 				// Call does not terminate the basic block; execution continues at nextPC.
-				// Record call target as potential new function.
 				if rel, ok := inst.Args[0].(x86asm.Rel); ok {
 					target := uint64(int64(nextPC) + int64(rel))
 					discoveredCalls = append(discoveredCalls, target)
@@ -546,18 +648,19 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
 					disp := int64(int32(mem.Disp))
 					target := uint64(int64(nextPC) + disp)
-					if d.inCode(target) && looksLikeFuncStart(d.elf.MemoryImage, target) {
+					if d.seedableFunc(target) {
 						discoveredCalls = append(discoveredCalls, target)
 					}
 				}
 			default:
-				// Conditional jumps (Jcc)
 				if isJcc(inst.Op) {
 					isBranch = true
 					if rel, ok := inst.Args[0].(x86asm.Rel); ok {
-						enqueueBlock(uint64(int64(nextPC) + int64(rel)))
+						edge(uint64(int64(nextPC) + int64(rel)))
 					}
-					enqueueBlock(nextPC)
+					if inside(nextPC) {
+						enqueueBlock(nextPC)
+					}
 				}
 			}
 
@@ -566,9 +669,13 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				break
 			}
 			if pc-blockStart >= maxBlockBytes || len(instAtAddr) >= maxFnInsts {
+				capped = true
 				break
 			}
 		}
+	}
+	if capped {
+		d.CapHits++
 	}
 
 	if len(instAtAddr) == 0 {
@@ -692,6 +799,22 @@ func isCmovcc(op x86asm.Op) bool {
 		x86asm.CMOVE, x86asm.CMOVG, x86asm.CMOVGE, x86asm.CMOVL,
 		x86asm.CMOVLE, x86asm.CMOVNE, x86asm.CMOVNO, x86asm.CMOVNP,
 		x86asm.CMOVNS, x86asm.CMOVO, x86asm.CMOVP, x86asm.CMOVS:
+		return true
+	default:
+		return false
+	}
+}
+
+// isPrivileged reports opcodes that do not appear in Jaguar user-mode code.
+// Decoding one means the PC is not an instruction boundary.
+func isPrivileged(op x86asm.Op) bool {
+	switch op {
+	case x86asm.IN, x86asm.INSB, x86asm.INSW, x86asm.INSD,
+		x86asm.OUT, x86asm.OUTSB, x86asm.OUTSW, x86asm.OUTSD,
+		x86asm.CLI, x86asm.STI, x86asm.HLT,
+		x86asm.IRET, x86asm.IRETD, x86asm.IRETQ,
+		x86asm.LGDT, x86asm.CLTS, x86asm.WBINVD, x86asm.INVD, x86asm.INVLPG,
+		x86asm.RDMSR, x86asm.WRMSR, x86asm.SWAPGS, x86asm.SYSRET, x86asm.SYSEXIT:
 		return true
 	default:
 		return false

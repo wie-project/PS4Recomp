@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -261,6 +262,18 @@ func (l *LoadedELF) ApplyBias(delta uint64) error {
 		l.ExecRanges[i].Start += delta
 		l.ExecRanges[i].End += delta
 	}
+	for i := range l.FuncBounds {
+		l.FuncBounds[i].Start += delta
+		l.FuncBounds[i].End += delta
+	}
+	for i := range l.UnwindRanges {
+		l.UnwindRanges[i].Start += delta
+		l.UnwindRanges[i].End += delta
+	}
+	for i := range l.DataRanges {
+		l.DataRanges[i].Start += delta
+		l.DataRanges[i].End += delta
+	}
 
 	for i := range l.Symbols {
 		if l.Symbols[i].Address != 0 {
@@ -341,6 +354,18 @@ func MergeImages(dst, src *LoadedELF) error {
 	}
 	dst.Segments = append(dst.Segments, src.Segments...)
 	dst.ExecRanges = append(dst.ExecRanges, src.ExecRanges...)
+	dst.FuncBounds = append(dst.FuncBounds, src.FuncBounds...)
+	slices.SortFunc(dst.FuncBounds, func(a, b AddrRange) int {
+		if a.Start < b.Start {
+			return -1
+		}
+		if a.Start > b.Start {
+			return 1
+		}
+		return 0
+	})
+	dst.UnwindRanges = mergeRanges(append(dst.UnwindRanges, src.UnwindRanges...))
+	dst.DataRanges = mergeRanges(append(dst.DataRanges, src.DataRanges...))
 	dst.Relocations = append(dst.Relocations, src.Relocations...)
 	dst.InitArray = append(dst.InitArray, src.InitArray...)
 	for _, sym := range src.Symbols {

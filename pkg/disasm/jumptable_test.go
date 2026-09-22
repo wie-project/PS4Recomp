@@ -191,6 +191,30 @@ func TestLibExamplePrintfSwitchLeaders(t *testing.T) {
 	}
 }
 
+func TestLibExampleHltDoesNotDropEpilogue(t *testing.T) {
+	path := "../../tools/OpenOrbis/PS4Toolchain/samples/using_library/sce_module/libExample.prx"
+	if _, err := os.Stat(path); err != nil {
+		t.Skip("libExample.prx not present")
+	}
+	loaded, err := elfloader.LoadELF(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewDisassembler(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// NID tIhsqj0qsFE is 44 bytes and contains HLT (0xf4) on a side path.
+	// The following RET is the target of an earlier JE and must stay a block.
+	fn, _, err := d.DisasmFunction(0xe8f0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fn.Blocks[0xe91b]; !ok {
+		t.Fatalf("RET at 0xe91b was dropped (blocks=%v)", fn.BlockOrder)
+	}
+}
+
 func TestLibExampleSwitchCaseIsLeader(t *testing.T) {
 	path := "../../tools/OpenOrbis/PS4Toolchain/samples/using_library/sce_module/libExample.prx"
 	if _, err := os.Stat(path); err != nil {

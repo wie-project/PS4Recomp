@@ -326,6 +326,198 @@ func TestLiftNewInstructions(t *testing.T) {
 			contains: []string{"ctx->xmm[1].u32[2]"},
 		},
 		{
+			name: "VRSQRTSS",
+			inst: disasm.Instruction{
+				Address: 0x1060,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VRSQRTSS,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1, x86asm.X2},
+					Len:  4,
+				},
+			},
+			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].f32[0] = 1.0f / sqrtf(ctx->xmm[2].f32[0]);"},
+		},
+		{
+			name: "VRSQRTPS",
+			inst: disasm.Instruction{
+				Address: 0x1064,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VRSQRTPS,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: []string{"ctx->xmm[0].f32[0] = 1.0f / sqrtf(src.f32[0]);", "ctx->xmm[0].f32[3] = 1.0f / sqrtf(src.f32[3]);"},
+		},
+		{
+			name: "VMOVAPD",
+			inst: disasm.Instruction{
+				Address: 0x1068,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VMOVAPD,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: []string{"ctx->xmm[0] = ctx->xmm[1];"},
+		},
+		{
+			name: "VMOVDDUP",
+			inst: disasm.Instruction{
+				Address: 0x106C,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VMOVDDUP,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: []string{"ctx->xmm[0].f64[0] = ctx->xmm[1].f64[0];", "ctx->xmm[0].f64[1] = ctx->xmm[1].f64[0];"},
+		},
+		{
+			name: "VCVTSS2SI",
+			inst: disasm.Instruction{
+				Address: 0x1070,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VCVTSS2SI,
+					Args: x86asm.Args{x86asm.RAX, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: []string{"llrintf(ctx->xmm[1].f32[0])"},
+		},
+		{
+			name: "VCVTSD2SI",
+			inst: disasm.Instruction{
+				Address: 0x1074,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VCVTSD2SI,
+					Args: x86asm.Args{x86asm.RAX, x86asm.X2},
+					Len:  4,
+				},
+			},
+			contains: []string{"llrint(ctx->xmm[2].f64[0])"},
+		},
+		{
+			name: "VEXTRACTF128_lo",
+			inst: disasm.Instruction{
+				Address: 0x1078,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VEXTRACTF128,
+					Args: x86asm.Args{x86asm.X0, x86asm.Y1, x86asm.Imm(0)},
+					Len:  6,
+				},
+			},
+			contains: []string{"ctx->xmm[1]", "ctx->xmm[0] = tmp;", "memset(&ctx->ymmh[0], 0, 16);"},
+		},
+		{
+			name: "VEXTRACTF128_hi",
+			inst: disasm.Instruction{
+				Address: 0x107E,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VEXTRACTF128,
+					Args: x86asm.Args{x86asm.X0, x86asm.Y1, x86asm.Imm(1)},
+					Len:  6,
+				},
+			},
+			contains: []string{"ctx->ymmh[1]", "ctx->xmm[0] = tmp;", "memset(&ctx->ymmh[0], 0, 16);"},
+		},
+		{
+			name: "VINSERTF128",
+			inst: disasm.Instruction{
+				Address: 0x1084,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VINSERTF128,
+					Args: x86asm.Args{x86asm.Y0, x86asm.Y1, x86asm.X2, x86asm.Imm(1)},
+					Len:  6,
+				},
+			},
+			contains: []string{"ctx->xmm[0] = s1_lo;", "ctx->ymmh[0] = s2;"},
+		},
+		{
+			name: "MOVBE_reg",
+			inst: disasm.Instruction{
+				Address: 0x108A,
+				Inst: x86asm.Inst{
+					Op:   x86asm.MOVBE,
+					Args: x86asm.Args{x86asm.RAX, x86asm.Mem{Base: x86asm.RDI}},
+					Len:  4,
+				},
+			},
+			contains: []string{"__builtin_bswap64"},
+		},
+		{
+			name: "HADDPD",
+			inst: disasm.Instruction{
+				Address: 0x108E,
+				Inst: x86asm.Inst{
+					Op:   x86asm.HADDPD,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: []string{"ctx->xmm[0].f64[0] = s1.f64[0] + s1.f64[1];", "ctx->xmm[0].f64[1] = s2.f64[0] + s2.f64[1];"},
+		},
+		{
+			name: "VHADDPD",
+			inst: disasm.Instruction{
+				Address: 0x1092,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VHADDPD,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1, x86asm.X2},
+					Len:  4,
+				},
+			},
+			contains: []string{"ctx->xmm[0].f64[0] = s1.f64[0] + s1.f64[1];", "ctx->xmm[0].f64[1] = s2.f64[0] + s2.f64[1];"},
+		},
+		{
+			name: "PCMPGTQ",
+			inst: disasm.Instruction{
+				Address: 0x1096,
+				Inst: x86asm.Inst{
+					Op:   x86asm.PCMPGTQ,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: []string{"ctx->xmm[0].u64[0] = ((int64_t)ctx->xmm[0].u64[0] > (int64_t)(ctx->xmm[1].u64[0])) ? 0xFFFFFFFFFFFFFFFFULL : 0;"},
+		},
+		{
+			name: "VPCMPGTQ",
+			inst: disasm.Instruction{
+				Address: 0x109A,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VPCMPGTQ,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1, x86asm.X2},
+					Len:  4,
+				},
+			},
+			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].u64[0] = ((int64_t)ctx->xmm[0].u64[0] > (int64_t)(ctx->xmm[2].u64[0])) ? 0xFFFFFFFFFFFFFFFFULL : 0;"},
+		},
+		{
+			name: "CVTPS2PD",
+			inst: disasm.Instruction{
+				Address: 0x109E,
+				Inst: x86asm.Inst{
+					Op:   x86asm.CVTPS2PD,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  3,
+				},
+			},
+			contains: []string{"ctx->xmm[0].f64[0] = (double)f0;", "ctx->xmm[0].f64[1] = (double)f1;"},
+		},
+		{
+			name: "VCVTPS2PD",
+			inst: disasm.Instruction{
+				Address: 0x10A1,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VCVTPS2PD,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: []string{"ctx->xmm[0].f64[0] = (double)f0;", "ctx->xmm[0].f64[1] = (double)f1;"},
+		},
+		{
 			name: "VMINSS",
 			inst: disasm.Instruction{
 				Address: 0x1056,

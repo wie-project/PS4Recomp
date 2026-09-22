@@ -726,6 +726,43 @@ func (l *Lifter) liftBswap(dst x86asm.Arg, defMemSz int, nextPC uint64) ([]strin
 	return l.getOperandWrite(dst, sz, swapExpr, nextPC)
 }
 
+func (l *Lifter) liftMovbe(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	} else if reg, ok := src.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	sRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	var swapExpr string
+	switch sz {
+	case 2:
+		swapExpr = fmt.Sprintf("__builtin_bswap16((uint16_t)(%s))", sRead)
+	case 4:
+		swapExpr = fmt.Sprintf("__builtin_bswap32((uint32_t)(%s))", sRead)
+	case 8:
+		swapExpr = fmt.Sprintf("__builtin_bswap64((uint64_t)(%s))", sRead)
+	default:
+		return nil, fmt.Errorf("unsupported MOVBE size: %d", sz)
+	}
+	writes, err := l.getOperandWrite(dst, sz, swapExpr, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	lines := make([]string, 0, len(writes))
+	for _, w := range writes {
+		lines = append(lines, "    "+w)
+	}
+	return lines, nil
+}
+
 func (l *Lifter) liftBitTest(op x86asm.Op, base, bit x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
 	sz := defMemSz
 	if reg, ok := base.(x86asm.Reg); ok {

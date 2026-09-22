@@ -38,6 +38,10 @@ type AnalysisReport struct {
 	MissingOpcodes      []OpcodeFrequency
 	TopSupportedOpcodes []OpcodeFrequency
 	HLE                 *emitter.HLEReport
+	UnwindFunctions     int
+	DataRanges          int
+	CapHits             int
+	PrivilegedStops     int
 }
 
 // AnalyzeBinary recovers the reachable CFG (the same seeding the recompiler uses)
@@ -75,7 +79,7 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 	visited := make(map[uint64]bool, len(entries)*2)
 	queue := make([]uint64, 0, len(entries)*2)
 	for _, addr := range entries {
-		if addr == 0 || !loaded.InExecutable(addr) || visited[addr] {
+		if addr == 0 || !d.InCode(addr) || visited[addr] {
 			continue
 		}
 		visited[addr] = true
@@ -111,7 +115,7 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 			}
 		}
 		for _, target := range calls {
-			if target == 0 || !loaded.InExecutable(target) || visited[target] {
+			if target == 0 || !d.InCode(target) || visited[target] {
 				continue
 			}
 			visited[target] = true
@@ -168,6 +172,10 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 		MissingOpcodes:      missingFreqs,
 		TopSupportedOpcodes: supportedFreqs,
 		HLE:                 hle,
+		UnwindFunctions:     len(loaded.FuncBounds),
+		DataRanges:          len(loaded.DataRanges),
+		CapHits:             d.CapHits,
+		PrivilegedStops:     d.PrivilegedStops,
 	}, nil
 }
 
@@ -180,7 +188,11 @@ func (r *AnalysisReport) SummaryString() string {
 	sb.WriteString(fmt.Sprintf("Binary File:            %s\n", filepath.Base(r.BinaryPath)))
 	sb.WriteString(fmt.Sprintf("Binary Size:            %.2f MB (%d bytes)\n", float64(r.BinarySize)/(1024*1024), r.BinarySize))
 	sb.WriteString(fmt.Sprintf("CFG Seeds:              %d\n", r.SeedCount))
+	sb.WriteString(fmt.Sprintf("Unwind Functions:       %d\n", r.UnwindFunctions))
+	sb.WriteString(fmt.Sprintf("Unwind Data Ranges:     %d\n", r.DataRanges))
 	sb.WriteString(fmt.Sprintf("Reachable Functions:    %d\n", r.FunctionCount))
+	sb.WriteString(fmt.Sprintf("Decode Cap Hits:        %d\n", r.CapHits))
+	sb.WriteString(fmt.Sprintf("Privileged Stops:       %d\n", r.PrivilegedStops))
 	sb.WriteString(fmt.Sprintf("Total Disassembled:     %d instructions\n", r.TotalInstructions))
 	sb.WriteString(fmt.Sprintf("Unique Opcodes:         %d\n", r.UniqueOpcodes))
 	sb.WriteString(fmt.Sprintf("Supported by Lifter:    %d instructions (%.2f%%)\n", r.SupportedCount, r.CoveragePercent))

@@ -278,5 +278,9 @@ func (d *Disassembler) readPIC32Targets(tableAddr, baseAddr uint64, count int, f
 }
 
 func (d *Disassembler) jumpTableTargets(sw picSwitch, fnStart, fnEnd uint64) []uint64 {
-	return d.readPIC32Targets(sw.tableAddr, sw.baseAddr, sw.count, fnStart, fnEnd)
+	targets := d.readPIC32Targets(sw.tableAddr, sw.baseAddr, sw.count, fnStart, fnEnd)
+	if sw.count > 0 {
+		d.noteData(sw.tableAddr, sw.tableAddr+uint64(sw.count)*4)
+	}
+	return targets
 }

@@ -219,8 +219,8 @@ func Execute(args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load ELF '%s': %w", cfg.ElfPath, err)
 	}
-	fmt.Printf("             Entry point: 0x%x | Segments: %d | Relocations: %d | Time: %v\n",
-		loaded.EntryPoint, len(loaded.Segments), len(loaded.Relocations), time.Since(stepStart).Round(time.Millisecond))
+	fmt.Printf("             Entry point: 0x%x | Segments: %d | Relocations: %d | Unwind functions: %d | Time: %v\n",
+		loaded.EntryPoint, len(loaded.Segments), len(loaded.Relocations), len(loaded.FuncBounds), time.Since(stepStart).Round(time.Millisecond))
 
 	// Step 2: Disassembly and CFG Analysis
 	stepStart = time.Now()
@@ -253,8 +253,8 @@ func Execute(args []string) error {
 	for _, f := range funcs {
 		totalInsts += f.Insts
 	}
-	fmt.Printf("             Discovered %d functions, %d instructions | Time: %v\n",
-		len(funcs), totalInsts, time.Since(stepStart).Round(time.Millisecond))
+	fmt.Printf("             Discovered %d functions, %d instructions | cap hits: %d | privileged stops: %d | Time: %v\n",
+		len(funcs), totalInsts, d.CapHits, d.PrivilegedStops, time.Since(stepStart).Round(time.Millisecond))
 
 	// Step 3: C Source Code Generation
 	stepStart = time.Now()

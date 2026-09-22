@@ -93,6 +93,15 @@ type LoadedELF struct {
 
 	// MemoryImage holds the pre-mapped guest memory image with relative relocs applied.
 	MemoryImage []byte
+
+	// FuncBounds are half-open function extents from .eh_frame, sorted by Start.
+	FuncBounds []AddrRange
+	// UnwindRanges are executable ranges covered by unwind information.
+	UnwindRanges []AddrRange
+	// DataRanges are half-open non-code intervals inside the image (.eh_frame
+	// and .eh_frame_hdr), sorted and non-overlapping. PS4 RX segments often
+	// contain both.
+	DataRanges []AddrRange
 }
 
 // LoadELF reads and parses a 64-bit ELF binary. PS4 SELF/FSELF containers are unwrapped first.
@@ -251,6 +260,7 @@ func LoadELFBytes(data []byte) (*LoadedELF, error) {
 			}
 		}
 	}
+	attachUnwind(loaded, file)
 	return loaded, nil
 }
 

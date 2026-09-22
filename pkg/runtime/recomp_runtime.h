@@ -72,6 +72,7 @@ typedef struct GuestContext {
 
   // SIMD Registers
   xmm_reg_t xmm[16];
+  xmm_reg_t ymmh[16];
 
   // x87 FPU state
   double fpu_stack[8];

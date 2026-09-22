@@ -7,9 +7,15 @@ import (
 )
 
 func (l *Lifter) loadXmmArg(src x86asm.Arg, nextPC uint64, varName string) ([]string, error) {
-	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
-		info := regMap[srcReg]
-		return []string{fmt.Sprintf("      xmm_reg_t %s = ctx->%s;", varName, info.BaseReg)}, nil
+	if srcReg, ok := src.(x86asm.Reg); ok {
+		if isXmm(srcReg) {
+			info := regMap[srcReg]
+			return []string{fmt.Sprintf("      xmm_reg_t %s = ctx->%s;", varName, info.BaseReg)}, nil
+		}
+		if isYmm(srcReg) {
+			idx := ymmIdx(srcReg)
+			return []string{fmt.Sprintf("      xmm_reg_t %s = ctx->xmm[%d];", varName, idx)}, nil
+		}
 	}
 	if srcMem, ok := src.(x86asm.Mem); ok {
 		addr, err := MemAddrExpr(srcMem, nextPC)
@@ -21,7 +27,84 @@ func (l *Lifter) loadXmmArg(src x86asm.Arg, nextPC uint64, varName string) ([]st
 			fmt.Sprintf("      memcpy(&%s, ctx->mem_base + (%s), 16);", varName, addr),
 		}, nil
 	}
-	return nil, fmt.Errorf("expected XMM or memory operand")
+	return nil, fmt.Errorf("expected XMM/YMM or memory operand")
+}
+
+func (l *Lifter) liftVextract128(dst, src, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
+	srcReg, ok1 := src.(x86asm.Reg)
+	imm, ok2 := immArg.(x86asm.Imm)
+	if !ok1 || !ok2 || !isYmm(srcReg) {
+		return nil, fmt.Errorf("vextract128 requires YMM source and immediate")
+	}
+	sIdx := ymmIdx(srcReg)
+	imm8 := uint8(imm) & 1
+
+	var srcField string
+	if imm8 == 0 {
+		srcField = fmt.Sprintf("ctx->xmm[%d]", sIdx)
+	} else {
+		srcField = fmt.Sprintf("ctx->ymmh[%d]", sIdx)
+	}
+
+	if dstReg, ok := dst.(x86asm.Reg); ok && isXmm(dstReg) {
+		dIdx := int(dstReg - x86asm.X0)
+		return []string{
+			"    {",
+			fmt.Sprintf("      xmm_reg_t tmp = %s;", srcField),
+			fmt.Sprintf("      ctx->xmm[%d] = tmp;", dIdx),
+			fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx),
+			"    }",
+		}, nil
+	}
+	if dstMem, ok := dst.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(dstMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		return []string{
+			"    {",
+			fmt.Sprintf("      xmm_reg_t tmp = %s;", srcField),
+			fmt.Sprintf("      memcpy(ctx->mem_base + (%s), &tmp, 16);", addr),
+			"    }",
+		}, nil
+	}
+	return nil, fmt.Errorf("vextract128 requires XMM or memory destination")
+}
+
+func (l *Lifter) liftVinsert128(dst, src1, src2, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok1 := dst.(x86asm.Reg)
+	src1Reg, ok2 := src1.(x86asm.Reg)
+	imm, ok3 := immArg.(x86asm.Imm)
+	if !ok1 || !ok2 || !ok3 || !isYmm(dstReg) || !isYmm(src1Reg) {
+		return nil, fmt.Errorf("vinsert128 requires YMM destination and src1, and immediate")
+	}
+	dIdx := ymmIdx(dstReg)
+	s1Idx := ymmIdx(src1Reg)
+	imm8 := uint8(imm) & 1
+
+	lines := []string{"    {"}
+	s2Code, err := l.loadXmmArg(src2, nextPC, "s2")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, s2Code...)
+	lines = append(lines,
+		fmt.Sprintf("      xmm_reg_t s1_lo = ctx->xmm[%d];", s1Idx),
+		fmt.Sprintf("      xmm_reg_t s1_hi = ctx->ymmh[%d];", s1Idx),
+	)
+	if imm8 == 0 {
+		lines = append(lines,
+			fmt.Sprintf("      ctx->xmm[%d] = s2;", dIdx),
+			fmt.Sprintf("      ctx->ymmh[%d] = s1_hi;", dIdx),
+		)
+	} else {
+		lines = append(lines,
+			fmt.Sprintf("      ctx->xmm[%d] = s1_lo;", dIdx),
+			fmt.Sprintf("      ctx->ymmh[%d] = s2;", dIdx),
+		)
+	}
+	lines = append(lines, "    }")
+	return lines, nil
 }
 
 func (l *Lifter) liftShufps(dst, src1, src2, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
@@ -897,6 +980,74 @@ func (l *Lifter) liftPackedSqrt(isDouble bool, dst, src x86asm.Arg, nextPC uint6
 	}
 	lines = append(lines, "    }")
 	return lines, nil
+}
+
+func (l *Lifter) liftRsqrtScalar(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("rsqrtss dst must be XMM")
+	}
+	infoDst := regMap[dstReg]
+	var sExpr string
+	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+		sExpr = fmt.Sprintf("ctx->%s.f32[0]", regMap[srcReg].BaseReg)
+	} else if srcMem, ok := src.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(srcMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		sExpr = fmt.Sprintf("({ float s; uint32_t u = MEM_U32(%s); memcpy(&s, &u, 4); s; })", addr)
+	} else {
+		return nil, fmt.Errorf("rsqrtss invalid src")
+	}
+	return []string{
+		fmt.Sprintf("    ctx->%s.f32[0] = 1.0f / sqrtf(%s);", infoDst.BaseReg, sExpr),
+	}, nil
+}
+
+func (l *Lifter) liftRsqrtPacked(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("rsqrtps destination must be XMM")
+	}
+	infoDst := regMap[dstReg]
+	lines := []string{"    {"}
+	s, err := l.loadXmmArg(src, nextPC, "src")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, s...)
+	for i := 0; i < 4; i++ {
+		lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] = 1.0f / sqrtf(src.f32[%d]);", infoDst.BaseReg, i, i))
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftMovddup(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || !isXmm(dstReg) {
+		return nil, fmt.Errorf("movddup dst must be XMM")
+	}
+	infoDst := regMap[dstReg]
+	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+		infoSrc := regMap[srcReg]
+		return []string{
+			fmt.Sprintf("    ctx->%s.f64[0] = ctx->%s.f64[0];", infoDst.BaseReg, infoSrc.BaseReg),
+			fmt.Sprintf("    ctx->%s.f64[1] = ctx->%s.f64[0];", infoDst.BaseReg, infoSrc.BaseReg),
+		}, nil
+	}
+	if srcMem, ok := src.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(srcMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		return []string{
+			fmt.Sprintf("    ctx->%s.u64[0] = MEM_U64(%s);", infoDst.BaseReg, addr),
+			fmt.Sprintf("    ctx->%s.u64[1] = ctx->%s.u64[0];", infoDst.BaseReg, infoDst.BaseReg),
+		}, nil
+	}
+	return nil, fmt.Errorf("movddup invalid src")
 }
 
 func (l *Lifter) liftPtest(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {

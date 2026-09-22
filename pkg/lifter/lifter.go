@@ -62,18 +62,19 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.ADDSD, x86asm.MULSD, x86asm.SUBSD, x86asm.DIVSD,
 		x86asm.ADDSS, x86asm.MULSS, x86asm.SUBSS, x86asm.DIVSS,
 		x86asm.ADDPS, x86asm.MULPS, x86asm.SUBPS, x86asm.DIVPS,
-		x86asm.MAXPS, x86asm.MINPS, x86asm.HADDPS,
+		x86asm.MAXPS, x86asm.MINPS, x86asm.HADDPS, x86asm.HADDPD,
 		x86asm.CVTDQ2PS, x86asm.CVTPS2DQ, x86asm.PAVGB, x86asm.PAVGW,
 		x86asm.UCOMISD, x86asm.UCOMISS, x86asm.COMISD, x86asm.COMISS,
 		x86asm.MINSD, x86asm.MINSS, x86asm.MAXSD, x86asm.MAXSS,
 		x86asm.SQRTSS, x86asm.SQRTSD,
 		x86asm.MOVHPD, x86asm.MOVLPD, x86asm.MOVLPS, x86asm.MOVHPS,
 		x86asm.MOVNTDQ, x86asm.UNPCKLPS, x86asm.UNPCKHPS, x86asm.INSB,
+		x86asm.PCMPGTQ, x86asm.CVTPS2PD, x86asm.CVTPD2PS, x86asm.MOVBE,
 		// AVX / VEX opcodes
-		x86asm.VMOVAPS, x86asm.VMOVUPS, x86asm.VMOVUPD, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ, x86asm.VMOVSS, x86asm.VMOVSD,
+		x86asm.VMOVAPS, x86asm.VMOVUPS, x86asm.VMOVUPD, x86asm.VMOVAPD, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ, x86asm.VMOVSS, x86asm.VMOVSD,
 		x86asm.VMOVNTPS, x86asm.VMOVNTDQ, x86asm.VBROADCASTSS, x86asm.VMOVSLDUP,
 		x86asm.VADDSS, x86asm.VADDSD, x86asm.VSUBSS, x86asm.VSUBSD, x86asm.VMULSS, x86asm.VMULSD, x86asm.VDIVSS, x86asm.VDIVSD,
-		x86asm.VADDPS, x86asm.VSUBPS, x86asm.VMULPS, x86asm.VDIVPS, x86asm.VMAXPS, x86asm.VMINPS, x86asm.VMAXSS, x86asm.VMINSS, x86asm.VHADDPS,
+		x86asm.VADDPS, x86asm.VSUBPS, x86asm.VMULPS, x86asm.VDIVPS, x86asm.VMAXPS, x86asm.VMINPS, x86asm.VMAXSS, x86asm.VMINSS, x86asm.VHADDPS, x86asm.VHADDPD,
 		x86asm.VXORPS, x86asm.VORPS, x86asm.VANDPS, x86asm.VPXOR, x86asm.VPOR, x86asm.VPAND, x86asm.VPADDW, x86asm.VPSUBW, x86asm.VPMULLW,
 		x86asm.VPAVGB, x86asm.VPAVGW,
 		x86asm.VPINSRW, x86asm.VPINSRB, x86asm.VPINSRD,
@@ -85,7 +86,8 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.VPANDN, x86asm.VPMULLD, x86asm.VPMOVZXWD, x86asm.VPMOVSXWD,
 		x86asm.VCVTSI2SS, x86asm.VCVTSI2SD, x86asm.VCVTTSS2SI, x86asm.VCVTTSD2SI, x86asm.VCVTSS2SD, x86asm.VCVTSD2SS,
 		x86asm.VUCOMISS, x86asm.VUCOMISD, x86asm.VPSHUFHW, x86asm.VPSHUFLW, x86asm.VROUNDSD, x86asm.VROUNDSS,
-		x86asm.VSQRTSS, x86asm.VSQRTSD,
+		x86asm.VSQRTSS, x86asm.VSQRTSD, x86asm.VRSQRTSS, x86asm.VRSQRTPS, x86asm.VMOVDDUP, x86asm.VCVTSS2SI, x86asm.VCVTSD2SI,
+		x86asm.VCVTPS2PD, x86asm.VCVTPD2PS, x86asm.VEXTRACTF128, x86asm.VEXTRACTI128, x86asm.VINSERTF128, x86asm.VINSERTI128,
 		x86asm.VPERMILPS, x86asm.VPERMILPD, x86asm.VCMPPS, x86asm.VSHUFPS,
 		x86asm.VINSERTPS, x86asm.VMOVSHDUP, x86asm.VMOVLPS, x86asm.VMOVMSKPS,
 		x86asm.VBLENDPS, x86asm.VBLENDVPS, x86asm.VPBLENDVB, x86asm.SHUFPS, x86asm.SHUFPD,
@@ -93,7 +95,7 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.VADDPD, x86asm.VSUBPD, x86asm.VMULPD, x86asm.VDIVPD, x86asm.VMINPD, x86asm.VMAXPD,
 		x86asm.VMINSD, x86asm.VMAXSD, x86asm.VANDPD, x86asm.VXORPD, x86asm.VORPD, x86asm.VANDNPS, x86asm.VANDNPD,
 		x86asm.VPADDB, x86asm.VPADDD, x86asm.VPADDQ, x86asm.VPSUBB, x86asm.VPSUBD, x86asm.VPSUBQ,
-		x86asm.VPCMPEQB, x86asm.VPCMPEQW, x86asm.VPCMPEQD, x86asm.VPCMPGTD,
+		x86asm.VPCMPEQB, x86asm.VPCMPEQW, x86asm.VPCMPEQD, x86asm.VPCMPGTD, x86asm.VPCMPGTQ,
 		x86asm.VPUNPCKLQDQ, x86asm.VPUNPCKHQDQ, x86asm.VUNPCKLPD, x86asm.VUNPCKHPD,
 		x86asm.VPSHUFD, x86asm.VPSHUFB, x86asm.VPALIGNR, x86asm.VPSLLQ, x86asm.VPSRLQ, x86asm.VPSLLDQ, x86asm.VPSRLDQ,
 		x86asm.VPINSRQ, x86asm.VPEXTRB, x86asm.VPEXTRW, x86asm.VPEXTRD, x86asm.VPEXTRQ,
@@ -634,15 +636,29 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 		}
 		lines = append(lines, code...)
 
-	case x86asm.CVTTSD2SI, x86asm.CVTSD2SI:
-		code, err := l.liftCvttsd2si(true, args[0], args[1], defMemSz, nextPC)
+	case x86asm.CVTTSD2SI:
+		code, err := l.liftCvtFloatToInt(true, true, args[0], args[1], defMemSz, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}
 		lines = append(lines, code...)
 
-	case x86asm.CVTTSS2SI, x86asm.CVTSS2SI:
-		code, err := l.liftCvttsd2si(false, args[0], args[1], defMemSz, nextPC)
+	case x86asm.CVTSD2SI:
+		code, err := l.liftCvtFloatToInt(false, true, args[0], args[1], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.CVTTSS2SI:
+		code, err := l.liftCvtFloatToInt(true, false, args[0], args[1], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.CVTSS2SI:
+		code, err := l.liftCvtFloatToInt(false, false, args[0], args[1], defMemSz, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}
@@ -1119,6 +1135,41 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 		}
 		lines = append(lines, code...)
 
+	case x86asm.HADDPD:
+		code, err := l.liftHaddpd(args[0], args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PCMPGTQ:
+		code, err := l.liftPcmpgtq(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.CVTPS2PD:
+		code, err := l.liftCvtps2pd(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.CVTPD2PS:
+		code, err := l.liftCvtpd2ps(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.MOVBE:
+		code, err := l.liftMovbe(args[0], args[1], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
 	case x86asm.CVTDQ2PS:
 		code, err := l.liftCvtdq2ps(args[0], args[1], nextPC)
 		if err != nil {
@@ -1333,12 +1384,12 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 		lines = append(lines, code...)
 	case x86asm.LFENCE, x86asm.MFENCE, x86asm.SFENCE:
 		lines = append(lines, "    __sync_synchronize();")
-	case x86asm.VMOVAPS, x86asm.VMOVUPS, x86asm.VMOVUPD, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ,
+	case x86asm.VMOVAPS, x86asm.VMOVUPS, x86asm.VMOVUPD, x86asm.VMOVAPD, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ,
 		x86asm.VMOVSS, x86asm.VMOVSD, x86asm.VMOVNTPS, x86asm.VMOVNTDQ, x86asm.VBROADCASTSS, x86asm.VMOVSLDUP,
 		x86asm.VADDSS, x86asm.VADDSD, x86asm.VSUBSS, x86asm.VSUBSD,
 		x86asm.VMULSS, x86asm.VMULSD, x86asm.VDIVSS, x86asm.VDIVSD,
 		x86asm.VADDPS, x86asm.VSUBPS, x86asm.VMULPS, x86asm.VDIVPS,
-		x86asm.VMAXPS, x86asm.VMINPS, x86asm.VMAXSS, x86asm.VMINSS, x86asm.VHADDPS,
+		x86asm.VMAXPS, x86asm.VMINPS, x86asm.VMAXSS, x86asm.VMINSS, x86asm.VHADDPS, x86asm.VHADDPD,
 		x86asm.VXORPS, x86asm.VORPS, x86asm.VANDPS, x86asm.VPXOR, x86asm.VPOR, x86asm.VPAND, x86asm.VPADDW, x86asm.VPSUBW, x86asm.VPMULLW,
 		x86asm.VPAVGB, x86asm.VPAVGW,
 		x86asm.VPINSRW, x86asm.VPINSRB, x86asm.VPINSRD,
@@ -1352,13 +1403,15 @@ func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *dis
 		x86asm.VCVTSS2SD, x86asm.VCVTSD2SS,
 		x86asm.VUCOMISS, x86asm.VUCOMISD, x86asm.VPSHUFHW, x86asm.VPSHUFLW,
 		x86asm.VROUNDSD, x86asm.VROUNDSS, x86asm.VSQRTSS, x86asm.VSQRTSD,
+		x86asm.VRSQRTSS, x86asm.VRSQRTPS, x86asm.VMOVDDUP, x86asm.VCVTSS2SI, x86asm.VCVTSD2SI,
+		x86asm.VCVTPS2PD, x86asm.VCVTPD2PS, x86asm.VEXTRACTF128, x86asm.VEXTRACTI128, x86asm.VINSERTF128, x86asm.VINSERTI128,
 		x86asm.VPERMILPS, x86asm.VPERMILPD, x86asm.VCMPPS, x86asm.VSHUFPS,
 		x86asm.VINSERTPS, x86asm.VMOVSHDUP, x86asm.VMOVLPS, x86asm.VMOVMSKPS,
 		x86asm.VBLENDPS, x86asm.VBLENDVPS, x86asm.VPBLENDVB, x86asm.VEXTRACTPS, x86asm.VCMPSS, x86asm.VCMPSD,
 		x86asm.VSHUFPD, x86asm.VADDPD, x86asm.VSUBPD, x86asm.VMULPD, x86asm.VDIVPD, x86asm.VMINPD, x86asm.VMAXPD,
 		x86asm.VMINSD, x86asm.VMAXSD, x86asm.VANDPD, x86asm.VXORPD, x86asm.VORPD, x86asm.VANDNPS, x86asm.VANDNPD,
 		x86asm.VPADDB, x86asm.VPADDD, x86asm.VPADDQ, x86asm.VPSUBB, x86asm.VPSUBD, x86asm.VPSUBQ,
-		x86asm.VPCMPEQB, x86asm.VPCMPEQW, x86asm.VPCMPEQD, x86asm.VPCMPGTD,
+		x86asm.VPCMPEQB, x86asm.VPCMPEQW, x86asm.VPCMPEQD, x86asm.VPCMPGTD, x86asm.VPCMPGTQ,
 		x86asm.VPUNPCKLQDQ, x86asm.VPUNPCKHQDQ, x86asm.VUNPCKLPD, x86asm.VUNPCKHPD,
 		x86asm.VPSHUFD, x86asm.VPSHUFB, x86asm.VPALIGNR, x86asm.VPSLLQ, x86asm.VPSRLQ, x86asm.VPSLLDQ, x86asm.VPSRLDQ,
 		x86asm.VPINSRQ, x86asm.VPEXTRB, x86asm.VPEXTRW, x86asm.VPEXTRD, x86asm.VPEXTRQ,

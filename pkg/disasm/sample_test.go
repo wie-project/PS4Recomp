@@ -1,9 +1,8 @@
-package disasm_test
+package disasm
 
 import (
 	"testing"
 
-	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
 
 	"golang.org/x/arch/x86/x86asm"
@@ -61,7 +60,7 @@ func TestDisasmAtomicAdd(t *testing.T) {
 		pc += uint64(inst.Len)
 	}
 
-	d, err := disasm.NewDisassembler(loaded)
+	d, err := NewDisassembler(loaded)
 	if err != nil {
 		t.Fatalf("NewDisassembler error: %v", err)
 	}
@@ -85,7 +84,7 @@ func TestCheckEntryPoint(t *testing.T) {
 		t.Fatalf("failed to load elf: %v", err)
 	}
 
-	d, err := disasm.NewDisassembler(loaded)
+	d, err := NewDisassembler(loaded)
 	if err != nil {
 		t.Fatalf("NewDisassembler error: %v", err)
 	}
@@ -139,5 +138,52 @@ func TestBMIDecoding(t *testing.T) {
 			t.Errorf("%s: expected op %v, got %v", tc.name, tc.op, decoded.Op)
 		}
 		t.Logf("%s decoded: %s", tc.name, decoded.String())
+	}
+}
+
+func TestDiscoverReachableWithMergedPRX(t *testing.T) {
+	prxPath := "../../tools/OpenOrbis/PS4Toolchain/samples/using_library/sce_module/libExample.prx"
+	mainPath := "../../tools/OpenOrbis/PS4Toolchain/samples/using_library/using_library/x64/Debug/using_library.elf"
+
+	mainLoaded, err := elfloader.LoadELF(mainPath)
+	if err != nil {
+		t.Skipf("sample elf not found: %v", err)
+	}
+	prxLoaded, err := elfloader.LoadELF(prxPath)
+	if err != nil {
+		t.Skipf("sample prx not found: %v", err)
+	}
+	if err := prxLoaded.ApplyBias(0x20000); err != nil {
+		t.Fatal(err)
+	}
+	if err := elfloader.MergeImages(mainLoaded, prxLoaded); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := NewDisassembler(mainLoaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries := SeedEntryPoints(mainLoaded, false)
+	// Add PRX exported functions to entries as done in CLI
+	for _, sym := range prxLoaded.ExportedFunctions() {
+		entries = append(entries, sym.Address)
+	}
+
+	funcs, err := d.DiscoverReachable(entries, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hasTarget := false
+	for _, f := range funcs {
+		if f.Addr == 0x8c380 {
+			hasTarget = true
+			break
+		}
+	}
+	if !hasTarget {
+		t.Errorf("expected 0x8c380 to be discovered via reachable CFG analysis from merged PRX")
 	}
 }
