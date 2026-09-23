@@ -2147,6 +2147,92 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		return l.liftPmovsxzx(false, 2, 4, args[0], args[1], nextPC)
 	case x86asm.VPMOVSXWD:
 		return l.liftPmovsxzx(true, 2, 4, args[0], args[1], nextPC)
+	case x86asm.VPMOVSXDQ:
+		return l.liftPmovsxzx(true, 4, 8, args[0], args[1], nextPC)
+	case x86asm.VPMOVZXDQ:
+		return l.liftPmovsxzx(false, 4, 8, args[0], args[1], nextPC)
+	case x86asm.VPMOVSXBD:
+		return l.liftPmovsxzx(true, 1, 4, args[0], args[1], nextPC)
+	case x86asm.VPMOVZXBD:
+		return l.liftPmovsxzx(false, 1, 4, args[0], args[1], nextPC)
+	case x86asm.VPMOVSXBW:
+		return l.liftPmovsxzx(true, 1, 2, args[0], args[1], nextPC)
+	case x86asm.VPMOVZXBW:
+		return l.liftPmovsxzx(false, 1, 2, args[0], args[1], nextPC)
+	case x86asm.VPMOVSXWQ:
+		return l.liftPmovsxzx(true, 2, 8, args[0], args[1], nextPC)
+	case x86asm.VPMOVZXWQ:
+		return l.liftPmovsxzx(false, 2, 8, args[0], args[1], nextPC)
+	case x86asm.VPMOVSXBQ:
+		return l.liftPmovsxzx(true, 1, 8, args[0], args[1], nextPC)
+	case x86asm.VPMOVZXBQ:
+		return l.liftPmovsxzx(false, 1, 8, args[0], args[1], nextPC)
+	case x86asm.VMOVLPD:
+		return l.liftVmovlpd(args[0], args[1], args[2], nextPC)
+	case x86asm.VPBLENDW:
+		return l.liftPblendw(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VBLENDPD:
+		return l.liftBlendpd(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VBLENDVPD:
+		return l.liftBlendvpd(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VMASKMOVPS:
+		return l.liftMaskmovps(args[0], args[1], args[2], nextPC)
+	case x86asm.VMASKMOVPD:
+		return l.liftMaskmovpd(args[0], args[1], args[2], nextPC)
+	case x86asm.VBROADCASTSD:
+		return l.liftVbroadcastsd(args[0], args[1], nextPC)
+	case x86asm.VBROADCASTF128:
+		return l.liftVbroadcastf128(args[0], args[1], nextPC)
+	case x86asm.VMOVMSKPD:
+		return l.liftVmovmskpd(args[0], args[1], nextPC)
+	case x86asm.VPERM2F128:
+		return l.liftVperm2f128(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VROUNDPD:
+		return l.liftVroundpd(args[0], args[1], args[2], nextPC)
+	case x86asm.VDPPS:
+		return l.liftVdpps(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VRCPPS:
+		return l.liftVrcp(false, args[0], args[1], args[2], nextPC)
+	case x86asm.VRCPSS:
+		return l.liftVrcp(true, args[0], args[1], args[2], nextPC)
+	case x86asm.VPHADDD, x86asm.VPHADDW, x86asm.VHSUBPS, x86asm.VHSUBPD, x86asm.VPHSUBD:
+		return l.liftHaddHsub(op, args[0], args[1], args[2], nextPC)
+	case x86asm.VPMAXUW, x86asm.VPMINUW, x86asm.VPMAXSW, x86asm.VPMINSW, x86asm.VPMAXUB, x86asm.VPMINUB:
+		return l.liftPminmaxExtra(op, args[0], args[1], args[2], nextPC)
+	case x86asm.VPMADDWD, x86asm.VPMADDUBSW:
+		return l.liftPmaddExtra(op, args[0], args[1], args[2], nextPC)
+	case x86asm.VPMOVMSKB:
+		return l.liftVpmovmskb(args[0], args[1], nextPC)
+	case x86asm.VPCMPEQQ, x86asm.VPCMPGTB, x86asm.VPCMPGTW:
+		return l.liftPcmpExtra(op, args[0], args[1], args[2], nextPC)
+	case x86asm.VPMULUDQ, x86asm.VPMULDQ, x86asm.VPMULHW, x86asm.VPMULHUW:
+		return l.liftPmulExtra(op, args[0], args[1], args[2], nextPC)
+	case x86asm.VPACKUSDW:
+		return l.liftVpackusdw(args[0], args[1], args[2], nextPC)
+	case x86asm.VPSADBW:
+		return l.liftVpsadbw(args[0], args[1], args[2], nextPC)
+	case x86asm.VPABSD, x86asm.VPABSW:
+		return l.liftVpabs(op, args[0], args[1], nextPC)
+	case x86asm.VPHMINPOSUW:
+		return l.liftVphminposuw(args[0], args[1], nextPC)
+	case x86asm.VPADDUSB, x86asm.VPADDSW, x86asm.VPSUBSW, x86asm.VPSUBUSB, x86asm.VPSUBUSW:
+		return l.liftPaddsubSatExtra(op, args[0], args[1], args[2], nextPC)
+	case x86asm.VADDSUBPS, x86asm.VADDSUBPD:
+		return l.liftVaddsub(op, args[0], args[1], args[2], nextPC)
+	case x86asm.VCMPPD:
+		return l.liftVcmppd(args[0], args[1], args[2], args[3], nextPC)
+	case x86asm.VCVTTPD2DQ:
+		return l.liftVcvttpd2dq(args[0], args[1], nextPC)
+	case x86asm.VCVTDQ2PD:
+		return l.liftVcvtdq2pd(args[0], args[1], nextPC)
+	case x86asm.VCVTPH2PS:
+		return l.liftVcvtph2ps(args[0], args[1], nextPC)
+	case x86asm.VCVTPS2PH:
+		return l.liftVcvtps2ph(args[0], args[1], args[2], nextPC)
+	case x86asm.VSTMXCSR:
+		return l.liftVmxcsr(true, args[0], nextPC)
+	case x86asm.VLDMXCSR:
+		return l.liftVmxcsr(false, args[0], nextPC)
 	case x86asm.VBROADCASTSS:
 		return l.liftVbroadcastss(args[0], args[1], nextPC)
 	case x86asm.VPSHUFHW:

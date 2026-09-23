@@ -146,6 +146,19 @@ static inline double fpu_pop(GuestContext *ctx) {
 #define MEM_U32(addr) (*(uint32_t *)((ctx)->mem_base + (uint64_t)(addr)))
 #define MEM_U64(addr) (*(uint64_t *)((ctx)->mem_base + (uint64_t)(addr)))
 
+static inline uint64_t recomp_rdtsc(void) {
+#if defined(__aarch64__)
+  uint64_t val;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(val));
+  return val;
+#elif defined(__x86_64__)
+  uint32_t lo, hi;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((uint64_t)hi << 32) | lo;
+#else
+  return 0;
+#endif
+}
 // Parity computation using compiler intrinsic
 static inline uint8_t compute_parity(uint8_t val) {
   return (uint8_t)(!__builtin_parity((unsigned int)val));

@@ -1150,6 +1150,18 @@ func (l *Lifter) liftPmovsxzx(signed bool, srcElem, dstElem int, dst, src x86asm
 		srcField, dstField = "s8", "s32"
 	case !signed && srcElem == 1 && dstElem == 4:
 		srcField, dstField = "u8", "u32"
+	case signed && srcElem == 4 && dstElem == 8:
+		srcField, dstField = "s32", "s64"
+	case !signed && srcElem == 4 && dstElem == 8:
+		srcField, dstField = "u32", "u64"
+	case signed && srcElem == 2 && dstElem == 8:
+		srcField, dstField = "s16", "s64"
+	case !signed && srcElem == 2 && dstElem == 8:
+		srcField, dstField = "u16", "u64"
+	case signed && srcElem == 1 && dstElem == 8:
+		srcField, dstField = "s8", "s64"
+	case !signed && srcElem == 1 && dstElem == 8:
+		srcField, dstField = "u8", "u64"
 	}
 	lines := []string{"    {"}
 	s, err := l.loadXmmArg(src, nextPC, "src")
@@ -1160,6 +1172,7 @@ func (l *Lifter) liftPmovsxzx(signed bool, srcElem, dstElem int, dst, src x86asm
 	for i := 0; i < n; i++ {
 		lines = append(lines, fmt.Sprintf("      ctx->%s.%s[%d] = src.%s[%d];", infoDst.BaseReg, dstField, i, srcField, i))
 	}
+	lines = append(lines, fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", int(dstReg-x86asm.X0)))
 	lines = append(lines, "    }")
 	return lines, nil
 }

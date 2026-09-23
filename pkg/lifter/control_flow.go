@@ -159,3 +159,27 @@ func isContextRestoreFunction(fn *disasm.Function) bool {
 	}
 	return false
 }
+
+func (l *Lifter) liftLoop(op x86asm.Op, arg x86asm.Arg, nextPC uint64, fn *disasm.Function) ([]string, error) {
+	rel, ok := arg.(x86asm.Rel)
+	if !ok {
+		return nil, fmt.Errorf("loop requires relative target")
+	}
+	target := uint64(int64(nextPC) + int64(rel))
+	cond := "ctx->rcx != 0"
+	if op == x86asm.LOOPE {
+		cond = "ctx->rcx != 0 && ctx->zf"
+	} else if op == x86asm.LOOPNE {
+		cond = "ctx->rcx != 0 && !ctx->zf"
+	}
+
+	jumpTarget := fmt.Sprintf("goto loc_0x%x;", target)
+	if fn == nil || fn.Blocks[target] == nil {
+		jumpTarget = fmt.Sprintf("ctx->rip = 0x%xULL; recomp_dispatch(ctx, 0x%xULL); return;", target, target)
+	}
+
+	return []string{
+		"    ctx->rcx--;",
+		fmt.Sprintf("    if (%s) { %s }", cond, jumpTarget),
+	}, nil
+}

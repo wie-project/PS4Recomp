@@ -1232,3 +1232,95 @@ func (l *Lifter) liftPopfq() []string {
 		"    }",
 	}
 }
+
+func (l *Lifter) liftRclRcr(op x86asm.Op, dst, countArg x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	dstRead, sz, err := l.getOperandRead(dst, defMemSz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	countRead, _, err := l.getOperandRead(countArg, 1, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	bits := sz * 8
+	cType := uintType(sz)
+	var lines []string
+	lines = append(
+		lines,
+		fmt.Sprintf("    { %s a = (%s)(%s); uint8_t count = ((uint8_t)(%s)) %% %d;", cType, cType, dstRead, countRead, bits+1),
+		"      uint8_t old_cf = ctx->cf;",
+	)
+	if op == x86asm.RCL {
+		lines = append(
+			lines,
+			"      for (int i = 0; i < count; i++) {",
+			fmt.Sprintf("        uint8_t bit = (a >> %d) & 1;", bits-1),
+			"        a = (a << 1) | old_cf;",
+			"        old_cf = bit;",
+			"      }",
+		)
+	} else {
+		lines = append(
+			lines,
+			"      for (int i = 0; i < count; i++) {",
+			"        uint8_t bit = a & 1;",
+			fmt.Sprintf("        a = (a >> 1) | (((%s)old_cf) << %d);", cType, bits-1),
+			"        old_cf = bit;",
+			"      }",
+		)
+	}
+	lines = append(lines, "      ctx->cf = old_cf;")
+	writeStmts, err := l.getOperandWrite(dst, sz, "a", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	for _, ws := range writeStmts {
+		lines = append(lines, "    "+ws)
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftCmc() []string {
+	return []string{"    ctx->cf = !ctx->cf;"}
+}
+
+func (l *Lifter) liftXlatb() []string {
+	return []string{
+		"    ctx->rax = (ctx->rax & ~0xFFULL) | MEM_U8(ctx->rbx + (ctx->rax & 0xFF));",
+	}
+}
+
+func (l *Lifter) liftRdtsc() []string {
+	return []string{
+		"    {",
+		"      uint64_t tsc = recomp_rdtsc();",
+		"      ctx->rax = (ctx->rax & ~0xFFFFFFFFULL) | (uint32_t)tsc;",
+		"      ctx->rdx = (ctx->rdx & ~0xFFFFFFFFULL) | (uint32_t)(tsc >> 32);",
+		"    }",
+	}
+}
+
+func (l *Lifter) liftSldt(dst x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	writes, err := l.getOperandWrite(dst, defMemSz, "0", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	lines := make([]string, 0, len(writes))
+	for _, w := range writes {
+		lines = append(lines, "    "+w)
+	}
+	return lines, nil
+}
+
+func (l *Lifter) liftLar(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	writes, err := l.getOperandWrite(dst, defMemSz, "0x00F20000", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	lines := []string{"    ctx->zf = 1;"}
+	for _, w := range writes {
+		lines = append(lines, "    "+w)
+	}
+	return lines, nil
+}

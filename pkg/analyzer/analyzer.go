@@ -205,7 +205,7 @@ func (r *AnalysisReport) SummaryString() string {
 		sb.WriteString("-------------------------------------------------------------------\n")
 		sb.WriteString("  Rank  Opcode                  Occurrences   Percentage\n")
 		sb.WriteString("  -----------------------------------------------------------------\n")
-		limit := 50
+		limit := 500
 		for i, m := range r.MissingOpcodes {
 			pct := 0.0
 			if r.TotalInstructions > 0 {

@@ -274,3 +274,218 @@ func (l *Lifter) liftFnstcw(arg x86asm.Arg, nextPC uint64) ([]string, error) {
 	}
 	return nil, fmt.Errorf("unsupported FNSTCW operand")
 }
+
+func (l *Lifter) liftFisttp(arg x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	if mem, ok := arg.(x86asm.Mem); ok {
+		addrExpr, err := MemAddrExpr(mem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		valExpr := "fpu_pop(ctx)"
+		if defMemSz == 8 {
+			return []string{fmt.Sprintf("    MEM_U64(%s) = (uint64_t)(int64_t)trunc(%s);", addrExpr, valExpr)}, nil
+		}
+		if defMemSz == 2 {
+			return []string{fmt.Sprintf("    MEM_U16(%s) = (uint16_t)(int16_t)trunc(%s);", addrExpr, valExpr)}, nil
+		}
+		return []string{fmt.Sprintf("    MEM_U32(%s) = (uint32_t)(int32_t)trunc(%s);", addrExpr, valExpr)}, nil
+	}
+	return nil, fmt.Errorf("unsupported FISTTP operand")
+}
+
+func (l *Lifter) liftFcom(op x86asm.Op, arg x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	lines := []string{"    {"}
+	rhs := "FPU_ST(1)"
+	if reg, ok := arg.(x86asm.Reg); ok && reg >= x86asm.F0 && reg <= x86asm.F7 {
+		rhs = fmt.Sprintf("FPU_ST(%d)", int(reg-x86asm.F0))
+	} else if mem, ok := arg.(x86asm.Mem); ok {
+		addrExpr, err := MemAddrExpr(mem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		if defMemSz == 8 {
+			lines = append(lines, fmt.Sprintf("      double d; uint64_t u = MEM_U64(%s); memcpy(&d, &u, 8);", addrExpr))
+		} else {
+			lines = append(lines, fmt.Sprintf("      float f; uint32_t u = MEM_U32(%s); memcpy(&f, &u, 4); double d = (double)f;", addrExpr))
+		}
+		rhs = "d"
+	}
+	lines = append(lines,
+		fmt.Sprintf("      double a = FPU_ST(0); double b = %s;", rhs),
+		"      uint16_t sw = ctx->fpu_sw & ~0x4500;",
+		"      if (isnan(a) || isnan(b)) { sw |= 0x4500; }",
+		"      else if (a < b) { sw |= 0x0100; }",
+		"      else if (a == b) { sw |= 0x4000; }",
+		"      ctx->fpu_sw = sw;",
+	)
+	if op == x86asm.FCOMP {
+		lines = append(lines, "      fpu_pop(ctx);")
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftFicom(op x86asm.Op, arg x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	mem, ok := arg.(x86asm.Mem)
+	if !ok {
+		return nil, fmt.Errorf("ficom requires memory operand")
+	}
+	addrExpr, err := MemAddrExpr(mem, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	lines := []string{"    {"}
+	if defMemSz == 2 {
+		lines = append(lines, fmt.Sprintf("      double b = (double)(int16_t)MEM_U16(%s);", addrExpr))
+	} else {
+		lines = append(lines, fmt.Sprintf("      double b = (double)(int32_t)MEM_U32(%s);", addrExpr))
+	}
+	lines = append(lines,
+		"      double a = FPU_ST(0);",
+		"      uint16_t sw = ctx->fpu_sw & ~0x4500;",
+		"      if (isnan(a) || isnan(b)) { sw |= 0x4500; }",
+		"      else if (a < b) { sw |= 0x0100; }",
+		"      else if (a == b) { sw |= 0x4000; }",
+		"      ctx->fpu_sw = sw;",
+	)
+	if op == x86asm.FICOMP {
+		lines = append(lines, "      fpu_pop(ctx);")
+	}
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+func (l *Lifter) liftFcmov(op x86asm.Op, arg x86asm.Arg) ([]string, error) {
+	reg, ok := arg.(x86asm.Reg)
+	if !ok || reg < x86asm.F0 || reg > x86asm.F7 {
+		return nil, fmt.Errorf("fcmov requires FPU register")
+	}
+	idx := int(reg - x86asm.F0)
+	cond := "0"
+	switch op {
+	case x86asm.FCMOVB:
+		cond = "ctx->cf"
+	case x86asm.FCMOVE:
+		cond = "ctx->zf"
+	case x86asm.FCMOVNB:
+		cond = "!ctx->cf"
+	case x86asm.FCMOVU:
+		cond = "ctx->pf"
+	}
+	return []string{
+		fmt.Sprintf("    if (%s) { FPU_ST(0) = FPU_ST(%d); }", cond, idx),
+	}, nil
+}
+
+func (l *Lifter) liftFidivr(arg x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	mem, ok := arg.(x86asm.Mem)
+	if !ok {
+		return nil, fmt.Errorf("fidivr requires memory operand")
+	}
+	addrExpr, err := MemAddrExpr(mem, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	if defMemSz == 2 {
+		return []string{fmt.Sprintf("    FPU_ST(0) = ((double)(int16_t)MEM_U16(%s)) / FPU_ST(0);", addrExpr)}, nil
+	}
+	return []string{fmt.Sprintf("    FPU_ST(0) = ((double)(int32_t)MEM_U32(%s)) / FPU_ST(0);", addrExpr)}, nil
+}
+
+func (l *Lifter) liftFdivrp() []string {
+	return []string{"    FPU_ST(1) = FPU_ST(0) / FPU_ST(1); fpu_pop(ctx);"}
+}
+
+func (l *Lifter) liftFsubr(args x86asm.Args, defMemSz int, nextPC uint64) ([]string, error) {
+	if reg0, ok0 := args[0].(x86asm.Reg); ok0 && reg0 >= x86asm.F0 && reg0 <= x86asm.F7 {
+		dstIdx := int(reg0 - x86asm.F0)
+		srcIdx := 0
+		if reg1, ok1 := args[1].(x86asm.Reg); ok1 && reg1 >= x86asm.F0 && reg1 <= x86asm.F7 {
+			srcIdx = int(reg1 - x86asm.F0)
+		}
+		return []string{fmt.Sprintf("    FPU_ST(%d) = FPU_ST(%d) - FPU_ST(%d);", dstIdx, srcIdx, dstIdx)}, nil
+	}
+	if mem, ok := args[0].(x86asm.Mem); ok {
+		addrExpr, err := MemAddrExpr(mem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		if defMemSz == 8 {
+			return []string{
+				fmt.Sprintf("    { double d; uint64_t u = MEM_U64(%s); memcpy(&d, &u, 8); FPU_ST(0) = d - FPU_ST(0); }", addrExpr),
+			}, nil
+		}
+		return []string{
+			fmt.Sprintf("    { float f; uint32_t u = MEM_U32(%s); memcpy(&f, &u, 4); FPU_ST(0) = (double)f - FPU_ST(0); }", addrExpr),
+		}, nil
+	}
+	return []string{"    FPU_ST(0) = FPU_ST(1) - FPU_ST(0);"}, nil
+}
+
+func (l *Lifter) liftFldl2t() []string {
+	return []string{"    fpu_push(ctx, 3.32192809488736234787);"}
+}
+
+func (l *Lifter) liftFbstp(arg x86asm.Arg, nextPC uint64) ([]string, error) {
+	mem, ok := arg.(x86asm.Mem)
+	if !ok {
+		return nil, fmt.Errorf("fbstp requires memory operand")
+	}
+	addrExpr, err := MemAddrExpr(mem, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"    {",
+		"      int64_t val = (int64_t)round(fpu_pop(ctx));",
+		"      uint8_t sign = (val < 0) ? 0x80 : 0x00;",
+		"      uint64_t pos = (val < 0) ? (uint64_t)(-val) : (uint64_t)val;",
+		"      uint8_t bcd[10] = {0};",
+		"      for (int i = 0; i < 9; i++) { uint8_t d0 = pos % 10; pos /= 10; uint8_t d1 = pos % 10; pos /= 10; bcd[i] = d0 | (d1 << 4); }",
+		"      bcd[9] = sign;",
+		fmt.Sprintf("      memcpy(ctx->mem_base + (%s), bcd, 10);", addrExpr),
+		"    }",
+	}, nil
+}
+
+func (l *Lifter) liftFnstenv(arg x86asm.Arg, nextPC uint64) ([]string, error) {
+	mem, ok := arg.(x86asm.Mem)
+	if !ok {
+		return nil, fmt.Errorf("fnstenv requires memory operand")
+	}
+	addrExpr, err := MemAddrExpr(mem, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"    {",
+		fmt.Sprintf("      uint8_t *ptr = ctx->mem_base + (%s);", addrExpr),
+		"      *(uint16_t*)(ptr) = ctx->fpu_cw;",
+		"      *(uint16_t*)(ptr + 4) = (ctx->fpu_sw & ~0x3800) | ((ctx->fpu_top & 7) << 11);",
+		"      *(uint16_t*)(ptr + 8) = 0xFFFF;",
+		"    }",
+	}, nil
+}
+
+func (l *Lifter) liftFnstsw(arg x86asm.Arg, nextPC uint64) ([]string, error) {
+	swExpr := "((ctx->fpu_sw & ~0x3800) | ((ctx->fpu_top & 7) << 11))"
+	if reg, ok := arg.(x86asm.Reg); ok && (reg == x86asm.AX || reg == x86asm.EAX || reg == x86asm.RAX) {
+		return []string{
+			fmt.Sprintf("    ctx->rax = (ctx->rax & ~0xFFFFULL) | (uint16_t)%s;", swExpr),
+		}, nil
+	}
+	if mem, ok := arg.(x86asm.Mem); ok {
+		addrExpr, err := MemAddrExpr(mem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		return []string{
+			fmt.Sprintf("    MEM_U16(%s) = (uint16_t)%s;", addrExpr, swExpr),
+		}, nil
+	}
+	return nil, fmt.Errorf("unsupported FNSTSW operand")
+}
+
+func (l *Lifter) liftFyl2xp1() []string {
+	return []string{"    FPU_ST(1) *= log2(FPU_ST(0) + 1.0); fpu_pop(ctx);"}
+}
