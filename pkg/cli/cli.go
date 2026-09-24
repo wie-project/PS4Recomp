@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -256,6 +257,17 @@ func Execute(args []string) error {
 	}
 	fmt.Printf("             Discovered %d functions, %d instructions | cap hits: %d | privileged stops: %d | Time: %v\n",
 		len(funcs), totalInsts, d.CapHits, d.PrivilegedStops, time.Since(stepStart).Round(time.Millisecond))
+	if d.CapHits > 0 {
+		fmt.Fprintf(os.Stderr, "             Warning: %d function(s) hit decode caps:\n", d.CapHits)
+		for i, hit := range d.CapHitDetails {
+			if i >= 10 {
+				fmt.Fprintf(os.Stderr, "               ... and %d more\n", len(d.CapHitDetails)-10)
+				break
+			}
+			fmt.Fprintf(os.Stderr, "               - %s (0x%x): %s at PC 0x%x (%d insts decoded)\n",
+				hit.Name, hit.EntryAddr, hit.Reason, hit.PC, hit.InstCount)
+		}
+	}
 
 	// Step 3: C Source Code Generation
 	stepStart = time.Now()
@@ -381,7 +393,122 @@ func Execute(args []string) error {
 	return nil
 }
 
+func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, targetBin string, optLevel string, asan bool) error {
+	var ftCflags []string
+	var ftLibs []string
+	if out, err := exec.Command("pkg-config", "--cflags", "freetype2").Output(); err == nil {
+		ftCflags = strings.Fields(string(out))
+	} else if _, err := os.Stat("/opt/homebrew/opt/freetype/include/freetype2"); err == nil {
+		ftCflags = []string{"-I/opt/homebrew/opt/freetype/include/freetype2"}
+	}
+	if out, err := exec.Command("pkg-config", "--libs", "freetype2").Output(); err == nil {
+		ftLibs = strings.Fields(string(out))
+	} else if _, err := os.Stat("/opt/homebrew/opt/freetype/lib"); err == nil {
+		ftLibs = []string{"-L/opt/homebrew/opt/freetype/lib", "-lfreetype"}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("ninja_required_version = 1.5\n\n")
+
+	var incFlags []string
+	incFlags = append(incFlags, "-I.")
+	for _, inc := range includeDirs {
+		relInc, err := filepath.Rel(outDir, inc)
+		if err == nil && !strings.HasPrefix(relInc, "..") {
+			incFlags = append(incFlags, "-I"+relInc)
+		} else {
+			incFlags = append(incFlags, "-I"+inc)
+		}
+	}
+	incFlags = append(incFlags, ftCflags...)
+
+	cflags := []string{"-O" + optLevel, "-fvisibility=hidden"}
+	if asan {
+		cflags = append(cflags, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
+	}
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		cflags = append([]string{"-target", "arm64-apple-darwin", "-mcpu=apple-m1"}, cflags...)
+	}
+
+	cflagsStr := strings.Join(append(cflags, incFlags...), " ")
+	sb.WriteString(fmt.Sprintf("cflags = %s\n\n", cflagsStr))
+
+	sb.WriteString("rule compile_c\n")
+	sb.WriteString("  command = clang -MD -MF $out.d $cflags -c $in -o $out\n")
+	sb.WriteString("  depfile = $out.d\n")
+	sb.WriteString("  deps = gcc\n")
+	sb.WriteString("  description = CC $in\n\n")
+
+	sb.WriteString("rule compile_m\n")
+	sb.WriteString("  command = clang -MD -MF $out.d $cflags -fobjc-arc -c $in -o $out\n")
+	sb.WriteString("  depfile = $out.d\n")
+	sb.WriteString("  deps = gcc\n")
+	sb.WriteString("  description = OBJC $in\n\n")
+
+	var ldflags []string
+	if asan {
+		ldflags = append(ldflags, "-fsanitize=address,undefined")
+	}
+	if runtime.GOOS == "darwin" {
+		ldflags = append(ldflags, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
+			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox")
+	} else {
+		ldflags = append(ldflags, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
+	}
+	ldflags = append(ldflags, ftLibs...)
+	ldflagsStr := strings.Join(ldflags, " ")
+
+	sb.WriteString(fmt.Sprintf("ldflags = %s\n\n", ldflagsStr))
+	sb.WriteString("rule link_bin\n")
+	sb.WriteString("  command = clang $in $ldflags -o $out\n")
+	sb.WriteString("  description = LINK $out\n\n")
+
+	var objFiles []string
+	for _, cFile := range cFiles {
+		relCFile, err := filepath.Rel(outDir, cFile)
+		if err != nil {
+			relCFile = cFile
+		}
+		ext := filepath.Ext(relCFile)
+		objFile := strings.TrimSuffix(relCFile, ext) + ".o"
+		objFiles = append(objFiles, objFile)
+		rule := "compile_c"
+		if ext == ".m" {
+			rule = "compile_m"
+		}
+		sb.WriteString(fmt.Sprintf("build %s: %s %s\n", objFile, rule, relCFile))
+	}
+
+	relTargetBin, err := filepath.Rel(outDir, targetBin)
+	if err != nil {
+		relTargetBin = filepath.Base(targetBin)
+	}
+
+	sb.WriteString(fmt.Sprintf("\nbuild %s: link_bin %s\n", relTargetBin, strings.Join(objFiles, " ")))
+	sb.WriteString(fmt.Sprintf("default %s\n", relTargetBin))
+
+	ninjaPath := filepath.Join(outDir, "build.ninja")
+	existing, err := os.ReadFile(ninjaPath)
+	content := []byte(sb.String())
+	if err == nil && bytes.Equal(existing, content) {
+		return nil
+	}
+	return os.WriteFile(ninjaPath, content, 0o644)
+}
+
 func compileParallel(cFiles []string, outDir string, includeDirs []string, targetBin string, numWorkers int, optLevel string, asan bool) error {
+	// Try building with Ninja first if available
+	if ninjaPath, err := exec.LookPath("ninja"); err == nil {
+		if err := generateNinjaBuild(cFiles, outDir, includeDirs, targetBin, optLevel, asan); err == nil {
+			cmd := exec.Command(ninjaPath, "-C", outDir, fmt.Sprintf("-j%d", numWorkers))
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			if err := cmd.Run(); err == nil {
+				return nil
+			}
+		}
+	}
+
 	var ftCflags []string
 	var ftLibs []string
 	if out, err := exec.Command("pkg-config", "--cflags", "freetype2").Output(); err == nil {
@@ -407,6 +534,12 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 				ext := filepath.Ext(cFile)
 				objFile := strings.TrimSuffix(cFile, ext) + ".o"
 				objFiles[idx] = objFile
+
+				cStat, errC := os.Stat(cFile)
+				oStat, errO := os.Stat(objFile)
+				if errC == nil && errO == nil && oStat.ModTime().After(cStat.ModTime()) {
+					continue
+				}
 
 				clangArgs := []string{
 					"-O" + optLevel,
@@ -592,31 +725,16 @@ func findRuntimeDir() (string, error) {
 	return "", fmt.Errorf("unable to locate runtime directory (checked %v)", candidates)
 }
 
-func copyFile(src, dst string) (err error) {
-	in, err := os.Open(src)
+func copyFile(src, dst string) error {
+	srcData, err := os.ReadFile(src)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if cerr := in.Close(); err == nil {
-			err = cerr
-		}
-	}()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
+	dstData, err := os.ReadFile(dst)
+	if err == nil && bytes.Equal(srcData, dstData) {
+		return nil
 	}
-	defer func() {
-		if cerr := out.Close(); err == nil {
-			err = cerr
-		}
-	}()
-
-	if _, err = io.Copy(out, in); err != nil {
-		return err
-	}
-	return nil
+	return os.WriteFile(dst, srcData, 0o644)
 }
 
 func copyDir(src, dst string) error {

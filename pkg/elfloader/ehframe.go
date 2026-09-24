@@ -52,8 +52,9 @@ func attachUnwind(l *LoadedELF, file *elf.File) {
 	}
 	if sec, ok := l.Sections[".eh_frame"]; ok && sec != nil && sec.Size >= 8 && sec.Addr != 0 {
 		limit := sec.Addr + sec.Size
-		if end, bounds := walkEHFrame(l.MemoryImage, sec.Addr, limit); len(bounds) > 0 {
+		if end, bounds, lsdaBounds := walkEHFrame(l.MemoryImage, sec.Addr, limit); len(bounds) > 0 {
 			l.FuncBounds = normalizeBounds(bounds)
+			l.LSDABounds = normalizeBounds(lsdaBounds)
 			l.UnwindRanges = mergeRanges(append(l.UnwindRanges, l.ExecRanges...))
 			l.DataRanges = mergeRanges([]AddrRange{{Start: sec.Addr, End: end}})
 		}
@@ -137,11 +138,12 @@ func parseEHFrameHdr(l *LoadedELF, hdrVA, hdrSize uint64, pcrelBias int64) bool 
 	if hdrVA > frameVA && hdrVA < limit {
 		limit = hdrVA
 	}
-	end, bounds := walkEHFrame(img, frameVA, limit)
+	end, bounds, lsdaBounds := walkEHFrame(img, frameVA, limit)
 	if len(bounds) == 0 || end <= frameVA {
 		return false
 	}
 	l.FuncBounds = normalizeBounds(bounds)
+	l.LSDABounds = normalizeBounds(lsdaBounds)
 	hdrEnd := hdrVA + hdrSize
 	if hdrEnd > uint64(len(img)) {
 		hdrEnd = uint64(len(img))
@@ -154,15 +156,18 @@ func parseEHFrameHdr(l *LoadedELF, hdrVA, hdrSize uint64, pcrelBias int64) bool 
 }
 
 type cieInfo struct {
-	enc byte
-	ok  bool
+	enc     byte
+	lsdaEnc byte
+	hasLSDA bool
+	hasAugZ bool
+	ok      bool
 }
 
 // walkEHFrame reads CIE/FDE records in [frameVA, limit). end is the address
 // just past the terminator, or the end of the last valid record.
-func walkEHFrame(img []byte, frameVA, limit uint64) (end uint64, bounds []AddrRange) {
+func walkEHFrame(img []byte, frameVA, limit uint64) (end uint64, bounds []AddrRange, lsdaBounds []AddrRange) {
 	if frameVA >= uint64(len(img)) || limit > uint64(len(img)) || frameVA >= limit {
-		return frameVA, nil
+		return frameVA, nil, nil
 	}
 	cies := make(map[uint64]cieInfo)
 	pos := frameVA
@@ -171,26 +176,26 @@ func walkEHFrame(img []byte, frameVA, limit uint64) (end uint64, bounds []AddrRa
 		length32 := readU32(img, int(pos))
 		body := pos + 4
 		if length32 == 0 {
-			return body, bounds
+			return body, bounds, lsdaBounds
 		}
 		if length32 == 0xffffffff {
 			if pos+12 > limit {
-				return pos, bounds
+				return pos, bounds, lsdaBounds
 			}
 			longLen := readU64(img, int(pos+4))
 			recEnd := pos + 12 + longLen
 			if longLen == 0 || recEnd < pos || recEnd > limit {
-				return pos, bounds
+				return pos, bounds, lsdaBounds
 			}
 			pos = recEnd
 			continue
 		}
 		recEnd := body + uint64(length32)
 		if recEnd < body || recEnd > limit {
-			return pos, bounds
+			return pos, bounds, lsdaBounds
 		}
 		if body+4 > recEnd {
-			return pos, bounds
+			return pos, bounds, lsdaBounds
 		}
 		id := uint64(readU32(img, int(body)))
 		if id == 0 {
@@ -209,13 +214,21 @@ func walkEHFrame(img []byte, frameVA, limit uint64) (end uint64, bounds []AddrRa
 			cies[cieVA] = info
 		}
 		if info.ok {
-			if start, size, ok := readFDERange(img, int(body+4), info.enc); ok {
+			if start, size, fdeOff, ok := readFDERange(img, int(body+4), info.enc); ok {
 				bounds = append(bounds, AddrRange{Start: start, End: start + size})
+				if info.hasAugZ && info.hasLSDA && info.lsdaEnc != dwEHPEOmit && fdeOff < int(recEnd) {
+					if augLen, augDataOff, ok := readULEB(img, fdeOff, int(recEnd)); ok && augLen > 0 && augDataOff < int(recEnd) {
+						lsdaVal, _, ok := (ehDec{img: img, hdr: frameVA}).read(augDataOff, info.lsdaEnc)
+						if ok && lsdaVal != 0 {
+							lsdaBounds = append(lsdaBounds, AddrRange{Start: start, End: start + size})
+						}
+					}
+				}
 			}
 		}
 		pos = recEnd
 	}
-	return pos, bounds
+	return pos, bounds, lsdaBounds
 }
 
 func cieRecordEnd(img []byte, cieVA, limit uint64) uint64 {
@@ -235,7 +248,7 @@ func cieRecordEnd(img []byte, cieVA, limit uint64) uint64 {
 
 func parseCIE(img []byte, start, end uint64) cieInfo {
 	// x86-64 absolute pointer when the augmentation has no 'R'.
-	info := cieInfo{enc: dwEHPEUdata8}
+	info := cieInfo{enc: dwEHPEUdata8, lsdaEnc: dwEHPEOmit}
 	if start+8 > end || end > uint64(len(img)) {
 		return info
 	}
@@ -273,6 +286,7 @@ func parseCIE(img []byte, start, end uint64) cieInfo {
 		info.ok = true
 		return info
 	}
+	info.hasAugZ = true
 	augLen, i, ok := readULEB(img, i, int(end))
 	if !ok || uint64(i)+augLen > end {
 		return info
@@ -284,6 +298,8 @@ func parseCIE(img []byte, start, end uint64) cieInfo {
 		}
 		switch ch {
 		case 'L':
+			info.hasLSDA = true
+			info.lsdaEnc = img[i]
 			i++
 		case 'R':
 			info.enc = img[i]
@@ -306,21 +322,21 @@ func parseCIE(img []byte, start, end uint64) cieInfo {
 	return info
 }
 
-func readFDERange(img []byte, off int, enc byte) (start, size uint64, ok bool) {
+func readFDERange(img []byte, off int, enc byte) (start, size uint64, nextOff int, ok bool) {
 	if enc == dwEHPEOmit {
-		return 0, 0, false
+		return 0, 0, off, false
 	}
 	dec := ehDec{img: img}
 	start, off, ok = dec.read(off, enc)
 	if !ok {
-		return 0, 0, false
+		return 0, 0, off, false
 	}
 	// Address range uses the same format and an absolute application.
-	size, _, ok = dec.read(off, enc&0x0f)
+	size, off, ok = dec.read(off, enc&0x0f)
 	if !ok || size == 0 || start+size < start {
-		return 0, 0, false
+		return 0, 0, off, false
 	}
-	return start, size, true
+	return start, size, off, true
 }
 
 type ehDec struct {

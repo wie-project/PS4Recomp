@@ -32,6 +32,23 @@ func TestHelloWorldUnwindBounds(t *testing.T) {
 	}
 }
 
+func TestExceptionsLSDABounds(t *testing.T) {
+	loaded, err := LoadELF("../../exceptions.elf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("FuncBounds: %d, LSDABounds: %d", len(loaded.FuncBounds), len(loaded.LSDABounds))
+	if len(loaded.FuncBounds) == 0 {
+		t.Fatal("expected FuncBounds > 0")
+	}
+	if len(loaded.LSDABounds) == 0 {
+		t.Fatal("expected LSDABounds > 0")
+	}
+	if len(loaded.LSDABounds) >= len(loaded.FuncBounds) {
+		t.Fatalf("expected LSDABounds (%d) < FuncBounds (%d)", len(loaded.LSDABounds), len(loaded.FuncBounds))
+	}
+}
+
 func TestSyntheticEHFrame(t *testing.T) {
 	const (
 		fn      = 0x40

@@ -96,12 +96,33 @@ type LoadedELF struct {
 
 	// FuncBounds are half-open function extents from .eh_frame, sorted by Start.
 	FuncBounds []AddrRange
+	// LSDABounds are half-open function extents from .eh_frame that contain an LSDA
+	// (Language Specific Data Area) with landing pads for exception handling.
+	LSDABounds []AddrRange
 	// UnwindRanges are executable ranges covered by unwind information.
 	UnwindRanges []AddrRange
 	// DataRanges are half-open non-code intervals inside the image (.eh_frame
 	// and .eh_frame_hdr), sorted and non-overlapping. PS4 RX segments often
 	// contain both.
 	DataRanges []AddrRange
+}
+
+// FunctionHasLSDA reports whether any function extent in [fnStart, fnEnd) has an LSDA
+// (exception landing pads for C++ catch/cleanup).
+func (l *LoadedELF) FunctionHasLSDA(fnStart, fnEnd uint64) bool {
+	if l == nil || len(l.LSDABounds) == 0 {
+		return false
+	}
+	low, high := 0, len(l.LSDABounds)
+	for low < high {
+		mid := int(uint(low+high) >> 1)
+		if l.LSDABounds[mid].End <= fnStart {
+			low = mid + 1
+		} else {
+			high = mid
+		}
+	}
+	return low < len(l.LSDABounds) && l.LSDABounds[low].Start < fnEnd
 }
 
 // LoadELF reads and parses a 64-bit ELF binary. PS4 SELF/FSELF containers are unwrapped first.

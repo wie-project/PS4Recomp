@@ -325,27 +325,32 @@ static inline void set_flags_dec_u8(GuestContext *ctx, uint8_t a, uint8_t res) {
 typedef void (*recomp_fn_t)(GuestContext *__restrict__ ctx);
 
 // Dispatch table: maps guest virtual address to compiled function pointer
-// Uses a 2-level page table covering up to 4GB of guest code space with
-// on-demand L2 allocation
-#define DISPATCH_L1_SHIFT 16
-#define DISPATCH_L1_SIZE (65536) // 2^16 entries
-#define DISPATCH_L2_SIZE (65536) // 2^16 entries
-#define DISPATCH_L2_MASK (0xFFFFULL)
+// Uses a 3-level page table covering the full 48-bit x86-64 user address space
+// (16 bits L1, 16 bits L2, 16 bits L3) with on-demand L2 and L3 allocation.
+#define DISPATCH_L1_SHIFT 32
+#define DISPATCH_L2_SHIFT 16
+#define DISPATCH_LEVEL_BITS 16
+#define DISPATCH_LEVEL_SIZE (65536) // 2^16 entries per level
+#define DISPATCH_LEVEL_MASK (0xFFFFULL)
 
-extern recomp_fn_t *g_dispatch_l1[DISPATCH_L1_SIZE];
+extern recomp_fn_t **g_dispatch_l1[DISPATCH_LEVEL_SIZE];
 
 void recomp_register_fn(uint64_t guest_addr, recomp_fn_t fn);
 
 static inline void recomp_dispatch(GuestContext *ctx, uint64_t target) {
   ctx->rip = target;
-  uint64_t l1_idx = target >> DISPATCH_L1_SHIFT;
-  if (l1_idx < DISPATCH_L1_SIZE) {
-    recomp_fn_t *l2 = g_dispatch_l1[l1_idx];
-    if (l2) {
-      recomp_fn_t fn = l2[target & DISPATCH_L2_MASK];
-      if (fn) {
-        fn(ctx);
-        return;
+  if (__builtin_expect(target < (1ULL << 48), 1)) {
+    uint64_t l1_idx = (target >> DISPATCH_L1_SHIFT) & DISPATCH_LEVEL_MASK;
+    recomp_fn_t **l2 = g_dispatch_l1[l1_idx];
+    if (__builtin_expect(l2 != NULL, 1)) {
+      uint64_t l2_idx = (target >> DISPATCH_L2_SHIFT) & DISPATCH_LEVEL_MASK;
+      recomp_fn_t *l3 = l2[l2_idx];
+      if (__builtin_expect(l3 != NULL, 1)) {
+        recomp_fn_t fn = l3[target & DISPATCH_LEVEL_MASK];
+        if (__builtin_expect(fn != NULL, 1)) {
+          fn(ctx);
+          return;
+        }
       }
     }
   }

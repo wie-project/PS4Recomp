@@ -21,6 +21,11 @@ func NewLifter(knownFuncs map[uint64]bool) *Lifter {
 	}
 }
 
+// IsKnownFunc reports whether addr is the entry point of a known function.
+func (l *Lifter) IsKnownFunc(addr uint64) bool {
+	return l != nil && l.knownFuncs != nil && l.knownFuncs[addr]
+}
+
 // IsOpcodeSupported returns true if the lifter implements translation for the given x86 opcode.
 func IsOpcodeSupported(op x86asm.Op) bool {
 	switch op {
@@ -162,12 +167,17 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 
 // LiftInstruction lifts a single instruction into C statements.
 func (l *Lifter) LiftInstruction(inst disasm.Instruction, nextPC uint64, fn *disasm.Function) ([]string, error) {
+	return l.LiftInstructionToBuf(inst, nextPC, fn, nil)
+}
+
+// LiftInstructionToBuf lifts a single instruction into C statements, appending to dst to reuse storage.
+func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn *disasm.Function, dst []string) ([]string, error) {
 	pc := inst.Address
 	op := inst.Inst.Op
 	args := inst.Inst.Args
 
-	lines := make([]string, 0, 4)
-	lines = append(lines, fmt.Sprintf("    /* 0x%x: %s */", pc, inst.Inst.String()))
+	lines := dst
+	lines = append(lines, "    /* 0x"+strconv.FormatUint(pc, 16)+": "+inst.Inst.String()+" */")
 
 	// Determine effective memory/operand size from instruction
 	defMemSz := inst.Inst.MemBytes

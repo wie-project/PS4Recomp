@@ -7,7 +7,7 @@
 #include <execinfo.h>
 #endif
 
-recomp_fn_t *g_dispatch_l1[DISPATCH_L1_SIZE] = {0};
+recomp_fn_t **g_dispatch_l1[DISPATCH_LEVEL_SIZE] = {0};
 _Thread_local GuestContext *g_current_ctx = NULL;
 pthread_mutex_t g_heap_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -56,18 +56,26 @@ static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
 }
 
 void recomp_register_fn(uint64_t guest_addr, recomp_fn_t fn) {
-    uint64_t l1_idx = guest_addr >> DISPATCH_L1_SHIFT;
-    if (l1_idx >= DISPATCH_L1_SIZE) {
+    if (guest_addr >= (1ULL << 48)) {
         return;
     }
+    uint64_t l1_idx = (guest_addr >> DISPATCH_L1_SHIFT) & DISPATCH_LEVEL_MASK;
     if (!g_dispatch_l1[l1_idx]) {
-        g_dispatch_l1[l1_idx] = (recomp_fn_t *)calloc(DISPATCH_L2_SIZE, sizeof(recomp_fn_t));
+        g_dispatch_l1[l1_idx] = (recomp_fn_t **)calloc(DISPATCH_LEVEL_SIZE, sizeof(recomp_fn_t *));
         if (!g_dispatch_l1[l1_idx]) {
             perror("calloc dispatch L2 table");
             abort();
         }
     }
-    g_dispatch_l1[l1_idx][guest_addr & DISPATCH_L2_MASK] = fn;
+    uint64_t l2_idx = (guest_addr >> DISPATCH_L2_SHIFT) & DISPATCH_LEVEL_MASK;
+    if (!g_dispatch_l1[l1_idx][l2_idx]) {
+        g_dispatch_l1[l1_idx][l2_idx] = (recomp_fn_t *)calloc(DISPATCH_LEVEL_SIZE, sizeof(recomp_fn_t));
+        if (!g_dispatch_l1[l1_idx][l2_idx]) {
+            perror("calloc dispatch L3 table");
+            abort();
+        }
+    }
+    g_dispatch_l1[l1_idx][l2_idx][guest_addr & DISPATCH_LEVEL_MASK] = fn;
 }
 
 static size_t parse_mem_size_str(const char *str) {
@@ -274,8 +282,13 @@ void recomp_free_runtime(GuestContext *ctx) {
         ext = next;
     }
     pthread_mutex_destroy(&ctx->vm_mutex);
-    for (size_t i = 0; i < DISPATCH_L1_SIZE; i++) {
+    for (size_t i = 0; i < DISPATCH_LEVEL_SIZE; i++) {
         if (g_dispatch_l1[i]) {
+            for (size_t j = 0; j < DISPATCH_LEVEL_SIZE; j++) {
+                if (g_dispatch_l1[i][j]) {
+                    free(g_dispatch_l1[i][j]);
+                }
+            }
             free(g_dispatch_l1[i]);
             g_dispatch_l1[i] = NULL;
         }

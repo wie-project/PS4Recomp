@@ -2,6 +2,7 @@ package emitter
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"os"
@@ -259,8 +260,9 @@ type CEmitter struct {
 	ChunkSize int
 	// Funcs is an optional compact index of reachable functions. When set,
 	// emission re-disassembles each address instead of requiring d.Functions.
-	Funcs []disasm.ReachableFunc
-	HLE   *HLEReport
+	Funcs    []disasm.ReachableFunc
+	HLE      *HLEReport
+	linesBuf []string
 }
 
 // NewCEmitter creates a new C emitter.
@@ -371,24 +373,18 @@ func (e *CEmitter) EmitAll(outDir string) ([]string, error) {
 	return cFiles, nil
 }
 
+func writeFileIfChanged(path string, data []byte) error {
+	existing, err := os.ReadFile(path)
+	if err == nil && bytes.Equal(existing, data) {
+		return nil
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
 // EmitFunctionsHeader generates forward declarations for all recompiled functions.
 func (e *CEmitter) EmitFunctionsHeader(path string) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
-
-	w := bufio.NewWriter(f)
-	defer func() {
-		if ferr := w.Flush(); err == nil {
-			err = ferr
-		}
-	}()
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
 
 	if _, err := w.WriteString("#ifndef GUEST_FUNCTIONS_H\n#define GUEST_FUNCTIONS_H\n\n#include \"recomp_runtime.h\"\n\n#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n"); err != nil {
 		return err
@@ -405,7 +401,10 @@ func (e *CEmitter) EmitFunctionsHeader(path string) (err error) {
 	if _, err := w.WriteString("\n#ifdef __cplusplus\n}\n#endif\n\n#endif // GUEST_FUNCTIONS_H\n"); err != nil {
 		return err
 	}
-	return nil
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	return writeFileIfChanged(path, buf.Bytes())
 }
 
 // EmitChunkedCode partitions recompiled functions across multiple C source files
@@ -523,25 +522,42 @@ func (e *CEmitter) functionInstCount(fn *disasm.Function) int {
 	return count
 }
 
-func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint64) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
+func (e *CEmitter) collectExternalCallees(loaded []*disasm.Function, chunkSet map[uint64]bool) []uint64 {
+	extMap := make(map[uint64]bool)
+	for _, fn := range loaded {
+		if fn == nil {
+			continue
+		}
+		for _, b := range fn.Blocks {
+			for _, inst := range b.Insts {
+				for _, arg := range inst.Inst.Args {
+					if arg == nil {
+						break
+					}
+					if rel, ok := arg.(x86asm.Rel); ok {
+						nextPC := inst.Address + uint64(inst.Inst.Len)
+						target := uint64(int64(nextPC) + int64(rel))
+						if !chunkSet[target] && e.lifter.IsKnownFunc(target) {
+							extMap[target] = true
+						}
+					}
+				}
+			}
+		}
 	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
+	var res []uint64
+	for addr := range extMap {
+		res = append(res, addr)
+	}
+	slices.Sort(res)
+	return res
+}
 
-	w := bufio.NewWriter(f)
-	defer func() {
-		if ferr := w.Flush(); err == nil {
-			err = ferr
-		}
-	}()
+func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint64) (err error) {
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
 
-	if _, err := fmt.Fprintf(w, "#include \"recomp_runtime.h\"\n#include \"guest_functions.h\"\n\n// Chunk %d (%d functions)\n\n", chunkIdx, len(chunkAddrs)); err != nil {
+	if _, err := fmt.Fprintf(w, "#include \"recomp_runtime.h\"\n\n// Chunk %d (%d functions)\n\n", chunkIdx, len(chunkAddrs)); err != nil {
 		return err
 	}
 
@@ -552,6 +568,39 @@ func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint6
 			return fmt.Errorf("0x%x: %w", addr, err)
 		}
 		loaded[i] = fn
+	}
+
+	// Forward declarations for functions defined in this chunk
+	if _, err := w.WriteString("// Forward declarations for functions defined in this chunk\n"); err != nil {
+		return err
+	}
+	for _, addr := range chunkAddrs {
+		if _, err := fmt.Fprintf(w, "void fn_0x%x(GuestContext *__restrict__ ctx);\n", addr); err != nil {
+			return err
+		}
+	}
+
+	// Forward declarations for external callees referenced by this chunk
+	chunkSet := make(map[uint64]bool, len(chunkAddrs))
+	for _, addr := range chunkAddrs {
+		chunkSet[addr] = true
+	}
+	extCalls := e.collectExternalCallees(loaded, chunkSet)
+	if len(extCalls) > 0 {
+		if _, err := w.WriteString("\n// Forward declarations for external functions called by this chunk\n"); err != nil {
+			return err
+		}
+		for _, addr := range extCalls {
+			if _, err := fmt.Fprintf(w, "void fn_0x%x(GuestContext *__restrict__ ctx);\n", addr); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := w.WriteString("\n"); err != nil {
+		return err
+	}
+
+	for _, fn := range loaded {
 		if err := e.emitFunction(w, fn); err != nil {
 			return err
 		}
@@ -578,8 +627,55 @@ func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint6
 	if _, err := w.WriteString("}\n"); err != nil {
 		return err
 	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
 
-	return nil
+	return writeFileIfChanged(path, buf.Bytes())
+}
+
+func (e *CEmitter) functionNeedsUnwind(fn *disasm.Function, maxEnd uint64) bool {
+	if fn == nil || len(fn.BlockOrder) <= 1 {
+		return false
+	}
+
+	// 1. If ELF has .eh_frame unwind tables, only functions with an LSDA
+	// (exception landing pads for C++ catch/cleanup) or calling setjmp need UnwindFrame.
+	if len(e.elf.FuncBounds) > 0 {
+		if e.elf.FunctionHasLSDA(fn.EntryAddr, maxEnd) {
+			return true
+		}
+		for _, b := range fn.Blocks {
+			for _, inst := range b.Insts {
+				if inst.Inst.Op == x86asm.CALL {
+					for _, arg := range inst.Inst.Args {
+						if arg == nil {
+							break
+						}
+						if rel, ok := arg.(x86asm.Rel); ok {
+							target := uint64(int64(inst.Address+uint64(inst.Inst.Len)) + int64(rel))
+							if sym, ok := e.elf.SymbolByAddr[target]; ok {
+								if strings.Contains(sym.Name, "setjmp") || strings.Contains(sym.Name, "sigsetjmp") {
+									return true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		return false
+	}
+
+	// 2. Fallback for binaries without .eh_frame (e.g. synthetic test ELFs):
+	for _, b := range fn.Blocks {
+		for _, inst := range b.Insts {
+			if inst.Inst.Op == x86asm.CALL {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
@@ -605,20 +701,7 @@ func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 		maxEnd = addr + sym.Size
 	}
 
-	needsUnwind := false
-	if len(fn.BlockOrder) > 1 {
-		for _, b := range fn.Blocks {
-			for _, inst := range b.Insts {
-				if inst.Inst.Op == x86asm.CALL {
-					needsUnwind = true
-					break
-				}
-			}
-			if needsUnwind {
-				break
-			}
-		}
-	}
+	needsUnwind := e.functionNeedsUnwind(fn, maxEnd)
 
 	if needsUnwind {
 		if _, err := fmt.Fprintf(w, "    UnwindFrame __unwind_frame;\n    __unwind_frame.fn_start = 0x%xULL;\n    __unwind_frame.fn_end = 0x%xULL;\n    __unwind_frame.prev = ctx->unwind_frame;\n    ctx->unwind_frame = &__unwind_frame;\n    UnwindFrame *__cur_unwind_frame = &__unwind_frame;\n", addr, maxEnd); err != nil {
@@ -673,7 +756,7 @@ func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 		}
 		for _, inst := range block.Insts {
 			nextPC := inst.Address + uint64(inst.Inst.Len)
-			lines, err := e.lifter.LiftInstruction(inst, nextPC, fn)
+			lines, err := e.lifter.LiftInstructionToBuf(inst, nextPC, fn, e.linesBuf[:0])
 			if err != nil {
 				if _, err := fmt.Fprintf(w, "    /* 0x%x: %s [UNSUPPORTED: %v] */\n", inst.Address, inst.Inst.String(), err); err != nil {
 					return err
@@ -682,6 +765,7 @@ func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 					return err
 				}
 			} else {
+				e.linesBuf = lines
 				for _, line := range lines {
 					if _, err := w.WriteString(line); err != nil {
 						return err
@@ -701,22 +785,8 @@ func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 }
 
 func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
-
-	w := bufio.NewWriter(f)
-	defer func() {
-		if ferr := w.Flush(); err == nil {
-			err = ferr
-		}
-	}()
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
 
 	if _, err := w.WriteString("#include \"recomp_runtime.h\"\n\nvoid recomp_register_guest_modules(void);\n\n// Forward declarations of chunk registration functions\n"); err != nil {
 		return err
@@ -748,8 +818,11 @@ func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
 	if _, err := w.WriteString("}\n"); err != nil {
 		return err
 	}
+	if err := w.Flush(); err != nil {
+		return err
+	}
 
-	return nil
+	return writeFileIfChanged(path, buf.Bytes())
 }
 
 func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
@@ -800,28 +873,11 @@ func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
 
 // EmitGuestImage writes the raw binary ELF memory image directly to disk.
 func (e *CEmitter) EmitGuestImage(path string) error {
-	return os.WriteFile(path, e.elf.MemoryImage, 0o644)
+	return writeFileIfChanged(path, e.elf.MemoryImage)
 }
 
 // EmitMainRunner writes main.c driver.
 func (e *CEmitter) EmitMainRunner(path string) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
-
-	w := bufio.NewWriter(f)
-	defer func() {
-		if ferr := w.Flush(); err == nil {
-			err = ferr
-		}
-	}()
-
 	entryAddr, entryName, err := e.ResolveEntryAddress()
 	if err != nil {
 		return err
@@ -873,10 +929,7 @@ int main(int argc, char **argv) {
 }
 `, vfsInitArg, entryName, e.formatInitArray(), entryName, entryAddr, entryAddr)
 
-	if _, err := w.WriteString(content); err != nil {
-		return err
-	}
-	return nil
+	return writeFileIfChanged(path, []byte(content))
 }
 
 func (e *CEmitter) formatInitArray() string {
@@ -892,21 +945,8 @@ func (e *CEmitter) formatInitArray() string {
 
 // EmitGuestModules writes the runtime export tables used by sceKernelDlsym.
 func (e *CEmitter) EmitGuestModules(path string) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
-	w := bufio.NewWriter(f)
-	defer func() {
-		if ferr := w.Flush(); err == nil {
-			err = ferr
-		}
-	}()
+	var buf bytes.Buffer
+	w := bufio.NewWriter(&buf)
 
 	if _, err := w.WriteString("#include \"recomp_runtime.h\"\n#include \"ps4_sysmodule.h\"\n\n"); err != nil {
 		return err
@@ -1011,7 +1051,11 @@ func (e *CEmitter) EmitGuestModules(path string) (err error) {
 	if _, err := w.WriteString("}\n"); err != nil {
 		return err
 	}
-	return nil
+	if err := w.Flush(); err != nil {
+		return err
+	}
+
+	return writeFileIfChanged(path, buf.Bytes())
 }
 
 func uniqueModuleNames(fileName string, aliases []string) []string {

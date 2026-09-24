@@ -41,6 +41,7 @@ type AnalysisReport struct {
 	UnwindFunctions     int
 	DataRanges          int
 	CapHits             int
+	CapHitDetails       []disasm.CapHitInfo
 	PrivilegedStops     int
 }
 
@@ -175,6 +176,7 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 		UnwindFunctions:     len(loaded.FuncBounds),
 		DataRanges:          len(loaded.DataRanges),
 		CapHits:             d.CapHits,
+		CapHitDetails:       d.CapHitDetails,
 		PrivilegedStops:     d.PrivilegedStops,
 	}, nil
 }
@@ -222,6 +224,16 @@ func (r *AnalysisReport) SummaryString() string {
 		}
 	} else {
 		sb.WriteString("\nAll reachable instructions in this binary are supported by the lifter.\n")
+	}
+
+	if len(r.CapHitDetails) > 0 {
+		sb.WriteString("\n-------------------------------------------------------------------\n")
+		sb.WriteString("  Decode Safety Cap Hits\n")
+		sb.WriteString("-------------------------------------------------------------------\n")
+		for _, hit := range r.CapHitDetails {
+			sb.WriteString(fmt.Sprintf("  - %s (0x%x): %s at PC 0x%x (%d insts decoded)\n",
+				hit.Name, hit.EntryAddr, hit.Reason, hit.PC, hit.InstCount))
+		}
 	}
 
 	if r.HLE != nil {

@@ -2,6 +2,7 @@ package lifter
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"golang.org/x/arch/x86/x86asm"
@@ -19,7 +20,28 @@ func MemAddrExpr(mem x86asm.Mem, nextPC uint64) (string, error) {
 	// In x86-64 mode, an addressing operand without base and index (and without segment override) is RIP-relative.
 	if mem.Base == x86asm.RIP || (mem.Segment == 0 && mem.Base == 0 && mem.Index == 0 && mem.Disp != 0) {
 		targetAddr := uint64(int64(nextPC) + disp)
-		return fmt.Sprintf("0x%xULL", targetAddr), nil
+		return "0x" + strconv.FormatUint(targetAddr, 16) + "ULL", nil
+	}
+
+	// Fast path 1: Base only (e.g. [RAX])
+	if mem.Segment == 0 && mem.Index == 0 && disp == 0 && mem.Base != 0 {
+		info, ok := regMap[mem.Base]
+		if !ok {
+			return "", fmt.Errorf("unsupported base register: %v", mem.Base)
+		}
+		return "ctx->" + info.BaseReg, nil
+	}
+
+	// Fast path 2: Base + Disp (e.g. [RBP-0x28], [RSP+0x10])
+	if mem.Segment == 0 && mem.Index == 0 && disp != 0 && mem.Base != 0 {
+		info, ok := regMap[mem.Base]
+		if !ok {
+			return "", fmt.Errorf("unsupported base register: %v", mem.Base)
+		}
+		if disp < 0 {
+			return "ctx->" + info.BaseReg + " + (uint64_t)(-0x" + strconv.FormatUint(uint64(-disp), 16) + "LL)", nil
+		}
+		return "ctx->" + info.BaseReg + " + 0x" + strconv.FormatUint(uint64(disp), 16) + "ULL", nil
 	}
 
 	parts := make([]string, 0, 3)
@@ -48,16 +70,16 @@ func MemAddrExpr(mem x86asm.Mem, nextPC uint64) (string, error) {
 		if scale == 0 || scale == 1 {
 			parts = append(parts, "ctx->"+info.BaseReg)
 		} else {
-			parts = append(parts, fmt.Sprintf("(ctx->%s * %dULL)", info.BaseReg, scale))
+			parts = append(parts, "(ctx->"+info.BaseReg+" * "+strconv.Itoa(int(scale))+"ULL)")
 		}
 	}
 
 	// Displacement
 	if disp != 0 || len(parts) == 0 {
 		if disp < 0 {
-			parts = append(parts, fmt.Sprintf("(uint64_t)(-0x%xLL)", -disp))
+			parts = append(parts, "(uint64_t)(-0x"+strconv.FormatUint(uint64(-disp), 16)+"LL)")
 		} else {
-			parts = append(parts, fmt.Sprintf("0x%xULL", disp))
+			parts = append(parts, "0x"+strconv.FormatUint(uint64(disp), 16)+"ULL")
 		}
 	}
 

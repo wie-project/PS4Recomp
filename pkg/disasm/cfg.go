@@ -33,6 +33,15 @@ type Function struct {
 	BlockOrder []uint64 // Topologically or address-sorted block start addresses
 }
 
+// CapHitInfo records diagnostic information about a function decode that hit safety caps.
+type CapHitInfo struct {
+	EntryAddr uint64
+	Name      string
+	Reason    string
+	PC        uint64
+	InstCount int
+}
+
 // Disassembler performs CFG recovery and reachability analysis.
 type Disassembler struct {
 	elf       *elfloader.LoadedELF
@@ -53,6 +62,8 @@ type Disassembler struct {
 	// CapHits counts functions whose decode stopped on the safety cap
 	// (maxBlockBytes / maxFnInsts) rather than on control flow or an unwind bound.
 	CapHits int
+	// CapHitDetails records diagnostic records for every function that hit a safety cap.
+	CapHitDetails []CapHitInfo
 	// PrivilegedStops counts user-mode-illegal opcodes that ended a block.
 	// Those bytes are data decoded on the wrong boundary.
 	PrivilegedStops int
@@ -584,9 +595,13 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	}
 
 	capped := false
+	var capReason string
+	var capPC uint64
 	for head := 0; head < len(blockQueue); head++ {
 		if len(instAtAddr) >= maxFnInsts {
 			capped = true
+			capReason = fmt.Sprintf("function instruction count (%d) >= cap (%d)", len(instAtAddr), maxFnInsts)
+			capPC = blockQueue[head]
 			break
 		}
 		blockStart := blockQueue[head]
@@ -668,14 +683,29 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 			if isTerminal || isBranch {
 				break
 			}
-			if pc-blockStart >= maxBlockBytes || len(instAtAddr) >= maxFnInsts {
+			if pc-blockStart >= maxBlockBytes {
 				capped = true
+				capReason = fmt.Sprintf("basic block bytes (%d) >= cap (%d)", pc-blockStart, maxBlockBytes)
+				capPC = pc
+				break
+			}
+			if len(instAtAddr) >= maxFnInsts {
+				capped = true
+				capReason = fmt.Sprintf("function instruction count (%d) >= cap (%d)", len(instAtAddr), maxFnInsts)
+				capPC = pc
 				break
 			}
 		}
 	}
 	if capped {
 		d.CapHits++
+		d.CapHitDetails = append(d.CapHitDetails, CapHitInfo{
+			EntryAddr: entryAddr,
+			Name:      symName,
+			Reason:    capReason,
+			PC:        capPC,
+			InstCount: len(instAtAddr),
+		})
 	}
 
 	if len(instAtAddr) == 0 {
