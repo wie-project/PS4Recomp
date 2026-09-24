@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -268,31 +269,39 @@ func Execute(args []string) error {
 		return fmt.Errorf("runtime directory error: %w", err)
 	}
 
-	runtimeFiles := []string{
-		"recomp_runtime.h", "recomp_runtime.c",
-		"ps4_vfs.h", "ps4_vfs.c",
-		"ps4_syscalls.c", "ps4_threading.c", "ps4_sync.c",
-		"ps4_direct_mem.h", "ps4_direct_mem.c",
-		"ps4_equeue.h", "ps4_equeue.c",
-		"ps4_metal_screen.h", "ps4_metal_screen.m",
-		"ps4_videoout.h", "ps4_videoout.c",
-		"ps4_user_service.h", "ps4_user_service.c",
-		"ps4_pad.h", "ps4_pad.m",
-		"ps4_sysmodule.h", "ps4_sysmodule.c",
-		"ps4_freetype.h", "ps4_freetype.c",
-		"ps4_semaphore.h", "ps4_semaphore.c",
-		"ps4_audioout.h", "ps4_audioout.c",
-		"ps4_keyboard.h", "ps4_keyboard.m",
-		"ps4_dialog.h", "ps4_dialog.m",
-		"ps4_trophy.h", "ps4_trophy.c",
+	runtimeOutDir := filepath.Join(cfg.OutDir, "runtime")
+	if err := copyDir(runtimeDir, runtimeOutDir); err != nil {
+		return fmt.Errorf("failed to copy runtime files: %w", err)
 	}
-	for _, rf := range runtimeFiles {
-		src := filepath.Join(runtimeDir, rf)
-		dst := filepath.Join(cfg.OutDir, rf)
-		if err := copyFile(src, dst); err != nil {
-			return fmt.Errorf("failed to copy runtime file %s: %w", rf, err)
+
+	var runtimeCFiles []string
+	var runtimeIncludeDirs []string
+	seenInc := make(map[string]bool)
+	seenInc[cfg.OutDir] = true
+	seenInc[runtimeOutDir] = true
+
+	err = filepath.Walk(runtimeOutDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
 		}
+		if info.IsDir() {
+			if !seenInc[path] {
+				seenInc[path] = true
+				runtimeIncludeDirs = append(runtimeIncludeDirs, path)
+			}
+			return nil
+		}
+		ext := filepath.Ext(path)
+		if ext == ".c" || ext == ".m" {
+			runtimeCFiles = append(runtimeCFiles, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed scanning runtime files: %w", err)
 	}
+	slices.Sort(runtimeCFiles)
+	slices.Sort(runtimeIncludeDirs)
 
 	knownFuncs := make(map[uint64]bool, len(funcs))
 	for _, f := range funcs {
@@ -327,27 +336,7 @@ func Execute(args []string) error {
 		}
 	}
 
-	cFiles = append(
-		cFiles,
-		filepath.Join(cfg.OutDir, "recomp_runtime.c"),
-		filepath.Join(cfg.OutDir, "ps4_vfs.c"),
-		filepath.Join(cfg.OutDir, "ps4_syscalls.c"),
-		filepath.Join(cfg.OutDir, "ps4_threading.c"),
-		filepath.Join(cfg.OutDir, "ps4_sync.c"),
-		filepath.Join(cfg.OutDir, "ps4_direct_mem.c"),
-		filepath.Join(cfg.OutDir, "ps4_equeue.c"),
-		filepath.Join(cfg.OutDir, "ps4_videoout.c"),
-		filepath.Join(cfg.OutDir, "ps4_metal_screen.m"),
-		filepath.Join(cfg.OutDir, "ps4_user_service.c"),
-		filepath.Join(cfg.OutDir, "ps4_pad.m"),
-		filepath.Join(cfg.OutDir, "ps4_sysmodule.c"),
-		filepath.Join(cfg.OutDir, "ps4_freetype.c"),
-		filepath.Join(cfg.OutDir, "ps4_semaphore.c"),
-		filepath.Join(cfg.OutDir, "ps4_audioout.c"),
-		filepath.Join(cfg.OutDir, "ps4_keyboard.m"),
-		filepath.Join(cfg.OutDir, "ps4_dialog.m"),
-		filepath.Join(cfg.OutDir, "ps4_trophy.c"),
-	)
+	cFiles = append(cFiles, runtimeCFiles...)
 	fmt.Printf("             Emitted %d C source files | Time: %v\n",
 		len(cFiles), time.Since(stepStart).Round(time.Millisecond))
 
@@ -357,7 +346,7 @@ func Execute(args []string) error {
 		stepStart = time.Now()
 		fmt.Printf("[ps4-recomp] [4/4] Compiling native ARM64 binary with clang (-O%s, %d workers)...\n",
 			cfg.OptLevel, cfg.Jobs)
-		if err := compileParallel(cFiles, cfg.OutDir, targetBin, cfg.Jobs, cfg.OptLevel, cfg.Asan); err != nil {
+		if err := compileParallel(cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.Jobs, cfg.OptLevel, cfg.Asan); err != nil {
 			return fmt.Errorf("compilation failed: %w", err)
 		}
 		fmt.Printf("             Compiled binary: %s | Time: %v\n",
@@ -392,7 +381,7 @@ func Execute(args []string) error {
 	return nil
 }
 
-func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, optLevel string, asan bool) error {
+func compileParallel(cFiles []string, outDir string, includeDirs []string, targetBin string, numWorkers int, optLevel string, asan bool) error {
 	var ftCflags []string
 	var ftLibs []string
 	if out, err := exec.Command("pkg-config", "--cflags", "freetype2").Output(); err == nil {
@@ -423,6 +412,9 @@ func compileParallel(cFiles []string, outDir, targetBin string, numWorkers int, 
 					"-O" + optLevel,
 					"-fvisibility=hidden",
 					"-I" + outDir,
+				}
+				for _, inc := range includeDirs {
+					clangArgs = append(clangArgs, "-I"+inc)
 				}
 				clangArgs = append(clangArgs, ftCflags...)
 				if asan {
@@ -588,6 +580,9 @@ func findRuntimeDir() (string, error) {
 
 	for _, c := range candidates {
 		if fi, err := os.Stat(c); err == nil && fi.IsDir() {
+			if _, err := os.Stat(filepath.Join(c, "core", "recomp_runtime.h")); err == nil {
+				return c, nil
+			}
 			if _, err := os.Stat(filepath.Join(c, "recomp_runtime.h")); err == nil {
 				return c, nil
 			}

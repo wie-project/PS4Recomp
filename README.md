@@ -284,19 +284,30 @@ PS4_RECOMP_MEM=2G perl -e 'alarm 4; exec "./output_graphics/ps4_app"'
 │   │   ├── alu.go           # Integer ALU, bit operations, CPUID, atomic synchronization
 │   │   ├── control_flow.go  # Branching, setcc, cmovcc, exception unwinding frames
 │   │   ├── fpu.go           # IEEE 754 80-bit x87 FPU stack emulation
-│   │   ├── simd.go          # Packed SIMD, vector arithmetic, AVX/VEX instructions
+│   │   ├── simd.go          # SSE / AVX vector instructions
+│   │   ├── simd_avx.go      # AVX 256-bit vector operations and VEX encodings
+│   │   ├── simd_avx_ext.go  # Extended AVX arithmetic, rounding, blends, conversions
 │   │   └── lifter.go        # Instruction decoder and opcode registry
 │   └── runtime/             # Native host runtime and PS4 kernel ABI
-│       ├── recomp_runtime.h # Guest context, SIMD unions, extent tracking
-│       ├── recomp_runtime.c # Virtual memory extent manager, flat address space
-│       ├── ps4_metal_screen.h/m # Native Apple Metal CAMetalLayer & Cocoa window renderer
-│       ├── ps4_direct_mem.h/c   # PS4 direct physical memory allocation & UMA mapping
-│       ├── ps4_videoout.h/c     # libSceVideoOut buffer registration & flip events
-│       ├── ps4_equeue.h/c       # Kernel event queue mechanism
-│       ├── ps4_vfs.h/c          # Guest VFS path virtualization (/app0/ resolution)
-│       ├── ps4_syscalls.c       # FreeBSD/PS4 syscall shims, signals, errno sync
-│       ├── ps4_threading.c      # Guest thread lifecycle, stacks, TLS keys
-│       └── ps4_sync.c           # Mutexes, condition variables, rwlocks, pthread_once
+│       ├── core/            # Guest context, CPU registers, dynamic dispatch
+│       │   ├── recomp_runtime.h
+│       │   └── recomp_runtime.c
+│       ├── kernel/          # Low-level Orbis / FreeBSD kernel subsystems
+│       │   ├── syscalls/    # FreeBSD/PS4 syscall shims, signals, errno sync
+│       │   ├── memory/      # Direct physical memory allocation & UMA mapping
+│       │   ├── sync/        # Mutexes, condition variables, semaphores, rwlocks
+│       │   ├── threading/   # Guest thread lifecycle, stacks, TLS keys
+│       │   ├── equeue/      # Kernel event queue mechanism
+│       │   └── vfs/         # Guest VFS path virtualization (/app0/ resolution)
+│       └── modules/         # High-level PS4 firmware and SDK library modules
+│           ├── libkernel/   # Dynamic module loader (sceKernelLoadStartModule, dlsym)
+│           ├── libSceVideoOut/  # Display output, flip events & Apple Metal presentation
+│           ├── libSceAudioOut/  # Low-latency multi-channel audio output (AudioToolbox)
+│           ├── libScePad/       # Gamepad (DualSense/HID) & keyboard input subsystem
+│           ├── libSceUserService/ # User profiles, active user management
+│           ├── libSceMsgDialog/ # System dialogs & error prompts
+│           ├── libSceNpTrophy/  # PlayStation Network trophy management
+│           └── libSceFreeType/  # TrueType font rendering engine
 ├── tests/
 │   ├── threading_test/      # Multi-threaded C++ testcase
 │   └── memory_stress_test/  # Compute and virtual memory stress testcase

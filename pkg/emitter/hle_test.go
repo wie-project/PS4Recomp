@@ -15,7 +15,12 @@ import (
 )
 
 func TestImplementedSyscallsMatchC(t *testing.T) {
-	data, err := os.ReadFile("../runtime/ps4_syscalls.c")
+	path := "../runtime/kernel/syscalls/ps4_syscalls.c"
+	data, err := os.ReadFile(path)
+	if err != nil {
+		path = "../runtime/ps4_syscalls.c"
+		data, err = os.ReadFile(path)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

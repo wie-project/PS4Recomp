@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 #ifndef RECOMP_RUNTIME_H
 #define RECOMP_RUNTIME_H
 
