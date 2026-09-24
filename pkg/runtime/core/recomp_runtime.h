@@ -122,6 +122,9 @@ typedef struct GuestVMExtent {
   uint64_t addr;
   size_t size;
   bool is_free;
+  int prot;
+  int flags;
+  char name[32];
   struct GuestVMExtent *prev;
   struct GuestVMExtent *next;
 } GuestVMExtent;
@@ -378,7 +381,10 @@ GuestContext *recomp_init_runtime_file(const char *image_filename, size_t reques
 void recomp_free_runtime(GuestContext *ctx);
 GuestContext *recomp_create_thread_context(GuestContext *parent, uint64_t stack_size);
 uint64_t recomp_vm_alloc(GuestContext *ctx, size_t size);
+uint64_t recomp_vm_alloc_named(GuestContext *ctx, size_t size, int prot, int flags, const char *name);
+uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr, size_t size, int prot, int flags, const char *name);
 int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size);
+GuestVMExtent *recomp_vm_find(GuestContext *ctx, uint64_t addr);
 
 // Syscall / Libkernel Shim declarations
 void shim_sceKernelUsleep(GuestContext *ctx);
@@ -458,6 +464,51 @@ void shim_sched_get_priority_max(GuestContext *ctx);
 void shim_sched_get_priority_min(GuestContext *ctx);
 void recomp_init_main_thread(GuestContext *ctx);
 
+// Orbis Pthread threading & synchronization shims
+void shim_scePthreadCreate(GuestContext *ctx);
+void shim_scePthreadJoin(GuestContext *ctx);
+void shim_scePthreadDetach(GuestContext *ctx);
+void shim_scePthreadExit(GuestContext *ctx);
+void shim_scePthreadSelf(GuestContext *ctx);
+void shim_scePthreadEqual(GuestContext *ctx);
+void shim_scePthreadYield(GuestContext *ctx);
+void shim_scePthreadGetthreadid(GuestContext *ctx);
+void shim_scePthreadSetprio(GuestContext *ctx);
+void shim_scePthreadGetprio(GuestContext *ctx);
+void shim_scePthreadSetaffinity(GuestContext *ctx);
+void shim_scePthreadGetaffinity(GuestContext *ctx);
+void shim_scePthreadAttrInit(GuestContext *ctx);
+void shim_scePthreadAttrDestroy(GuestContext *ctx);
+void shim_scePthreadAttrSetstacksize(GuestContext *ctx);
+void shim_scePthreadAttrSetdetachstate(GuestContext *ctx);
+void shim_scePthreadAttrSetschedpolicy(GuestContext *ctx);
+void shim_scePthreadAttrSetschedparam(GuestContext *ctx);
+void shim_scePthreadAttrGetschedparam(GuestContext *ctx);
+void shim_scePthreadAttrSetinheritsched(GuestContext *ctx);
+void shim_scePthreadAttrSetaffinity(GuestContext *ctx);
+void shim_scePthreadMutexInit(GuestContext *ctx);
+void shim_scePthreadMutexLock(GuestContext *ctx);
+void shim_scePthreadMutexTrylock(GuestContext *ctx);
+void shim_scePthreadMutexUnlock(GuestContext *ctx);
+void shim_scePthreadMutexDestroy(GuestContext *ctx);
+void shim_scePthreadMutexattrInit(GuestContext *ctx);
+void shim_scePthreadMutexattrDestroy(GuestContext *ctx);
+void shim_scePthreadMutexattrSettype(GuestContext *ctx);
+void shim_scePthreadMutexattrSetprotocol(GuestContext *ctx);
+void shim_scePthreadCondInit(GuestContext *ctx);
+void shim_scePthreadCondDestroy(GuestContext *ctx);
+void shim_scePthreadCondSignal(GuestContext *ctx);
+void shim_scePthreadCondBroadcast(GuestContext *ctx);
+void shim_scePthreadCondWait(GuestContext *ctx);
+void shim_scePthreadCondTimedwait(GuestContext *ctx);
+void shim_scePthreadCondattrInit(GuestContext *ctx);
+void shim_scePthreadCondattrDestroy(GuestContext *ctx);
+void shim_scePthreadKeyCreate(GuestContext *ctx);
+void shim_scePthreadKeyDelete(GuestContext *ctx);
+void shim_scePthreadSetspecific(GuestContext *ctx);
+void shim_scePthreadGetspecific(GuestContext *ctx);
+void shim___tls_get_addr(GuestContext *ctx);
+
 // POSIX Semaphores
 void shim_sem_init(GuestContext *ctx);
 void shim_sem_destroy(GuestContext *ctx);
@@ -466,11 +517,43 @@ void shim_sem_trywait(GuestContext *ctx);
 void shim_sem_post(GuestContext *ctx);
 void shim_sem_getvalue(GuestContext *ctx);
 
-// Direct Memory shims
+// Direct Memory & VMM shims
 void shim_sceKernelAllocateDirectMemory(GuestContext *ctx);
+void shim_sceKernelAllocateMainDirectMemory(GuestContext *ctx);
 void shim_sceKernelGetDirectMemorySize(GuestContext *ctx);
+void shim_sceKernelAvailableDirectMemorySize(GuestContext *ctx);
 void shim_sceKernelMapDirectMemory(GuestContext *ctx);
 void shim_sceKernelReleaseDirectMemory(GuestContext *ctx);
+void shim_sceKernelMapFlexibleMemory(GuestContext *ctx);
+void shim_sceKernelAvailableFlexibleMemorySize(GuestContext *ctx);
+void shim_sceKernelVirtualQuery(GuestContext *ctx);
+void shim_sceKernelQueryMemoryProtection(GuestContext *ctx);
+void shim_sceKernelMemoryPoolReserve(GuestContext *ctx);
+void shim_sceKernelMemoryPoolExpand(GuestContext *ctx);
+void shim_sceKernelMemoryPoolCommit(GuestContext *ctx);
+void shim_sceKernelMemoryPoolDecommit(GuestContext *ctx);
+
+// Orbis Event Flags
+void shim_sceKernelCreateEventFlag(GuestContext *ctx);
+void shim_sceKernelDeleteEventFlag(GuestContext *ctx);
+void shim_sceKernelSetEventFlag(GuestContext *ctx);
+void shim_sceKernelClearEventFlag(GuestContext *ctx);
+void shim_sceKernelWaitEventFlag(GuestContext *ctx);
+void shim_sceKernelPollEventFlag(GuestContext *ctx);
+
+// Kernel High-Resolution Timers & CPU Configuration
+void shim_sceKernelGetProcessTimeCounter(GuestContext *ctx);
+void shim_sceKernelGetProcessTimeCounterFrequency(GuestContext *ctx);
+void shim_sceKernelGetProcessTime(GuestContext *ctx);
+void shim_sceKernelGetTscFrequency(GuestContext *ctx);
+void shim_sceKernelReadTsc(GuestContext *ctx);
+void shim_sceKernelGettimeofday(GuestContext *ctx);
+void shim_sceKernelGetCurrentCpu(GuestContext *ctx);
+void shim_sceKernelGetCpumode(GuestContext *ctx);
+void shim_sceKernelIsNeoMode(GuestContext *ctx);
+void shim_sceKernelHasNeoMode(GuestContext *ctx);
+void shim_sceKernelIsAuthenticNeo(GuestContext *ctx);
+void shim_sceKernelGetSystemSwVersion(GuestContext *ctx);
 
 // Kernel Equeue shims
 void shim_sceKernelCreateEqueue(GuestContext *ctx);
@@ -568,6 +651,7 @@ void shim_sceKernelDlsym(GuestContext *ctx);
 // Subsystem teardown and lifecycle
 void recomp_free_thread_context(GuestContext *ctx);
 void ps4_direct_mem_destroy(void);
+void ps4_event_flag_destroy(void);
 void ps4_sync_destroy(void);
 void ps4_videoout_destroy(void);
 void ps4_equeue_destroy(void);

@@ -113,8 +113,8 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
     }
 
     if (guest_mem_sz == 0) {
-        // Dynamic headroom: TLS/Args (128KB) + initial heap headroom (1024MB) + stack (64MB)
-        size_t min_headroom = 0x20000ULL + (1024ULL * 1024 * 1024) + (64ULL * 1024 * 1024);
+        // Dynamic headroom: TLS/Args (128KB) + initial heap/direct memory headroom (8192MB) + stack (64MB)
+        size_t min_headroom = 0x20000ULL + (8ULL * 1024 * 1024 * 1024) + (64ULL * 1024 * 1024);
         size_t base_size = image_size > 0 ? image_size : 0;
         guest_mem_sz = base_size + min_headroom;
         // Round up to 2MB boundary
@@ -269,6 +269,7 @@ void recomp_free_runtime(GuestContext *ctx) {
     ps4_videoout_destroy();
     ps4_equeue_destroy();
     ps4_direct_mem_destroy();
+    ps4_event_flag_destroy();
     ps4_sync_destroy();
     ps4_vfs_destroy();
 
@@ -310,7 +311,7 @@ void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip) {
     abort();
 }
 
-uint64_t recomp_vm_alloc(GuestContext *ctx, size_t size) {
+uint64_t recomp_vm_alloc_named(GuestContext *ctx, size_t size, int prot, int flags, const char *name) {
     if (!ctx || size == 0) return (uint64_t)-1;
     GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
     size_t aligned_size = (size + 4095ULL) & ~4095ULL;
@@ -351,9 +352,114 @@ uint64_t recomp_vm_alloc(GuestContext *ctx, size_t size) {
     }
 
     best->is_free = false;
+    best->prot = prot;
+    best->flags = flags;
+    if (name) {
+        strncpy(best->name, name, sizeof(best->name) - 1);
+        best->name[sizeof(best->name) - 1] = '\0';
+    } else {
+        best->name[0] = '\0';
+    }
     uint64_t res = best->addr;
     pthread_mutex_unlock(&proc->vm_mutex);
     return res;
+}
+
+uint64_t recomp_vm_alloc(GuestContext *ctx, size_t size) {
+    return recomp_vm_alloc_named(ctx, size, PROT_READ | PROT_WRITE, 0, "anon");
+}
+
+uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr, size_t size, int prot, int flags, const char *name) {
+    if (!ctx || size == 0) return (uint64_t)-1;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    uint64_t aligned_addr = desired_addr & ~4095ULL;
+    size_t aligned_size = (size + 4095ULL) & ~4095ULL;
+    if (aligned_addr + aligned_size > proc->mem_size || aligned_addr + aligned_size < aligned_addr) {
+        return (uint64_t)-1;
+    }
+
+    pthread_mutex_lock(&proc->vm_mutex);
+
+    GuestVMExtent *curr = proc->vm_extents;
+    while (curr) {
+        if (curr->is_free && curr->addr <= aligned_addr && (curr->addr + curr->size) >= (aligned_addr + aligned_size)) {
+            break;
+        }
+        curr = curr->next;
+    }
+
+    if (!curr) {
+        pthread_mutex_unlock(&proc->vm_mutex);
+        return (uint64_t)-1;
+    }
+
+    // Split leading part if desired_addr > curr->addr
+    if (aligned_addr > curr->addr) {
+        GuestVMExtent *prefix = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
+        if (!prefix) {
+            pthread_mutex_unlock(&proc->vm_mutex);
+            return (uint64_t)-1;
+        }
+        prefix->addr = curr->addr;
+        prefix->size = aligned_addr - curr->addr;
+        prefix->is_free = true;
+        prefix->prev = curr->prev;
+        prefix->next = curr;
+        if (curr->prev) {
+            curr->prev->next = prefix;
+        } else {
+            proc->vm_extents = prefix;
+        }
+        curr->prev = prefix;
+        curr->addr = aligned_addr;
+        curr->size -= prefix->size;
+    }
+
+    // Split trailing part if curr->size > aligned_size
+    if (curr->size > aligned_size) {
+        GuestVMExtent *suffix = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
+        if (suffix) {
+            suffix->addr = curr->addr + aligned_size;
+            suffix->size = curr->size - aligned_size;
+            suffix->is_free = true;
+            suffix->prev = curr;
+            suffix->next = curr->next;
+            if (curr->next) {
+                curr->next->prev = suffix;
+            }
+            curr->next = suffix;
+            curr->size = aligned_size;
+        }
+    }
+
+    curr->is_free = false;
+    curr->prot = prot;
+    curr->flags = flags;
+    if (name) {
+        strncpy(curr->name, name, sizeof(curr->name) - 1);
+        curr->name[sizeof(curr->name) - 1] = '\0';
+    } else {
+        curr->name[0] = '\0';
+    }
+
+    pthread_mutex_unlock(&proc->vm_mutex);
+    return aligned_addr;
+}
+
+GuestVMExtent *recomp_vm_find(GuestContext *ctx, uint64_t addr) {
+    if (!ctx) return NULL;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    pthread_mutex_lock(&proc->vm_mutex);
+    GuestVMExtent *curr = proc->vm_extents;
+    while (curr) {
+        if (addr >= curr->addr && addr < (curr->addr + curr->size)) {
+            pthread_mutex_unlock(&proc->vm_mutex);
+            return curr;
+        }
+        curr = curr->next;
+    }
+    pthread_mutex_unlock(&proc->vm_mutex);
+    return NULL;
 }
 
 int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {

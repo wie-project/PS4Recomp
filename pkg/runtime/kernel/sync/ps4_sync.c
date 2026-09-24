@@ -350,3 +350,93 @@ void ps4_sync_destroy(void) {
   }
   pthread_mutex_unlock(&g_rwlock_map_lock);
 }
+
+// scePthreadMutex shims
+void shim_scePthreadMutexInit(GuestContext *ctx) {
+  shim_pthread_mutex_init(ctx);
+}
+
+void shim_scePthreadMutexLock(GuestContext *ctx) {
+  shim_pthread_mutex_lock(ctx);
+}
+
+void shim_scePthreadMutexTrylock(GuestContext *ctx) {
+  shim_pthread_mutex_trylock(ctx);
+}
+
+void shim_scePthreadMutexUnlock(GuestContext *ctx) {
+  shim_pthread_mutex_unlock(ctx);
+}
+
+void shim_scePthreadMutexDestroy(GuestContext *ctx) {
+  shim_pthread_mutex_destroy(ctx);
+}
+
+void shim_scePthreadMutexattrInit(GuestContext *ctx) {
+  shim_pthread_mutexattr_init(ctx);
+}
+
+void shim_scePthreadMutexattrDestroy(GuestContext *ctx) {
+  shim_pthread_mutexattr_destroy(ctx);
+}
+
+void shim_scePthreadMutexattrSettype(GuestContext *ctx) {
+  shim_pthread_mutexattr_settype(ctx);
+}
+
+void shim_scePthreadMutexattrSetprotocol(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+// scePthreadCond shims
+void shim_scePthreadCondInit(GuestContext *ctx) {
+  shim_pthread_cond_init(ctx);
+}
+
+void shim_scePthreadCondDestroy(GuestContext *ctx) {
+  shim_pthread_cond_destroy(ctx);
+}
+
+void shim_scePthreadCondSignal(GuestContext *ctx) {
+  shim_pthread_cond_signal(ctx);
+}
+
+void shim_scePthreadCondBroadcast(GuestContext *ctx) {
+  shim_pthread_cond_broadcast(ctx);
+}
+
+void shim_scePthreadCondWait(GuestContext *ctx) {
+  shim_pthread_cond_wait(ctx);
+}
+
+void shim_scePthreadCondTimedwait(GuestContext *ctx) {
+  uint64_t cond_addr = ctx->rdi;
+  uint64_t mtx_addr = ctx->rsi;
+  uint64_t usec = ctx->rdx;
+  pthread_cond_t *c = get_host_cond(cond_addr);
+  pthread_mutex_t *m = get_host_mutex(mtx_addr);
+
+  struct timespec now;
+  clock_gettime(CLOCK_REALTIME, &now);
+  struct timespec ts;
+  ts.tv_sec = now.tv_sec + (time_t)(usec / 1000000ULL);
+  ts.tv_nsec = now.tv_nsec + (long)((usec % 1000000ULL) * 1000ULL);
+  if (ts.tv_nsec >= 1000000000L) {
+    ts.tv_sec += 1;
+    ts.tv_nsec -= 1000000000L;
+  }
+  int ret = pthread_cond_timedwait(c, m, &ts);
+  ctx->rax = (uint64_t)ret;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadCondattrInit(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadCondattrDestroy(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}

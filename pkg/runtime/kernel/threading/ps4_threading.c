@@ -371,3 +371,225 @@ void shim_pthread_sigmask(GuestContext *ctx) {
   ctx->rax = 0;
   SHIM_RETURN();
 }
+
+// scePthread management shims
+void shim_scePthreadCreate(GuestContext *ctx) {
+  uint64_t thread_ptr_addr = ctx->rdi;
+  uint64_t attr_addr = ctx->rsi;
+  uint64_t start_routine = ctx->rdx;
+  uint64_t arg = ctx->rcx;
+  uint64_t name_addr = ctx->r8;
+
+  RecompThread *t = (RecompThread *)calloc(1, sizeof(RecompThread));
+  if (!t) {
+    set_guest_errno(ctx, ENOMEM);
+    ctx->rax = (uint64_t)ENOMEM;
+    SHIM_RETURN();
+  }
+
+  pthread_mutex_lock(&g_threads_mutex);
+  t->thread_id = ++g_thread_counter;
+  pthread_mutex_unlock(&g_threads_mutex);
+
+  uint64_t stack_size = 4 * 1024 * 1024;
+  if (attr_addr) {
+    uint64_t requested_stack = *(uint64_t *)(ctx->mem_base + attr_addr + 8);
+    if (requested_stack >= 64 * 1024) {
+      stack_size = requested_stack;
+    }
+  }
+
+  GuestContext *child_ctx = recomp_create_thread_context(ctx, stack_size);
+  if (!child_ctx) {
+    free(t);
+    set_guest_errno(ctx, ENOMEM);
+    ctx->rax = (uint64_t)ENOMEM;
+    SHIM_RETURN();
+  }
+  child_ctx->thread_id = t->thread_id;
+
+  t->ctx = child_ctx;
+  t->start_routine = start_routine;
+  t->arg = arg;
+  t->finished = false;
+  t->joined = false;
+  t->detached = false;
+
+  register_thread(t);
+
+  if (thread_ptr_addr != 0) {
+    *(uint64_t *)(ctx->mem_base + thread_ptr_addr) = (uint64_t)t;
+  }
+
+  int ret = pthread_create(&t->host_thread, NULL, recomp_host_thread_runner, t);
+  if (ret != 0) {
+    unregister_thread(t);
+    recomp_free_thread_context(child_ctx);
+    free(t);
+    set_guest_errno(ctx, ret);
+    ctx->rax = (uint64_t)ret;
+    SHIM_RETURN();
+  }
+
+  if (name_addr != 0) {
+    const char *name = (const char *)(ctx->mem_base + name_addr);
+#if defined(__APPLE__)
+    pthread_setname_np(name);
+#elif defined(__linux__)
+    pthread_setname_np(t->host_thread, name);
+#endif
+  }
+
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadJoin(GuestContext *ctx) {
+  shim_pthread_join(ctx);
+}
+
+void shim_scePthreadDetach(GuestContext *ctx) {
+  shim_pthread_detach(ctx);
+}
+
+void shim_scePthreadExit(GuestContext *ctx) {
+  if (g_current_thread) {
+    g_current_thread->finished = true;
+    g_current_thread->ret_val = ctx->rdi;
+  }
+  pthread_exit(NULL);
+}
+
+void shim_scePthreadSelf(GuestContext *ctx) {
+  shim_pthread_self(ctx);
+}
+
+void shim_scePthreadEqual(GuestContext *ctx) {
+  shim_pthread_equal(ctx);
+}
+
+void shim_scePthreadYield(GuestContext *ctx) {
+  sched_yield();
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadGetthreadid(GuestContext *ctx) {
+  ctx->rax = g_current_thread ? g_current_thread->thread_id : (ctx->thread_id ? ctx->thread_id : 1000);
+  SHIM_RETURN();
+}
+
+void shim_scePthreadSetprio(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadGetprio(GuestContext *ctx) {
+  uint64_t prio_ptr = ctx->rsi;
+  if (prio_ptr) {
+    *(int32_t *)(ctx->mem_base + prio_ptr) = 0;
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadSetaffinity(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadGetaffinity(GuestContext *ctx) {
+  uint64_t mask_ptr = ctx->rsi;
+  if (mask_ptr) {
+    *(uint64_t *)(ctx->mem_base + mask_ptr) = 0xFFULL;
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+// scePthread attribute shims
+void shim_scePthreadAttrInit(GuestContext *ctx) {
+  shim_pthread_attr_init(ctx);
+}
+
+void shim_scePthreadAttrDestroy(GuestContext *ctx) {
+  shim_pthread_attr_destroy(ctx);
+}
+
+void shim_scePthreadAttrSetstacksize(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  size_t stacksize = (size_t)ctx->rsi;
+  if (attr_addr) {
+    *(uint64_t *)(ctx->mem_base + attr_addr + 8) = stacksize;
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrSetdetachstate(GuestContext *ctx) {
+  shim_pthread_attr_setdetachstate(ctx);
+}
+
+void shim_scePthreadAttrSetschedpolicy(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrSetschedparam(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrGetschedparam(GuestContext *ctx) {
+  uint64_t sp_addr = ctx->rsi;
+  if (sp_addr) {
+    *(int32_t *)(ctx->mem_base + sp_addr) = 0;
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrSetinheritsched(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrSetaffinity(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+// scePthread TLS shims
+void shim_scePthreadKeyCreate(GuestContext *ctx) {
+  shim_pthread_key_create(ctx);
+}
+
+void shim_scePthreadKeyDelete(GuestContext *ctx) {
+  uint32_t key = (uint32_t)ctx->rdi;
+  if (key < 128) {
+    ctx->tls_keys[key] = 0;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    proc->tls_destructors[key] = 0;
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadSetspecific(GuestContext *ctx) {
+  shim_pthread_setspecific(ctx);
+}
+
+void shim_scePthreadGetspecific(GuestContext *ctx) {
+  shim_pthread_getspecific(ctx);
+}
+
+void shim___tls_get_addr(GuestContext *ctx) {
+  uint64_t ti_addr = ctx->rdi;
+  if (ti_addr) {
+    uint64_t offset = *(uint64_t *)(ctx->mem_base + ti_addr + 8);
+    ctx->rax = ctx->fs_base + offset;
+  } else {
+    ctx->rax = ctx->fs_base;
+  }
+  SHIM_RETURN();
+}

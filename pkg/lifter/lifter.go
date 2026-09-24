@@ -60,7 +60,7 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.PINSRB, x86asm.PINSRW, x86asm.PINSRD, x86asm.PINSRQ,
 		x86asm.PSLLW, x86asm.PSRLW, x86asm.PSRAW, x86asm.PSRAD,
 		x86asm.PSLLQ, x86asm.PSRLQ, x86asm.PSLLDQ, x86asm.PSRLDQ,
-		x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.UNPCKLPD,
+		x86asm.PUNPCKLBW, x86asm.PUNPCKLWD, x86asm.UNPCKLPD, x86asm.UNPCKHPD,
 		x86asm.PUNPCKHBW, x86asm.PUNPCKHWD, x86asm.PUNPCKHDQ, x86asm.PUNPCKLQDQ, x86asm.PUNPCKHQDQ,
 		x86asm.PSHUFHW,
 		x86asm.ADDPD, x86asm.MULPD, x86asm.SUBPD, x86asm.DIVPD,
@@ -1101,7 +1101,7 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		}
 		lines = append(lines, code...)
 
-	case x86asm.PUNPCKHQDQ:
+	case x86asm.PUNPCKHQDQ, x86asm.UNPCKHPD:
 		code, err := l.liftPunpckh(8, args[0], args[1], nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
