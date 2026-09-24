@@ -88,7 +88,21 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 	}
 	seedCount := len(queue)
 
-	hle := emitter.NewHLEReport(loaded, nil)
+	refs := elfloader.DiscoverCompanionModules(path, "", loaded.MemoryImage)
+	var modules []emitter.GuestModule
+	for _, ref := range refs {
+		mod, err := elfloader.LoadELF(ref.Path)
+		if err != nil {
+			continue
+		}
+		modules = append(modules, emitter.GuestModule{
+			FileName: mod.FileName,
+			Aliases:  ref.Aliases,
+			Exports:  mod.ExportedFunctions(),
+		})
+	}
+
+	hle := emitter.NewHLEReport(loaded, modules)
 	syscallShims := emitter.ImportShimMap(loaded, "shim_syscall")
 
 	for head := 0; head < len(queue); head++ {

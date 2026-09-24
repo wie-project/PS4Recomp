@@ -22,10 +22,18 @@ var systemStubModules = map[string]struct{}{
 	"right.prx":        {},
 }
 
-// IsSystemStubModule reports whether filename is a firmware/SDK stub PRX.
+// IsSystemStubModule reports whether name/path is an SDK import stub PRX.
+// OpenOrbis SDK stub modules are tiny symbol placeholders (< 64 KB).
+// Real retail modules provided by games (such as retail libc.prx or libSceFios2.prx)
+// contain actual implementations and are much larger.
 func IsSystemStubModule(name string) bool {
-	_, ok := systemStubModules[strings.ToLower(filepath.Base(name))]
-	return ok
+	if _, ok := systemStubModules[strings.ToLower(filepath.Base(name))]; !ok {
+		return false
+	}
+	if fi, err := os.Stat(name); err == nil && fi.Size() > 64*1024 {
+		return false
+	}
+	return true
 }
 
 // ModuleRef is a companion PRX/SPRX/ELF to AOT-link into the guest image.
@@ -155,11 +163,13 @@ func thisAppModuleDirs(elfPath, appDir string) []string {
 	if appDir != "" {
 		add(appDir)
 		add(filepath.Join(appDir, "sce_module"))
+		add(filepath.Join(appDir, "prx"))
 	}
 	if elfPath != "" {
 		dir := filepath.Dir(elfPath)
 		for range 5 {
 			add(filepath.Join(dir, "sce_module"))
+			add(filepath.Join(dir, "prx"))
 			parent := filepath.Dir(dir)
 			if parent == dir {
 				break

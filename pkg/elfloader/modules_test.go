@@ -51,3 +51,48 @@ func TestDiscoverResolvesApp0(t *testing.T) {
 		t.Fatalf("path=%s", refs[0].Path)
 	}
 }
+
+func TestRetailModuleNotStub(t *testing.T) {
+	dir := t.TempDir()
+	libcStub := filepath.Join(dir, "libc.prx")
+	if err := os.WriteFile(libcStub, make([]byte, 1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !IsSystemStubModule(libcStub) {
+		t.Fatalf("expected %s (< 64KB) to be a system stub", libcStub)
+	}
+
+	libcPath := filepath.Join(dir, "retail", "libc.prx")
+	if err := os.MkdirAll(filepath.Dir(libcPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(libcPath, make([]byte, 128*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if IsSystemStubModule(libcPath) {
+		t.Fatalf("expected %s (> 64KB) to NOT be treated as a system stub", libcPath)
+	}
+}
+
+func TestDiscoverPrxDir(t *testing.T) {
+	dir := t.TempDir()
+	prxDir := filepath.Join(dir, "prx")
+	if err := os.Mkdir(prxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plugin := filepath.Join(prxDir, "akplugin.prx")
+	if err := os.WriteFile(plugin, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refs := DiscoverCompanionModules("", dir, nil)
+	found := false
+	for _, ref := range refs {
+		if filepath.Base(ref.Path) == "akplugin.prx" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected akplugin.prx from prx directory to be discovered, got %+v", refs)
+	}
+}
