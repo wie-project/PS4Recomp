@@ -277,6 +277,33 @@ void shim_pthread_rwlock_unlock(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+void shim_pthread_rwlock_init(GuestContext *ctx) {
+  uint64_t rw_addr = ctx->rdi;
+  (void)get_host_rwlock(rw_addr);
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_rwlock_destroy(GuestContext *ctx) {
+  uint64_t rw_addr = ctx->rdi;
+  uint64_t bucket = (rw_addr >> 3) % RWLOCK_MAP_SIZE;
+  pthread_mutex_lock(&g_rwlock_map_lock);
+  RwlockNode **curr = &g_rwlock_map[bucket];
+  while (*curr) {
+    if ((*curr)->guest_addr == rw_addr) {
+      RwlockNode *to_free = *curr;
+      *curr = (*curr)->next;
+      pthread_rwlock_destroy(&to_free->host_rwlock);
+      free(to_free);
+      break;
+    }
+    curr = &(*curr)->next;
+  }
+  pthread_mutex_unlock(&g_rwlock_map_lock);
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
 static pthread_mutex_t g_once_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_once_cond = PTHREAD_COND_INITIALIZER;
 

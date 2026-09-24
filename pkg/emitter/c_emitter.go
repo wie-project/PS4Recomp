@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
@@ -81,56 +82,56 @@ var CanonicalShims = map[string]string{
 	"pthread_rwlock_unlock":     "shim_pthread_rwlock_unlock",
 	"syscall":                   "shim_syscall",
 	// Orbis Pthread threading & synchronization
-	"scePthreadCreate":             "shim_scePthreadCreate",
-	"scePthreadJoin":               "shim_scePthreadJoin",
-	"scePthreadDetach":             "shim_scePthreadDetach",
-	"scePthreadExit":               "shim_scePthreadExit",
-	"scePthreadSelf":               "shim_scePthreadSelf",
-	"scePthreadEqual":              "shim_scePthreadEqual",
-	"scePthreadYield":              "shim_scePthreadYield",
-	"scePthreadGetthreadid":        "shim_scePthreadGetthreadid",
-	"scePthreadSetprio":            "shim_scePthreadSetprio",
-	"scePthreadGetprio":            "shim_scePthreadGetprio",
-	"scePthreadSetaffinity":        "shim_scePthreadSetaffinity",
-	"scePthreadGetaffinity":        "shim_scePthreadGetaffinity",
-	"scePthreadAttrInit":           "shim_scePthreadAttrInit",
-	"scePthreadAttrDestroy":        "shim_scePthreadAttrDestroy",
-	"scePthreadAttrSetstacksize":   "shim_scePthreadAttrSetstacksize",
-	"scePthreadAttrSetdetachstate": "shim_scePthreadAttrSetdetachstate",
-	"scePthreadAttrSetschedpolicy": "shim_scePthreadAttrSetschedpolicy",
-	"scePthreadAttrSetschedparam":  "shim_scePthreadAttrSetschedparam",
-	"scePthreadAttrGetschedparam":  "shim_scePthreadAttrGetschedparam",
-	"scePthreadAttrSetinheritsched": "shim_scePthreadAttrSetinheritsched",
-	"scePthreadAttrSetaffinity":    "shim_scePthreadAttrSetaffinity",
-	"scePthreadMutexInit":          "shim_scePthreadMutexInit",
-	"scePthreadMutexLock":          "shim_scePthreadMutexLock",
-	"scePthreadMutexTrylock":       "shim_scePthreadMutexTrylock",
-	"scePthreadMutexUnlock":        "shim_scePthreadMutexUnlock",
-	"scePthreadMutexDestroy":       "shim_scePthreadMutexDestroy",
-	"scePthreadMutexattrInit":      "shim_scePthreadMutexattrInit",
-	"scePthreadMutexattrDestroy":   "shim_scePthreadMutexattrDestroy",
-	"scePthreadMutexattrSettype":   "shim_scePthreadMutexattrSettype",
+	"scePthreadCreate":               "shim_scePthreadCreate",
+	"scePthreadJoin":                 "shim_scePthreadJoin",
+	"scePthreadDetach":               "shim_scePthreadDetach",
+	"scePthreadExit":                 "shim_scePthreadExit",
+	"scePthreadSelf":                 "shim_scePthreadSelf",
+	"scePthreadEqual":                "shim_scePthreadEqual",
+	"scePthreadYield":                "shim_scePthreadYield",
+	"scePthreadGetthreadid":          "shim_scePthreadGetthreadid",
+	"scePthreadSetprio":              "shim_scePthreadSetprio",
+	"scePthreadGetprio":              "shim_scePthreadGetprio",
+	"scePthreadSetaffinity":          "shim_scePthreadSetaffinity",
+	"scePthreadGetaffinity":          "shim_scePthreadGetaffinity",
+	"scePthreadAttrInit":             "shim_scePthreadAttrInit",
+	"scePthreadAttrDestroy":          "shim_scePthreadAttrDestroy",
+	"scePthreadAttrSetstacksize":     "shim_scePthreadAttrSetstacksize",
+	"scePthreadAttrSetdetachstate":   "shim_scePthreadAttrSetdetachstate",
+	"scePthreadAttrSetschedpolicy":   "shim_scePthreadAttrSetschedpolicy",
+	"scePthreadAttrSetschedparam":    "shim_scePthreadAttrSetschedparam",
+	"scePthreadAttrGetschedparam":    "shim_scePthreadAttrGetschedparam",
+	"scePthreadAttrSetinheritsched":  "shim_scePthreadAttrSetinheritsched",
+	"scePthreadAttrSetaffinity":      "shim_scePthreadAttrSetaffinity",
+	"scePthreadMutexInit":            "shim_scePthreadMutexInit",
+	"scePthreadMutexLock":            "shim_scePthreadMutexLock",
+	"scePthreadMutexTrylock":         "shim_scePthreadMutexTrylock",
+	"scePthreadMutexUnlock":          "shim_scePthreadMutexUnlock",
+	"scePthreadMutexDestroy":         "shim_scePthreadMutexDestroy",
+	"scePthreadMutexattrInit":        "shim_scePthreadMutexattrInit",
+	"scePthreadMutexattrDestroy":     "shim_scePthreadMutexattrDestroy",
+	"scePthreadMutexattrSettype":     "shim_scePthreadMutexattrSettype",
 	"scePthreadMutexattrSetprotocol": "shim_scePthreadMutexattrSetprotocol",
-	"scePthreadCondInit":           "shim_scePthreadCondInit",
-	"scePthreadCondDestroy":        "shim_scePthreadCondDestroy",
-	"scePthreadCondSignal":         "shim_scePthreadCondSignal",
-	"scePthreadCondBroadcast":      "shim_scePthreadCondBroadcast",
-	"scePthreadCondWait":           "shim_scePthreadCondWait",
-	"scePthreadCondTimedwait":      "shim_scePthreadCondTimedwait",
-	"scePthreadCondattrInit":       "shim_scePthreadCondattrInit",
-	"scePthreadCondattrDestroy":    "shim_scePthreadCondattrDestroy",
-	"scePthreadKeyCreate":          "shim_scePthreadKeyCreate",
-	"scePthreadKeyDelete":          "shim_scePthreadKeyDelete",
-	"scePthreadSetspecific":        "shim_scePthreadSetspecific",
-	"scePthreadGetspecific":        "shim_scePthreadGetspecific",
-	"__tls_get_addr":               "shim___tls_get_addr",
+	"scePthreadCondInit":             "shim_scePthreadCondInit",
+	"scePthreadCondDestroy":          "shim_scePthreadCondDestroy",
+	"scePthreadCondSignal":           "shim_scePthreadCondSignal",
+	"scePthreadCondBroadcast":        "shim_scePthreadCondBroadcast",
+	"scePthreadCondWait":             "shim_scePthreadCondWait",
+	"scePthreadCondTimedwait":        "shim_scePthreadCondTimedwait",
+	"scePthreadCondattrInit":         "shim_scePthreadCondattrInit",
+	"scePthreadCondattrDestroy":      "shim_scePthreadCondattrDestroy",
+	"scePthreadKeyCreate":            "shim_scePthreadKeyCreate",
+	"scePthreadKeyDelete":            "shim_scePthreadKeyDelete",
+	"scePthreadSetspecific":          "shim_scePthreadSetspecific",
+	"scePthreadGetspecific":          "shim_scePthreadGetspecific",
+	"__tls_get_addr":                 "shim___tls_get_addr",
 	// Orbis Event Flags
-	"sceKernelCreateEventFlag":     "shim_sceKernelCreateEventFlag",
-	"sceKernelDeleteEventFlag":     "shim_sceKernelDeleteEventFlag",
-	"sceKernelSetEventFlag":        "shim_sceKernelSetEventFlag",
-	"sceKernelClearEventFlag":      "shim_sceKernelClearEventFlag",
-	"sceKernelWaitEventFlag":       "shim_sceKernelWaitEventFlag",
-	"sceKernelPollEventFlag":       "shim_sceKernelPollEventFlag",
+	"sceKernelCreateEventFlag": "shim_sceKernelCreateEventFlag",
+	"sceKernelDeleteEventFlag": "shim_sceKernelDeleteEventFlag",
+	"sceKernelSetEventFlag":    "shim_sceKernelSetEventFlag",
+	"sceKernelClearEventFlag":  "shim_sceKernelClearEventFlag",
+	"sceKernelWaitEventFlag":   "shim_sceKernelWaitEventFlag",
+	"sceKernelPollEventFlag":   "shim_sceKernelPollEventFlag",
 	// Orbis Timers & CPU Configuration
 	"sceKernelGetProcessTimeCounter":          "shim_sceKernelGetProcessTimeCounter",
 	"sceKernelGetProcessTimeCounterFrequency": "shim_sceKernelGetProcessTimeCounterFrequency",
@@ -285,6 +286,78 @@ var CanonicalShims = map[string]string{
 	// Dynamic Module Loader
 	"sceKernelLoadStartModule": "shim_sceKernelLoadStartModule",
 	"sceKernelDlsym":           "shim_sceKernelDlsym",
+
+	// libkernel File I/O & System Events
+	"sceKernelOpen":             "shim_open",
+	"sceKernelClose":            "shim_close",
+	"sceKernelRead":             "shim_read",
+	"sceKernelWrite":            "shim_write",
+	"sceKernelLseek":            "shim_lseek",
+	"sceKernelStat":             "shim_stat",
+	"sceKernelFstat":            "shim_fstat",
+	"sceKernelChmod":            "shim_chmod",
+	"sceKernelUtimes":           "shim_utimes",
+	"sceKernelGetdents":         "shim_getdents",
+	"sceKernelTriggerUserEvent": "shim_sceKernelTriggerUserEvent",
+	"sceKernelAddUserEventEdge": "shim_sceKernelAddUserEventEdge",
+	"sceKernelStopUnloadModule": "shim_sceKernelStopUnloadModule",
+	"sceKernelGetPrtAperture":   "shim_sceKernelGetPrtAperture",
+
+	// libScePosix BSD Sockets & System
+	"socket":                 "shim_socket",
+	"connect":                "shim_connect",
+	"bind":                   "shim_bind",
+	"listen":                 "shim_listen",
+	"accept":                 "shim_accept",
+	"send":                   "shim_send",
+	"recv":                   "shim_recv",
+	"sendto":                 "shim_sendto",
+	"recvfrom":               "shim_recvfrom",
+	"setsockopt":             "shim_setsockopt",
+	"getsockopt":             "shim_getsockopt",
+	"getsockname":            "shim_getsockname",
+	"getpeername":            "shim_getpeername",
+	"shutdown":               "shim_shutdown",
+	"select":                 "shim_select",
+	"inet_pton":              "shim_inet_pton",
+	"usleep":                 "shim_usleep",
+	"stat":                   "shim_stat",
+	"getpid":                 "shim_getpid",
+	"pthread_exit":           "shim_pthread_exit",
+	"pthread_key_delete":     "shim_pthread_key_delete",
+	"pthread_rwlock_init":    "shim_pthread_rwlock_init",
+	"pthread_rwlock_destroy": "shim_pthread_rwlock_destroy",
+
+	// Pad Subsystem additional methods
+	"scePadSetVibration":             "shim_scePadSetVibration",
+	"scePadGetControllerInformation": "shim_scePadGetControllerInformation",
+	"scePadSetLightBar":              "shim_scePadSetLightBar",
+	"scePadResetOrientation":         "shim_scePadResetOrientation",
+	"scePadResetLightBar":            "shim_scePadResetLightBar",
+
+	// VideoOut additional methods
+	"sceVideoOutGetVblankStatus":          "shim_sceVideoOutGetVblankStatus",
+	"sceVideoOutGetDeviceCapabilityInfo_": "shim_sceVideoOutGetDeviceCapabilityInfo_",
+	"sceVideoOutModeSetAny_":              "shim_sceVideoOutModeSetAny_",
+}
+
+var (
+	canonicalNIDMapOnce sync.Once
+	canonicalNIDMap     map[string]string
+)
+
+func initCanonicalNIDMap() {
+	canonicalNIDMap = make(map[string]string, len(CanonicalShims)*2)
+	for plain, shim := range CanonicalShims {
+		if nid := elfloader.CalculateNID(plain); nid != "" {
+			canonicalNIDMap[nid] = shim
+		}
+		if !strings.HasPrefix(plain, "_") {
+			if nid := elfloader.CalculateNID("_" + plain); nid != "" {
+				canonicalNIDMap[nid] = shim
+			}
+		}
+	}
 }
 
 func nidPrefix(name string) string {
@@ -298,15 +371,9 @@ func shimByNID(nid string) (string, bool) {
 	if nid == "" {
 		return "", false
 	}
-	for plain, shim := range CanonicalShims {
-		if elfloader.CalculateNID(plain) == nid {
-			return shim, true
-		}
-		if !strings.HasPrefix(plain, "_") && elfloader.CalculateNID("_"+plain) == nid {
-			return shim, true
-		}
-	}
-	return "", false
+	canonicalNIDMapOnce.Do(initCanonicalNIDMap)
+	shim, ok := canonicalNIDMap[nid]
+	return shim, ok
 }
 
 // LookupShim looks up a host shim for a symbol name or Sony NID (hash#lib#mod).

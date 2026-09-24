@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
+#include <dirent.h>
 
 // PS4 specific: sceKernelUsleep sleeps for microseconds
 void shim_sceKernelUsleep(GuestContext *ctx) {
@@ -320,6 +321,61 @@ struct ps4_stat {
   int64_t  st_birthtim_nsec;
 };
 
+static void fill_ps4_stat(struct ps4_stat *gst, const struct stat *st) {
+  memset(gst, 0, sizeof(struct ps4_stat));
+  gst->st_dev = (uint32_t)st->st_dev;
+  gst->st_ino = (uint32_t)st->st_ino;
+  gst->st_mode = (uint32_t)st->st_mode;
+  gst->st_nlink = (uint32_t)st->st_nlink;
+  gst->st_uid = (uint32_t)st->st_uid;
+  gst->st_gid = (uint32_t)st->st_gid;
+  gst->st_rdev = (uint32_t)st->st_rdev;
+#if defined(__APPLE__)
+  gst->st_atime_sec = (int64_t)st->st_atimespec.tv_sec;
+  gst->st_atime_nsec = (int64_t)st->st_atimespec.tv_nsec;
+  gst->st_mtime_sec = (int64_t)st->st_mtimespec.tv_sec;
+  gst->st_mtime_nsec = (int64_t)st->st_mtimespec.tv_nsec;
+  gst->st_ctime_sec = (int64_t)st->st_ctimespec.tv_sec;
+  gst->st_ctime_nsec = (int64_t)st->st_ctimespec.tv_nsec;
+  gst->st_birthtim_sec = (int64_t)st->st_birthtimespec.tv_sec;
+  gst->st_birthtim_nsec = (int64_t)st->st_birthtimespec.tv_nsec;
+#else
+  gst->st_atime_sec = (int64_t)st->st_atim.tv_sec;
+  gst->st_atime_nsec = (int64_t)st->st_atim.tv_nsec;
+  gst->st_mtime_sec = (int64_t)st->st_mtim.tv_sec;
+  gst->st_mtime_nsec = (int64_t)st->st_mtim.tv_nsec;
+  gst->st_ctime_sec = (int64_t)st->st_ctim.tv_sec;
+  gst->st_ctime_nsec = (int64_t)st->st_ctim.tv_nsec;
+#endif
+  gst->st_size = (int64_t)st->st_size;
+  gst->st_blocks = (int64_t)st->st_blocks;
+  gst->st_blksize = (uint32_t)st->st_blksize;
+  gst->st_flags = (uint32_t)st->st_flags;
+  gst->st_gen = (uint32_t)st->st_gen;
+}
+
+// stat
+void shim_stat(GuestContext *ctx) {
+  uint64_t path_addr = ctx->rdi;
+  uint64_t statbuf_addr = ctx->rsi;
+  const char *path = (const char *)(ctx->mem_base + path_addr);
+  char resolved_path[1024];
+  if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
+    path = resolved_path;
+  }
+  struct stat st;
+  int ret = stat(path, &st);
+  if (ret == 0) {
+    struct ps4_stat *gst = (struct ps4_stat *)(ctx->mem_base + statbuf_addr);
+    fill_ps4_stat(gst, &st);
+    ctx->rax = 0;
+  } else {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  }
+  SHIM_RETURN();
+}
+
 // fstat
 void shim_fstat(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
@@ -328,41 +384,107 @@ void shim_fstat(GuestContext *ctx) {
   int ret = fstat(fd, &st);
   if (ret == 0) {
     struct ps4_stat *gst = (struct ps4_stat *)(ctx->mem_base + statbuf_addr);
-    memset(gst, 0, sizeof(struct ps4_stat));
-    gst->st_dev = (uint32_t)st.st_dev;
-    gst->st_ino = (uint32_t)st.st_ino;
-    gst->st_mode = (uint32_t)st.st_mode;
-    gst->st_nlink = (uint32_t)st.st_nlink;
-    gst->st_uid = (uint32_t)st.st_uid;
-    gst->st_gid = (uint32_t)st.st_gid;
-    gst->st_rdev = (uint32_t)st.st_rdev;
-#if defined(__APPLE__)
-    gst->st_atime_sec = (int64_t)st.st_atimespec.tv_sec;
-    gst->st_atime_nsec = (int64_t)st.st_atimespec.tv_nsec;
-    gst->st_mtime_sec = (int64_t)st.st_mtimespec.tv_sec;
-    gst->st_mtime_nsec = (int64_t)st.st_mtimespec.tv_nsec;
-    gst->st_ctime_sec = (int64_t)st.st_ctimespec.tv_sec;
-    gst->st_ctime_nsec = (int64_t)st.st_ctimespec.tv_nsec;
-    gst->st_birthtim_sec = (int64_t)st.st_birthtimespec.tv_sec;
-    gst->st_birthtim_nsec = (int64_t)st.st_birthtimespec.tv_nsec;
-#else
-    gst->st_atime_sec = (int64_t)st.st_atim.tv_sec;
-    gst->st_atime_nsec = (int64_t)st.st_atim.tv_nsec;
-    gst->st_mtime_sec = (int64_t)st.st_mtim.tv_sec;
-    gst->st_mtime_nsec = (int64_t)st.st_mtim.tv_nsec;
-    gst->st_ctime_sec = (int64_t)st.st_ctim.tv_sec;
-    gst->st_ctime_nsec = (int64_t)st.st_ctim.tv_nsec;
-#endif
-    gst->st_size = (int64_t)st.st_size;
-    gst->st_blocks = (int64_t)st.st_blocks;
-    gst->st_blksize = (uint32_t)st.st_blksize;
-    gst->st_flags = (uint32_t)st.st_flags;
-    gst->st_gen = (uint32_t)st.st_gen;
+    fill_ps4_stat(gst, &st);
     ctx->rax = 0;
   } else {
     set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)-1;
   }
+  SHIM_RETURN();
+}
+
+// chmod
+void shim_chmod(GuestContext *ctx) {
+  uint64_t path_addr = ctx->rdi;
+  mode_t mode = (mode_t)ctx->rsi;
+  const char *path = (const char *)(ctx->mem_base + path_addr);
+  char resolved_path[1024];
+  if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
+    path = resolved_path;
+  }
+  int ret = chmod(path, mode);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// utimes
+void shim_utimes(GuestContext *ctx) {
+  uint64_t path_addr = ctx->rdi;
+  uint64_t times_addr = ctx->rsi;
+  const char *path = (const char *)(ctx->mem_base + path_addr);
+  char resolved_path[1024];
+  if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
+    path = resolved_path;
+  }
+  const struct timeval *host_times = NULL;
+  struct timeval tv[2];
+  if (times_addr) {
+    const int64_t *guest_tv = (const int64_t *)(ctx->mem_base + times_addr);
+    tv[0].tv_sec = (time_t)guest_tv[0];
+    tv[0].tv_usec = (suseconds_t)guest_tv[1];
+    tv[1].tv_sec = (time_t)guest_tv[2];
+    tv[1].tv_usec = (suseconds_t)guest_tv[3];
+    host_times = tv;
+  }
+  int ret = utimes(path, host_times);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// getdents
+void shim_getdents(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  char *buf = (char *)(ctx->mem_base + ctx->rsi);
+  size_t nbytes = (size_t)ctx->rdx;
+#if defined(__APPLE__)
+  long basep = 0;
+  int ret = getdirentries(fd, buf, (int)nbytes, &basep);
+#else
+  int ret = getdents(fd, buf, nbytes);
+#endif
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = (uint64_t)ret;
+  }
+  SHIM_RETURN();
+}
+
+void shim_sceKernelTriggerUserEvent(GuestContext *ctx) {
+  int eq = (int)ctx->rdi;
+  int id = (int)ctx->rsi;
+  extern int ps4_equeue_post_event(int eq, uint64_t ident, int16_t filter, int64_t data, void *udata);
+  int ret = ps4_equeue_post_event(eq, (uint64_t)id, -4 /* ORBIS_KERNEL_EVFILT_USER */, 0, NULL);
+  ctx->rax = (uint64_t)ret;
+  SHIM_RETURN();
+}
+
+void shim_sceKernelAddUserEventEdge(GuestContext *ctx) {
+  (void)ctx;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_sceKernelStopUnloadModule(GuestContext *ctx) {
+  (void)ctx;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_sceKernelGetPrtAperture(GuestContext *ctx) {
+  (void)ctx;
+  ctx->rax = 0;
   SHIM_RETURN();
 }
 

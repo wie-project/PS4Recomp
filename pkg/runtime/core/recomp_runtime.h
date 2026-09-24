@@ -446,8 +446,44 @@ void shim_pthread_rwlock_wrlock(GuestContext *ctx);
 void shim_pthread_rwlock_unlock(GuestContext *ctx);
 void shim_pthread_once(GuestContext *ctx);
 void shim_pthread_key_create(GuestContext *ctx);
+void shim_pthread_key_delete(GuestContext *ctx);
 void shim_pthread_setspecific(GuestContext *ctx);
 void shim_pthread_getspecific(GuestContext *ctx);
+void shim_pthread_exit(GuestContext *ctx);
+void shim_pthread_rwlock_init(GuestContext *ctx);
+void shim_pthread_rwlock_destroy(GuestContext *ctx);
+
+// POSIX System & File I/O shims
+void shim_stat(GuestContext *ctx);
+void shim_chmod(GuestContext *ctx);
+void shim_utimes(GuestContext *ctx);
+void shim_getdents(GuestContext *ctx);
+void shim_usleep(GuestContext *ctx);
+void shim_getpid(GuestContext *ctx);
+
+// BSD Socket shims
+void shim_socket(GuestContext *ctx);
+void shim_connect(GuestContext *ctx);
+void shim_bind(GuestContext *ctx);
+void shim_listen(GuestContext *ctx);
+void shim_accept(GuestContext *ctx);
+void shim_send(GuestContext *ctx);
+void shim_recv(GuestContext *ctx);
+void shim_sendto(GuestContext *ctx);
+void shim_recvfrom(GuestContext *ctx);
+void shim_setsockopt(GuestContext *ctx);
+void shim_getsockopt(GuestContext *ctx);
+void shim_getsockname(GuestContext *ctx);
+void shim_getpeername(GuestContext *ctx);
+void shim_shutdown(GuestContext *ctx);
+void shim_select(GuestContext *ctx);
+void shim_inet_pton(GuestContext *ctx);
+
+// Kernel events and lifecycle
+void shim_sceKernelTriggerUserEvent(GuestContext *ctx);
+void shim_sceKernelAddUserEventEdge(GuestContext *ctx);
+void shim_sceKernelStopUnloadModule(GuestContext *ctx);
+void shim_sceKernelGetPrtAperture(GuestContext *ctx);
 void shim_pthread_self(GuestContext *ctx);
 void shim_pthread_equal(GuestContext *ctx);
 void shim_pthread_detach(GuestContext *ctx);
@@ -578,6 +614,9 @@ void shim_sceVideoOutGetFlipStatus(GuestContext *ctx);
 void shim_sceVideoOutGetResolutionStatus(GuestContext *ctx);
 void shim_sceVideoOutIsFlipPending(GuestContext *ctx);
 void shim_sceVideoOutUnregisterBuffers(GuestContext *ctx);
+void shim_sceVideoOutGetVblankStatus(GuestContext *ctx);
+void shim_sceVideoOutGetDeviceCapabilityInfo_(GuestContext *ctx);
+void shim_sceVideoOutModeSetAny_(GuestContext *ctx);
 
 // Pad shims
 void shim_scePadGetHandle(GuestContext *ctx);
@@ -595,6 +634,11 @@ void shim_scePadOpen(GuestContext *ctx);
 void shim_scePadClose(GuestContext *ctx);
 void shim_scePadReadState(GuestContext *ctx);
 void shim_scePadRead(GuestContext *ctx);
+void shim_scePadSetVibration(GuestContext *ctx);
+void shim_scePadGetControllerInformation(GuestContext *ctx);
+void shim_scePadSetLightBar(GuestContext *ctx);
+void shim_scePadResetOrientation(GuestContext *ctx);
+void shim_scePadResetLightBar(GuestContext *ctx);
 
 // Keyboard shims
 void shim_sceKeyboardInit(GuestContext *ctx);

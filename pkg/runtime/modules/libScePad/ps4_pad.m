@@ -489,3 +489,34 @@ void shim_scePadGetHandle(GuestContext *ctx) {
   ctx->rax = (uint64_t)(int64_t)scePadGetHandle(userID, type, index);
   SHIM_RETURN();
 }
+
+void shim_scePadSetVibration(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePadGetControllerInformation(GuestContext *ctx) {
+  uint64_t info_addr = ctx->rsi;
+  if (info_addr) {
+    uint8_t *info = (uint8_t *)(ctx->mem_base + info_addr);
+    memset(info, 0, 32);
+    info[0] = 1; // connected
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePadSetLightBar(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePadResetOrientation(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePadResetLightBar(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}

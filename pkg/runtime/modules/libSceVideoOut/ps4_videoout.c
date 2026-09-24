@@ -362,3 +362,18 @@ void shim_sceVideoOutUnregisterBuffers(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceVideoOutUnregisterBuffers(handle, setIndex);
     SHIM_RETURN();
 }
+
+void shim_sceVideoOutGetVblankStatus(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutGetDeviceCapabilityInfo_(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutModeSetAny_(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}

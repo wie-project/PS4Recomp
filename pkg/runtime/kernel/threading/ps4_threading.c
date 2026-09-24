@@ -245,6 +245,16 @@ void shim_pthread_key_create(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+void shim_pthread_key_delete(GuestContext *ctx) {
+  uint32_t key = (uint32_t)ctx->rdi;
+  if (key < 128) {
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    proc->tls_destructors[key] = 0;
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
 void shim_pthread_setspecific(GuestContext *ctx) {
   uint32_t key = (uint32_t)ctx->rdi;
   uint64_t val = ctx->rsi;
