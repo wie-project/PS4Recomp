@@ -46,3 +46,29 @@ func TestPRXJumpSlotMatchesELF(t *testing.T) {
 		t.Fatalf("PRX GOT 0x%x = %q want mutex_lock NID %s", lockOff, prxByOff[lockOff], wantNID)
 	}
 }
+
+func TestResolveModuleRelocations(t *testing.T) {
+	main := &LoadedELF{
+		MemoryImage: make([]byte, 0x2000),
+		Relocations: []Relocation{
+			{Offset: 0x1000, Type: R_X86_64_JUMP_SLOT, SymName: "sample_fn"},
+			{Offset: 0x1010, Type: R_X86_64_GLOB_DAT, SymName: "unresolved_fn"},
+		},
+	}
+	exports := []Symbol{
+		{Name: "sample_fn", Address: 0x1500},
+	}
+	if err := ResolveModuleRelocations(main, exports); err != nil {
+		t.Fatalf("ResolveModuleRelocations failed: %v", err)
+	}
+
+	gotAddr := uint64(main.MemoryImage[0x1000]) | (uint64(main.MemoryImage[0x1001]) << 8) | (uint64(main.MemoryImage[0x1002]) << 16)
+	if gotAddr != 0x1500 {
+		t.Fatalf("expected resolved address 0x1500 at 0x1000, got 0x%x", gotAddr)
+	}
+
+	gotUnresolved := uint64(main.MemoryImage[0x1010]) | (uint64(main.MemoryImage[0x1011]) << 8) | (uint64(main.MemoryImage[0x1012]) << 16)
+	if gotUnresolved != 0x1010 {
+		t.Fatalf("expected fallback target 0x1010 at 0x1010, got 0x%x", gotUnresolved)
+	}
+}

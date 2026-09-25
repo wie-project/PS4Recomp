@@ -283,6 +283,12 @@ func (l *Lifter) liftPunpckldq(dst, src x86asm.Arg, nextPC uint64) ([]string, er
 func (l *Lifter) liftMovd(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
 	if dstReg, ok := dst.(x86asm.Reg); ok && isXmm(dstReg) {
 		infoDst := regMap[dstReg]
+		if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+			infoSrc := regMap[srcReg]
+			return []string{
+				fmt.Sprintf("    { uint32_t val = ctx->%s.u32[0]; memset(&ctx->%s, 0, 16); ctx->%s.u32[0] = val; }", infoSrc.BaseReg, infoDst.BaseReg, infoDst.BaseReg),
+			}, nil
+		}
 		srcExpr, _, err := l.getOperandRead(src, 4, nextPC)
 		if err != nil {
 			return nil, err
@@ -302,6 +308,12 @@ func (l *Lifter) liftMovd(dst, src x86asm.Arg, nextPC uint64) ([]string, error) 
 func (l *Lifter) liftMovq(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
 	if dstReg, ok := dst.(x86asm.Reg); ok && isXmm(dstReg) {
 		infoDst := regMap[dstReg]
+		if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+			infoSrc := regMap[srcReg]
+			return []string{
+				fmt.Sprintf("    { uint64_t val = ctx->%s.u64[0]; memset(&ctx->%s, 0, 16); ctx->%s.u64[0] = val; }", infoSrc.BaseReg, infoDst.BaseReg, infoDst.BaseReg),
+			}, nil
+		}
 		srcExpr, _, err := l.getOperandRead(src, 8, nextPC)
 		if err != nil {
 			return nil, err
@@ -333,6 +345,7 @@ func (l *Lifter) liftMovss(dst, src x86asm.Arg, nextPC uint64) ([]string, error)
 				return nil, err
 			}
 			return []string{
+				fmt.Sprintf("    memset(&ctx->%s, 0, 16);", infoDst.BaseReg),
 				fmt.Sprintf("    ctx->%s.u32[0] = MEM_U32(%s);", infoDst.BaseReg, addr),
 			}, nil
 		}
@@ -367,6 +380,7 @@ func (l *Lifter) liftMovsd(dst, src x86asm.Arg, nextPC uint64) ([]string, error)
 				return nil, err
 			}
 			return []string{
+				fmt.Sprintf("    memset(&ctx->%s, 0, 16);", infoDst.BaseReg),
 				fmt.Sprintf("    ctx->%s.u64[0] = MEM_U64(%s);", infoDst.BaseReg, addr),
 			}, nil
 		}
@@ -814,7 +828,8 @@ func (l *Lifter) liftCvtps2pd(dst, src x86asm.Arg, nextPC uint64) ([]string, err
 	lines := []string{"    {"}
 	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
 		infoSrc := regMap[srcReg]
-		lines = append(lines,
+		lines = append(
+			lines,
 			fmt.Sprintf("      float f0 = ctx->%s.f32[0];", infoSrc.BaseReg),
 			fmt.Sprintf("      float f1 = ctx->%s.f32[1];", infoSrc.BaseReg),
 		)
@@ -823,14 +838,16 @@ func (l *Lifter) liftCvtps2pd(dst, src x86asm.Arg, nextPC uint64) ([]string, err
 		if err != nil {
 			return nil, err
 		}
-		lines = append(lines,
+		lines = append(
+			lines,
 			fmt.Sprintf("      float f0 = *(float *)(ctx->mem_base + (%s));", addr),
 			fmt.Sprintf("      float f1 = *(float *)(ctx->mem_base + (%s) + 4);", addr),
 		)
 	} else {
 		return nil, fmt.Errorf("cvtps2pd invalid src")
 	}
-	lines = append(lines,
+	lines = append(
+		lines,
 		fmt.Sprintf("      ctx->%s.f64[0] = (double)f0;", infoDst.BaseReg),
 		fmt.Sprintf("      ctx->%s.f64[1] = (double)f1;", infoDst.BaseReg),
 		"    }",
@@ -848,7 +865,8 @@ func (l *Lifter) liftCvtpd2ps(dst, src x86asm.Arg, nextPC uint64) ([]string, err
 	lines := []string{"    {"}
 	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
 		infoSrc := regMap[srcReg]
-		lines = append(lines,
+		lines = append(
+			lines,
 			fmt.Sprintf("      double d0 = ctx->%s.f64[0];", infoSrc.BaseReg),
 			fmt.Sprintf("      double d1 = ctx->%s.f64[1];", infoSrc.BaseReg),
 		)
@@ -857,14 +875,16 @@ func (l *Lifter) liftCvtpd2ps(dst, src x86asm.Arg, nextPC uint64) ([]string, err
 		if err != nil {
 			return nil, err
 		}
-		lines = append(lines,
+		lines = append(
+			lines,
 			fmt.Sprintf("      double d0 = *(double *)(ctx->mem_base + (%s));", addr),
 			fmt.Sprintf("      double d1 = *(double *)(ctx->mem_base + (%s) + 8);", addr),
 		)
 	} else {
 		return nil, fmt.Errorf("cvtpd2ps invalid src")
 	}
-	lines = append(lines,
+	lines = append(
+		lines,
 		fmt.Sprintf("      ctx->%s.f32[0] = (float)d0;", infoDst.BaseReg),
 		fmt.Sprintf("      ctx->%s.f32[1] = (float)d1;", infoDst.BaseReg),
 		fmt.Sprintf("      ctx->%s.u64[1] = 0;", infoDst.BaseReg),

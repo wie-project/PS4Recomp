@@ -157,6 +157,10 @@ void shim_sceSaveDataDialogUpdateStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSaveDataDialogUpdateStatus();
 }
 
+void shim_sceSaveDataDialogGetStatus(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceSaveDataDialogGetStatus();
+}
+
 void shim_sceSaveDataDialogGetResult(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSaveDataDialogGetResult((OrbisSaveDataDialogResult *)ctx->rdi);
 }

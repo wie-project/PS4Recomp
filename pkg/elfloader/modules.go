@@ -429,3 +429,92 @@ func (l *LoadedELF) ExportedFunctions() []Symbol {
 	}
 	return out
 }
+
+// ResolveModuleRelocations patches all GOT/PLT and data relocations across the main image
+// and linked companion modules into main.MemoryImage.
+func ResolveModuleRelocations(main *LoadedELF, companionExports []Symbol) error {
+	if main == nil {
+		return nil
+	}
+
+	// 1. Build lookup table from companion module exports and main defined symbols
+	exportMap := make(map[string]uint64)
+	for _, sym := range companionExports {
+		if sym.Name != "" && sym.Address != 0 {
+			exportMap[sym.Name] = sym.Address
+			if nid := NIDPrefix(sym.Name); nid != "" {
+				exportMap[nid] = sym.Address
+			}
+			if canon, ok := ResolveNID(sym.Name); ok && canon != "" {
+				exportMap[canon] = sym.Address
+			}
+		}
+	}
+	for _, sym := range main.DynSymbols {
+		if sym.Name != "" && sym.Address != 0 {
+			if _, ok := exportMap[sym.Name]; !ok {
+				exportMap[sym.Name] = sym.Address
+			}
+			if nid := NIDPrefix(sym.Name); nid != "" {
+				if _, ok := exportMap[nid]; !ok {
+					exportMap[nid] = sym.Address
+				}
+			}
+			if canon, ok := ResolveNID(sym.Name); ok && canon != "" {
+				if _, ok := exportMap[canon]; !ok {
+					exportMap[canon] = sym.Address
+				}
+			}
+		}
+	}
+	for _, sym := range main.Symbols {
+		if sym.Name != "" && sym.Address != 0 {
+			if _, ok := exportMap[sym.Name]; !ok {
+				exportMap[sym.Name] = sym.Address
+			}
+		}
+	}
+
+	// 2. Iterate through all relocations in main
+	for i := range main.Relocations {
+		rel := &main.Relocations[i]
+		if rel.Offset+8 > uint64(len(main.MemoryImage)) {
+			continue
+		}
+
+		switch rel.Type {
+		case R_X86_64_JUMP_SLOT, R_X86_64_GLOB_DAT, R_X86_64_64:
+			if rel.SymName == "" {
+				continue
+			}
+
+			// Check if symbol exists in exported/defined symbols
+			targetAddr, ok := exportMap[rel.SymName]
+			if !ok {
+				if nid := NIDPrefix(rel.SymName); nid != "" {
+					targetAddr, ok = exportMap[nid]
+				}
+			}
+			if !ok {
+				if canon, hit := ResolveNID(rel.SymName); hit && canon != "" {
+					targetAddr, ok = exportMap[canon]
+				}
+			}
+
+			if ok && targetAddr != 0 {
+				finalAddr := targetAddr + uint64(rel.Addend)
+				binary.LittleEndian.PutUint64(main.MemoryImage[rel.Offset:rel.Offset+8], finalAddr)
+			} else {
+				// For host shims or unresolved symbols: point the GOT slot to rel.Offset (or rel.PltAddr)
+				// so indirect call recomp_dispatch(ctx, MEM_U64(rel.Offset)) dispatches to the registered shim/stub!
+				target := rel.Offset
+				if rel.PltAddr != 0 {
+					target = rel.PltAddr
+				}
+				binary.LittleEndian.PutUint64(main.MemoryImage[rel.Offset:rel.Offset+8], target)
+			}
+		}
+	}
+
+	return nil
+}

@@ -55,6 +55,14 @@ static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
     exit(1);
 }
 
+void shim_unresolved_stub(GuestContext *ctx) {
+    fprintf(stderr, "[ps4-recomp] WARN: Called unresolved function at RIP=0x%llx (RSP=0x%llx)\n",
+            (unsigned long long)ctx->rip, (unsigned long long)ctx->rsp);
+    fflush(stderr);
+    ctx->rax = 0;
+    ctx->rsp += 8;
+}
+
 void recomp_register_fn(uint64_t guest_addr, recomp_fn_t fn) {
     if (guest_addr >= (1ULL << 48)) {
         return;

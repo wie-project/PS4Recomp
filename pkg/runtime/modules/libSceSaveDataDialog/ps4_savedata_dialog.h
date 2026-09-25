@@ -88,6 +88,7 @@ int32_t sceSaveDataDialogTerminate(void);
 void shim_sceSaveDataDialogInitialize(GuestContext *ctx);
 void shim_sceSaveDataDialogOpen(GuestContext *ctx);
 void shim_sceSaveDataDialogUpdateStatus(GuestContext *ctx);
+void shim_sceSaveDataDialogGetStatus(GuestContext *ctx);
 void shim_sceSaveDataDialogGetResult(GuestContext *ctx);
 void shim_sceSaveDataDialogTerminate(GuestContext *ctx);
 

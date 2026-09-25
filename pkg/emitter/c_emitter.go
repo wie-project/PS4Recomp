@@ -991,7 +991,7 @@ func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint6
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
 
-	if _, err := fmt.Fprintf(w, "#include \"recomp_runtime.h\"\n\n// Chunk %d (%d functions)\n\n", chunkIdx, len(chunkAddrs)); err != nil {
+	if _, err := fmt.Fprintf(w, "#include \"recomp_context.h\"\n\n// Chunk %d (%d functions)\n\n", chunkIdx, len(chunkAddrs)); err != nil {
 		return err
 	}
 
@@ -1260,15 +1260,50 @@ func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
 }
 
 func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
+	registeredAddrs := make(map[uint64]struct{})
 	for _, rel := range e.elf.Relocations {
-		if rel.SymName != "" {
-			if shim, ok := LookupShim(rel.SymName); ok {
-				if rel.PltAddr != 0 {
+		if rel.SymName == "" {
+			continue
+		}
+		shim, hasShim := LookupShim(rel.SymName)
+		if !hasShim {
+			if nid := elfloader.NIDPrefix(rel.SymName); nid != "" {
+				shim, hasShim = LookupShim(nid)
+			}
+		}
+		if !hasShim {
+			if canon, ok := elfloader.ResolveNID(rel.SymName); ok {
+				shim, hasShim = LookupShim(canon)
+			}
+		}
+
+		if hasShim {
+			if rel.PltAddr != 0 {
+				if _, ok := registeredAddrs[rel.PltAddr]; !ok {
+					registeredAddrs[rel.PltAddr] = struct{}{}
 					if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s); // PLT %s\n", rel.PltAddr, shim, rel.SymName); err != nil {
 						return err
 					}
 				}
+			}
+			if _, ok := registeredAddrs[rel.Offset]; !ok {
+				registeredAddrs[rel.Offset] = struct{}{}
 				if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s); // GOT %s\n", rel.Offset, shim, rel.SymName); err != nil {
+					return err
+				}
+			}
+		} else {
+			if rel.PltAddr != 0 {
+				if _, ok := registeredAddrs[rel.PltAddr]; !ok {
+					registeredAddrs[rel.PltAddr] = struct{}{}
+					if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, shim_unresolved_stub); // Unresolved PLT %s\n", rel.PltAddr, rel.SymName); err != nil {
+						return err
+					}
+				}
+			}
+			if _, ok := registeredAddrs[rel.Offset]; !ok {
+				registeredAddrs[rel.Offset] = struct{}{}
+				if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, shim_unresolved_stub); // Unresolved GOT %s\n", rel.Offset, rel.SymName); err != nil {
 					return err
 				}
 			}

@@ -231,6 +231,13 @@ func Execute(args []string) error {
 	if err != nil {
 		return err
 	}
+	var allCompanionExports []elfloader.Symbol
+	for _, m := range moduleInfos {
+		allCompanionExports = append(allCompanionExports, m.Exports...)
+	}
+	if err := elfloader.ResolveModuleRelocations(loaded, allCompanionExports); err != nil {
+		return fmt.Errorf("failed resolving module relocations: %w", err)
+	}
 	hle := emitter.NewHLEReport(loaded, moduleInfos)
 	fmt.Print(hle.ImportSummary())
 

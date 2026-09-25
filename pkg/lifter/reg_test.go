@@ -774,6 +774,38 @@ func TestLiftNewInstructions(t *testing.T) {
 				"ctx->ymmh[1] = ctx->ymmh[2];",
 			},
 		},
+		{
+			name: "MOVQ_XMM_XMM",
+			inst: disasm.Instruction{
+				Address: 0x85994,
+				Inst: x86asm.Inst{
+					Op:   x86asm.MOVQ,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: []string{
+				"uint64_t val = ctx->xmm[1].u64[0];",
+				"memset(&ctx->xmm[0], 0, 16);",
+				"ctx->xmm[0].u64[0] = val;",
+			},
+		},
+		{
+			name: "MOVD_XMM_XMM",
+			inst: disasm.Instruction{
+				Address: 0x85998,
+				Inst: x86asm.Inst{
+					Op:   x86asm.MOVD,
+					Args: x86asm.Args{x86asm.X2, x86asm.X3},
+					Len:  4,
+				},
+			},
+			contains: []string{
+				"uint32_t val = ctx->xmm[3].u32[0];",
+				"memset(&ctx->xmm[2], 0, 16);",
+				"ctx->xmm[2].u32[0] = val;",
+			},
+		},
 	}
 
 	for _, tc := range tests {
