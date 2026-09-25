@@ -152,6 +152,45 @@ func TestHogwartsUnresolvedLibraryNames(t *testing.T) {
 	t.Logf("unresolved=%d libSce-grouped=%d", r.UnresolvedCount, sce)
 }
 
+func TestPrintHogwartsNetworkUnresolved(t *testing.T) {
+	path := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/extracted/eboot.bin"
+	loaded, err := elfloader.LoadELF(path)
+	if err != nil {
+		t.Skip(err)
+	}
+	appDir := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/extracted"
+	refs := elfloader.DiscoverCompanionModules(path, appDir, loaded.MemoryImage)
+	var modules []GuestModule
+	nextBase := (loaded.MaxVAddr + 0xFFFF) &^ 0xFFFF
+	for _, ref := range refs {
+		prxELF, err := elfloader.LoadELF(ref.Path)
+		if err != nil {
+			continue
+		}
+		if elfloader.Overlaps(loaded, prxELF) {
+			_ = prxELF.ApplyBias(nextBase - prxELF.MinVAddr)
+		}
+		_ = elfloader.MergeImages(loaded, prxELF)
+		nextBase = (loaded.MaxVAddr + 0xFFFF) &^ 0xFFFF
+		exports := prxELF.ExportedFunctions()
+		modules = append(modules, GuestModule{
+			FileName: prxELF.FileName,
+			Aliases:  ref.Aliases,
+			Exports:  exports,
+			Init:     append([]uint64(nil), prxELF.InitArray...),
+		})
+	}
+	r := NewHLEReport(loaded, modules)
+	for _, imp := range r.Imports {
+		if imp.Class == ImportUnresolved {
+			if strings.HasPrefix(imp.Library, "libSceNp") {
+				plain, _ := elfloader.ResolveNID(imp.Name)
+				t.Logf("NP: %s -> %s (sym=%s)", imp.Library, plain, imp.Name)
+			}
+		}
+	}
+}
+
 func TestHLEReportWrite(t *testing.T) {
 	path := "../../tools/OpenOrbis/PS4Toolchain/samples/hello_world/hello_world/x64/Debug/hello_world.elf"
 	if _, err := os.Stat(path); err != nil {

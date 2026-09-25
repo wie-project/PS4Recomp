@@ -35,12 +35,20 @@ func TestLookupShimByNID(t *testing.T) {
 		{"sceScreenShotEnable", "2xxUtuC-RzE", "shim_sceScreenShotEnable"},
 		{"sceSharePlayInitialize", "isruqthpYcw", "shim_sceSharePlayInitialize"},
 		{"sceMouseOpen", "RaqxZIf6DvE", "shim_sceMouseOpen"},
+		{"sceHttpInit", "", "shim_sceHttpInit"},
+		{"sceHttp2Init", "", "shim_sceHttp2Init"},
+		{"sceSslInit", "", "shim_sceSslInit"},
+		{"sceNpGetState", "", "shim_sceNpGetState"},
+		{"sceNpAuthGetAuthorizationCode", "", "shim_sceNpAuthGetAuthorizationCode"},
+		{"sceVoiceQoSInit", "", "shim_sceVoiceQoSInit"},
+		{"_ZN3sce4Json6StringC1EPKc", "", "shim__ZN3sce4Json6StringC1EPKc"},
 	}
 	for _, tc := range cases {
-		if got := elfloader.CalculateNID(tc.plain); got != tc.nid {
-			t.Fatalf("%s NID=%s want %s", tc.plain, got, tc.nid)
+		nid := elfloader.CalculateNID(tc.plain)
+		if tc.nid != "" && nid != tc.nid {
+			t.Fatalf("%s NID=%s want %s", tc.plain, nid, tc.nid)
 		}
-		encoded := tc.nid + "#B#B"
+		encoded := nid + "#B#B"
 		shim, ok := LookupShim(encoded)
 		if !ok || shim != tc.shim {
 			t.Fatalf("LookupShim(%s)=%q ok=%v want %s", encoded, shim, ok, tc.shim)

@@ -814,6 +814,158 @@ void shim_sceNpTrophyRegisterContext(GuestContext *ctx);
 void shim_sceNpTrophyUnlockTrophy(GuestContext *ctx);
 void shim_sceNpTrophyShowTrophyList(GuestContext *ctx);
 
+// libSceHttp & libSceHttp2
+void shim_sceHttpInit(GuestContext *ctx);
+void shim_sceHttpTerm(GuestContext *ctx);
+void shim_sceHttpCreateTemplate(GuestContext *ctx);
+void shim_sceHttpDeleteTemplate(GuestContext *ctx);
+void shim_sceHttpCreateConnectionWithURL(GuestContext *ctx);
+void shim_sceHttpDeleteConnection(GuestContext *ctx);
+void shim_sceHttpCreateRequestWithURL(GuestContext *ctx);
+void shim_sceHttpCreateRequestWithURL2(GuestContext *ctx);
+void shim_sceHttpDeleteRequest(GuestContext *ctx);
+void shim_sceHttpSendRequest(GuestContext *ctx);
+void shim_sceHttpAbortRequest(GuestContext *ctx);
+void shim_sceHttpWaitRequest(GuestContext *ctx);
+void shim_sceHttpReadData(GuestContext *ctx);
+void shim_sceHttpGetStatusCode(GuestContext *ctx);
+void shim_sceHttpGetResponseContentLength(GuestContext *ctx);
+void shim_sceHttpGetAllResponseHeaders(GuestContext *ctx);
+void shim_sceHttpAddRequestHeader(GuestContext *ctx);
+void shim_sceHttpSetNonblock(GuestContext *ctx);
+void shim_sceHttpGetLastErrno(GuestContext *ctx);
+void shim_sceHttpUriParse(GuestContext *ctx);
+void shim_sceHttpUriBuild(GuestContext *ctx);
+void shim_sceHttpCreateEpoll(GuestContext *ctx);
+void shim_sceHttpSetEpoll(GuestContext *ctx);
+void shim_sceHttpDestroyEpoll(GuestContext *ctx);
+void shim_sceHttp2Init(GuestContext *ctx);
+void shim_sceHttp2Term(GuestContext *ctx);
+
+// libSceSsl
+void shim_sceSslInit(GuestContext *ctx);
+void shim_sceSslTerm(GuestContext *ctx);
+void shim_sceSslGetCaCerts(GuestContext *ctx);
+
+// libSceJson2
+void shim__ZN3sce4Json12MemAllocatorC2Ev(GuestContext *ctx);
+void shim__ZN3sce4Json12MemAllocatorD2Ev(GuestContext *ctx);
+void shim__ZN3sce4Json14InitParameter2C1Ev(GuestContext *ctx);
+void shim__ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv(GuestContext *ctx);
+void shim__ZN3sce4Json14InitParameter217setFileBufferSizeEm(GuestContext *ctx);
+void shim__ZN3sce4Json11InitializerC1Ev(GuestContext *ctx);
+void shim__ZN3sce4Json11InitializerD1Ev(GuestContext *ctx);
+void shim__ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E(GuestContext *ctx);
+void shim__ZN3sce4Json11Initializer9terminateEv(GuestContext *ctx);
+void shim__ZN3sce4Json6StringC1EPKc(GuestContext *ctx);
+void shim__ZN3sce4Json6StringD1Ev(GuestContext *ctx);
+void shim__ZNK3sce4Json6String5c_strEv(GuestContext *ctx);
+void shim__ZN3sce4Json5ValueC1Ev(GuestContext *ctx);
+void shim__ZN3sce4Json5ValueD1Ev(GuestContext *ctx);
+void shim__ZN3sce4Json5ValueaSERKS1_(GuestContext *ctx);
+void shim__ZN3sce4Json5ValueC1ERKNS0_6StringE(GuestContext *ctx);
+void shim__ZNK3sce4Json5Value9getStringEv(GuestContext *ctx);
+void shim__ZNK3sce4Json5ValueixEPKc(GuestContext *ctx);
+void shim__ZN3sce4Json6ObjectC1Ev(GuestContext *ctx);
+void shim__ZN3sce4Json6ObjectC1ERKS1_(GuestContext *ctx);
+void shim__ZN3sce4Json6ObjectD1Ev(GuestContext *ctx);
+void shim__ZN3sce4Json6ObjectixERKNS0_6StringE(GuestContext *ctx);
+void shim__ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(GuestContext *ctx);
+
+// libSceNp
+void shim_sceNpCheckNpAvailability(GuestContext *ctx);
+void shim_sceNpCheckNpAvailabilityA(GuestContext *ctx);
+void shim_sceNpCheckPlus(GuestContext *ctx);
+void shim_sceNpCreateAsyncRequest(GuestContext *ctx);
+void shim_sceNpCreateRequest(GuestContext *ctx);
+void shim_sceNpDeleteRequest(GuestContext *ctx);
+void shim_sceNpGetAccountCountry(GuestContext *ctx);
+void shim_sceNpGetAccountCountryA(GuestContext *ctx);
+void shim_sceNpGetAccountDateOfBirth(GuestContext *ctx);
+void shim_sceNpGetAccountDateOfBirthA(GuestContext *ctx);
+void shim_sceNpGetAccountId(GuestContext *ctx);
+void shim_sceNpGetAccountIdA(GuestContext *ctx);
+void shim_sceNpGetAccountLanguage(GuestContext *ctx);
+void shim_sceNpGetAccountLanguageA(GuestContext *ctx);
+void shim_sceNpGetGamePresenceStatus(GuestContext *ctx);
+void shim_sceNpGetGamePresenceStatusA(GuestContext *ctx);
+void shim_sceNpGetNpId(GuestContext *ctx);
+void shim_sceNpGetNpReachabilityState(GuestContext *ctx);
+void shim_sceNpGetOnlineId(GuestContext *ctx);
+void shim_sceNpGetState(GuestContext *ctx);
+void shim_sceNpHasSignedUp(GuestContext *ctx);
+void shim_sceNpIsPlusMember(GuestContext *ctx);
+void shim_sceNpPollAsync(GuestContext *ctx);
+void shim_sceNpWaitAsync(GuestContext *ctx);
+void shim_sceNpRegisterStateCallback(GuestContext *ctx);
+void shim_sceNpRegisterStateCallbackA(GuestContext *ctx);
+void shim_sceNpUnregisterStateCallback(GuestContext *ctx);
+void shim_sceNpUnregisterStateCallbackA(GuestContext *ctx);
+
+void shim_sceNpAuthCreateRequest(GuestContext *ctx);
+void shim_sceNpAuthCreateAsyncRequest(GuestContext *ctx);
+void shim_sceNpAuthDeleteRequest(GuestContext *ctx);
+void shim_sceNpAuthGetAuthorizationCode(GuestContext *ctx);
+void shim_sceNpAuthGetAuthorizationCodeA(GuestContext *ctx);
+void shim_sceNpAuthPollAsync(GuestContext *ctx);
+void shim_sceNpAuthWaitAsync(GuestContext *ctx);
+
+void shim_sceNpMatching2Initialize(GuestContext *ctx);
+void shim_sceNpMatching2Terminate(GuestContext *ctx);
+void shim_sceNpMatching2CreateContext(GuestContext *ctx);
+void shim_sceNpMatching2CreateContextA(GuestContext *ctx);
+
+void shim_sceNpSignalingInitialize(GuestContext *ctx);
+void shim_sceNpSignalingTerminate(GuestContext *ctx);
+void shim_sceNpSignalingCreateContext(GuestContext *ctx);
+void shim_sceNpSignalingCreateContextA(GuestContext *ctx);
+
+void shim_sceNpWebApiInitialize(GuestContext *ctx);
+void shim_sceNpWebApiTerminate(GuestContext *ctx);
+void shim_sceNpWebApiCreateContext(GuestContext *ctx);
+void shim_sceNpWebApiCreateContextA(GuestContext *ctx);
+void shim_sceNpWebApiDeleteContext(GuestContext *ctx);
+void shim_sceNpWebApiCreateRequest(GuestContext *ctx);
+void shim_sceNpWebApiSendRequest(GuestContext *ctx);
+void shim_sceNpWebApiSendRequest2(GuestContext *ctx);
+void shim_sceNpWebApiDeleteRequest(GuestContext *ctx);
+
+void shim_sceNpScoreCreateNpTitleCtx(GuestContext *ctx);
+void shim_sceNpScoreCreateNpTitleCtxA(GuestContext *ctx);
+void shim_sceNpScoreDeleteNpTitleCtx(GuestContext *ctx);
+void shim_sceNpScoreCreateRequest(GuestContext *ctx);
+void shim_sceNpScoreDeleteRequest(GuestContext *ctx);
+void shim_sceNpScorePollAsync(GuestContext *ctx);
+void shim_sceNpScoreWaitAsync(GuestContext *ctx);
+
+void shim_sceNpTusCreateNpTitleCtx(GuestContext *ctx);
+void shim_sceNpTusCreateNpTitleCtxA(GuestContext *ctx);
+void shim_sceNpTusDeleteNpTitleCtx(GuestContext *ctx);
+void shim_sceNpTusCreateRequest(GuestContext *ctx);
+void shim_sceNpTusDeleteRequest(GuestContext *ctx);
+void shim_sceNpTusPollAsync(GuestContext *ctx);
+void shim_sceNpTusWaitAsync(GuestContext *ctx);
+
+void shim_sceNpCommerceDialogInitialize(GuestContext *ctx);
+void shim_sceNpCommerceDialogTerminate(GuestContext *ctx);
+void shim_sceNpCommerceDialogClose(GuestContext *ctx);
+void shim_sceNpCommerceDialogGetStatus(GuestContext *ctx);
+void shim_sceNpCommerceDialogGetResult(GuestContext *ctx);
+void shim_sceNpCommerceDialogOpen(GuestContext *ctx);
+
+void shim_sceNpUtilityInit(GuestContext *ctx);
+void shim_sceNpUtilityTerm(GuestContext *ctx);
+void shim_sceNpGameIntentInitialize(GuestContext *ctx);
+void shim_sceNpGameIntentTerminate(GuestContext *ctx);
+
+// libSceVoiceQoS
+void shim_sceVoiceQoSInit(GuestContext *ctx);
+void shim_sceVoiceQoSInitHQ(GuestContext *ctx);
+void shim_sceVoiceQoSEnd(GuestContext *ctx);
+void shim_sceVoiceQoSConnect(GuestContext *ctx);
+void shim_sceVoiceQoSDisconnect(GuestContext *ctx);
+void shim_sceVoiceQoSGetStatus(GuestContext *ctx);
+
 // Dynamic module loading shims
 void shim_sceKernelLoadStartModule(GuestContext *ctx);
 void shim_sceKernelDlsym(GuestContext *ctx);
