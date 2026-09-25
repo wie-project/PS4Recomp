@@ -421,6 +421,18 @@ func (r *HLEReport) ImportSummary() string {
 	for i := 0; i < limit; i++ {
 		fmt.Fprintf(&b, "               %-28s %5d symbols (%d relocs)\n", libs[i].lib, libs[i].n, libs[i].relocs)
 	}
+	resolvedNames := 0
+	for i := range r.Imports {
+		if r.Imports[i].Class == ImportUnresolved {
+			if _, ok := elfloader.ResolveNID(r.Imports[i].Name); ok {
+				resolvedNames++
+			}
+		}
+	}
+	if resolvedNames > 0 {
+		fmt.Fprintf(&b, "             NID name database: %d / %d unresolved symbols mapped to known functions\n",
+			resolvedNames, r.UnresolvedCount)
+	}
 	return b.String()
 }
 
@@ -522,7 +534,11 @@ func (r *HLEReport) FullString() string {
 			g := byLib[lib]
 			fmt.Fprintf(&b, "\n## %s (%d)\n", lib, len(g.syms))
 			for _, s := range g.syms {
-				fmt.Fprintf(&b, "  %s\trelocs=%d\n", s.Name, s.Relocs)
+				nameDisplay := s.Name
+				if resolved, ok := elfloader.ResolveNID(s.Name); ok {
+					nameDisplay = fmt.Sprintf("%-28s -> %s", s.Name, resolved)
+				}
+				fmt.Fprintf(&b, "  %s\trelocs=%d\n", nameDisplay, s.Relocs)
 			}
 		}
 		b.WriteByte('\n')

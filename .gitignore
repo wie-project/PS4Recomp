@@ -8,3 +8,4 @@ output_*/
 *.DS_Store
 build/
 ps4-recomp
+known_names.txt.gz

@@ -439,6 +439,15 @@ func LookupShim(name string) (string, bool) {
 		if shim, ok := shimByNID(nid); ok {
 			return shim, true
 		}
+		if resolved, ok := elfloader.ResolveNID(nid); ok {
+			if shim, hit := CanonicalShims[resolved]; hit {
+				return shim, true
+			}
+			strippedResolved := strings.TrimPrefix(resolved, "_")
+			if shim, hit := CanonicalShims[strippedResolved]; hit {
+				return shim, true
+			}
+		}
 	}
 	return "", false
 }

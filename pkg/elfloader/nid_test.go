@@ -46,3 +46,22 @@ func TestHogwartsImportLibNames(t *testing.T) {
 	}
 	t.Logf("%s -> %s (libs=%d)", name, lib, len(loaded.ImportLibs))
 }
+
+func TestResolveNID(t *testing.T) {
+	// Test known Sony system NIDs
+	tests := []struct {
+		sym  string
+		want string
+	}{
+		{"zr094EQ39Ww#BA#+", "__cxa_pure_virtual"},
+		{"9BcDykPmo1I#-#K", "__error"},
+		{"E6ao34wPw+U", "stat"},
+	}
+	for _, tc := range tests {
+		got, ok := ResolveNID(tc.sym)
+		if !ok || got != tc.want {
+			t.Errorf("ResolveNID(%q) = %q, %v; want %q, true", tc.sym, got, ok, tc.want)
+		}
+	}
+}
+

@@ -1,12 +1,64 @@
 package elfloader
 
 import (
+	"bufio"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha1"
+	_ "embed"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"strings"
+	"sync"
 )
+
+//go:embed known_names.txt.gz
+var knownNamesGz []byte
+
+var (
+	nidDBOnce sync.Once
+	nidToName map[string]string
+)
+
+func initNIDDB() {
+	nidToName = make(map[string]string, 45000)
+	if len(knownNamesGz) == 0 {
+		return
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(knownNamesGz))
+	if err != nil {
+		return
+	}
+	defer zr.Close()
+
+	scanner := bufio.NewScanner(zr)
+	for scanner.Scan() {
+		name := strings.TrimSpace(scanner.Text())
+		if name == "" {
+			continue
+		}
+		nid := CalculateNID(name)
+		if nid != "" {
+			nidToName[nid] = name
+		}
+		nidUnder := CalculateNID("_" + name)
+		if nidUnder != "" {
+			if _, exists := nidToName[nidUnder]; !exists {
+				nidToName[nidUnder] = "_" + name
+			}
+		}
+	}
+}
+
+// ResolveNID returns the human-readable function name for a Sony NID if known.
+func ResolveNID(nidOrSym string) (string, bool) {
+	prefix := NIDPrefix(nidOrSym)
+	nidDBOnce.Do(initNIDDB)
+	name, ok := nidToName[prefix]
+	return name, ok
+}
+
 
 // nidSuffixKey is the OpenOrbis / Sony suffix mixed into symbol-name SHA-1 hashes.
 const nidSuffixKey = "518D64A635DED8C1E6B039B1C3E55230"
