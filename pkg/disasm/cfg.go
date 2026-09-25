@@ -4,6 +4,7 @@ import (
 	"debug/elf"
 	"fmt"
 	"slices"
+	"strings"
 
 	"ps4-recomp/pkg/elfloader"
 
@@ -59,8 +60,12 @@ type Disassembler struct {
 	// bound jump-table recovery when a function has no symbol size.
 	funcSymAddrs []uint64
 
+	// noReturnAddrs contains PLT, GOT, and symbol addresses for functions that never return
+	// (e.g. abort, exit, __stack_chk_fail, __cxa_throw).
+	noReturnAddrs map[uint64]bool
+
 	// CapHits counts functions whose decode stopped on the safety cap
-	// (maxBlockBytes / maxFnInsts) rather than on control flow or an unwind bound.
+	// (maxFnInsts) rather than on control flow or an unwind bound.
 	CapHits int
 	// CapHitDetails records diagnostic records for every function that hit a safety cap.
 	CapHitDetails []CapHitInfo
@@ -82,12 +87,13 @@ func NewDisassembler(loaded *elfloader.LoadedELF) (*Disassembler, error) {
 	}
 
 	return &Disassembler{
-		elf:          loaded,
-		textStart:    start,
-		textEnd:      end,
-		Functions:    make(map[uint64]*Function, 1024),
-		Blocks:       make(map[uint64]*BasicBlock, 4096),
-		funcSymAddrs: collectFuncSymAddrs(loaded),
+		elf:           loaded,
+		textStart:     start,
+		textEnd:       end,
+		Functions:     make(map[uint64]*Function, 1024),
+		Blocks:        make(map[uint64]*BasicBlock, 4096),
+		funcSymAddrs:  collectFuncSymAddrs(loaded),
+		noReturnAddrs: collectNoReturnAddrs(loaded),
 	}, nil
 }
 
@@ -109,6 +115,75 @@ func collectFuncSymAddrs(loaded *elfloader.LoadedELF) []uint64 {
 	}
 	slices.Sort(addrs)
 	return addrs
+}
+
+var knownNoReturnNames = map[string]struct{}{
+	"abort":                 {},
+	"exit":                  {},
+	"quick_exit":            {},
+	"__stack_chk_fail":      {},
+	"__cxa_throw":           {},
+	"__cxa_rethrow":         {},
+	"__cxa_pure_virtual":    {},
+	"__cxa_deleted_virtual": {},
+	"sceKernelExitProcess":  {},
+	"__assert_fail":         {},
+	"__assert_rtn":          {},
+	"panic":                 {},
+	"pthread_exit":          {},
+	"scePthreadExit":        {},
+}
+
+func isNoReturnName(name string) bool {
+	if _, ok := knownNoReturnNames[name]; ok {
+		return true
+	}
+	clean := strings.TrimLeft(name, "_")
+	if _, ok := knownNoReturnNames[clean]; ok {
+		return true
+	}
+	if _, ok := knownNoReturnNames["__"+clean]; ok {
+		return true
+	}
+	return false
+}
+
+func collectNoReturnAddrs(loaded *elfloader.LoadedELF) map[uint64]bool {
+	if loaded == nil {
+		return nil
+	}
+	out := make(map[uint64]bool)
+	check := func(name string, addr uint64) {
+		if addr == 0 || name == "" {
+			return
+		}
+		if isNoReturnName(name) {
+			out[addr] = true
+			return
+		}
+		if resolved, ok := elfloader.ResolveNID(name); ok {
+			if isNoReturnName(resolved) {
+				out[addr] = true
+			}
+		}
+	}
+	for _, s := range loaded.Symbols {
+		check(s.Name, s.Address)
+	}
+	for _, rel := range loaded.Relocations {
+		if rel.PltAddr != 0 {
+			check(rel.SymName, rel.PltAddr)
+		}
+		check(rel.SymName, rel.Offset)
+	}
+	return out
+}
+
+func (d *Disassembler) isNoReturn(addr uint64) bool {
+	if d == nil || len(d.noReturnAddrs) == 0 {
+		return false
+	}
+	return d.noReturnAddrs[addr]
 }
 
 // functionEnd is the exclusive upper bound for bytes that belong to the
@@ -392,6 +467,9 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			pc++
 			continue
 		}
+		if inst.Op == 0 {
+			inst.Op = x86asm.UD2
+		}
 		wrapped := Instruction{
 			Address: pc,
 			Inst:    inst,
@@ -459,6 +537,18 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 				}
 			}
 			if nextPC < fnEnd {
+				leaders[nextPC] = true
+			}
+
+		case inst.Inst.Op == x86asm.CALL:
+			target := uint64(0)
+			if rel, ok := inst.Inst.Args[0].(x86asm.Rel); ok {
+				target = uint64(int64(nextPC) + int64(rel))
+			} else if mem, ok := inst.Inst.Args[0].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
+				disp := int64(int32(mem.Disp))
+				target = uint64(int64(nextPC) + disp)
+			}
+			if target != 0 && d.isNoReturn(target) && nextPC < fnEnd {
 				leaders[nextPC] = true
 			}
 
@@ -578,7 +668,12 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	// range. The caps stop a fallthrough into data from becoming one
 	// multi-megabyte function. Real compiler blocks are far smaller.
 	const maxBlockBytes = 8192
-	const maxFnInsts = 32768
+	maxFnInsts := 32768
+	if d.elf != nil && d.elf.InUnwindScope(entryAddr) {
+		// Functions backed by unwind metadata have an explicit upper bound (fnEnd).
+		// Allow larger instruction limits for monolithic engine dispatchers.
+		maxFnInsts = 131072
+	}
 	fnEnd := d.functionEnd(entryAddr, 0)
 	inside := func(addr uint64) bool {
 		return addr >= entryAddr && addr < fnEnd && d.inCode(addr)
@@ -615,6 +710,9 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 			inst, err := x86asm.Decode(d.elf.MemoryImage[pc:], 64)
 			if err != nil || inst.Len == 0 {
 				break
+			}
+			if inst.Op == 0 {
+				inst.Op = x86asm.UD2
 			}
 			if isPrivileged(inst.Op) {
 				d.PrivilegedStops++
@@ -654,10 +752,19 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 			case x86asm.UD2:
 				isTerminal = true
 			case x86asm.CALL:
-				// Call does not terminate the basic block; execution continues at nextPC.
+				// Call does not terminate the basic block unless target is noreturn.
 				if rel, ok := inst.Args[0].(x86asm.Rel); ok {
 					target := uint64(int64(nextPC) + int64(rel))
 					discoveredCalls = append(discoveredCalls, target)
+					if d.isNoReturn(target) {
+						isTerminal = true
+					}
+				} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
+					disp := int64(int32(mem.Disp))
+					target := uint64(int64(nextPC) + disp)
+					if d.isNoReturn(target) {
+						isTerminal = true
+					}
 				}
 			case x86asm.LEA:
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
@@ -684,9 +791,12 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				break
 			}
 			if pc-blockStart >= maxBlockBytes {
-				capped = true
-				capReason = fmt.Sprintf("basic block bytes (%d) >= cap (%d)", pc-blockStart, maxBlockBytes)
-				capPC = pc
+				// Block splitting: do not truncate function or drop code.
+				// Split the oversized block by enqueuing a fallthrough edge
+				// to the next PC and terminate the current block.
+				if inside(pc) {
+					enqueueBlock(pc)
+				}
 				break
 			}
 			if len(instAtAddr) >= maxFnInsts {
