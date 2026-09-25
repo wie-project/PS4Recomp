@@ -1,0 +1,51 @@
+ninja_required_version = 1.5
+
+cflags = -target arm64-apple-darwin -mcpu=apple-m1 -O2 -fvisibility=hidden -I. -Iruntime/core -Iruntime/kernel -Iruntime/kernel/equeue -Iruntime/kernel/memory -Iruntime/kernel/sync -Iruntime/kernel/syscalls -Iruntime/kernel/threading -Iruntime/kernel/vfs -Iruntime/modules -Iruntime/modules/libSceAudioOut -Iruntime/modules/libSceFreeType -Iruntime/modules/libSceMsgDialog -Iruntime/modules/libSceNet -Iruntime/modules/libSceNpTrophy -Iruntime/modules/libScePad -Iruntime/modules/libScePosix -Iruntime/modules/libSceUserService -Iruntime/modules/libSceVideoOut -Iruntime/modules/libkernel -I/opt/homebrew/opt/freetype/include/freetype2 -I/opt/homebrew/opt/libpng/include/libpng16
+
+rule compile_c
+  command = clang -MD -MF $out.d $cflags -c $in -o $out
+  depfile = $out.d
+  deps = gcc
+  description = CC $in
+
+rule compile_m
+  command = clang -MD -MF $out.d $cflags -fobjc-arc -c $in -o $out
+  depfile = $out.d
+  deps = gcc
+  description = OBJC $in
+
+ldflags = -target arm64-apple-darwin -Wl,-dead_strip -Wl,-x -framework Metal -framework Cocoa -framework QuartzCore -framework GameController -framework AudioToolbox -L/opt/homebrew/opt/freetype/lib -lfreetype
+
+rule link_bin
+  command = clang $in $ldflags -o $out
+  description = LINK $out
+
+build main.o: compile_c main.c
+build code_000.o: compile_c code_000.c
+build dispatch.o: compile_c dispatch.c
+build guest_modules.o: compile_c guest_modules.c
+build runtime/core/recomp_runtime.o: compile_c runtime/core/recomp_runtime.c
+build runtime/kernel/equeue/ps4_equeue.o: compile_c runtime/kernel/equeue/ps4_equeue.c
+build runtime/kernel/memory/ps4_direct_mem.o: compile_c runtime/kernel/memory/ps4_direct_mem.c
+build runtime/kernel/sync/ps4_event_flag.o: compile_c runtime/kernel/sync/ps4_event_flag.c
+build runtime/kernel/sync/ps4_semaphore.o: compile_c runtime/kernel/sync/ps4_semaphore.c
+build runtime/kernel/sync/ps4_sync.o: compile_c runtime/kernel/sync/ps4_sync.c
+build runtime/kernel/syscalls/ps4_syscalls.o: compile_c runtime/kernel/syscalls/ps4_syscalls.c
+build runtime/kernel/threading/ps4_threading.o: compile_c runtime/kernel/threading/ps4_threading.c
+build runtime/kernel/vfs/ps4_vfs.o: compile_c runtime/kernel/vfs/ps4_vfs.c
+build runtime/modules/libSceAudioOut/ps4_audioout.o: compile_c runtime/modules/libSceAudioOut/ps4_audioout.c
+build runtime/modules/libSceFreeType/ps4_freetype.o: compile_c runtime/modules/libSceFreeType/ps4_freetype.c
+build runtime/modules/libSceMsgDialog/ps4_dialog.o: compile_m runtime/modules/libSceMsgDialog/ps4_dialog.m
+build runtime/modules/libSceNet/ps4_net.o: compile_c runtime/modules/libSceNet/ps4_net.c
+build runtime/modules/libSceNpTrophy/ps4_trophy.o: compile_c runtime/modules/libSceNpTrophy/ps4_trophy.c
+build runtime/modules/libScePad/ps4_keyboard.o: compile_m runtime/modules/libScePad/ps4_keyboard.m
+build runtime/modules/libScePad/ps4_pad.o: compile_m runtime/modules/libScePad/ps4_pad.m
+build runtime/modules/libScePosix/ps4_posix.o: compile_c runtime/modules/libScePosix/ps4_posix.c
+build runtime/modules/libSceUserService/ps4_user_service.o: compile_c runtime/modules/libSceUserService/ps4_user_service.c
+build runtime/modules/libSceVideoOut/ps4_metal_screen.o: compile_m runtime/modules/libSceVideoOut/ps4_metal_screen.m
+build runtime/modules/libSceVideoOut/ps4_videoout.o: compile_c runtime/modules/libSceVideoOut/ps4_videoout.c
+build runtime/modules/libkernel/ps4_kernel_sys.o: compile_c runtime/modules/libkernel/ps4_kernel_sys.c
+build runtime/modules/libkernel/ps4_sysmodule.o: compile_c runtime/modules/libkernel/ps4_sysmodule.c
+
+build ps4_app: link_bin main.o code_000.o dispatch.o guest_modules.o runtime/core/recomp_runtime.o runtime/kernel/equeue/ps4_equeue.o runtime/kernel/memory/ps4_direct_mem.o runtime/kernel/sync/ps4_event_flag.o runtime/kernel/sync/ps4_semaphore.o runtime/kernel/sync/ps4_sync.o runtime/kernel/syscalls/ps4_syscalls.o runtime/kernel/threading/ps4_threading.o runtime/kernel/vfs/ps4_vfs.o runtime/modules/libSceAudioOut/ps4_audioout.o runtime/modules/libSceFreeType/ps4_freetype.o runtime/modules/libSceMsgDialog/ps4_dialog.o runtime/modules/libSceNet/ps4_net.o runtime/modules/libSceNpTrophy/ps4_trophy.o runtime/modules/libScePad/ps4_keyboard.o runtime/modules/libScePad/ps4_pad.o runtime/modules/libScePosix/ps4_posix.o runtime/modules/libSceUserService/ps4_user_service.o runtime/modules/libSceVideoOut/ps4_metal_screen.o runtime/modules/libSceVideoOut/ps4_videoout.o runtime/modules/libkernel/ps4_kernel_sys.o runtime/modules/libkernel/ps4_sysmodule.o
+default ps4_app

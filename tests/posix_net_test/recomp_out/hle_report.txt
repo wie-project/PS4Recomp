@@ -1,0 +1,21 @@
+PS4Recomp HLE report
+====================
+
+Static inventory of imported symbols (dynamic relocations) and syscall
+numbers recovered from immediates in reachable code. Runtime dlsym names
+and syscall numbers computed in registers are not listed.
+
+DT_NEEDED:
+  libkernel.so
+
+Imports: 31 unique names
+  host shim:     31
+  linked PRX:    0
+  defined:       0
+  unresolved:    0 (0 relocs)
+
+Syscalls
+  immediate numbers: 0
+  dynamic sites:     0
+  SYSCALL/SYSENTER:  0
+

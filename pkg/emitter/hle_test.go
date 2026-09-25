@@ -104,7 +104,7 @@ func TestCollectGraphicsHostShims(t *testing.T) {
 	}
 }
 
-func TestNetworkingUnresolvedImports(t *testing.T) {
+func TestNetworkingResolvedHostShims(t *testing.T) {
 	path := "../../tools/OpenOrbis/PS4Toolchain/samples/networking/networking/x64/Debug/networking.elf"
 	if _, err := os.Stat(path); err != nil {
 		t.Skip(path)
@@ -114,12 +114,9 @@ func TestNetworkingUnresolvedImports(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := NewHLEReport(loaded, nil)
-	if r.UnresolvedCount == 0 {
-		t.Fatal("networking.elf: expected unresolved socket imports")
-	}
 	want := map[string]bool{"accept": false, "bind": false, "listen": false}
 	for _, imp := range r.Imports {
-		if imp.Class != ImportUnresolved {
+		if imp.Class != ImportHostShim {
 			continue
 		}
 		if _, ok := want[imp.Name]; ok {
@@ -128,7 +125,7 @@ func TestNetworkingUnresolvedImports(t *testing.T) {
 	}
 	for name, found := range want {
 		if !found {
-			t.Errorf("networking.elf: unresolved import %s missing", name)
+			t.Errorf("networking.elf: expected host shim for %s", name)
 		}
 	}
 }
