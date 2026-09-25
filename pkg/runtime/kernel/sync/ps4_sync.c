@@ -30,10 +30,8 @@ static pthread_mutex_t *get_host_mutex_with_type(uint64_t guest_addr, int guest_
 
   pthread_mutexattr_t attr;
   pthread_mutexattr_init(&attr);
-  int host_type = PTHREAD_MUTEX_NORMAL;
-  if (guest_type == 2) {
-    host_type = PTHREAD_MUTEX_RECURSIVE;
-  } else if (guest_type == 1) {
+  int host_type = PTHREAD_MUTEX_RECURSIVE;
+  if (guest_type == 1) {
     host_type = PTHREAD_MUTEX_ERRORCHECK;
   }
   pthread_mutexattr_settype(&attr, host_type);
@@ -467,3 +465,85 @@ void shim_scePthreadCondattrDestroy(GuestContext *ctx) {
   ctx->rax = 0;
   SHIM_RETURN();
 }
+
+// C++ ABI static guard shims (matching Itanium C++ ABI with recursion prevention)
+static pthread_mutex_t g_cxa_guard_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_cxa_guard_cond = PTHREAD_COND_INITIALIZER;
+
+void shim_cxa_guard_acquire(GuestContext *ctx) {
+  uint64_t guard_addr = ctx->rdi;
+  if (!guard_addr) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+  uint8_t *guard = (uint8_t *)(ctx->mem_base + guard_addr);
+  // Fast path: if byte 0 is set, initialization is already complete.
+  if (*guard & 1) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+
+  pthread_mutex_lock(&g_cxa_guard_mutex);
+  while (1) {
+    if (*guard & 1) {
+      pthread_mutex_unlock(&g_cxa_guard_mutex);
+      ctx->rax = 0;
+      SHIM_RETURN();
+    }
+    // If byte 1 is set, initialization is in progress
+    if (guard[1] != 0) {
+      // Check if held by current thread (recursive static initialization).
+      // We store thread_id in bytes 4..7
+      uint32_t holder = *(uint32_t *)(guard + 4);
+      uint32_t my_tid = (uint32_t)(ctx->thread_id ? ctx->thread_id : 1);
+      if (holder == my_tid) {
+        // Recursive static initialization detected on the same thread!
+        // Returning 0 avoids recursive deadlock and allows caller to proceed.
+        pthread_mutex_unlock(&g_cxa_guard_mutex);
+        ctx->rax = 0;
+        SHIM_RETURN();
+      }
+      // Held by another thread: wait for release/abort
+      pthread_cond_wait(&g_cxa_guard_cond, &g_cxa_guard_mutex);
+      continue;
+    }
+
+    // Mark as in-progress
+    guard[1] = 1;
+    uint32_t my_tid = (uint32_t)(ctx->thread_id ? ctx->thread_id : 1);
+    *(uint32_t *)(guard + 4) = my_tid;
+    pthread_mutex_unlock(&g_cxa_guard_mutex);
+    ctx->rax = 1; // Proceed with initialization
+    SHIM_RETURN();
+  }
+}
+
+void shim_cxa_guard_release(GuestContext *ctx) {
+  uint64_t guard_addr = ctx->rdi;
+  if (guard_addr) {
+    uint8_t *guard = (uint8_t *)(ctx->mem_base + guard_addr);
+    pthread_mutex_lock(&g_cxa_guard_mutex);
+    *guard = 1; // Mark completed
+    guard[1] = 0; // Clear in-progress
+    *(uint32_t *)(guard + 4) = 0;
+    pthread_cond_broadcast(&g_cxa_guard_cond);
+    pthread_mutex_unlock(&g_cxa_guard_mutex);
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_cxa_guard_abort(GuestContext *ctx) {
+  uint64_t guard_addr = ctx->rdi;
+  if (guard_addr) {
+    uint8_t *guard = (uint8_t *)(ctx->mem_base + guard_addr);
+    pthread_mutex_lock(&g_cxa_guard_mutex);
+    guard[1] = 0; // Clear in-progress
+    *(uint32_t *)(guard + 4) = 0;
+    pthread_cond_broadcast(&g_cxa_guard_cond);
+    pthread_mutex_unlock(&g_cxa_guard_mutex);
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+

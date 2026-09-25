@@ -90,6 +90,11 @@ void shim_pthread_rwlock_destroy(GuestContext *ctx);
 void shim_pthread_rename_np(GuestContext *ctx);
 void shim_pthread_create_name_np(GuestContext *ctx);
 
+// C++ ABI guard shims
+void shim_cxa_guard_acquire(GuestContext *ctx);
+void shim_cxa_guard_release(GuestContext *ctx);
+void shim_cxa_guard_abort(GuestContext *ctx);
+
 // POSIX System & File I/O shims
 void shim_stat(GuestContext *ctx);
 void shim_chmod(GuestContext *ctx);

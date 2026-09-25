@@ -81,6 +81,13 @@ var CanonicalShims = map[string]string{
 	"pthread_rwlock_wrlock":     "shim_pthread_rwlock_wrlock",
 	"pthread_rwlock_unlock":     "shim_pthread_rwlock_unlock",
 	"syscall":                   "shim_syscall",
+	// C++ ABI guard shims
+	"__cxa_guard_acquire": "shim_cxa_guard_acquire",
+	"__cxa_guard_release": "shim_cxa_guard_release",
+	"__cxa_guard_abort":   "shim_cxa_guard_abort",
+	"3GPpjQdAMTw":         "shim_cxa_guard_acquire",
+	"9rAeANT2tyE":         "shim_cxa_guard_release",
+	"2emaaluWzUw":         "shim_cxa_guard_abort",
 	// Orbis Pthread threading & synchronization
 	"scePthreadCreate":               "shim_scePthreadCreate",
 	"scePthreadJoin":                 "shim_scePthreadJoin",
@@ -696,7 +703,8 @@ type CEmitter struct {
 	// emission re-disassembles each address instead of requiring d.Functions.
 	Funcs    []disasm.ReachableFunc
 	HLE      *HLEReport
-	linesBuf []string
+	linesBuf     []string
+	knownFuncSet map[uint64]bool
 }
 
 // NewCEmitter creates a new C emitter.
@@ -723,7 +731,6 @@ func NewCEmitter(loaded *elfloader.LoadedELF, d *disasm.Disassembler, l *lifter.
 					continue
 				}
 			}
-			binary.LittleEndian.PutUint64(loaded.MemoryImage[rel.Offset:rel.Offset+8], 0)
 			continue
 		}
 		if rel.SymName == "" {
@@ -858,6 +865,16 @@ func (e *CEmitter) functionAddrs() []uint64 {
 	}
 	slices.Sort(addrs)
 	return addrs
+}
+
+func (e *CEmitter) hasFunction(addr uint64) bool {
+	if e.knownFuncSet == nil {
+		e.knownFuncSet = make(map[uint64]bool)
+		for _, a := range e.functionAddrs() {
+			e.knownFuncSet[a] = true
+		}
+	}
+	return e.knownFuncSet[addr]
 }
 
 func (e *CEmitter) instCountByAddr() map[uint64]int {
@@ -1026,6 +1043,29 @@ func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint6
 		}
 		for _, addr := range extCalls {
 			if _, err := fmt.Fprintf(w, "void fn_0x%x(GuestContext *__restrict__ ctx);\n", addr); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Forward declarations for host shims referenced by this chunk
+	chunkShims := make(map[string]bool)
+	for _, addr := range chunkAddrs {
+		if shim, isShimmed := e.shimMap[addr]; isShimmed {
+			chunkShims[shim] = true
+		}
+	}
+	if len(chunkShims) > 0 {
+		var shimNames []string
+		for s := range chunkShims {
+			shimNames = append(shimNames, s)
+		}
+		slices.Sort(shimNames)
+		if _, err := w.WriteString("// Forward declarations for host shims referenced by this chunk\n"); err != nil {
+			return err
+		}
+		for _, s := range shimNames {
+			if _, err := fmt.Fprintf(w, "void %s(GuestContext *ctx);\n", s); err != nil {
 				return err
 			}
 		}
@@ -1218,11 +1258,127 @@ func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 	return nil
 }
 
+func (e *CEmitter) collectDispatchShims() []string {
+	used := make(map[string]bool)
+	used["shim_unresolved_stub"] = true
+	for _, rel := range e.elf.Relocations {
+		if rel.SymName == "" {
+			continue
+		}
+		shim, hasShim := LookupShim(rel.SymName)
+		if !hasShim {
+			if nid := elfloader.NIDPrefix(rel.SymName); nid != "" {
+				shim, hasShim = LookupShim(nid)
+			}
+		}
+		if !hasShim {
+			if canon, ok := elfloader.ResolveNID(rel.SymName); ok {
+				shim, hasShim = LookupShim(canon)
+			}
+		}
+		if hasShim {
+			used[shim] = true
+		}
+	}
+	for _, sym := range e.elf.Symbols {
+		if sym.Name != "" && sym.Address != 0 {
+			if shim, ok := LookupShim(sym.Name); ok {
+				used[shim] = true
+			}
+		}
+	}
+	for _, sym := range e.elf.DynSymbols {
+		if sym.Name != "" && sym.Address != 0 {
+			if shim, ok := LookupShim(sym.Name); ok {
+				used[shim] = true
+			}
+		}
+	}
+	var res []string
+	for s := range used {
+		res = append(res, s)
+	}
+	slices.Sort(res)
+	return res
+}
+
+func (e *CEmitter) lookupCompanionExport(symName string) (uint64, bool) {
+	if symName == "" {
+		return 0, false
+	}
+	nid := elfloader.NIDPrefix(symName)
+	canon, hasCanon := elfloader.ResolveNID(symName)
+
+	for _, mod := range e.Modules {
+		for _, exp := range mod.Exports {
+			if exp.Name == symName {
+				return exp.Address, true
+			}
+			expNID := elfloader.NIDPrefix(exp.Name)
+			if nid != "" && expNID == nid {
+				return exp.Address, true
+			}
+			if hasCanon && canon != "" {
+				if exp.Name == canon || expNID == canon {
+					return exp.Address, true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
 func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
 
-	if _, err := w.WriteString("#include \"recomp_runtime.h\"\n\nvoid recomp_register_guest_modules(void);\n\n// Forward declarations of chunk registration functions\n"); err != nil {
+	if _, err := w.WriteString("#include \"recomp_runtime.h\"\n\nvoid recomp_register_guest_modules(void);\n\n"); err != nil {
+		return err
+	}
+
+	dispatchShims := e.collectDispatchShims()
+	if len(dispatchShims) > 0 {
+		if _, err := w.WriteString("// Forward declarations for host shims referenced in dispatch\n"); err != nil {
+			return err
+		}
+		for _, s := range dispatchShims {
+			if _, err := fmt.Fprintf(w, "void %s(GuestContext *ctx);\n", s); err != nil {
+				return err
+			}
+		}
+		if _, err := w.WriteString("\n"); err != nil {
+			return err
+		}
+	}
+
+	var companionAddrs []uint64
+	seenCompanion := make(map[uint64]bool)
+	for _, rel := range e.elf.Relocations {
+		if rel.SymName != "" {
+			if targetAddr, ok := e.lookupCompanionExport(rel.SymName); ok && e.hasFunction(targetAddr) {
+				if !seenCompanion[targetAddr] {
+					seenCompanion[targetAddr] = true
+					companionAddrs = append(companionAddrs, targetAddr)
+				}
+			}
+		}
+	}
+	slices.Sort(companionAddrs)
+	if len(companionAddrs) > 0 {
+		if _, err := w.WriteString("// Forward declarations for companion module functions referenced in dispatch\n"); err != nil {
+			return err
+		}
+		for _, addr := range companionAddrs {
+			if _, err := fmt.Fprintf(w, "void fn_0x%x(GuestContext *__restrict__ ctx);\n", addr); err != nil {
+				return err
+			}
+		}
+		if _, err := w.WriteString("\n"); err != nil {
+			return err
+		}
+	}
+
+	if _, err := w.WriteString("// Forward declarations of chunk registration functions\n"); err != nil {
 		return err
 	}
 	for i := range numChunks {
@@ -1290,6 +1446,32 @@ func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
 				registeredAddrs[rel.Offset] = struct{}{}
 				if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, %s); // GOT %s\n", rel.Offset, shim, rel.SymName); err != nil {
 					return err
+				}
+			}
+		} else if targetAddr, isCompanion := e.lookupCompanionExport(rel.SymName); isCompanion {
+			if e.hasFunction(targetAddr) {
+				if rel.PltAddr != 0 {
+					if _, ok := registeredAddrs[rel.PltAddr]; !ok {
+						registeredAddrs[rel.PltAddr] = struct{}{}
+						if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x); // Companion PLT %s\n", rel.PltAddr, targetAddr, rel.SymName); err != nil {
+							return err
+						}
+					}
+				}
+				if _, ok := registeredAddrs[rel.Offset]; !ok {
+					registeredAddrs[rel.Offset] = struct{}{}
+					if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x); // Companion GOT %s\n", rel.Offset, targetAddr, rel.SymName); err != nil {
+						return err
+					}
+				}
+			} else {
+				if rel.PltAddr != 0 {
+					if _, ok := registeredAddrs[rel.PltAddr]; !ok {
+						registeredAddrs[rel.PltAddr] = struct{}{}
+						if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, shim_unresolved_stub); // Unresolved PLT %s\n", rel.PltAddr, rel.SymName); err != nil {
+							return err
+						}
+					}
 				}
 			}
 		} else {
@@ -1421,8 +1603,16 @@ func (e *CEmitter) EmitGuestModules(path string) (err error) {
 		return err
 	}
 
+	// Deterministic sorting of shimMap keys
+	var sortedShimAddrs []uint64
+	for addr := range e.shimMap {
+		sortedShimAddrs = append(sortedShimAddrs, addr)
+	}
+	slices.Sort(sortedShimAddrs)
+
 	shimAddr := make(map[string]uint64)
-	for addr, shim := range e.shimMap {
+	for _, addr := range sortedShimAddrs {
+		shim := e.shimMap[addr]
 		for name, target := range CanonicalShims {
 			if target == shim {
 				if _, exists := shimAddr[name]; !exists {
@@ -1449,6 +1639,41 @@ func (e *CEmitter) EmitGuestModules(path string) (err error) {
 		shimAddr[name] = nextSynth
 		synthRegs = append(synthRegs, fmt.Sprintf("    recomp_register_fn(0x%xULL, %s);\n", nextSynth, CanonicalShims[name]))
 		nextSynth += 16
+	}
+
+	// Forward declarations and weak fallback implementations for host shims
+	uniqueShims := make(map[string]bool)
+	uniqueShims["shim_unresolved_stub"] = true
+	for _, target := range CanonicalShims {
+		uniqueShims[target] = true
+	}
+	sortedShims := make([]string, 0, len(uniqueShims))
+	for s := range uniqueShims {
+		sortedShims = append(sortedShims, s)
+	}
+	slices.Sort(sortedShims)
+
+	if _, err := w.WriteString("// Forward declarations and weak fallback implementations for host shims\n"); err != nil {
+		return err
+	}
+	for _, s := range sortedShims {
+		if _, err := fmt.Fprintf(w, "void %s(GuestContext *ctx);\n", s); err != nil {
+			return err
+		}
+	}
+	if _, err := w.WriteString("\n// Weak fallback implementations to avoid linker failures if a shim is not yet implemented\n"); err != nil {
+		return err
+	}
+	for _, s := range sortedShims {
+		if s == "shim_unresolved_stub" {
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "__attribute__((weak)) void %s(GuestContext *ctx) { shim_unresolved_stub(ctx); }\n", s); err != nil {
+			return err
+		}
+	}
+	if _, err := w.WriteString("\n"); err != nil {
+		return err
 	}
 
 	if _, err := w.WriteString("static const RecompModuleExport recomp_host_shim_exports[] = {\n"); err != nil {
