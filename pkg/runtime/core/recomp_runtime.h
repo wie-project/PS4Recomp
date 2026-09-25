@@ -670,7 +670,35 @@ void shim_sceUserServiceInitialize(GuestContext *ctx);
 void shim_sceUserServiceGetInitialUser(GuestContext *ctx);
 void shim_sceUserServiceGetLoginUserIdList(GuestContext *ctx);
 void shim_sceUserServiceGetUserName(GuestContext *ctx);
+void shim_sceUserServiceGetEvent(GuestContext *ctx);
 void shim_sceUserServiceTerminate(GuestContext *ctx);
+
+// PlayGo shims
+void shim_scePlayGoInitialize(GuestContext *ctx);
+void shim_scePlayGoTerminate(GuestContext *ctx);
+void shim_scePlayGoOpen(GuestContext *ctx);
+void shim_scePlayGoClose(GuestContext *ctx);
+void shim_scePlayGoGetProgress(GuestContext *ctx);
+void shim_scePlayGoGetLocus(GuestContext *ctx);
+void shim_scePlayGoGetLanguageMask(GuestContext *ctx);
+void shim_scePlayGoSetLanguageMask(GuestContext *ctx);
+void shim_scePlayGoGetInstallSpeed(GuestContext *ctx);
+void shim_scePlayGoSetInstallSpeed(GuestContext *ctx);
+void shim_scePlayGoGetToDoList(GuestContext *ctx);
+void shim_scePlayGoGetEta(GuestContext *ctx);
+void shim_scePlayGoPrefetch(GuestContext *ctx);
+
+// RTC shims
+void shim_sceRtcGetCurrentTick(GuestContext *ctx);
+void shim_sceRtcGetTick(GuestContext *ctx);
+void shim_sceRtcSetTick(GuestContext *ctx);
+void shim_sceRtcGetTickResolution(GuestContext *ctx);
+void shim_sceRtcGetCurrentClockLocalTime(GuestContext *ctx);
+void shim_sceRtcGetDayOfWeek(GuestContext *ctx);
+void shim_sceRtcIsLeapYear(GuestContext *ctx);
+
+// Random shims
+void shim_sceRandomGetRandomNumber(GuestContext *ctx);
 
 // Pad shims
 void shim_scePadInit(GuestContext *ctx);
@@ -720,6 +748,60 @@ void shim_sceMsgDialogTerminate(GuestContext *ctx);
 void shim_sceMsgDialogProgressBarInc(GuestContext *ctx);
 void shim_sceMsgDialogProgressBarSetMsg(GuestContext *ctx);
 void shim_sceMsgDialogProgressBarSetValue(GuestContext *ctx);
+
+// Group 2: Dialogs, System UI & Media Services
+void shim_sceImeDialogInit(GuestContext *ctx);
+void shim_sceImeDialogGetStatus(GuestContext *ctx);
+void shim_sceImeDialogGetResult(GuestContext *ctx);
+void shim_sceImeDialogAbort(GuestContext *ctx);
+void shim_sceImeDialogTerm(GuestContext *ctx);
+void shim_sceImeDialogGetPanelSizeExtended(GuestContext *ctx);
+
+void shim_sceSaveDataDialogInitialize(GuestContext *ctx);
+void shim_sceSaveDataDialogOpen(GuestContext *ctx);
+void shim_sceSaveDataDialogUpdateStatus(GuestContext *ctx);
+void shim_sceSaveDataDialogGetResult(GuestContext *ctx);
+void shim_sceSaveDataDialogTerminate(GuestContext *ctx);
+
+void shim_sceErrorDialogInitialize(GuestContext *ctx);
+void shim_sceErrorDialogOpen(GuestContext *ctx);
+void shim_sceErrorDialogUpdateStatus(GuestContext *ctx);
+void shim_sceErrorDialogGetStatus(GuestContext *ctx);
+void shim_sceErrorDialogTerminate(GuestContext *ctx);
+
+void shim_sceInvitationDialogInitialize(GuestContext *ctx);
+void shim_sceInvitationDialogOpenA(GuestContext *ctx);
+void shim_sceInvitationDialogUpdateStatus(GuestContext *ctx);
+void shim_sceInvitationDialogGetStatus(GuestContext *ctx);
+void shim_sceInvitationDialogGetResultA(GuestContext *ctx);
+void shim_sceInvitationDialogTerminate(GuestContext *ctx);
+
+void shim_sceNpProfileDialogInitialize(GuestContext *ctx);
+void shim_sceNpProfileDialogOpenA(GuestContext *ctx);
+void shim_sceNpProfileDialogUpdateStatus(GuestContext *ctx);
+void shim_sceNpProfileDialogGetStatus(GuestContext *ctx);
+void shim_sceNpProfileDialogGetResult(GuestContext *ctx);
+void shim_sceNpProfileDialogTerminate(GuestContext *ctx);
+
+void shim_sceVideoRecordingQueryMemSize2(GuestContext *ctx);
+void shim_sceVideoRecordingOpen2(GuestContext *ctx);
+void shim_sceVideoRecordingClose(GuestContext *ctx);
+void shim_sceVideoRecordingStart(GuestContext *ctx);
+void shim_sceVideoRecordingStop(GuestContext *ctx);
+void shim_sceVideoRecordingGetStatus(GuestContext *ctx);
+void shim_sceVideoRecordingSetInfo(GuestContext *ctx);
+
+void shim_sceScreenShotEnable(GuestContext *ctx);
+void shim_sceScreenShotDisable(GuestContext *ctx);
+
+void shim_sceSharePlayInitialize(GuestContext *ctx);
+void shim_sceSharePlayTerminate(GuestContext *ctx);
+void shim_sceSharePlaySetProhibition(GuestContext *ctx);
+
+void shim_sceMouseInit(GuestContext *ctx);
+void shim_sceMouseOpen(GuestContext *ctx);
+void shim_sceMouseClose(GuestContext *ctx);
+void shim_sceMouseRead(GuestContext *ctx);
 
 // Trophy shims
 void shim_sceNpTrophyInit(GuestContext *ctx);

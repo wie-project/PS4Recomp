@@ -413,8 +413,9 @@ func (l *LoadedELF) ExportedFunctions() []Symbol {
 		if _, ok := seen[sym.Name]; ok {
 			return
 		}
-		isFunc := sym.Type == elf.STT_FUNC || (sym.Type == elf.STT_NOTYPE && l.InExecutable(sym.Address))
-		if !isFunc {
+		validAddr := sym.Address < uint64(len(l.MemoryImage))
+		isExport := sym.Type == elf.STT_FUNC || sym.Type == elf.STT_OBJECT || (sym.Type == elf.STT_NOTYPE && validAddr)
+		if !isExport {
 			return
 		}
 		seen[sym.Name] = struct{}{}

@@ -21,6 +21,20 @@ func TestLookupShimByNID(t *testing.T) {
 		{"memset", "8zTFvBIAIN8", "shim_memset"},
 		{"strlen", "j4ViWNHEgww", "shim_strlen"},
 		{"strncpy", "6sJWiWSRuqk", "shim_strncpy"},
+		{"sceUserServiceGetEvent", "yH17Q6NWtVg", "shim_sceUserServiceGetEvent"},
+		{"scePlayGoGetProgress", "-RJWNMK3fC8", "shim_scePlayGoGetProgress"},
+		{"sceRtcGetCurrentTick", "18B2NS1y9UU", "shim_sceRtcGetCurrentTick"},
+		{"sceRandomGetRandomNumber", "PI7jIZj4pcE", "shim_sceRandomGetRandomNumber"},
+		{"sceImeDialogInit", "NUeBrN7hzf0", "shim_sceImeDialogInit"},
+		{"sceImeDialogGetResult", "x01jxu+vxlc", "shim_sceImeDialogGetResult"},
+		{"sceSaveDataDialogOpen", "4tPhsP6FpDI", "shim_sceSaveDataDialogOpen"},
+		{"sceErrorDialogOpen", "M2ZF-ClLhgY", "shim_sceErrorDialogOpen"},
+		{"sceInvitationDialogOpenA", "sAxbHhAWMXM", "shim_sceInvitationDialogOpenA"},
+		{"sceNpProfileDialogOpenA", "nrQRlLKzdwE", "shim_sceNpProfileDialogOpenA"},
+		{"sceVideoRecordingOpen2", "s28dalBwp2g", "shim_sceVideoRecordingOpen2"},
+		{"sceScreenShotEnable", "2xxUtuC-RzE", "shim_sceScreenShotEnable"},
+		{"sceSharePlayInitialize", "isruqthpYcw", "shim_sceSharePlayInitialize"},
+		{"sceMouseOpen", "RaqxZIf6DvE", "shim_sceMouseOpen"},
 	}
 	for _, tc := range cases {
 		if got := elfloader.CalculateNID(tc.plain); got != tc.nid {

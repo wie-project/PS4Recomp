@@ -49,9 +49,28 @@ int32_t sceUserServiceGetUserName(int32_t userId, char *userName, const size_t s
     return 0;
 }
 
+static int g_user_event_delivered = 0;
+
+int32_t sceUserServiceGetEvent(OrbisUserServiceEvent *event) {
+    if (!event) {
+        return -EINVAL;
+    }
+    pthread_mutex_lock(&g_user_service_mutex);
+    if (!g_user_event_delivered) {
+        event->eventType = ORBIS_USER_SERVICE_EVENT_TYPE_LOGIN;
+        event->userId = ORBIS_USER_SERVICE_INITIAL_USER_ID;
+        g_user_event_delivered = 1;
+        pthread_mutex_unlock(&g_user_service_mutex);
+        return 0;
+    }
+    pthread_mutex_unlock(&g_user_service_mutex);
+    return (int32_t)ORBIS_USER_SERVICE_ERROR_NO_EVENT;
+}
+
 int32_t sceUserServiceTerminate(void) {
     pthread_mutex_lock(&g_user_service_mutex);
     g_user_service_initialized = 0;
+    g_user_event_delivered = 0;
     pthread_mutex_unlock(&g_user_service_mutex);
     return 0;
 }
@@ -93,6 +112,14 @@ void shim_sceUserServiceGetUserName(GuestContext *ctx) {
     char *userName = nameGuest ? (char *)(ctx->mem_base + nameGuest) : NULL;
 
     int32_t ret = sceUserServiceGetUserName(userId, userName, size);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_sceUserServiceGetEvent(GuestContext *ctx) {
+    uint64_t eventGuest = ctx->rdi;
+    OrbisUserServiceEvent *event = eventGuest ? (OrbisUserServiceEvent *)(ctx->mem_base + eventGuest) : NULL;
+    int32_t ret = sceUserServiceGetEvent(event);
     ctx->rax = (uint64_t)(int64_t)ret;
     SHIM_RETURN();
 }
