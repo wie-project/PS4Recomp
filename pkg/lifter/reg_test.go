@@ -729,6 +729,51 @@ func TestLiftNewInstructions(t *testing.T) {
 			},
 			contains: []string{"ctx->xmm[0].f32[0] = sqrtf(src.f32[0]);", "ctx->xmm[0].f32[3] = sqrtf(src.f32[3]);"},
 		},
+		{
+			name: "VMOVAPS_YMM_store",
+			inst: disasm.Instruction{
+				Address: 0x854ee,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VMOVAPS,
+					Args: x86asm.Args{x86asm.Mem{Base: x86asm.RSP, Disp: 0x7b80}, x86asm.Y5},
+					Len:  9,
+				},
+			},
+			contains: []string{
+				"memcpy(ctx->mem_base + (ctx->rsp + 0x7b80ULL), &ctx->xmm[5], 16);",
+				"memcpy(ctx->mem_base + (ctx->rsp + 0x7b80ULL) + 16, &ctx->ymmh[5], 16);",
+			},
+		},
+		{
+			name: "VMOVAPS_YMM_load",
+			inst: disasm.Instruction{
+				Address: 0x85998,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VMOVAPS,
+					Args: x86asm.Args{x86asm.Y6, x86asm.Mem{Base: x86asm.RSP, Disp: 0x7ba0}},
+					Len:  9,
+				},
+			},
+			contains: []string{
+				"memcpy(&ctx->xmm[6], ctx->mem_base + (ctx->rsp + 0x7ba0ULL), 16);",
+				"memcpy(&ctx->ymmh[6], ctx->mem_base + (ctx->rsp + 0x7ba0ULL) + 16, 16);",
+			},
+		},
+		{
+			name: "VMOVAPS_YMM_reg",
+			inst: disasm.Instruction{
+				Address: 0x85990,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VMOVAPS,
+					Args: x86asm.Args{x86asm.Y1, x86asm.Y2},
+					Len:  4,
+				},
+			},
+			contains: []string{
+				"ctx->xmm[1] = ctx->xmm[2];",
+				"ctx->ymmh[1] = ctx->ymmh[2];",
+			},
+		},
 	}
 
 	for _, tc := range tests {

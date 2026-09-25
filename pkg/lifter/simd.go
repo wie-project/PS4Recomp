@@ -20,19 +20,61 @@ func ymmIdx(reg x86asm.Reg) int {
 }
 
 func (l *Lifter) liftVectorMove(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
-	if dstReg, ok := dst.(x86asm.Reg); ok {
-		if srcReg, ok := src.(x86asm.Reg); ok {
-			infoDst := regMap[dstReg]
-			infoSrc := regMap[srcReg]
-			return []string{fmt.Sprintf("    ctx->%s = ctx->%s;", infoDst.BaseReg, infoSrc.BaseReg)}, nil
+	// 256-bit YMM register moves
+	if dstReg, ok := dst.(x86asm.Reg); ok && isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		if srcReg, ok := src.(x86asm.Reg); ok && isYmm(srcReg) {
+			sIdx := ymmIdx(srcReg)
+			return []string{
+				fmt.Sprintf("    ctx->xmm[%d] = ctx->xmm[%d];", dIdx, sIdx),
+				fmt.Sprintf("    ctx->ymmh[%d] = ctx->ymmh[%d];", dIdx, sIdx),
+			}, nil
 		}
 		if srcMem, ok := src.(x86asm.Mem); ok {
 			addr, err := MemAddrExpr(srcMem, nextPC)
 			if err != nil {
 				return nil, err
 			}
-			infoDst := regMap[dstReg]
-			return []string{fmt.Sprintf("    memcpy(&ctx->%s, ctx->mem_base + (%s), 16);", infoDst.BaseReg, addr)}, nil
+			return []string{
+				fmt.Sprintf("    memcpy(&ctx->xmm[%d], ctx->mem_base + (%s), 16);", dIdx, addr),
+				fmt.Sprintf("    memcpy(&ctx->ymmh[%d], ctx->mem_base + (%s) + 16, 16);", dIdx, addr),
+			}, nil
+		}
+	}
+	if dstMem, ok := dst.(x86asm.Mem); ok {
+		if srcReg, ok := src.(x86asm.Reg); ok && isYmm(srcReg) {
+			addr, err := MemAddrExpr(dstMem, nextPC)
+			if err != nil {
+				return nil, err
+			}
+			sIdx := ymmIdx(srcReg)
+			return []string{
+				fmt.Sprintf("    memcpy(ctx->mem_base + (%s), &ctx->xmm[%d], 16);", addr, sIdx),
+				fmt.Sprintf("    memcpy(ctx->mem_base + (%s) + 16, &ctx->ymmh[%d], 16);", addr, sIdx),
+			}, nil
+		}
+	}
+
+	// 128-bit XMM register moves
+	if dstReg, ok := dst.(x86asm.Reg); ok && isXmm(dstReg) {
+		infoDst := regMap[dstReg]
+		dIdx := int(dstReg - x86asm.X0)
+		if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
+			infoSrc := regMap[srcReg]
+			return []string{
+				fmt.Sprintf("    ctx->%s = ctx->%s;", infoDst.BaseReg, infoSrc.BaseReg),
+				fmt.Sprintf("    memset(&ctx->ymmh[%d], 0, 16);", dIdx),
+			}, nil
+		}
+		if srcMem, ok := src.(x86asm.Mem); ok {
+			addr, err := MemAddrExpr(srcMem, nextPC)
+			if err != nil {
+				return nil, err
+			}
+			return []string{
+				fmt.Sprintf("    memcpy(&ctx->%s, ctx->mem_base + (%s), 16);", infoDst.BaseReg, addr),
+				fmt.Sprintf("    memset(&ctx->ymmh[%d], 0, 16);", dIdx),
+			}, nil
 		}
 	}
 	if dstMem, ok := dst.(x86asm.Mem); ok {
@@ -40,7 +82,7 @@ func (l *Lifter) liftVectorMove(dst, src x86asm.Arg, nextPC uint64) ([]string, e
 		if err != nil {
 			return nil, err
 		}
-		if srcReg, ok := src.(x86asm.Reg); ok {
+		if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
 			infoSrc := regMap[srcReg]
 			return []string{fmt.Sprintf("    memcpy(ctx->mem_base + (%s), &ctx->%s, 16);", addr, infoSrc.BaseReg)}, nil
 		}
