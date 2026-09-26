@@ -72,6 +72,7 @@ typedef struct GuestContext {
   uint8_t of;
   uint8_t pf;
   uint8_t af;
+  uint8_t df;
 
   // SIMD Registers
   xmm_reg_t xmm[16];

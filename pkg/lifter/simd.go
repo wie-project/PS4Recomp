@@ -3448,7 +3448,7 @@ func (l *Lifter) liftPcmpestri(op x86asm.Op, args x86asm.Args, nextPC uint64) ([
 	if src1Reg, ok2 := src1Arg.(x86asm.Reg); ok2 && isXmm(src1Reg) {
 		s1Idx := int(src1Reg - x86asm.X0)
 		return []string{
-			fmt.Sprintf("    recomp_vpcmpe_stri(ctx, &ctx->xmm[%d], (int64_t)ctx->rdx, &ctx->xmm[%d], (int64_t)ctx->rax, 0x%02x);", s1Idx, s2Idx, imm8),
+			fmt.Sprintf("    recomp_vpcmpe_stri(ctx, &ctx->xmm[%d], &ctx->xmm[%d], 0x%02x);", s1Idx, s2Idx, imm8),
 		}, nil
 	} else if src1Mem, ok2 := src1Arg.(x86asm.Mem); ok2 {
 		addr, err := MemAddrExpr(src1Mem, nextPC)
@@ -3456,7 +3456,7 @@ func (l *Lifter) liftPcmpestri(op x86asm.Op, args x86asm.Args, nextPC uint64) ([
 			return nil, err
 		}
 		return []string{
-			fmt.Sprintf("    recomp_vpcmpe_stri(ctx, (const void *)(ctx->mem_base + (%s)), (int64_t)ctx->rdx, &ctx->xmm[%d], (int64_t)ctx->rax, 0x%02x);", addr, s2Idx, imm8),
+			fmt.Sprintf("    recomp_vpcmpe_stri(ctx, (const void *)(ctx->mem_base + (%s)), &ctx->xmm[%d], 0x%02x);", addr, s2Idx, imm8),
 		}, nil
 	}
 	return nil, fmt.Errorf("pcmpestri unsupported src1 operand: %v", src1Arg)

@@ -1310,8 +1310,10 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		lines = append(lines, "    ctx->cf = 0;")
 	case x86asm.STC:
 		lines = append(lines, "    ctx->cf = 1;")
-	case x86asm.CLD, x86asm.STD:
-		lines = append(lines, "    /* direction flag is not modeled; string ops increment */")
+	case x86asm.CLD:
+		lines = append(lines, "    ctx->df = 0;")
+	case x86asm.STD:
+		lines = append(lines, "    ctx->df = 1;")
 	case x86asm.MOVSB:
 		lines = append(lines, l.liftMovs(inst.Inst, 1)...)
 	case x86asm.MOVSW:
