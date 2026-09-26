@@ -101,12 +101,20 @@ func leaRIPTarget(inst Instruction) (x86asm.Reg, uint64, bool) {
 //	add jmpReg, baseReg
 //	jmp jmpReg
 //
-// Clang uses baseReg == tableReg (offsets relative to the table). GCC may
-// load a second RIP-relative label as the addend.
-func matchPICSwitch(window []Instruction) (picSwitch, bool) {
+// matchPICSwitch recognizes the Clang/GCC x86-64 PIC switch idiom ending at
+// window[len-1], which must be an indirect JMP.
+//
+// If tableAddr or switch count is not found in window (e.g. when the switch
+// spans across multiple basic blocks), findTableAddr and findCount are queried
+// as fallbacks (tracing predecessor basic blocks).
+func matchPICSwitch(
+	window []Instruction,
+	findTableAddr func(reg x86asm.Reg) (uint64, bool),
+	findCount func(idxReg x86asm.Reg) (int, bool),
+) (picSwitch, bool) {
 	var none picSwitch
 	n := len(window)
-	if n < 4 {
+	if n < 3 {
 		return none, false
 	}
 
@@ -148,6 +156,7 @@ func matchPICSwitch(window []Instruction) (picSwitch, bool) {
 	if tableReg == 0 {
 		return none, false
 	}
+	idxReg := mem.Index
 
 	var tableAddr, codeBase uint64
 	foundTable, foundBase := false, false
@@ -168,6 +177,12 @@ func matchPICSwitch(window []Instruction) (picSwitch, bool) {
 			break
 		}
 	}
+	if !foundTable && findTableAddr != nil {
+		tableAddr, foundTable = findTableAddr(tableReg)
+	}
+	if !foundBase && !sameGPR(baseReg, tableReg) && findTableAddr != nil {
+		codeBase, foundBase = findTableAddr(baseReg)
+	}
 	if !foundTable {
 		return none, false
 	}
@@ -181,13 +196,18 @@ func matchPICSwitch(window []Instruction) (picSwitch, bool) {
 		return none, false
 	}
 
-	count := switchTableCount(window[:n-3])
+	count := switchTableCount(window[:n-3], idxReg)
+	if count <= 0 && findCount != nil {
+		if c, ok := findCount(idxReg); ok {
+			count = c
+		}
+	}
 	return picSwitch{tableAddr: tableAddr, baseAddr: baseAddr, count: count}, true
 }
 
 // switchTableCount reads `cmp/sub reg, imm; ja/jae` immediately before the
 // table load. JA means entries = imm+1; JAE means entries = imm.
-func switchTableCount(window []Instruction) int {
+func switchTableCount(window []Instruction, idxReg x86asm.Reg) int {
 	for i := len(window) - 1; i >= 1; i-- {
 		op := window[i].Inst.Op
 		if op != x86asm.JA && op != x86asm.JAE {
@@ -196,27 +216,30 @@ func switchTableCount(window []Instruction) int {
 		for j := i - 1; j >= 0; j-- {
 			prev := window[j].Inst
 			if prev.Op != x86asm.CMP && prev.Op != x86asm.SUB {
-				// MOV/LEA spills do not clobber flags; keep walking.
-				if prev.Op == x86asm.MOV || prev.Op == x86asm.LEA || prev.Op == x86asm.NOP {
+				// MOV/LEA/MOVZX spills do not clobber flags; keep walking.
+				if prev.Op == x86asm.MOV || prev.Op == x86asm.LEA || prev.Op == x86asm.NOP || prev.Op == x86asm.MOVZX {
 					continue
 				}
-				return 0
+				break
 			}
-			imm, ok := instImm(prev.Args[1])
-			if !ok || imm < 0 || imm >= maxJumpTableEntries {
-				return 0
+			if dst, ok := prev.Args[0].(x86asm.Reg); ok && sameGPR(dst, idxReg) {
+				imm, ok := instImm(prev.Args[1])
+				if !ok || imm < 0 || imm >= maxJumpTableEntries {
+					break
+				}
+				n := int(imm)
+				if op == x86asm.JA {
+					n++
+				}
+				if n <= 0 || n > maxJumpTableEntries {
+					break
+				}
+				return n
 			}
-			n := int(imm)
-			if op == x86asm.JA {
-				n++
-			}
-			if n <= 0 || n > maxJumpTableEntries {
-				return 0
-			}
-			return n
 		}
-		return 0
 	}
+
+
 	return 0
 }
 

@@ -508,7 +508,6 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 	// Identify basic block leaders
 	leaders := make(map[uint64]bool)
 	leaders[entryAddr] = true
-
 	for i, inst := range insts {
 		nextPC := inst.Address + uint64(inst.Inst.Len)
 
@@ -557,17 +556,8 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 				leaders[nextPC] = true
 			}
 
-		case inst.Inst.Op == x86asm.LEA:
-			if mem, ok := inst.Inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
-				disp := int64(int32(mem.Disp))
-				tableAddr := uint64(int64(nextPC) + disp)
-				for _, target := range d.findJumpTableTargets(tableAddr, entryAddr, fnEnd) {
-					leaders[target] = true
-				}
-			}
-
 		case isIndirectJump(inst.Inst):
-			if sw, ok := matchPICSwitch(insts[:i+1]); ok {
+			if sw, ok := matchPICSwitch(insts[:i+1], nil, nil); ok {
 				for _, target := range d.jumpTableTargets(sw, entryAddr, fnEnd) {
 					if target >= entryAddr && target < fnEnd {
 						leaders[target] = true
@@ -651,8 +641,8 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	jumpTargets := make(map[uint64]bool)
 	jumpTargets[entryAddr] = true
 
-	const recentCap = 24
-	recent := make([]Instruction, 0, recentCap)
+	blockPreds := make(map[uint64][]uint64)
+	blockInsts := make(map[uint64][]Instruction)
 	enqueueBlock := func(target uint64) {
 		if target == 0 || !d.inCode(target) {
 			return
@@ -678,8 +668,10 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	inside := func(addr uint64) bool {
 		return addr >= entryAddr && addr < fnEnd && d.inCode(addr)
 	}
+	var blockStart uint64
 	// A direct transfer past the function is a tail call, not another block.
 	edge := func(target uint64) {
+		blockPreds[target] = append(blockPreds[target], blockStart)
 		if inside(target) {
 			enqueueBlock(target)
 			return
@@ -699,8 +691,9 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 			capPC = blockQueue[head]
 			break
 		}
-		blockStart := blockQueue[head]
+		blockStart = blockQueue[head]
 		pc := blockStart
+		var curBlock []Instruction
 
 		for pc < fnEnd && d.inCode(pc) {
 			if pc >= uint64(len(d.elf.MemoryImage)) {
@@ -724,12 +717,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				Inst:    inst,
 			}
 			instAtAddr[pc] = wrapped
-			if len(recent) == recentCap {
-				copy(recent, recent[1:])
-				recent[recentCap-1] = wrapped
-			} else {
-				recent = append(recent, wrapped)
-			}
+			curBlock = append(curBlock, wrapped)
 
 			nextPC := pc + uint64(inst.Len)
 
@@ -742,9 +730,68 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				isTerminal = true
 				if rel, ok := inst.Args[0].(x86asm.Rel); ok {
 					edge(uint64(int64(nextPC) + int64(rel)))
-				} else if sw, ok := matchPICSwitch(recent); ok {
-					for _, target := range d.jumpTableTargets(sw, entryAddr, fnEnd) {
-						edge(target)
+				} else {
+					findTableAddr := func(reg x86asm.Reg) (uint64, bool) {
+						visited := make(map[uint64]bool)
+						queue := append([]uint64(nil), blockPreds[blockStart]...)
+						for _, q := range queue {
+							visited[q] = true
+						}
+						depth := 0
+						for len(queue) > 0 && depth < 16 {
+							depth++
+							var nextQueue []uint64
+							for _, pred := range queue {
+								insts := blockInsts[pred]
+								for i := len(insts) - 1; i >= 0; i-- {
+									dst, target, isLEA := leaRIPTarget(insts[i])
+									if isLEA && sameGPR(dst, reg) {
+										return target, true
+									}
+								}
+								for _, p := range blockPreds[pred] {
+									if !visited[p] {
+										visited[p] = true
+										nextQueue = append(nextQueue, p)
+									}
+								}
+							}
+							queue = nextQueue
+						}
+						return 0, false
+					}
+
+					findCount := func(idxReg x86asm.Reg) (int, bool) {
+						visited := make(map[uint64]bool)
+						queue := append([]uint64(nil), blockPreds[blockStart]...)
+						for _, q := range queue {
+							visited[q] = true
+						}
+						depth := 0
+						for len(queue) > 0 && depth < 16 {
+							depth++
+							var nextQueue []uint64
+							for _, pred := range queue {
+								insts := blockInsts[pred]
+								if c := switchTableCount(insts, idxReg); c > 0 {
+									return c, true
+								}
+								for _, p := range blockPreds[pred] {
+									if !visited[p] {
+										visited[p] = true
+										nextQueue = append(nextQueue, p)
+									}
+								}
+							}
+							queue = nextQueue
+						}
+						return 0, false
+					}
+
+					if sw, ok := matchPICSwitch(curBlock, findTableAddr, findCount); ok {
+						for _, target := range d.jumpTableTargets(sw, entryAddr, fnEnd) {
+							edge(target)
+						}
 					}
 				}
 			case x86asm.RET:
@@ -773,9 +820,6 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 					if d.seedableFunc(target) {
 						discoveredCalls = append(discoveredCalls, target)
 					}
-					for _, jmpTarget := range d.findJumpTableTargets(target, entryAddr, fnEnd) {
-						edge(jmpTarget)
-					}
 				}
 			default:
 				if isJcc(inst.Op) {
@@ -784,7 +828,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 						edge(uint64(int64(nextPC) + int64(rel)))
 					}
 					if inside(nextPC) {
-						enqueueBlock(nextPC)
+						edge(nextPC)
 					}
 				}
 			}
@@ -798,7 +842,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				// Split the oversized block by enqueuing a fallthrough edge
 				// to the next PC and terminate the current block.
 				if inside(pc) {
-					enqueueBlock(pc)
+					edge(pc)
 				}
 				break
 			}
@@ -809,6 +853,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				break
 			}
 		}
+		blockInsts[blockStart] = curBlock
 	}
 	if capped {
 		d.CapHits++

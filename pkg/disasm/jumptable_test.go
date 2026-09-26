@@ -78,7 +78,7 @@ func TestMatchPICSwitchFromBytes(t *testing.T) {
 			break
 		}
 	}
-	sw, ok := matchPICSwitch(window)
+	sw, ok := matchPICSwitch(window, nil, nil)
 	if !ok {
 		t.Fatal("expected PIC switch match")
 	}
@@ -162,7 +162,7 @@ func TestLibExamplePrintfSwitchLeaders(t *testing.T) {
 			break
 		}
 	}
-	sw, ok := matchPICSwitch(window)
+	sw, ok := matchPICSwitch(window, nil, nil)
 	if !ok {
 		for _, in := range window {
 			t.Logf("  0x%x %s", in.Address, in.Inst)
@@ -249,3 +249,53 @@ func TestLibExampleSwitchCaseIsLeader(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchPICSwitchSplitAcrossBlocks(t *testing.T) {
+	// Simulate a switch where LEA and CMP/JA were in predecessor blocks:
+	// Block 3:
+	//   movzx ecx, cl
+	//   movsxd rcx, [rax + 4*rcx]
+	//   add rcx, rax
+	//   jmp rcx
+	block3Bytes := []byte{
+		0x0f, 0xb6, 0xc9, // movzx ecx, cl
+		0x48, 0x63, 0x0c, 0x88, // movsxd rcx, [rax+4*rcx]
+		0x48, 0x01, 0xc1, // add rcx, rax
+		0xff, 0xe1, // jmp rcx
+	}
+	var window []Instruction
+	pc := uint64(0x1000)
+	for len(block3Bytes[pc-0x1000:]) > 0 {
+		inst, err := x86asm.Decode(block3Bytes[pc-0x1000:], 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		window = append(window, Instruction{Address: pc, Inst: inst})
+		pc += uint64(inst.Len)
+	}
+
+	findTable := func(reg x86asm.Reg) (uint64, bool) {
+		if sameGPR(reg, x86asm.RAX) {
+			return 0x5000, true
+		}
+		return 0, false
+	}
+	findCount := func(idxReg x86asm.Reg) (int, bool) {
+		if sameGPR(idxReg, x86asm.RCX) {
+			return 17, true
+		}
+		return 0, false
+	}
+
+	sw, ok := matchPICSwitch(window, findTable, findCount)
+	if !ok {
+		t.Fatal("expected matchPICSwitch to succeed via predecessor callbacks")
+	}
+	if sw.tableAddr != 0x5000 {
+		t.Errorf("tableAddr=%x, want 0x5000", sw.tableAddr)
+	}
+	if sw.count != 17 {
+		t.Errorf("count=%d, want 17", sw.count)
+	}
+}
+
