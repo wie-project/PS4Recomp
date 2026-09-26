@@ -35,9 +35,10 @@ type Config struct {
 	OptLevel   string
 	AllSymbols bool
 	ChunkSize  int
-	Verbose    bool
-	AppDir     string
-	Asan       bool
+	Verbose       bool
+	AppDir        string
+	CopyResources bool
+	Asan          bool
 }
 
 const banner = `
@@ -64,6 +65,7 @@ Options:
   -k, -chunk-size <num>   Number of functions per emitted C chunk file (default: 250)
   -v, -verbose            Enable verbose output and detailed timing breakdown (default: false)
       -app-dir <dir>      Host directory mapping to /app0 for game assets (auto-detected if omitted)
+      -copy-resources     Copy all game assets/resources into macOS .app bundle Resources/ (default: false)
       -asan               Compile with AddressSanitizer and LeakSanitizer (default: false)
   -h, -help               Show this help message
 `
@@ -133,6 +135,8 @@ func ParseArgs(args []string) (*Config, error) {
 	fs.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Number of functions per C chunk")
 	fs.IntVar(&cfg.ChunkSize, "k", cfg.ChunkSize, "Chunk size (short)")
 	fs.StringVar(&cfg.AppDir, "app-dir", "", "Host directory mapping to /app0 for game assets")
+	fs.BoolVar(&cfg.CopyResources, "copy-resources", false, "Copy all game assets/resources into macOS .app bundle Resources/")
+	fs.BoolVar(&cfg.CopyResources, "bundle-resources", false, "Copy all game assets/resources into macOS .app bundle Resources/ (alias)")
 	fs.BoolVar(&cfg.Asan, "asan", false, "Compile with AddressSanitizer and LeakSanitizer")
 	fs.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "Verbose logging")
 	fs.BoolVar(&cfg.Verbose, "v", cfg.Verbose, "Verbose logging (short)")
@@ -161,21 +165,38 @@ func ParseArgs(args []string) (*Config, error) {
 		return nil, fmt.Errorf("no input PS4 ELF binary specified\n%s", usageText)
 	}
 
-	// Auto-detect AppDir (parent directory containing assets/ if omitted)
+	// Auto-detect AppDir (directory containing game files/assets if omitted)
 	if cfg.AppDir == "" && cfg.ElfPath != "" {
-		dir := filepath.Dir(cfg.ElfPath)
-		for range 5 {
-			if fi, err := os.Stat(filepath.Join(dir, "assets")); err == nil && fi.IsDir() {
-				if absDir, err := filepath.Abs(dir); err == nil {
-					cfg.AppDir = absDir
+		elfDir := filepath.Dir(cfg.ElfPath)
+		markers := []string{"sce_sys", "assets", "contentid.txt", "sce_module"}
+		checkMarkers := func(d string) bool {
+			for _, m := range markers {
+				if _, err := os.Stat(filepath.Join(d, m)); err == nil {
+					return true
 				}
-				break
 			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
+			return false
+		}
+
+		if checkMarkers(elfDir) {
+			if absDir, err := filepath.Abs(elfDir); err == nil {
+				cfg.AppDir = absDir
 			}
-			dir = parent
+		} else {
+			dir := elfDir
+			for range 5 {
+				if checkMarkers(dir) {
+					if absDir, err := filepath.Abs(dir); err == nil {
+						cfg.AppDir = absDir
+					}
+					break
+				}
+				parent := filepath.Dir(dir)
+				if parent == dir {
+					break
+				}
+				dir = parent
+			}
 		}
 	}
 
@@ -739,15 +760,39 @@ func findRuntimeDir() (string, error) {
 }
 
 func copyFile(src, dst string) error {
-	srcData, err := os.ReadFile(src)
+	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	dstData, err := os.ReadFile(dst)
-	if err == nil && bytes.Equal(srcData, dstData) {
-		return nil
+	defer in.Close()
+
+	srcInfo, err := in.Stat()
+	if err != nil {
+		return err
 	}
-	return os.WriteFile(dst, srcData, 0o644)
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+
+	mode := srcInfo.Mode()
+	if mode&0o111 != 0 {
+		mode = 0o755
+	} else {
+		mode = 0o644
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	_ = os.Chmod(dst, mode)
+	return nil
 }
 
 func copyDir(src, dst string) error {
@@ -762,6 +807,37 @@ func copyDir(src, dst string) error {
 		target := filepath.Join(dst, rel)
 		if info.IsDir() {
 			return os.MkdirAll(target, info.Mode())
+		}
+		return copyFile(path, target)
+	})
+}
+
+func copyDirFiltered(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		name := info.Name()
+		if strings.HasPrefix(name, ".") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext == ".prx" || ext == ".elf" || strings.EqualFold(name, "eboot.bin") {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
 		}
 		return copyFile(path, target)
 	})
@@ -791,11 +867,12 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 	}
 	_ = os.Chmod(bundleBin, 0o755)
 
-	// Keep cfg.OutDir/ps4_app as a symlink for backward compatibility
+	// Keep cfg.OutDir/ps4_app updated
 	compatBin := filepath.Join(cfg.OutDir, "ps4_app")
 	if compatBin != compiledBin {
 		_ = os.Remove(compatBin)
-		_ = os.Symlink(bundleBin, compatBin)
+		_ = copyFile(compiledBin, compatBin)
+		_ = os.Chmod(compatBin, 0o755)
 	}
 
 	// 2. Copy guest_image.bin into Contents/Resources/
@@ -805,24 +882,58 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 		_ = copyFile(guestImgSrc, guestImgDst)
 	}
 
-	// 3. Fully copy assets/ into Contents/Resources/assets/
+	// 3. Copy resources into Contents/Resources/
 	if cfg.AppDir != "" {
-		srcAssets := filepath.Join(cfg.AppDir, "assets")
-		dstAssets := filepath.Join(resourcesDir, "assets")
-		if fi, err := os.Stat(srcAssets); err == nil && fi.IsDir() {
-			_ = os.RemoveAll(dstAssets)
-			if err := copyDir(srcAssets, dstAssets); err != nil {
-				return "", fmt.Errorf("failed to copy assets into app bundle: %w", err)
+		if cfg.CopyResources {
+			entries, err := os.ReadDir(cfg.AppDir)
+			if err == nil {
+				absOut, _ := filepath.Abs(cfg.OutDir)
+				absElf, _ := filepath.Abs(cfg.ElfPath)
+				for _, entry := range entries {
+					name := entry.Name()
+					if strings.HasPrefix(name, ".") || strings.EqualFold(name, "prx") {
+						continue
+					}
+					srcPath := filepath.Join(cfg.AppDir, name)
+					absSrc, _ := filepath.Abs(srcPath)
+					if absSrc == absOut || absSrc == absElf {
+						continue
+					}
+					ext := strings.ToLower(filepath.Ext(name))
+					if ext == ".prx" || ext == ".elf" || strings.EqualFold(name, "eboot.bin") {
+						continue
+					}
+					dstPath := filepath.Join(resourcesDir, name)
+					if entry.IsDir() {
+						_ = os.RemoveAll(dstPath)
+						if err := copyDirFiltered(srcPath, dstPath); err != nil {
+							return "", fmt.Errorf("failed to copy %s into app bundle: %w", name, err)
+						}
+					} else {
+						if err := copyFile(srcPath, dstPath); err != nil {
+							return "", fmt.Errorf("failed to copy %s into app bundle: %w", name, err)
+						}
+					}
+				}
 			}
-		}
+		} else {
+			// Default selective copy of assets/ and sce_sys/ if present
+			srcAssets := filepath.Join(cfg.AppDir, "assets")
+			dstAssets := filepath.Join(resourcesDir, "assets")
+			if fi, err := os.Stat(srcAssets); err == nil && fi.IsDir() {
+				_ = os.RemoveAll(dstAssets)
+				if err := copyDir(srcAssets, dstAssets); err != nil {
+					return "", fmt.Errorf("failed to copy assets into app bundle: %w", err)
+				}
+			}
 
-		// Also fully copy sce_sys/ into Contents/Resources/sce_sys/
-		srcSceSys := filepath.Join(cfg.AppDir, "sce_sys")
-		dstSceSys := filepath.Join(resourcesDir, "sce_sys")
-		if fi, err := os.Stat(srcSceSys); err == nil && fi.IsDir() {
-			_ = os.RemoveAll(dstSceSys)
-			if err := copyDir(srcSceSys, dstSceSys); err != nil {
-				return "", fmt.Errorf("failed to copy sce_sys into app bundle: %w", err)
+			srcSceSys := filepath.Join(cfg.AppDir, "sce_sys")
+			dstSceSys := filepath.Join(resourcesDir, "sce_sys")
+			if fi, err := os.Stat(srcSceSys); err == nil && fi.IsDir() {
+				_ = os.RemoveAll(dstSceSys)
+				if err := copyDir(srcSceSys, dstSceSys); err != nil {
+					return "", fmt.Errorf("failed to copy sce_sys into app bundle: %w", err)
+				}
 			}
 		}
 	}

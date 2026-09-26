@@ -253,6 +253,13 @@ int sceKernelMapFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t lengt
     return 0;
 }
 
+int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut) {
+    (void)ctx;
+    if (!sizeOut) return -EINVAL;
+    *sizeOut = 512ULL * 1024 * 1024; // 512MB default flexible memory size (ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE)
+    return 0;
+}
+
 size_t sceKernelAvailableFlexibleMemorySize(GuestContext *ctx) {
     if (!ctx) return 0;
     GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
@@ -482,6 +489,19 @@ void shim_sceKernelMapFlexibleMemory(GuestContext *ctx) {
         *(uint64_t *)(ctx->mem_base + addrInOutGuest) = (uint64_t)mappedAddr;
     }
     ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx) {
+    uint64_t sizeOutGuest = ctx->rdi;
+    if (sizeOutGuest == 0) {
+        ctx->rax = (uint64_t)(int64_t)-EINVAL;
+    } else if (ctx->mem_base && sizeOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+        *(uint64_t *)(ctx->mem_base + sizeOutGuest) = 512ULL * 1024 * 1024;
+        ctx->rax = 0;
+    } else {
+        ctx->rax = (uint64_t)(int64_t)-EFAULT;
+    }
     SHIM_RETURN();
 }
 

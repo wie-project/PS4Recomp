@@ -173,6 +173,7 @@ var CanonicalShims = map[string]string{
 	"sceKernelReleaseDirectMemory":         "shim_sceKernelReleaseDirectMemory",
 	"sceKernelMapFlexibleMemory":           "shim_sceKernelMapFlexibleMemory",
 	"sceKernelMapNamedFlexibleMemory":      "shim_sceKernelMapFlexibleMemory",
+	"sceKernelConfiguredFlexibleMemorySize": "shim_sceKernelConfiguredFlexibleMemorySize",
 	"sceKernelAvailableFlexibleMemorySize": "shim_sceKernelAvailableFlexibleMemorySize",
 	"sceKernelVirtualQuery":                "shim_sceKernelVirtualQuery",
 	"sceKernelQueryMemoryProtection":       "shim_sceKernelQueryMemoryProtection",
@@ -234,13 +235,19 @@ var CanonicalShims = map[string]string{
 	"sceAudioOutOpen":   "shim_sceAudioOutOpen",
 	"sceAudioOutOutput": "shim_sceAudioOutOutput",
 	"sceAudioOutClose":  "shim_sceAudioOutClose",
-	// User Service
-	"sceUserServiceInitialize":         "shim_sceUserServiceInitialize",
-	"sceUserServiceGetInitialUser":     "shim_sceUserServiceGetInitialUser",
-	"sceUserServiceGetLoginUserIdList": "shim_sceUserServiceGetLoginUserIdList",
-	"sceUserServiceGetUserName":        "shim_sceUserServiceGetUserName",
-	"sceUserServiceGetEvent":           "shim_sceUserServiceGetEvent",
-	"sceUserServiceTerminate":          "shim_sceUserServiceTerminate",
+	// User Service & System Service
+	"sceUserServiceInitialize":             "shim_sceUserServiceInitialize",
+	"sceUserServiceGetInitialUser":         "shim_sceUserServiceGetInitialUser",
+	"sceUserServiceGetLoginUserIdList":     "shim_sceUserServiceGetLoginUserIdList",
+	"sceUserServiceGetUserName":            "shim_sceUserServiceGetUserName",
+	"sceUserServiceGetEvent":               "shim_sceUserServiceGetEvent",
+	"sceUserServiceTerminate":              "shim_sceUserServiceTerminate",
+	"sceSystemServiceParamGetInt":          "shim_sceSystemServiceParamGetInt",
+	"sceSystemServiceParamGetString":       "shim_sceSystemServiceParamGetString",
+	"sceSystemServiceHideSplashScreen":     "shim_sceSystemServiceHideSplashScreen",
+	"sceSystemServiceGetStatus":            "shim_sceSystemServiceGetStatus",
+	"sceSystemServiceGetDisplaySafeAreaInfo": "shim_sceSystemServiceGetDisplaySafeAreaInfo",
+	"sceSystemServiceReceiveEvent":         "shim_sceSystemServiceReceiveEvent",
 	// PlayGo
 	"scePlayGoInitialize":      "shim_scePlayGoInitialize",
 	"scePlayGoTerminate":       "shim_scePlayGoTerminate",
@@ -1448,45 +1455,59 @@ func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
 					return err
 				}
 			}
-		} else if targetAddr, isCompanion := e.lookupCompanionExport(rel.SymName); isCompanion {
-			if e.hasFunction(targetAddr) {
-				if rel.PltAddr != 0 {
-					if _, ok := registeredAddrs[rel.PltAddr]; !ok {
-						registeredAddrs[rel.PltAddr] = struct{}{}
-						if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x); // Companion PLT %s\n", rel.PltAddr, targetAddr, rel.SymName); err != nil {
+			emitUnresolved := func(addr uint64, kind string) error {
+				if _, ok := registeredAddrs[addr]; ok {
+					return nil
+				}
+				registeredAddrs[addr] = struct{}{}
+				nid := elfloader.NIDPrefix(rel.SymName)
+				canon := ""
+				if resolved, ok := elfloader.ResolveNID(rel.SymName); ok {
+					canon = resolved
+				}
+				lib := ""
+				if e.elf != nil {
+					lib = e.elf.LibraryForNID(rel.SymName)
+				}
+				if _, err := fmt.Fprintf(w, "    recomp_register_unresolved(0x%xULL, %q, %q, %q);\n", addr, nid, canon, lib); err != nil {
+					return err
+				}
+				_, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, shim_unresolved_stub); // Unresolved %s %s\n", addr, kind, rel.SymName)
+				return err
+			}
+			if targetAddr, isCompanion := e.lookupCompanionExport(rel.SymName); isCompanion {
+				if e.hasFunction(targetAddr) {
+					if rel.PltAddr != 0 {
+						if _, ok := registeredAddrs[rel.PltAddr]; !ok {
+							registeredAddrs[rel.PltAddr] = struct{}{}
+							if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x); // Companion PLT %s\n", rel.PltAddr, targetAddr, rel.SymName); err != nil {
+								return err
+							}
+						}
+					}
+					if _, ok := registeredAddrs[rel.Offset]; !ok {
+						registeredAddrs[rel.Offset] = struct{}{}
+						if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x); // Companion GOT %s\n", rel.Offset, targetAddr, rel.SymName); err != nil {
 							return err
 						}
 					}
-				}
-				if _, ok := registeredAddrs[rel.Offset]; !ok {
-					registeredAddrs[rel.Offset] = struct{}{}
-					if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x); // Companion GOT %s\n", rel.Offset, targetAddr, rel.SymName); err != nil {
-						return err
+				} else {
+					if rel.PltAddr != 0 {
+						if err := emitUnresolved(rel.PltAddr, "PLT"); err != nil {
+							return err
+						}
 					}
 				}
 			} else {
 				if rel.PltAddr != 0 {
-					if _, ok := registeredAddrs[rel.PltAddr]; !ok {
-						registeredAddrs[rel.PltAddr] = struct{}{}
-						if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, shim_unresolved_stub); // Unresolved PLT %s\n", rel.PltAddr, rel.SymName); err != nil {
-							return err
-						}
-					}
-				}
-			}
-		} else {
-			if rel.PltAddr != 0 {
-				if _, ok := registeredAddrs[rel.PltAddr]; !ok {
-					registeredAddrs[rel.PltAddr] = struct{}{}
-					if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, shim_unresolved_stub); // Unresolved PLT %s\n", rel.PltAddr, rel.SymName); err != nil {
+					if err := emitUnresolved(rel.PltAddr, "PLT"); err != nil {
 						return err
 					}
 				}
-			}
-			if _, ok := registeredAddrs[rel.Offset]; !ok {
-				registeredAddrs[rel.Offset] = struct{}{}
-				if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, shim_unresolved_stub); // Unresolved GOT %s\n", rel.Offset, rel.SymName); err != nil {
-					return err
+				if rel.Offset != 0 {
+					if err := emitUnresolved(rel.Offset, "GOT"); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -1670,7 +1691,7 @@ func (e *CEmitter) EmitGuestModules(path string) (err error) {
 		if s == "shim_unresolved_stub" {
 			continue
 		}
-		if _, err := fmt.Fprintf(w, "__attribute__((weak)) void %s(GuestContext *ctx) { shim_unresolved_stub(ctx); }\n", s); err != nil {
+		if _, err := fmt.Fprintf(w, "__attribute__((weak)) void %s(GuestContext *ctx) { recomp_unimplemented_shim(ctx, %q); }\n", s, s); err != nil {
 			return err
 		}
 	}

@@ -378,6 +378,17 @@ static inline void recomp_dispatch(GuestContext *ctx, uint64_t target) {
           (unsigned long long)ctx->r10, (unsigned long long)ctx->r11,
           (unsigned long long)ctx->r12, (unsigned long long)ctx->r13,
           (unsigned long long)ctx->r14, (unsigned long long)ctx->r15);
+  if (ctx->mem_base && ctx->rsp < ctx->mem_size) {
+    fprintf(stderr, "Guest call stack heuristic (RSP=0x%llx):\n", (unsigned long long)ctx->rsp);
+    uint64_t sp = ctx->rsp;
+    int frame = 0;
+    for (int i = 0; i < 64 && sp + 8 <= ctx->mem_size; i++, sp += 8) {
+      uint64_t val = *(uint64_t *)(ctx->mem_base + sp);
+      if (val >= 0x10000 && val < (1ULL << 48) && val != (uint64_t)-1) {
+        fprintf(stderr, "  frame #%d: 0x%016llx (RSP+0x%x)\n", frame++, (unsigned long long)val, (unsigned int)(sp - ctx->rsp));
+      }
+    }
+  }
   fflush(stderr);
   abort();
 }

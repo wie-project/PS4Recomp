@@ -55,12 +55,94 @@ static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
     exit(1);
 }
 
+#define UNRESOLVED_BUCKETS 1024
+static RecompUnresolvedSym *g_unresolved_table[UNRESOLVED_BUCKETS];
+static pthread_mutex_t g_unresolved_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void recomp_register_unresolved(uint64_t addr, const char *nid, const char *sym_name, const char *lib_name) {
+    if (!addr) return;
+    uint32_t bucket = (uint32_t)((addr ^ (addr >> 12)) % UNRESOLVED_BUCKETS);
+    pthread_mutex_lock(&g_unresolved_mutex);
+    RecompUnresolvedSym *entry = (RecompUnresolvedSym *)malloc(sizeof(RecompUnresolvedSym));
+    if (entry) {
+        entry->addr = addr;
+        entry->nid = nid ? strdup(nid) : NULL;
+        entry->sym_name = sym_name ? strdup(sym_name) : NULL;
+        entry->lib_name = lib_name ? strdup(lib_name) : NULL;
+        entry->next = g_unresolved_table[bucket];
+        g_unresolved_table[bucket] = entry;
+    }
+    pthread_mutex_unlock(&g_unresolved_mutex);
+}
+
+const RecompUnresolvedSym *recomp_lookup_unresolved(uint64_t addr) {
+    uint32_t bucket = (uint32_t)((addr ^ (addr >> 12)) % UNRESOLVED_BUCKETS);
+    pthread_mutex_lock(&g_unresolved_mutex);
+    RecompUnresolvedSym *curr = g_unresolved_table[bucket];
+    while (curr) {
+        if (curr->addr == addr) {
+            pthread_mutex_unlock(&g_unresolved_mutex);
+            return curr;
+        }
+        curr = curr->next;
+    }
+    pthread_mutex_unlock(&g_unresolved_mutex);
+    return NULL;
+}
+
 void shim_unresolved_stub(GuestContext *ctx) {
-    fprintf(stderr, "[ps4-recomp] WARN: Called unresolved function at RIP=0x%llx (RSP=0x%llx)\n",
-            (unsigned long long)ctx->rip, (unsigned long long)ctx->rsp);
+    uint64_t caller_rip = 0;
+    if (ctx && ctx->mem_base && ctx->rsp + 8 <= ctx->mem_size) {
+        caller_rip = *(uint64_t *)(ctx->mem_base + ctx->rsp);
+    }
+    const RecompUnresolvedSym *sym = recomp_lookup_unresolved(ctx ? ctx->rip : 0);
+    if (sym && sym->sym_name && sym->sym_name[0]) {
+        fprintf(stderr,
+                "[ps4-recomp] WARN: Called unimplemented function '%s' (NID: %s, Lib: %s) at RIP=0x%llx (caller RIP=0x%llx, RSP=0x%llx)\n",
+                sym->sym_name,
+                sym->nid ? sym->nid : "unknown",
+                sym->lib_name ? sym->lib_name : "unknown",
+                (unsigned long long)(ctx ? ctx->rip : 0),
+                (unsigned long long)caller_rip,
+                (unsigned long long)(ctx ? ctx->rsp : 0));
+    } else if (sym && sym->nid && sym->nid[0]) {
+        fprintf(stderr,
+                "[ps4-recomp] WARN: Called unimplemented function NID '%s' (Lib: %s) at RIP=0x%llx (caller RIP=0x%llx, RSP=0x%llx)\n",
+                sym->nid,
+                sym->lib_name ? sym->lib_name : "unknown",
+                (unsigned long long)(ctx ? ctx->rip : 0),
+                (unsigned long long)caller_rip,
+                (unsigned long long)(ctx ? ctx->rsp : 0));
+    } else {
+        fprintf(stderr,
+                "[ps4-recomp] WARN: Called unresolved function at RIP=0x%llx (caller RIP=0x%llx, RSP=0x%llx)\n",
+                (unsigned long long)(ctx ? ctx->rip : 0),
+                (unsigned long long)caller_rip,
+                (unsigned long long)(ctx ? ctx->rsp : 0));
+    }
     fflush(stderr);
-    ctx->rax = 0;
-    ctx->rsp += 8;
+    if (ctx) {
+        ctx->rax = 0;
+        ctx->rsp += 8;
+    }
+}
+
+void recomp_unimplemented_shim(GuestContext *ctx, const char *shim_name) {
+    uint64_t caller_rip = 0;
+    if (ctx && ctx->mem_base && ctx->rsp + 8 <= ctx->mem_size) {
+        caller_rip = *(uint64_t *)(ctx->mem_base + ctx->rsp);
+    }
+    fprintf(stderr,
+            "[ps4-recomp] WARN: Called unimplemented host shim '%s' at RIP=0x%llx (caller RIP=0x%llx, RSP=0x%llx)\n",
+            shim_name ? shim_name : "unknown",
+            (unsigned long long)(ctx ? ctx->rip : 0),
+            (unsigned long long)caller_rip,
+            (unsigned long long)(ctx ? ctx->rsp : 0));
+    fflush(stderr);
+    if (ctx) {
+        ctx->rax = 0;
+        ctx->rsp += 8;
+    }
 }
 
 void recomp_register_fn(uint64_t guest_addr, recomp_fn_t fn) {

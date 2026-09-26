@@ -21,6 +21,19 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr, size_t 
 int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size);
 GuestVMExtent *recomp_vm_find(GuestContext *ctx, uint64_t addr);
 
+// Unresolved Symbol Diagnostics
+typedef struct RecompUnresolvedSym {
+    uint64_t addr;
+    char *nid;
+    char *sym_name;
+    char *lib_name;
+    struct RecompUnresolvedSym *next;
+} RecompUnresolvedSym;
+
+void recomp_register_unresolved(uint64_t addr, const char *nid, const char *sym_name, const char *lib_name);
+const RecompUnresolvedSym *recomp_lookup_unresolved(uint64_t addr);
+void recomp_unimplemented_shim(GuestContext *ctx, const char *shim_name);
+
 // Syscall / Libkernel Shim declarations
 void shim_unresolved_stub(GuestContext *ctx);
 void shim_sceKernelUsleep(GuestContext *ctx);
@@ -246,6 +259,7 @@ void shim_sceKernelAvailableDirectMemorySize(GuestContext *ctx);
 void shim_sceKernelMapDirectMemory(GuestContext *ctx);
 void shim_sceKernelReleaseDirectMemory(GuestContext *ctx);
 void shim_sceKernelMapFlexibleMemory(GuestContext *ctx);
+void shim_sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx);
 void shim_sceKernelAvailableFlexibleMemorySize(GuestContext *ctx);
 void shim_sceKernelVirtualQuery(GuestContext *ctx);
 void shim_sceKernelQueryMemoryProtection(GuestContext *ctx);
@@ -253,6 +267,14 @@ void shim_sceKernelMemoryPoolReserve(GuestContext *ctx);
 void shim_sceKernelMemoryPoolExpand(GuestContext *ctx);
 void shim_sceKernelMemoryPoolCommit(GuestContext *ctx);
 void shim_sceKernelMemoryPoolDecommit(GuestContext *ctx);
+
+// System Service shims
+void shim_sceSystemServiceParamGetInt(GuestContext *ctx);
+void shim_sceSystemServiceParamGetString(GuestContext *ctx);
+void shim_sceSystemServiceHideSplashScreen(GuestContext *ctx);
+void shim_sceSystemServiceGetStatus(GuestContext *ctx);
+void shim_sceSystemServiceGetDisplaySafeAreaInfo(GuestContext *ctx);
+void shim_sceSystemServiceReceiveEvent(GuestContext *ctx);
 
 // Orbis Event Flags
 void shim_sceKernelCreateEventFlag(GuestContext *ctx);

@@ -72,6 +72,32 @@ int main(void) {
     }
     printf("[+] System Software Version: 0x%08x (\"%s\")\n", swVer.Version, swVer.VersionString);
 
-    printf("[SUCCESS] All PS4 Process Timers and CPU Sys tests PASSED!\n");
+    // 7. Configured Flexible Memory Size
+    uint64_t flexMemSize = 0;
+    extern int sceKernelConfiguredFlexibleMemorySize(uint64_t *sizeOut);
+    rc = sceKernelConfiguredFlexibleMemorySize(&flexMemSize);
+    if (rc != 0 || flexMemSize != (512ULL * 1024 * 1024)) {
+        printf("ERROR: sceKernelConfiguredFlexibleMemorySize failed: rc=%d, size=%llu\n", rc, (unsigned long long)flexMemSize);
+        return 1;
+    }
+    printf("[+] sceKernelConfiguredFlexibleMemorySize = %llu MB\n", (unsigned long long)(flexMemSize / (1024 * 1024)));
+
+    // 8. System Service Parameters
+    extern int sceSystemServiceParamGetInt(int paramId, int *value);
+    int lang = 0;
+    rc = sceSystemServiceParamGetInt(1 /* Lang */, &lang);
+    if (rc != 0 || lang != 1) {
+        printf("ERROR: sceSystemServiceParamGetInt(Lang) failed: rc=%d, lang=%d\n", rc, lang);
+        return 1;
+    }
+    int enterBtn = 0;
+    rc = sceSystemServiceParamGetInt(1000 /* EnterButtonAssign */, &enterBtn);
+    if (rc != 0 || enterBtn != 1) {
+        printf("ERROR: sceSystemServiceParamGetInt(EnterButton) failed: rc=%d, btn=%d\n", rc, enterBtn);
+        return 1;
+    }
+    printf("[+] sceSystemServiceParamGetInt: Lang=%d, EnterButton=%d\n", lang, enterBtn);
+
+    printf("[SUCCESS] All PS4 Process Timers, System and Memory tests PASSED!\n");
     return 0;
 }

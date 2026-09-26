@@ -39,6 +39,7 @@ int sceKernelReleaseDirectMemory(off_t physAddr, size_t length);
 
 // Flexible Memory & VMM
 int sceKernelMapFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags);
+int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut);
 size_t sceKernelAvailableFlexibleMemorySize(GuestContext *ctx);
 int sceKernelVirtualQuery(GuestContext *ctx, const void *addr, int flags, OrbisKernelVirtualQueryInfo *info, size_t infoSize);
 int sceKernelQueryMemoryProtection(GuestContext *ctx, const void *addr, void **start, void **end, int *prot);
@@ -57,6 +58,7 @@ void shim_sceKernelMapDirectMemory(GuestContext *ctx);
 void shim_sceKernelGetDirectMemorySize(GuestContext *ctx);
 void shim_sceKernelAvailableDirectMemorySize(GuestContext *ctx);
 void shim_sceKernelMapFlexibleMemory(GuestContext *ctx);
+void shim_sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx);
 void shim_sceKernelAvailableFlexibleMemorySize(GuestContext *ctx);
 void shim_sceKernelVirtualQuery(GuestContext *ctx);
 void shim_sceKernelQueryMemoryProtection(GuestContext *ctx);
