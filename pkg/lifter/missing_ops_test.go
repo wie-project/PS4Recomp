@@ -464,6 +464,30 @@ func TestMissingOpsLifting(t *testing.T) {
 			},
 			contains: "((uint16_t)ctx->fs_base)",
 		},
+		{
+			name: "STMXCSR_mem",
+			inst: disasm.Instruction{
+				Address: 0xb25f76a,
+				Inst: x86asm.Inst{
+					Op:   x86asm.STMXCSR,
+					Args: x86asm.Args{x86asm.Mem{Base: x86asm.RBP, Disp: -0xc}},
+					Len:  4,
+				},
+			},
+			contains: "ctx->mxcsr",
+		},
+		{
+			name: "LDMXCSR_mem",
+			inst: disasm.Instruction{
+				Address: 0xb25f770,
+				Inst: x86asm.Inst{
+					Op:   x86asm.LDMXCSR,
+					Args: x86asm.Args{x86asm.Mem{Base: x86asm.RBP, Disp: -0xc}},
+					Len:  4,
+				},
+			},
+			contains: "ctx->mxcsr",
+		},
 	}
 
 	for _, tc := range testCases {

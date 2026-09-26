@@ -97,7 +97,13 @@ func MemReadExpr(addrExpr string, size int) (string, error) {
 		return "MEM_U16(" + addrExpr + ")", nil
 	case 4:
 		return "MEM_U32(" + addrExpr + ")", nil
+	case 6:
+		// 48-bit far pointer (16-bit selector + 32-bit offset) in flat 64-bit address space
+		return "(uint64_t)MEM_U32(" + addrExpr + ")", nil
 	case 8:
+		return "MEM_U64(" + addrExpr + ")", nil
+	case 10:
+		// 80-bit far pointer (16-bit selector + 64-bit offset) in flat 64-bit address space
 		return "MEM_U64(" + addrExpr + ")", nil
 	default:
 		return "", fmt.Errorf("unsupported memory read size: %d", size)
