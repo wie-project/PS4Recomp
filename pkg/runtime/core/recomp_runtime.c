@@ -291,6 +291,32 @@ GuestContext *recomp_init_runtime_file(const char *image_filename, size_t reques
         }
     }
     fclose(fp);
+
+    // Initialize stack canary if needed
+    if (ctx->mem_base) {
+        uint64_t *canary_ptr = (uint64_t *)(ctx->mem_base + 0x96f05d8ULL);
+        if (*canary_ptr == 0) {
+            uint64_t canary_addr = 0x9f50000ULL;
+            *(uint64_t *)(ctx->mem_base + canary_addr) = 0x595e9fbd94fda766ULL;
+            *canary_ptr = canary_addr;
+            printf("[ps4-recomp] Initialized stack canary at 0x%llx\n", (unsigned long long)canary_addr);
+        }
+
+        // Call SceLibcParam init function to initialize custom memory allocator
+        uint64_t proc_param_addr = 0x9800000ULL;
+        uint64_t libc_param_addr = *(uint64_t *)(ctx->mem_base + proc_param_addr + 0x38ULL);
+        if (libc_param_addr != 0) {
+            uint64_t malloc_replace_addr = *(uint64_t *)(ctx->mem_base + libc_param_addr + 0x30ULL);
+            if (malloc_replace_addr != 0) {
+                uint64_t init_func = *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x10ULL);
+                if (init_func != 0) {
+                    printf("[ps4-recomp] Calling SceLibcParam init function at 0x%llx...\n", (unsigned long long)init_func);
+                    recomp_call_guest(ctx, init_func);
+                }
+            }
+        }
+    }
+
     return ctx;
 }
 
@@ -780,10 +806,11 @@ void recomp_vpcmpistri(GuestContext *ctx, const void *src2_ptr, const void *src1
     ctx->rcx = (uint64_t)index;
 
     // Update EFLAGS: CF, ZF, SF, OF, clear AF & PF
-    ctx->rflags &= ~0x8D5ULL; // Clear CF(0), PF(2), AF(4), ZF(6), SF(7), OF(11)
-    if (int_res2 != 0) ctx->rflags |= (1ULL << 0);  // CF
-    if (len2 < sz)      ctx->rflags |= (1ULL << 6);  // ZF
-    if (len1 < sz)      ctx->rflags |= (1ULL << 7);  // SF
-    if (int_res2 & 1)   ctx->rflags |= (1ULL << 11); // OF
+    ctx->cf = (int_res2 != 0);
+    ctx->zf = (len2 < sz);
+    ctx->sf = (len1 < sz);
+    ctx->of = (int_res2 & 1);
+    ctx->af = 0;
+    ctx->pf = 0;
 }
 
