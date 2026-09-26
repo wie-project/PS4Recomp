@@ -46,9 +46,11 @@ func MemAddrExpr(mem x86asm.Mem, nextPC uint64) (string, error) {
 
 	parts := make([]string, 0, 3)
 
-	// Segment (e.g. FS for TLS)
+	// Segment (e.g. FS for TLS, GS)
 	if mem.Segment == x86asm.FS {
 		parts = append(parts, "ctx->fs_base")
+	} else if mem.Segment == x86asm.GS {
+		parts = append(parts, "ctx->gs_base")
 	}
 
 	// Base register

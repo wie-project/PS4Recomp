@@ -42,11 +42,11 @@ func ConditionExpr(op x86asm.Op) (string, error) {
 	case x86asm.JNP:
 		return "!ctx->pf", nil
 	case x86asm.JCXZ:
-		return "((uint16_t)ctx->rcx == 0)", nil
+		return "(uint16_t)ctx->rcx == 0", nil
 	case x86asm.JECXZ:
-		return "((uint32_t)ctx->rcx == 0)", nil
+		return "(uint32_t)ctx->rcx == 0", nil
 	case x86asm.JRCXZ:
-		return "(ctx->rcx == 0)", nil
+		return "ctx->rcx == 0", nil
 	default:
 		return "", fmt.Errorf("unsupported condition op: %v", op)
 	}

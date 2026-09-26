@@ -128,13 +128,6 @@ var regMap = map[x86asm.Reg]RegInfo{
 	x86asm.M6: {BaseReg: "mmx[6]", Size: 8},
 	x86asm.M7: {BaseReg: "mmx[7]", Size: 8},
 
-	// Segment registers (16-bit selector in x86-64)
-	x86asm.FS: {BaseReg: "fs_base", Size: 2},
-	x86asm.GS: {BaseReg: "gs_base", Size: 2},
-	x86asm.CS: {BaseReg: "cs", Size: 2},
-	x86asm.DS: {BaseReg: "ds", Size: 2},
-	x86asm.ES: {BaseReg: "es", Size: 2},
-	x86asm.SS: {BaseReg: "ss", Size: 2},
 }
 
 type regReadEntry struct {
@@ -177,14 +170,17 @@ func init() {
 		}
 	}
 
-	// Segment register read/write special handling:
+	// Segment register read/write special handling in x86-64 flat mode:
 	// FS: reads ctx->fs_base, writes ctx->fs_base
-	// GS: reads 0, writes no-op (or ctx->gs_base if needed)
+	// GS: reads ctx->gs_base, writes ctx->gs_base
 	// CS, DS, ES, SS: in x86-64 flat mode, reads 0, writes ignored
 	regReadTable[x86asm.FS] = regReadEntry{expr: "((uint16_t)ctx->fs_base)", size: 2, ok: true}
 	regWriteTable[x86asm.FS] = regWriteEntry{prefix: "ctx->fs_base = (uint64_t)(uint16_t)(", suffix: ");", ok: true}
 
-	for _, seg := range []x86asm.Reg{x86asm.GS, x86asm.CS, x86asm.DS, x86asm.ES, x86asm.SS} {
+	regReadTable[x86asm.GS] = regReadEntry{expr: "((uint16_t)ctx->gs_base)", size: 2, ok: true}
+	regWriteTable[x86asm.GS] = regWriteEntry{prefix: "ctx->gs_base = (uint64_t)(uint16_t)(", suffix: ");", ok: true}
+
+	for _, seg := range []x86asm.Reg{x86asm.CS, x86asm.DS, x86asm.ES, x86asm.SS} {
 		regReadTable[seg] = regReadEntry{expr: "((uint16_t)0)", size: 2, ok: true}
 		regWriteTable[seg] = regWriteEntry{prefix: "/* ignored seg write: */ (void)(", suffix: ");", ok: true}
 	}

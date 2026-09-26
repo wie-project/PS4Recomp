@@ -434,7 +434,7 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	}
 	incFlags = append(incFlags, ftCflags...)
 
-	cflags := []string{"-O" + optLevel, "-fvisibility=hidden"}
+	cflags := []string{"-O" + optLevel, "-fvisibility=hidden", "-Wno-parentheses-equality"}
 	if asan {
 		cflags = append(cflags, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
 	}
@@ -556,6 +556,7 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 				clangArgs := []string{
 					"-O" + optLevel,
 					"-fvisibility=hidden",
+					"-Wno-parentheses-equality",
 					"-I" + outDir,
 				}
 				for _, inc := range includeDirs {

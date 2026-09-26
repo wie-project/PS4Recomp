@@ -63,6 +63,7 @@ typedef struct GuestContext {
   uint64_t r15;
   uint64_t rip;
   uint64_t fs_base;
+  uint64_t gs_base;
 
   // CPU Flags
   uint8_t cf;
