@@ -158,7 +158,8 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.VPMOVSXBQ, x86asm.VPMOVZXBQ,
 		// BMI1 / BMI2 opcodes
 		x86asm.ANDN, x86asm.BEXTR, x86asm.BLSI, x86asm.BLSMSK, x86asm.BLSR, x86asm.BZHI,
-		x86asm.MULX, x86asm.RORX, x86asm.SARX, x86asm.SHLX, x86asm.SHRX:
+		x86asm.MULX, x86asm.RORX, x86asm.SARX, x86asm.SHLX, x86asm.SHRX,
+		x86asm.VPCMPISTRI, x86asm.PCMPISTRI:
 		return true
 	default:
 		return isSetcc(op) || isCmovcc(op) || IsJcc(op)
@@ -1543,6 +1544,13 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		x86asm.VPMOVSXBW, x86asm.VPMOVZXBW, x86asm.VPMOVSXWQ, x86asm.VPMOVZXWQ,
 		x86asm.VPMOVSXBQ, x86asm.VPMOVZXBQ:
 		code, err := l.liftVexOp(op, args, defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.VPCMPISTRI, x86asm.PCMPISTRI:
+		code, err := l.liftPcmpistri(op, args, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}

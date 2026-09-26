@@ -210,10 +210,13 @@ void shim_pthread_detach(GuestContext *ctx) {
 }
 
 void shim_pthread_self(GuestContext *ctx) {
-  if (g_current_thread) {
+  if (ctx && ctx->fs_base) {
+    uint64_t t = MEM_U64(ctx->fs_base + 0x10);
+    ctx->rax = (t != 0) ? t : ctx->fs_base;
+  } else if (g_current_thread) {
     ctx->rax = (uint64_t)g_current_thread;
   } else {
-    ctx->rax = (uint64_t)&g_main_thread_obj;
+    ctx->rax = 0x1000ULL;
   }
   SHIM_RETURN();
 }

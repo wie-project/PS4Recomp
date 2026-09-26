@@ -308,42 +308,59 @@ int sceKernelQueryMemoryProtection(GuestContext *ctx, const void *addr, void **s
 }
 
 // Memory Pool implementation
-int sceKernelMemoryPoolReserve(GuestContext *ctx, void **addrOut, size_t size, int flags) {
-    if (!ctx || !addrOut || size == 0) return -EINVAL;
-    size_t aligned_size = (size + 4095ULL) & ~4095ULL;
-    uint64_t vaddr = recomp_vm_alloc_named(ctx, aligned_size, PROT_READ | PROT_WRITE, flags, "pool_mem");
+int sceKernelMemoryPoolReserve(GuestContext *ctx, void *addrIn, size_t len, size_t alignment, int flags, void **addrOut) {
+    if (!ctx || !addrOut || len == 0) return -EINVAL;
+    if (alignment == 0) alignment = 2ULL * 1024 * 1024; // 2MB default alignment
+    size_t aligned_size = (len + alignment - 1) & ~(alignment - 1);
+
+    uint64_t vaddr = (uint64_t)-1;
+    if (addrIn != NULL) {
+        uint64_t req_vaddr = (uint64_t)addrIn;
+        vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_size, PROT_READ | PROT_WRITE, flags, "pool_reserved");
+        if (vaddr == (uint64_t)-1) {
+            // In case the guest requested a fixed virtual reservation that is outside
+            // the initial linear window, accept the requested virtual base.
+            vaddr = req_vaddr;
+        }
+    } else {
+        vaddr = recomp_vm_alloc_named(ctx, aligned_size, PROT_READ | PROT_WRITE, flags, "pool_reserved");
+    }
+
     if (vaddr == (uint64_t)-1) {
         return -ENOMEM;
     }
+
     *addrOut = (void *)vaddr;
-    return 0;
+    return 0; // ORBIS_OK
 }
 
-int sceKernelMemoryPoolExpand(GuestContext *ctx, void *addr, size_t size) {
+int sceKernelMemoryPoolExpand(GuestContext *ctx, off_t searchStart, off_t searchEnd, size_t len, size_t alignment, off_t *physAddrOut) {
     (void)ctx;
-    (void)addr;
-    (void)size;
-    return 0;
+    if (len == 0 || !physAddrOut) return -EINVAL;
+    if (alignment == 0) alignment = 64ULL * 1024; // 64KB default alignment
+    return sceKernelAllocateDirectMemory(searchStart, searchEnd, len, alignment, 3 /* POOLED */, physAddrOut);
 }
 
-int sceKernelMemoryPoolCommit(GuestContext *ctx, void *addr, size_t size, int flags) {
+int sceKernelMemoryPoolCommit(GuestContext *ctx, void *addr, size_t len, int type, int prot, int flags) {
     (void)ctx;
-    (void)addr;
-    (void)size;
+    (void)type;
+    (void)prot;
     (void)flags;
-    return 0;
+    if (!addr || len == 0) return -EINVAL;
+    return 0; // ORBIS_OK
 }
 
-int sceKernelMemoryPoolDecommit(GuestContext *ctx, void *addr, size_t size) {
-    if (!ctx || !addr || size == 0) return -EINVAL;
+int sceKernelMemoryPoolDecommit(GuestContext *ctx, void *addr, size_t len, int flags) {
+    (void)flags;
+    if (!ctx || !addr || len == 0) return -EINVAL;
     GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
     uint64_t vaddr = (uint64_t)addr;
-    if (proc->mem_base && vaddr + size <= proc->mem_size) {
+    if (proc->mem_base && vaddr + len <= proc->mem_size) {
 #if defined(__APPLE__) || defined(__linux__)
-        madvise(proc->mem_base + vaddr, size, MADV_DONTNEED);
+        madvise(proc->mem_base + vaddr, len, MADV_DONTNEED);
 #endif
     }
-    return 0;
+    return 0; // ORBIS_OK
 }
 
 // Shims for guest execution
@@ -385,7 +402,41 @@ void shim_sceKernelGetDirectMemorySize(GuestContext *ctx) {
 }
 
 void shim_sceKernelAvailableDirectMemorySize(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceKernelAvailableDirectMemorySize();
+    uint64_t startOutGuest = ctx->rcx;
+    uint64_t sizeOutGuest = ctx->r8;
+
+    if (startOutGuest != 0 || sizeOutGuest != 0) {
+        // PS4 SDK convention:
+        // int sceKernelAvailableDirectMemorySize(off_t searchStart, off_t searchEnd, int flags, off_t *startOut, size_t *sizeOut)
+        // Returns 0 on success, writes free block start and size.
+        off_t searchStart = (off_t)ctx->rdi;
+        off_t searchEnd = (off_t)ctx->rsi;
+        (void)searchEnd;
+
+        ps4_direct_mem_init();
+        pthread_mutex_lock(&g_direct_mutex);
+        size_t free_total = 0;
+        off_t best_start = searchStart;
+        DirectMemBlock *curr = g_direct_blocks;
+        while (curr) {
+            if (curr->is_free) {
+                free_total += curr->size;
+                if (best_start == 0) best_start = curr->phys_offset;
+            }
+            curr = curr->next;
+        }
+        pthread_mutex_unlock(&g_direct_mutex);
+
+        if (startOutGuest && startOutGuest < ctx->mem_size) {
+            *(off_t *)(ctx->mem_base + startOutGuest) = best_start;
+        }
+        if (sizeOutGuest && sizeOutGuest < ctx->mem_size) {
+            *(size_t *)(ctx->mem_base + sizeOutGuest) = free_total;
+        }
+        ctx->rax = 0; // SCE_OK
+    } else {
+        ctx->rax = (uint64_t)sceKernelAvailableDirectMemorySize();
+    }
     SHIM_RETURN();
 }
 
@@ -480,37 +531,68 @@ void shim_sceKernelQueryMemoryProtection(GuestContext *ctx) {
 }
 
 void shim_sceKernelMemoryPoolReserve(GuestContext *ctx) {
-    uint64_t addrOutGuest = ctx->rdi;
-    size_t size = (size_t)ctx->rsi;
-    int flags = (int)ctx->rdx;
+    // PS4 ABI: sceKernelMemoryPoolReserve(void* addr_in, u64 len, u64 alignment, s32 flags, void** addr_out)
+    // RDI: addr_in, RSI: len, RDX: alignment, RCX: flags, R8: addr_out
+    void *addr_in = (void *)ctx->rdi;
+    size_t len = (size_t)ctx->rsi;
+    size_t alignment = (size_t)ctx->rdx;
+    int flags = (int)ctx->rcx;
+    uint64_t addrOutGuest = ctx->r8;
 
-    void *addr = NULL;
-    int rc = sceKernelMemoryPoolReserve(ctx, &addr, size, flags);
-    if (rc == 0 && addrOutGuest) {
-        *(uint64_t *)(ctx->mem_base + addrOutGuest) = (uint64_t)addr;
+    // Handle compatibility with old 3-arg stub (addr_out in RDI) if R8 == 0
+    if (addrOutGuest == 0 && ctx->rdi != 0 && ctx->rsi != 0 && ctx->rdx != 0 && ctx->rcx == 0) {
+        addrOutGuest = ctx->rdi;
+        addr_in = NULL;
+        flags = (int)ctx->rdx;
+    }
+
+    void *addrOut = NULL;
+    int rc = sceKernelMemoryPoolReserve(ctx, addr_in, len, alignment, flags, &addrOut);
+    if (rc == 0 && addrOutGuest != 0 && addrOutGuest < ctx->mem_size) {
+        *(uint64_t *)(ctx->mem_base + addrOutGuest) = (uint64_t)addrOut;
     }
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 
 void shim_sceKernelMemoryPoolExpand(GuestContext *ctx) {
-    uint64_t addr = ctx->rdi;
-    size_t size = (size_t)ctx->rsi;
-    ctx->rax = (uint64_t)(int64_t)sceKernelMemoryPoolExpand(ctx, (void *)addr, size);
+    // PS4 ABI: sceKernelMemoryPoolExpand(u64 searchStart, u64 searchEnd, u64 len, u64 alignment, u64* physAddrOut)
+    // RDI: searchStart, RSI: searchEnd, RDX: len, RCX: alignment, R8: physAddrOut
+    off_t searchStart = (off_t)ctx->rdi;
+    off_t searchEnd = (off_t)ctx->rsi;
+    size_t len = (size_t)ctx->rdx;
+    size_t alignment = (size_t)ctx->rcx;
+    uint64_t physAddrOutGuest = ctx->r8;
+
+    off_t physAddr = 0;
+    int rc = sceKernelMemoryPoolExpand(ctx, searchStart, searchEnd, len, alignment, &physAddr);
+    if (rc == 0 && physAddrOutGuest != 0 && physAddrOutGuest < ctx->mem_size) {
+        *(uint64_t *)(ctx->mem_base + physAddrOutGuest) = (uint64_t)physAddr;
+    }
+    ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 
 void shim_sceKernelMemoryPoolCommit(GuestContext *ctx) {
-    uint64_t addr = ctx->rdi;
-    size_t size = (size_t)ctx->rsi;
-    int flags = (int)ctx->rdx;
-    ctx->rax = (uint64_t)(int64_t)sceKernelMemoryPoolCommit(ctx, (void *)addr, size, flags);
+    // PS4 ABI: sceKernelMemoryPoolCommit(void* addr, u64 len, s32 type, s32 prot, s32 flags)
+    // RDI: addr, RSI: len, RDX: type, RCX: prot, R8: flags
+    void *addr = (void *)ctx->rdi;
+    size_t len = (size_t)ctx->rsi;
+    int type = (int)ctx->rdx;
+    int prot = (int)ctx->rcx;
+    int flags = (int)ctx->r8;
+    int rc = sceKernelMemoryPoolCommit(ctx, addr, len, type, prot, flags);
+    ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 
 void shim_sceKernelMemoryPoolDecommit(GuestContext *ctx) {
-    uint64_t addr = ctx->rdi;
-    size_t size = (size_t)ctx->rsi;
-    ctx->rax = (uint64_t)(int64_t)sceKernelMemoryPoolDecommit(ctx, (void *)addr, size);
+    // PS4 ABI: sceKernelMemoryPoolDecommit(void* addr, u64 len, s32 flags)
+    // RDI: addr, RSI: len, RDX: flags
+    void *addr = (void *)ctx->rdi;
+    size_t len = (size_t)ctx->rsi;
+    int flags = (int)ctx->rdx;
+    int rc = sceKernelMemoryPoolDecommit(ctx, addr, len, flags);
+    ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }

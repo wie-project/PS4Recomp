@@ -370,7 +370,8 @@ func applyRelaTable(loaded *LoadedELF, relData []byte, isPlt bool) {
 			}
 		}
 
-		if relType == R_X86_64_GLOB_DAT && symName == "__stack_chk_guard" {
+		canonSym, _ := ResolveNID(symName)
+		if (relType == R_X86_64_GLOB_DAT || relType == R_X86_64_64) && (symName == "__stack_chk_guard" || canonSym == "__stack_chk_guard") {
 			applyStackCanary(loaded, offset)
 		}
 

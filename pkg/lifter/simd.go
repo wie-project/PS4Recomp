@@ -94,8 +94,21 @@ func (l *Lifter) liftVectorXor(dst, src x86asm.Arg, nextPC uint64) ([]string, er
 	dstReg, ok1 := dst.(x86asm.Reg)
 	srcReg, ok2 := src.(x86asm.Reg)
 	if ok1 && ok2 && dstReg == srcReg {
-		info := regMap[dstReg]
-		return []string{fmt.Sprintf("    memset(&ctx->%s, 0, 16);", info.BaseReg)}, nil
+		if isXmm(dstReg) {
+			info := regMap[dstReg]
+			dIdx := int(dstReg - x86asm.X0)
+			return []string{
+				fmt.Sprintf("    memset(&ctx->%s, 0, 16);", info.BaseReg),
+				fmt.Sprintf("    memset(&ctx->ymmh[%d], 0, 16);", dIdx),
+			}, nil
+		}
+		if isYmm(dstReg) {
+			dIdx := ymmIdx(dstReg)
+			return []string{
+				fmt.Sprintf("    memset(&ctx->xmm[%d], 0, 16);", dIdx),
+				fmt.Sprintf("    memset(&ctx->ymmh[%d], 0, 16);", dIdx),
+			}, nil
+		}
 	}
 	return l.liftVectorBitwise(" ^ ", dst, src, nextPC)
 }
@@ -571,12 +584,44 @@ func (l *Lifter) liftPackedF32(op string, dst, src x86asm.Arg, nextPC uint64) ([
 
 func (l *Lifter) liftCvtdq2ps(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok := dst.(x86asm.Reg)
-	if !ok || !isXmm(dstReg) {
-		return nil, fmt.Errorf("cvtdq2ps dst must be XMM register")
+	if !ok || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("cvtdq2ps dst must be XMM or YMM register")
 	}
-	infoDst := regMap[dstReg]
 	var lines []string
 	lines = append(lines, "    {")
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		if srcReg, ok := src.(x86asm.Reg); ok && isYmm(srcReg) {
+			sIdx := ymmIdx(srcReg)
+			lines = append(lines,
+				fmt.Sprintf("      xmm_reg_t src_lo = ctx->xmm[%d];", sIdx),
+				fmt.Sprintf("      xmm_reg_t src_hi = ctx->ymmh[%d];", sIdx),
+			)
+		} else if srcMem, ok := src.(x86asm.Mem); ok {
+			addr, err := MemAddrExpr(srcMem, nextPC)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines,
+				"      xmm_reg_t src_lo, src_hi;",
+				fmt.Sprintf("      memcpy(&src_lo, ctx->mem_base + (%s), 16);", addr),
+				fmt.Sprintf("      memcpy(&src_hi, ctx->mem_base + (%s) + 16, 16);", addr),
+			)
+		} else {
+			return nil, fmt.Errorf("cvtdq2ps invalid src")
+		}
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      ctx->xmm[%d].f32[%d] = (float)src_lo.s32[%d];", dIdx, i, i),
+				fmt.Sprintf("      ctx->ymmh[%d].f32[%d] = (float)src_hi.s32[%d];", dIdx, i, i),
+			)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
 		infoSrc := regMap[srcReg]
 		lines = append(lines, fmt.Sprintf("      xmm_reg_t src = ctx->%s;", infoSrc.BaseReg))
@@ -596,18 +641,50 @@ func (l *Lifter) liftCvtdq2ps(dst, src x86asm.Arg, nextPC uint64) ([]string, err
 	for i := 0; i < 4; i++ {
 		lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] = (float)src.s32[%d];", infoDst.BaseReg, i, i))
 	}
-	lines = append(lines, "    }")
+	lines = append(lines, fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx), "    }")
 	return lines, nil
 }
 
 func (l *Lifter) liftCvtps2dq(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok := dst.(x86asm.Reg)
-	if !ok || !isXmm(dstReg) {
-		return nil, fmt.Errorf("cvtps2dq dst must be XMM register")
+	if !ok || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("cvtps2dq dst must be XMM or YMM register")
 	}
-	infoDst := regMap[dstReg]
 	var lines []string
 	lines = append(lines, "    {")
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		if srcReg, ok := src.(x86asm.Reg); ok && isYmm(srcReg) {
+			sIdx := ymmIdx(srcReg)
+			lines = append(lines,
+				fmt.Sprintf("      xmm_reg_t src_lo = ctx->xmm[%d];", sIdx),
+				fmt.Sprintf("      xmm_reg_t src_hi = ctx->ymmh[%d];", sIdx),
+			)
+		} else if srcMem, ok := src.(x86asm.Mem); ok {
+			addr, err := MemAddrExpr(srcMem, nextPC)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines,
+				"      xmm_reg_t src_lo, src_hi;",
+				fmt.Sprintf("      memcpy(&src_lo, ctx->mem_base + (%s), 16);", addr),
+				fmt.Sprintf("      memcpy(&src_hi, ctx->mem_base + (%s) + 16, 16);", addr),
+			)
+		} else {
+			return nil, fmt.Errorf("cvtps2dq invalid src")
+		}
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      ctx->xmm[%d].s32[%d] = (int32_t)roundf(src_lo.f32[%d]);", dIdx, i, i),
+				fmt.Sprintf("      ctx->ymmh[%d].s32[%d] = (int32_t)roundf(src_hi.f32[%d]);", dIdx, i, i),
+			)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
 		infoSrc := regMap[srcReg]
 		lines = append(lines, fmt.Sprintf("      xmm_reg_t src = ctx->%s;", infoSrc.BaseReg))
@@ -627,7 +704,7 @@ func (l *Lifter) liftCvtps2dq(dst, src x86asm.Arg, nextPC uint64) ([]string, err
 	for i := 0; i < 4; i++ {
 		lines = append(lines, fmt.Sprintf("      ctx->%s.s32[%d] = (int32_t)roundf(src.f32[%d]);", infoDst.BaseReg, i, i))
 	}
-	lines = append(lines, "    }")
+	lines = append(lines, fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx), "    }")
 	return lines, nil
 }
 
@@ -697,15 +774,19 @@ func (l *Lifter) liftPavgw(dst, src x86asm.Arg, nextPC uint64) ([]string, error)
 
 func (l *Lifter) liftVbroadcastss(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok := dst.(x86asm.Reg)
-	if !ok || !isXmm(dstReg) {
-		return nil, fmt.Errorf("vbroadcastss dst must be XMM register")
+	if !ok || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("vbroadcastss dst must be XMM or YMM register")
 	}
-	infoDst := regMap[dstReg]
 	var lines []string
 	lines = append(lines, "    {", "      float val;")
-	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
-		infoSrc := regMap[srcReg]
-		lines = append(lines, fmt.Sprintf("      val = ctx->%s.f32[0];", infoSrc.BaseReg))
+	if srcReg, ok := src.(x86asm.Reg); ok && (isXmm(srcReg) || isYmm(srcReg)) {
+		if isXmm(srcReg) {
+			infoSrc := regMap[srcReg]
+			lines = append(lines, fmt.Sprintf("      val = ctx->%s.f32[0];", infoSrc.BaseReg))
+		} else {
+			sIdx := ymmIdx(srcReg)
+			lines = append(lines, fmt.Sprintf("      val = ctx->xmm[%d].f32[0];", sIdx))
+		}
 	} else if srcMem, ok := src.(x86asm.Mem); ok {
 		addr, err := MemAddrExpr(srcMem, nextPC)
 		if err != nil {
@@ -719,8 +800,21 @@ func (l *Lifter) liftVbroadcastss(dst, src x86asm.Arg, nextPC uint64) ([]string,
 	} else {
 		return nil, fmt.Errorf("vbroadcastss unsupported src operand")
 	}
-	for i := 0; i < 4; i++ {
-		lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] = val;", infoDst.BaseReg, i))
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      ctx->xmm[%d].f32[%d] = val;", dIdx, i),
+				fmt.Sprintf("      ctx->ymmh[%d].f32[%d] = val;", dIdx, i),
+			)
+		}
+	} else {
+		infoDst := regMap[dstReg]
+		dIdx := int(dstReg - x86asm.X0)
+		for i := 0; i < 4; i++ {
+			lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] = val;", infoDst.BaseReg, i))
+		}
+		lines = append(lines, fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx))
 	}
 	lines = append(lines, "    }")
 	return lines, nil
@@ -820,18 +914,62 @@ func (l *Lifter) liftHaddpd(dst, src1, src2 x86asm.Arg, nextPC uint64) ([]string
 
 func (l *Lifter) liftCvtps2pd(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
-	if !ok1 || !isXmm(dstReg) {
-		return nil, fmt.Errorf("cvtps2pd dst must be XMM register")
+	if !ok1 || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("cvtps2pd dst must be XMM or YMM register")
 	}
-	infoDst := regMap[dstReg]
 
 	lines := []string{"    {"}
-	if srcReg, ok := src.(x86asm.Reg); ok && isXmm(srcReg) {
-		infoSrc := regMap[srcReg]
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		if srcReg, ok := src.(x86asm.Reg); ok && (isXmm(srcReg) || isYmm(srcReg)) {
+			sIdx := int(srcReg - x86asm.X0)
+			if isYmm(srcReg) {
+				sIdx = ymmIdx(srcReg)
+			}
+			lines = append(
+				lines,
+				fmt.Sprintf("      float f0 = ctx->xmm[%d].f32[0];", sIdx),
+				fmt.Sprintf("      float f1 = ctx->xmm[%d].f32[1];", sIdx),
+				fmt.Sprintf("      float f2 = ctx->xmm[%d].f32[2];", sIdx),
+				fmt.Sprintf("      float f3 = ctx->xmm[%d].f32[3];", sIdx),
+			)
+		} else if srcMem, ok := src.(x86asm.Mem); ok {
+			addr, err := MemAddrExpr(srcMem, nextPC)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(
+				lines,
+				fmt.Sprintf("      float f0 = *(float *)(ctx->mem_base + (%s));", addr),
+				fmt.Sprintf("      float f1 = *(float *)(ctx->mem_base + (%s) + 4);", addr),
+				fmt.Sprintf("      float f2 = *(float *)(ctx->mem_base + (%s) + 8);", addr),
+				fmt.Sprintf("      float f3 = *(float *)(ctx->mem_base + (%s) + 12);", addr),
+			)
+		} else {
+			return nil, fmt.Errorf("cvtps2pd invalid src")
+		}
 		lines = append(
 			lines,
-			fmt.Sprintf("      float f0 = ctx->%s.f32[0];", infoSrc.BaseReg),
-			fmt.Sprintf("      float f1 = ctx->%s.f32[1];", infoSrc.BaseReg),
+			fmt.Sprintf("      ctx->xmm[%d].f64[0] = (double)f0;", dIdx),
+			fmt.Sprintf("      ctx->xmm[%d].f64[1] = (double)f1;", dIdx),
+			fmt.Sprintf("      ctx->ymmh[%d].f64[0] = (double)f2;", dIdx),
+			fmt.Sprintf("      ctx->ymmh[%d].f64[1] = (double)f3;", dIdx),
+			"    }",
+		)
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
+	if srcReg, ok := src.(x86asm.Reg); ok && (isXmm(srcReg) || isYmm(srcReg)) {
+		sIdx := int(srcReg - x86asm.X0)
+		if isYmm(srcReg) {
+			sIdx = ymmIdx(srcReg)
+		}
+		lines = append(
+			lines,
+			fmt.Sprintf("      float f0 = ctx->xmm[%d].f32[0];", sIdx),
+			fmt.Sprintf("      float f1 = ctx->xmm[%d].f32[1];", sIdx),
 		)
 	} else if srcMem, ok := src.(x86asm.Mem); ok {
 		addr, err := MemAddrExpr(srcMem, nextPC)
@@ -850,6 +988,7 @@ func (l *Lifter) liftCvtps2pd(dst, src x86asm.Arg, nextPC uint64) ([]string, err
 		lines,
 		fmt.Sprintf("      ctx->%s.f64[0] = (double)f0;", infoDst.BaseReg),
 		fmt.Sprintf("      ctx->%s.f64[1] = (double)f1;", infoDst.BaseReg),
+		fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx),
 		"    }",
 	)
 	return lines, nil
@@ -2462,8 +2601,14 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 	// 3-operand VEX operations: dst = src1; op(dst, src2)
 	dstReg, ok1 := args[0].(x86asm.Reg)
 	src1Reg, ok2 := args[1].(x86asm.Reg)
-	if !ok1 || !ok2 || !isXmm(dstReg) || !isXmm(src1Reg) {
-		return nil, fmt.Errorf("3-operand VEX requires XMM dst and src1")
+	if !ok1 || !ok2 {
+		return nil, fmt.Errorf("3-operand VEX requires register dst and src1")
+	}
+	if isYmm(dstReg) && isYmm(src1Reg) {
+		return l.liftVexYmm3Op(op, dstReg, src1Reg, args[2], nextPC)
+	}
+	if !isXmm(dstReg) || !isXmm(src1Reg) {
+		return nil, fmt.Errorf("3-operand VEX requires XMM or YMM dst and src1")
 	}
 	infoDst := regMap[dstReg]
 	infoSrc1 := regMap[src1Reg]
@@ -2655,5 +2800,403 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 	if err != nil {
 		return nil, err
 	}
-	return append(lines, code...), nil
+	lines = append(lines, code...)
+	dIdx := int(dstReg - x86asm.X0)
+	lines = append(lines, fmt.Sprintf("    memset(&ctx->ymmh[%d], 0, 16);", dIdx))
+	return lines, nil
+}
+
+func (l *Lifter) liftVexYmm3Op(op x86asm.Op, dstReg, src1Reg x86asm.Reg, src2 x86asm.Arg, nextPC uint64) ([]string, error) {
+	dIdx := ymmIdx(dstReg)
+	s1Idx := ymmIdx(src1Reg)
+
+	var lines []string
+	lines = append(lines, "    {")
+
+	if s2Reg, ok := src2.(x86asm.Reg); ok && isYmm(s2Reg) {
+		s2Idx := ymmIdx(s2Reg)
+		lines = append(lines,
+			fmt.Sprintf("      xmm_reg_t s2_lo = ctx->xmm[%d];", s2Idx),
+			fmt.Sprintf("      xmm_reg_t s2_hi = ctx->ymmh[%d];", s2Idx),
+		)
+	} else if s2Mem, ok := src2.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(s2Mem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(
+			lines,
+			"      xmm_reg_t s2_lo, s2_hi;",
+			fmt.Sprintf("      memcpy(&s2_lo, ctx->mem_base + (%s), 16);", addr),
+			fmt.Sprintf("      memcpy(&s2_hi, ctx->mem_base + (%s) + 16, 16);", addr),
+		)
+	} else {
+		return nil, fmt.Errorf("liftVexYmm3Op unsupported src2: %v", src2)
+	}
+
+	lines = append(lines,
+		fmt.Sprintf("      xmm_reg_t s1_lo = ctx->xmm[%d];", s1Idx),
+		fmt.Sprintf("      xmm_reg_t s1_hi = ctx->ymmh[%d];", s1Idx),
+		"      xmm_reg_t res_lo, res_hi;",
+	)
+
+	switch op {
+	case x86asm.VADDPS:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f32[%d] = s1_lo.f32[%d] + s2_lo.f32[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.f32[%d] = s1_hi.f32[%d] + s2_hi.f32[%d];", i, i, i),
+			)
+		}
+	case x86asm.VSUBPS:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f32[%d] = s1_lo.f32[%d] - s2_lo.f32[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.f32[%d] = s1_hi.f32[%d] - s2_hi.f32[%d];", i, i, i),
+			)
+		}
+	case x86asm.VMULPS:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f32[%d] = s1_lo.f32[%d] * s2_lo.f32[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.f32[%d] = s1_hi.f32[%d] * s2_hi.f32[%d];", i, i, i),
+			)
+		}
+	case x86asm.VDIVPS:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f32[%d] = s1_lo.f32[%d] / s2_lo.f32[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.f32[%d] = s1_hi.f32[%d] / s2_hi.f32[%d];", i, i, i),
+			)
+		}
+	case x86asm.VMAXPS:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f32[%d] = (s1_lo.f32[%d] > s2_lo.f32[%d]) ? s1_lo.f32[%d] : s2_lo.f32[%d];", i, i, i, i, i),
+				fmt.Sprintf("      res_hi.f32[%d] = (s1_hi.f32[%d] > s2_hi.f32[%d]) ? s1_hi.f32[%d] : s2_hi.f32[%d];", i, i, i, i, i),
+			)
+		}
+	case x86asm.VMINPS:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f32[%d] = (s1_lo.f32[%d] < s2_lo.f32[%d]) ? s1_lo.f32[%d] : s2_lo.f32[%d];", i, i, i, i, i),
+				fmt.Sprintf("      res_hi.f32[%d] = (s1_hi.f32[%d] < s2_hi.f32[%d]) ? s1_hi.f32[%d] : s2_hi.f32[%d];", i, i, i, i, i),
+			)
+		}
+	case x86asm.VADDPD:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f64[%d] = s1_lo.f64[%d] + s2_lo.f64[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.f64[%d] = s1_hi.f64[%d] + s2_hi.f64[%d];", i, i, i),
+			)
+		}
+	case x86asm.VSUBPD:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f64[%d] = s1_lo.f64[%d] - s2_lo.f64[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.f64[%d] = s1_hi.f64[%d] - s2_hi.f64[%d];", i, i, i),
+			)
+		}
+	case x86asm.VMULPD:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f64[%d] = s1_lo.f64[%d] * s2_lo.f64[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.f64[%d] = s1_hi.f64[%d] * s2_hi.f64[%d];", i, i, i),
+			)
+		}
+	case x86asm.VDIVPD:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f64[%d] = s1_lo.f64[%d] / s2_lo.f64[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.f64[%d] = s1_hi.f64[%d] / s2_hi.f64[%d];", i, i, i),
+			)
+		}
+	case x86asm.VMAXPD:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f64[%d] = (s1_lo.f64[%d] > s2_lo.f64[%d]) ? s1_lo.f64[%d] : s2_lo.f64[%d];", i, i, i, i, i),
+				fmt.Sprintf("      res_hi.f64[%d] = (s1_hi.f64[%d] > s2_hi.f64[%d]) ? s1_hi.f64[%d] : s2_hi.f64[%d];", i, i, i, i, i),
+			)
+		}
+	case x86asm.VMINPD:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.f64[%d] = (s1_lo.f64[%d] < s2_lo.f64[%d]) ? s1_lo.f64[%d] : s2_lo.f64[%d];", i, i, i, i, i),
+				fmt.Sprintf("      res_hi.f64[%d] = (s1_hi.f64[%d] < s2_hi.f64[%d]) ? s1_hi.f64[%d] : s2_hi.f64[%d];", i, i, i, i, i),
+			)
+		}
+	case x86asm.VXORPS, x86asm.VXORPD, x86asm.VPXOR:
+		lines = append(lines,
+			"      res_lo.u64[0] = s1_lo.u64[0] ^ s2_lo.u64[0];",
+			"      res_lo.u64[1] = s1_lo.u64[1] ^ s2_lo.u64[1];",
+			"      res_hi.u64[0] = s1_hi.u64[0] ^ s2_hi.u64[0];",
+			"      res_hi.u64[1] = s1_hi.u64[1] ^ s2_hi.u64[1];",
+		)
+	case x86asm.VORPS, x86asm.VORPD, x86asm.VPOR:
+		lines = append(lines,
+			"      res_lo.u64[0] = s1_lo.u64[0] | s2_lo.u64[0];",
+			"      res_lo.u64[1] = s1_lo.u64[1] | s2_lo.u64[1];",
+			"      res_hi.u64[0] = s1_hi.u64[0] | s2_hi.u64[0];",
+			"      res_hi.u64[1] = s1_hi.u64[1] | s2_hi.u64[1];",
+		)
+	case x86asm.VANDPS, x86asm.VANDPD, x86asm.VPAND:
+		lines = append(lines,
+			"      res_lo.u64[0] = s1_lo.u64[0] & s2_lo.u64[0];",
+			"      res_lo.u64[1] = s1_lo.u64[1] & s2_lo.u64[1];",
+			"      res_hi.u64[0] = s1_hi.u64[0] & s2_hi.u64[0];",
+			"      res_hi.u64[1] = s1_hi.u64[1] & s2_hi.u64[1];",
+		)
+	case x86asm.VANDNPS, x86asm.VANDNPD, x86asm.VPANDN:
+		lines = append(lines,
+			"      res_lo.u64[0] = (~s1_lo.u64[0]) & s2_lo.u64[0];",
+			"      res_lo.u64[1] = (~s1_lo.u64[1]) & s2_lo.u64[1];",
+			"      res_hi.u64[0] = (~s1_hi.u64[0]) & s2_hi.u64[0];",
+			"      res_hi.u64[1] = (~s1_hi.u64[1]) & s2_hi.u64[1];",
+		)
+	case x86asm.VPADDB:
+		for i := 0; i < 16; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u8[%d] = s1_lo.u8[%d] + s2_lo.u8[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.u8[%d] = s1_hi.u8[%d] + s2_hi.u8[%d];", i, i, i),
+			)
+		}
+	case x86asm.VPADDW:
+		for i := 0; i < 8; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u16[%d] = s1_lo.u16[%d] + s2_lo.u16[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.u16[%d] = s1_hi.u16[%d] + s2_hi.u16[%d];", i, i, i),
+			)
+		}
+	case x86asm.VPADDD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u32[%d] = s1_lo.u32[%d] + s2_lo.u32[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.u32[%d] = s1_hi.u32[%d] + s2_hi.u32[%d];", i, i, i),
+			)
+		}
+	case x86asm.VPADDQ:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u64[%d] = s1_lo.u64[%d] + s2_lo.u64[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.u64[%d] = s1_hi.u64[%d] + s2_hi.u64[%d];", i, i, i),
+			)
+		}
+	case x86asm.VPSUBB:
+		for i := 0; i < 16; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u8[%d] = s1_lo.u8[%d] - s2_lo.u8[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.u8[%d] = s1_hi.u8[%d] - s2_hi.u8[%d];", i, i, i),
+			)
+		}
+	case x86asm.VPSUBW:
+		for i := 0; i < 8; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u16[%d] = s1_lo.u16[%d] - s2_lo.u16[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.u16[%d] = s1_hi.u16[%d] - s2_hi.u16[%d];", i, i, i),
+			)
+		}
+	case x86asm.VPSUBD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u32[%d] = s1_lo.u32[%d] - s2_lo.u32[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.u32[%d] = s1_hi.u32[%d] - s2_hi.u32[%d];", i, i, i),
+			)
+		}
+	case x86asm.VPSUBQ:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u64[%d] = s1_lo.u64[%d] - s2_lo.u64[%d];", i, i, i),
+				fmt.Sprintf("      res_hi.u64[%d] = s1_hi.u64[%d] - s2_hi.u64[%d];", i, i, i),
+			)
+		}
+	case x86asm.VPCMPEQB:
+		for i := 0; i < 16; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u8[%d] = (s1_lo.u8[%d] == s2_lo.u8[%d]) ? 0xFF : 0;", i, i, i),
+				fmt.Sprintf("      res_hi.u8[%d] = (s1_hi.u8[%d] == s2_hi.u8[%d]) ? 0xFF : 0;", i, i, i),
+			)
+		}
+	case x86asm.VPCMPEQW:
+		for i := 0; i < 8; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u16[%d] = (s1_lo.u16[%d] == s2_lo.u16[%d]) ? 0xFFFF : 0;", i, i, i),
+				fmt.Sprintf("      res_hi.u16[%d] = (s1_hi.u16[%d] == s2_hi.u16[%d]) ? 0xFFFF : 0;", i, i, i),
+			)
+		}
+	case x86asm.VPCMPEQD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u32[%d] = (s1_lo.u32[%d] == s2_lo.u32[%d]) ? 0xFFFFFFFFU : 0;", i, i, i),
+				fmt.Sprintf("      res_hi.u32[%d] = (s1_hi.u32[%d] == s2_hi.u32[%d]) ? 0xFFFFFFFFU : 0;", i, i, i),
+			)
+		}
+	case x86asm.VPCMPEQQ:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u64[%d] = (s1_lo.u64[%d] == s2_lo.u64[%d]) ? 0xFFFFFFFFFFFFFFFFULL : 0;", i, i, i),
+				fmt.Sprintf("      res_hi.u64[%d] = (s1_hi.u64[%d] == s2_hi.u64[%d]) ? 0xFFFFFFFFFFFFFFFFULL : 0;", i, i, i),
+			)
+		}
+	case x86asm.VPCMPGTB:
+		for i := 0; i < 16; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u8[%d] = (s1_lo.s8[%d] > s2_lo.s8[%d]) ? 0xFF : 0;", i, i, i),
+				fmt.Sprintf("      res_hi.u8[%d] = (s1_hi.s8[%d] > s2_hi.s8[%d]) ? 0xFF : 0;", i, i, i),
+			)
+		}
+	case x86asm.VPCMPGTW:
+		for i := 0; i < 8; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u16[%d] = (s1_lo.s16[%d] > s2_lo.s16[%d]) ? 0xFFFF : 0;", i, i, i),
+				fmt.Sprintf("      res_hi.u16[%d] = (s1_hi.s16[%d] > s2_hi.s16[%d]) ? 0xFFFF : 0;", i, i, i),
+			)
+		}
+	case x86asm.VPCMPGTD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u32[%d] = (s1_lo.s32[%d] > s2_lo.s32[%d]) ? 0xFFFFFFFFU : 0;", i, i, i),
+				fmt.Sprintf("      res_hi.u32[%d] = (s1_hi.s32[%d] > s2_hi.s32[%d]) ? 0xFFFFFFFFU : 0;", i, i, i),
+			)
+		}
+	case x86asm.VPCMPGTQ:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u64[%d] = (s1_lo.s64[%d] > s2_lo.s64[%d]) ? 0xFFFFFFFFFFFFFFFFULL : 0;", i, i, i),
+				fmt.Sprintf("      res_hi.u64[%d] = (s1_hi.s64[%d] > s2_hi.s64[%d]) ? 0xFFFFFFFFFFFFFFFFULL : 0;", i, i, i),
+			)
+		}
+	case x86asm.VPMINSD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.s32[%d] = (s1_lo.s32[%d] < s2_lo.s32[%d]) ? s1_lo.s32[%d] : s2_lo.s32[%d];", i, i, i, i, i),
+				fmt.Sprintf("      res_hi.s32[%d] = (s1_hi.s32[%d] < s2_hi.s32[%d]) ? s1_hi.s32[%d] : s2_hi.s32[%d];", i, i, i, i, i),
+			)
+		}
+	case x86asm.VPMAXSD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.s32[%d] = (s1_lo.s32[%d] > s2_lo.s32[%d]) ? s1_lo.s32[%d] : s2_lo.s32[%d];", i, i, i, i, i),
+				fmt.Sprintf("      res_hi.s32[%d] = (s1_hi.s32[%d] > s2_hi.s32[%d]) ? s1_hi.s32[%d] : s2_hi.s32[%d];", i, i, i, i, i),
+			)
+		}
+	case x86asm.VPMINUD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u32[%d] = (s1_lo.u32[%d] < s2_lo.u32[%d]) ? s1_lo.u32[%d] : s2_lo.u32[%d];", i, i, i, i, i),
+				fmt.Sprintf("      res_hi.u32[%d] = (s1_hi.u32[%d] < s2_hi.u32[%d]) ? s1_hi.u32[%d] : s2_hi.u32[%d];", i, i, i, i, i),
+			)
+		}
+	case x86asm.VPMAXUD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u32[%d] = (s1_lo.u32[%d] > s2_lo.u32[%d]) ? s1_lo.u32[%d] : s2_lo.u32[%d];", i, i, i, i, i),
+				fmt.Sprintf("      res_hi.u32[%d] = (s1_hi.u32[%d] > s2_hi.u32[%d]) ? s1_hi.u32[%d] : s2_hi.u32[%d];", i, i, i, i, i),
+			)
+		}
+	case x86asm.VPMULLD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u32[%d] = (uint32_t)((int32_t)s1_lo.u32[%d] * (int32_t)s2_lo.u32[%d]);", i, i, i),
+				fmt.Sprintf("      res_hi.u32[%d] = (uint32_t)((int32_t)s1_hi.u32[%d] * (int32_t)s2_hi.u32[%d]);", i, i, i),
+			)
+		}
+	case x86asm.VPMULLW:
+		for i := 0; i < 8; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u16[%d] = (uint16_t)((int16_t)s1_lo.u16[%d] * (int16_t)s2_lo.u16[%d]);", i, i, i),
+				fmt.Sprintf("      res_hi.u16[%d] = (uint16_t)((int16_t)s1_hi.u16[%d] * (int16_t)s2_hi.u16[%d]);", i, i, i),
+			)
+		}
+	case x86asm.VPUNPCKLBW:
+		for i := 0; i < 8; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u8[%d] = s1_lo.u8[%d]; res_lo.u8[%d] = s2_lo.u8[%d];", i*2, i, i*2+1, i),
+				fmt.Sprintf("      res_hi.u8[%d] = s1_hi.u8[%d]; res_hi.u8[%d] = s2_hi.u8[%d];", i*2, i, i*2+1, i),
+			)
+		}
+	case x86asm.VPUNPCKHBW:
+		for i := 0; i < 8; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u8[%d] = s1_lo.u8[%d]; res_lo.u8[%d] = s2_lo.u8[%d];", i*2, i+8, i*2+1, i+8),
+				fmt.Sprintf("      res_hi.u8[%d] = s1_hi.u8[%d]; res_hi.u8[%d] = s2_hi.u8[%d];", i*2, i+8, i*2+1, i+8),
+			)
+		}
+	case x86asm.VPUNPCKLWD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u16[%d] = s1_lo.u16[%d]; res_lo.u16[%d] = s2_lo.u16[%d];", i*2, i, i*2+1, i),
+				fmt.Sprintf("      res_hi.u16[%d] = s1_hi.u16[%d]; res_hi.u16[%d] = s2_hi.u16[%d];", i*2, i, i*2+1, i),
+			)
+		}
+	case x86asm.VPUNPCKHWD:
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u16[%d] = s1_lo.u16[%d]; res_lo.u16[%d] = s2_lo.u16[%d];", i*2, i+4, i*2+1, i+4),
+				fmt.Sprintf("      res_hi.u16[%d] = s1_hi.u16[%d]; res_hi.u16[%d] = s2_hi.u16[%d];", i*2, i+4, i*2+1, i+4),
+			)
+		}
+	case x86asm.VPUNPCKLDQ, x86asm.VUNPCKLPS:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u32[%d] = s1_lo.u32[%d]; res_lo.u32[%d] = s2_lo.u32[%d];", i*2, i, i*2+1, i),
+				fmt.Sprintf("      res_hi.u32[%d] = s1_hi.u32[%d]; res_hi.u32[%d] = s2_hi.u32[%d];", i*2, i, i*2+1, i),
+			)
+		}
+	case x86asm.VPUNPCKHDQ, x86asm.VUNPCKHPS:
+		for i := 0; i < 2; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      res_lo.u32[%d] = s1_lo.u32[%d]; res_lo.u32[%d] = s2_lo.u32[%d];", i*2, i+2, i*2+1, i+2),
+				fmt.Sprintf("      res_hi.u32[%d] = s1_hi.u32[%d]; res_hi.u32[%d] = s2_hi.u32[%d];", i*2, i+2, i*2+1, i+2),
+			)
+		}
+	case x86asm.VPUNPCKLQDQ, x86asm.VUNPCKLPD:
+		lines = append(lines,
+			"      res_lo.u64[0] = s1_lo.u64[0]; res_lo.u64[1] = s2_lo.u64[0];",
+			"      res_hi.u64[0] = s1_hi.u64[0]; res_hi.u64[1] = s2_hi.u64[0];",
+		)
+	case x86asm.VPUNPCKHQDQ, x86asm.VUNPCKHPD:
+		lines = append(lines,
+			"      res_lo.u64[0] = s1_lo.u64[1]; res_lo.u64[1] = s2_lo.u64[1];",
+			"      res_hi.u64[0] = s1_hi.u64[1]; res_hi.u64[1] = s2_hi.u64[1];",
+		)
+	default:
+		return nil, fmt.Errorf("unsupported 256-bit VEX op: %v", op)
+	}
+
+	lines = append(lines,
+		fmt.Sprintf("      ctx->xmm[%d] = res_lo;", dIdx),
+		fmt.Sprintf("      ctx->ymmh[%d] = res_hi;", dIdx),
+		"    }",
+	)
+	return lines, nil
+}
+
+func (l *Lifter) liftPcmpistri(op x86asm.Op, args x86asm.Args, nextPC uint64) ([]string, error) {
+	src2Reg, ok1 := args[0].(x86asm.Reg)
+	if !ok1 || !isXmm(src2Reg) {
+		return nil, fmt.Errorf("pcmpistri requires XMM src2")
+	}
+	s2Idx := int(src2Reg - x86asm.X0)
+
+	immArg, ok3 := args[2].(x86asm.Imm)
+	if !ok3 {
+		return nil, fmt.Errorf("pcmpistri requires immediate argument")
+	}
+	imm8 := uint8(immArg)
+
+	if src1Reg, ok2 := args[1].(x86asm.Reg); ok2 && isXmm(src1Reg) {
+		s1Idx := int(src1Reg - x86asm.X0)
+		return []string{
+			fmt.Sprintf("    recomp_vpcmpistri(ctx, &ctx->xmm[%d], &ctx->xmm[%d], 0x%02x);", s2Idx, s1Idx, imm8),
+		}, nil
+	} else if src1Mem, ok2 := args[1].(x86asm.Mem); ok2 {
+		addr, err := MemAddrExpr(src1Mem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		return []string{
+			fmt.Sprintf("    recomp_vpcmpistri(ctx, &ctx->xmm[%d], (const void *)(ctx->mem_base + (%s)), 0x%02x);", s2Idx, addr, imm8),
+		}, nil
+	}
+	return nil, fmt.Errorf("pcmpistri unsupported src1 operand: %v", args[1])
 }

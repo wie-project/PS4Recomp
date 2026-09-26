@@ -30,6 +30,28 @@ func (l *Lifter) loadXmmArg(src x86asm.Arg, nextPC uint64, varName string) ([]st
 	return nil, fmt.Errorf("expected XMM/YMM or memory operand")
 }
 
+func (l *Lifter) loadYmmArg(src x86asm.Arg, nextPC uint64, prefix string) ([]string, error) {
+	if srcReg, ok := src.(x86asm.Reg); ok && isYmm(srcReg) {
+		idx := ymmIdx(srcReg)
+		return []string{
+			fmt.Sprintf("      xmm_reg_t %s_lo = ctx->xmm[%d];", prefix, idx),
+			fmt.Sprintf("      xmm_reg_t %s_hi = ctx->ymmh[%d];", prefix, idx),
+		}, nil
+	}
+	if srcMem, ok := src.(x86asm.Mem); ok {
+		addr, err := MemAddrExpr(srcMem, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		return []string{
+			fmt.Sprintf("      xmm_reg_t %s_lo, %s_hi;", prefix, prefix),
+			fmt.Sprintf("      memcpy(&%s_lo, ctx->mem_base + (%s), 16);", prefix, addr),
+			fmt.Sprintf("      memcpy(&%s_hi, ctx->mem_base + (%s) + 16, 16);", prefix, addr),
+		}, nil
+	}
+	return nil, fmt.Errorf("expected YMM or memory operand")
+}
+
 func (l *Lifter) liftVextract128(dst, src, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
 	srcReg, ok1 := src.(x86asm.Reg)
 	imm, ok2 := immArg.(x86asm.Imm)
@@ -141,44 +163,84 @@ func (l *Lifter) liftShufps(dst, src1, src2, immArg x86asm.Arg, nextPC uint64) (
 func (l *Lifter) liftPermilpsImm(dst, src, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
 	imm, ok2 := immArg.(x86asm.Imm)
-	if !ok1 || !ok2 || !isXmm(dstReg) {
-		return nil, fmt.Errorf("vpermilps requires XMM destination and immediate")
+	if !ok1 || !ok2 || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("vpermilps requires XMM or YMM destination and immediate")
 	}
-	infoDst := regMap[dstReg]
+	imm8 := uint8(imm)
 	lines := []string{"    {"}
+
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		s, err := l.loadYmmArg(src, nextPC, "src")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, s...)
+		for i := 0; i < 4; i++ {
+			sel := (imm8 >> (i * 2)) & 3
+			lines = append(lines,
+				fmt.Sprintf("      ctx->xmm[%d].f32[%d] = src_lo.f32[%d];", dIdx, i, sel),
+				fmt.Sprintf("      ctx->ymmh[%d].f32[%d] = src_hi.f32[%d];", dIdx, i, sel),
+			)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	s, err := l.loadXmmArg(src, nextPC, "src")
 	if err != nil {
 		return nil, err
 	}
 	lines = append(lines, s...)
-	imm8 := uint8(imm)
 	for i := 0; i < 4; i++ {
 		sel := (imm8 >> (i * 2)) & 3
 		lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] = src.f32[%d];", infoDst.BaseReg, i, sel))
 	}
-	lines = append(lines, "    }")
+	lines = append(lines, fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx), "    }")
 	return lines, nil
 }
 
 func (l *Lifter) liftPermilpdImm(dst, src, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
 	imm, ok2 := immArg.(x86asm.Imm)
-	if !ok1 || !ok2 || !isXmm(dstReg) {
-		return nil, fmt.Errorf("vpermilpd requires XMM destination and immediate")
+	if !ok1 || !ok2 || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("vpermilpd requires XMM or YMM destination and immediate")
 	}
-	infoDst := regMap[dstReg]
+	imm8 := uint8(imm)
 	lines := []string{"    {"}
+
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		s, err := l.loadYmmArg(src, nextPC, "src")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, s...)
+		for i := 0; i < 2; i++ {
+			sel := (imm8 >> i) & 1
+			lines = append(lines,
+				fmt.Sprintf("      ctx->xmm[%d].f64[%d] = src_lo.f64[%d];", dIdx, i, sel),
+				fmt.Sprintf("      ctx->ymmh[%d].f64[%d] = src_hi.f64[%d];", dIdx, i, sel),
+			)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	s, err := l.loadXmmArg(src, nextPC, "src")
 	if err != nil {
 		return nil, err
 	}
 	lines = append(lines, s...)
-	imm8 := uint8(imm)
 	for i := 0; i < 2; i++ {
 		sel := (imm8 >> i) & 1
 		lines = append(lines, fmt.Sprintf("      ctx->%s.f64[%d] = src.f64[%d];", infoDst.BaseReg, i, sel))
 	}
-	lines = append(lines, "    }")
+	lines = append(lines, fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx), "    }")
 	return lines, nil
 }
 
@@ -246,11 +308,44 @@ func (l *Lifter) liftInsertps(dst, src1, src2, immArg x86asm.Arg, nextPC uint64)
 func (l *Lifter) liftBlendps(dst, src1, src2, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
 	imm, ok2 := immArg.(x86asm.Imm)
-	if !ok1 || !ok2 || !isXmm(dstReg) {
+	if !ok1 || !ok2 || (!isXmm(dstReg) && !isYmm(dstReg)) {
 		return nil, fmt.Errorf("vblendps invalid operands")
 	}
-	infoDst := regMap[dstReg]
+	imm8 := uint8(imm)
 	lines := []string{"    {"}
+
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		s1, err := l.loadYmmArg(src1, nextPC, "s1")
+		if err != nil {
+			return nil, err
+		}
+		s2, err := l.loadYmmArg(src2, nextPC, "s2")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, s1...)
+		lines = append(lines, s2...)
+		for i := 0; i < 4; i++ {
+			srcLo := "s1_lo"
+			if imm8&(1<<i) != 0 {
+				srcLo = "s2_lo"
+			}
+			srcHi := "s1_hi"
+			if imm8&(1<<(i+4)) != 0 {
+				srcHi = "s2_hi"
+			}
+			lines = append(lines,
+				fmt.Sprintf("      ctx->xmm[%d].f32[%d] = %s.f32[%d];", dIdx, i, srcLo, i),
+				fmt.Sprintf("      ctx->ymmh[%d].f32[%d] = %s.f32[%d];", dIdx, i, srcHi, i),
+			)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	s1, err := l.loadXmmArg(src1, nextPC, "s1")
 	if err != nil {
 		return nil, err
@@ -261,7 +356,6 @@ func (l *Lifter) liftBlendps(dst, src1, src2, immArg x86asm.Arg, nextPC uint64) 
 	}
 	lines = append(lines, s1...)
 	lines = append(lines, s2...)
-	imm8 := uint8(imm)
 	for i := 0; i < 4; i++ {
 		src := "s1"
 		if imm8&(1<<i) != 0 {
@@ -269,17 +363,46 @@ func (l *Lifter) liftBlendps(dst, src1, src2, immArg x86asm.Arg, nextPC uint64) 
 		}
 		lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] = %s.f32[%d];", infoDst.BaseReg, i, src, i))
 	}
-	lines = append(lines, "    }")
+	lines = append(lines, fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx), "    }")
 	return lines, nil
 }
 
 func (l *Lifter) liftBlendvps(dst, src1, src2, maskArg x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
-	if !ok1 || !isXmm(dstReg) {
-		return nil, fmt.Errorf("vblendvps destination must be XMM")
+	if !ok1 || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("vblendvps destination must be XMM or YMM")
 	}
-	infoDst := regMap[dstReg]
+
 	lines := []string{"    {"}
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		s1, err := l.loadYmmArg(src1, nextPC, "s1")
+		if err != nil {
+			return nil, err
+		}
+		s2, err := l.loadYmmArg(src2, nextPC, "s2")
+		if err != nil {
+			return nil, err
+		}
+		mask, err := l.loadYmmArg(maskArg, nextPC, "mask")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, s1...)
+		lines = append(lines, s2...)
+		lines = append(lines, mask...)
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      ctx->xmm[%d].f32[%d] = (mask_lo.u32[%d] & 0x80000000U) ? s2_lo.f32[%d] : s1_lo.f32[%d];", dIdx, i, i, i, i),
+				fmt.Sprintf("      ctx->ymmh[%d].f32[%d] = (mask_hi.u32[%d] & 0x80000000U) ? s2_hi.f32[%d] : s1_hi.f32[%d];", dIdx, i, i, i, i),
+			)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	s1, err := l.loadXmmArg(src1, nextPC, "s1")
 	if err != nil {
 		return nil, err
@@ -299,7 +422,7 @@ func (l *Lifter) liftBlendvps(dst, src1, src2, maskArg x86asm.Arg, nextPC uint64
 		lines = append(lines, fmt.Sprintf("      ctx->%s.f32[%d] = (mask.u32[%d] & 0x80000000U) ? s2.f32[%d] : s1.f32[%d];",
 			infoDst.BaseReg, i, i, i, i))
 	}
-	lines = append(lines, "    }")
+	lines = append(lines, fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx), "    }")
 	return lines, nil
 }
 
@@ -347,12 +470,38 @@ func cmppsPredicate(pred uint8, a, b string) string {
 func (l *Lifter) liftCmpps(dst, src1, src2, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
 	imm, ok2 := immArg.(x86asm.Imm)
-	if !ok1 || !ok2 || !isXmm(dstReg) {
+	if !ok1 || !ok2 || (!isXmm(dstReg) && !isYmm(dstReg)) {
 		return nil, fmt.Errorf("vcmpps invalid operands")
 	}
-	infoDst := regMap[dstReg]
 	pred := uint8(imm)
 	lines := []string{"    {"}
+
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		s1, err := l.loadYmmArg(src1, nextPC, "s1")
+		if err != nil {
+			return nil, err
+		}
+		s2, err := l.loadYmmArg(src2, nextPC, "s2")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, s1...)
+		lines = append(lines, s2...)
+		for i := 0; i < 4; i++ {
+			condLo := cmppsPredicate(pred, fmt.Sprintf("s1_lo.f32[%d]", i), fmt.Sprintf("s2_lo.f32[%d]", i))
+			condHi := cmppsPredicate(pred, fmt.Sprintf("s1_hi.f32[%d]", i), fmt.Sprintf("s2_hi.f32[%d]", i))
+			lines = append(lines,
+				fmt.Sprintf("      ctx->xmm[%d].u32[%d] = (%s) ? 0xFFFFFFFFU : 0;", dIdx, i, condLo),
+				fmt.Sprintf("      ctx->ymmh[%d].u32[%d] = (%s) ? 0xFFFFFFFFU : 0;", dIdx, i, condHi),
+			)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	s1, err := l.loadXmmArg(src1, nextPC, "s1")
 	if err != nil {
 		return nil, err
@@ -367,7 +516,7 @@ func (l *Lifter) liftCmpps(dst, src1, src2, immArg x86asm.Arg, nextPC uint64) ([
 		cond := cmppsPredicate(pred, fmt.Sprintf("s1.f32[%d]", i), fmt.Sprintf("s2.f32[%d]", i))
 		lines = append(lines, fmt.Sprintf("      ctx->%s.u32[%d] = (%s) ? 0xFFFFFFFFU : 0;", infoDst.BaseReg, i, cond))
 	}
-	lines = append(lines, "    }")
+	lines = append(lines, fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx), "    }")
 	return lines, nil
 }
 
@@ -1112,11 +1261,30 @@ func (l *Lifter) liftCwd() []string {
 
 func (l *Lifter) liftCvttps2dq(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok := dst.(x86asm.Reg)
-	if !ok || !isXmm(dstReg) {
-		return nil, fmt.Errorf("cvttps2dq dst must be XMM")
+	if !ok || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("cvttps2dq dst must be XMM or YMM")
 	}
-	infoDst := regMap[dstReg]
 	lines := []string{"    {"}
+
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		s, err := l.loadYmmArg(src, nextPC, "src")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, s...)
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      ctx->xmm[%d].s32[%d] = (int32_t)truncf(src_lo.f32[%d]);", dIdx, i, i),
+				fmt.Sprintf("      ctx->ymmh[%d].s32[%d] = (int32_t)truncf(src_hi.f32[%d]);", dIdx, i, i),
+			)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	s, err := l.loadXmmArg(src, nextPC, "src")
 	if err != nil {
 		return nil, err
@@ -1125,7 +1293,7 @@ func (l *Lifter) liftCvttps2dq(dst, src x86asm.Arg, nextPC uint64) ([]string, er
 	for i := 0; i < 4; i++ {
 		lines = append(lines, fmt.Sprintf("      ctx->%s.s32[%d] = (int32_t)truncf(src.f32[%d]);", infoDst.BaseReg, i, i))
 	}
-	lines = append(lines, "    }")
+	lines = append(lines, fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx), "    }")
 	return lines, nil
 }
 

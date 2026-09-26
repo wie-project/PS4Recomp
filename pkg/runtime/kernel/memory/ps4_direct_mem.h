@@ -44,10 +44,10 @@ int sceKernelVirtualQuery(GuestContext *ctx, const void *addr, int flags, OrbisK
 int sceKernelQueryMemoryProtection(GuestContext *ctx, const void *addr, void **start, void **end, int *prot);
 
 // Memory Pools
-int sceKernelMemoryPoolReserve(GuestContext *ctx, void **addrOut, size_t size, int flags);
-int sceKernelMemoryPoolExpand(GuestContext *ctx, void *addr, size_t size);
-int sceKernelMemoryPoolCommit(GuestContext *ctx, void *addr, size_t size, int flags);
-int sceKernelMemoryPoolDecommit(GuestContext *ctx, void *addr, size_t size);
+int sceKernelMemoryPoolReserve(GuestContext *ctx, void *addrIn, size_t len, size_t alignment, int flags, void **addrOut);
+int sceKernelMemoryPoolExpand(GuestContext *ctx, off_t searchStart, off_t searchEnd, size_t len, size_t alignment, off_t *physAddrOut);
+int sceKernelMemoryPoolCommit(GuestContext *ctx, void *addr, size_t len, int type, int prot, int flags);
+int sceKernelMemoryPoolDecommit(GuestContext *ctx, void *addr, size_t len, int flags);
 
 // Guest execution shims
 void shim_sceKernelAllocateDirectMemory(GuestContext *ctx);

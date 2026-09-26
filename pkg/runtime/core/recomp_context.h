@@ -390,6 +390,9 @@ static inline void recomp_call_guest(GuestContext *ctx, uint64_t target) {
 #define RECOMP_POP_UNWIND() do { if (__cur_unwind_frame) ctx->unwind_frame = __cur_unwind_frame->prev; } while (0)
 void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip);
 
+// SIMD helpers
+void recomp_vpcmpistri(GuestContext *ctx, const void *src2_ptr, const void *src1_ptr, uint8_t imm8);
+
 #ifdef __cplusplus
 }
 #endif

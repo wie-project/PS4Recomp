@@ -384,7 +384,12 @@ func Execute(args []string) error {
 			fmt.Printf("             Packaged macOS App Bundle: %s\n", bundleDir)
 		}
 	} else {
-		fmt.Println("[ps4-recomp] [4/4] Clang compilation skipped (--compile=false).")
+		fmt.Println("[ps4-recomp] [4/4] Clang compilation skipped (--compile=false). Generating build.ninja...")
+		if err := generateNinjaBuild(cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.OptLevel, cfg.Asan); err != nil {
+			fmt.Printf("             Warning: failed to generate build.ninja: %v\n", err)
+		} else {
+			fmt.Printf("             Generated %s\n", filepath.Join(cfg.OutDir, "build.ninja"))
+		}
 	}
 
 	fmt.Printf("[ps4-recomp] All tasks completed successfully in %v\n", time.Since(totalStart).Round(time.Millisecond))
