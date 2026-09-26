@@ -574,15 +574,13 @@ func (l *Lifter) liftVperm2f128(dst, src1, src2, immArg x86asm.Arg, nextPC uint6
 	return lines, nil
 }
 
-// liftVroundpd handles VROUNDPD dst_xmm, src_xmm/m128, imm8
+// liftVroundpd handles VROUNDPD dst_xmm/ymm, src_xmm/ymm/mem, imm8
 func (l *Lifter) liftVroundpd(dst, src, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
 	imm, ok2 := immArg.(x86asm.Imm)
-	if !ok1 || !ok2 || !isXmm(dstReg) {
+	if !ok1 || !ok2 || (!isXmm(dstReg) && !isYmm(dstReg)) {
 		return nil, fmt.Errorf("vroundpd invalid operands")
 	}
-	infoDst := regMap[dstReg]
-	dIdx := int(dstReg - x86asm.X0)
 	mode := uint8(imm) & 3
 	roundFunc := "round"
 	switch mode {
@@ -595,6 +593,25 @@ func (l *Lifter) liftVroundpd(dst, src, immArg x86asm.Arg, nextPC uint64) ([]str
 	}
 
 	lines := []string{"    {"}
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		sCode, err := l.loadYmmArg(src, nextPC, "src")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, sCode...)
+		lines = append(lines,
+			fmt.Sprintf("      ctx->xmm[%d].f64[0] = %s(src_lo.f64[0]);", dIdx, roundFunc),
+			fmt.Sprintf("      ctx->xmm[%d].f64[1] = %s(src_lo.f64[1]);", dIdx, roundFunc),
+			fmt.Sprintf("      ctx->ymmh[%d].f64[0] = %s(src_hi.f64[0]);", dIdx, roundFunc),
+			fmt.Sprintf("      ctx->ymmh[%d].f64[1] = %s(src_hi.f64[1]);", dIdx, roundFunc),
+			"    }",
+		)
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	sCode, err := l.loadXmmArg(src, nextPC, "src")
 	if err != nil {
 		return nil, err
@@ -650,13 +667,16 @@ func (l *Lifter) liftVdpps(dst, src1, src2, immArg x86asm.Arg, nextPC uint64) ([
 // liftVrcp handles VRCPPS and VRCPSS
 func (l *Lifter) liftVrcp(isScalar bool, dst, src1, src2 x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
-	if !ok1 || !isXmm(dstReg) {
-		return nil, fmt.Errorf("vrcp destination must be XMM")
+	if !ok1 || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("vrcp destination must be XMM or YMM")
 	}
-	infoDst := regMap[dstReg]
-	dIdx := int(dstReg - x86asm.X0)
 
 	if isScalar {
+		if !isXmm(dstReg) {
+			return nil, fmt.Errorf("vrcpss destination must be XMM")
+		}
+		infoDst := regMap[dstReg]
+		dIdx := int(dstReg - x86asm.X0)
 		src1Reg, ok2 := src1.(x86asm.Reg)
 		if !ok2 || !isXmm(src1Reg) {
 			return nil, fmt.Errorf("vrcpss src1 must be XMM")
@@ -683,7 +703,27 @@ func (l *Lifter) liftVrcp(isScalar bool, dst, src1, src2 x86asm.Arg, nextPC uint
 	if src2 != nil {
 		src = src2
 	}
+
 	lines := []string{"    {"}
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		sCode, err := l.loadYmmArg(src, nextPC, "s")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, sCode...)
+		for i := 0; i < 4; i++ {
+			lines = append(lines,
+				fmt.Sprintf("      ctx->xmm[%d].f32[%d] = 1.0f / s_lo.f32[%d];", dIdx, i, i),
+				fmt.Sprintf("      ctx->ymmh[%d].f32[%d] = 1.0f / s_hi.f32[%d];", dIdx, i, i),
+			)
+		}
+		lines = append(lines, "    }")
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	sCode, err := l.loadXmmArg(src, nextPC, "s")
 	if err != nil {
 		return nil, err
@@ -1165,14 +1205,55 @@ func (l *Lifter) liftPaddsubSatExtra(op x86asm.Op, dst, src1, src2 x86asm.Arg, n
 func (l *Lifter) liftVaddsub(op x86asm.Op, dst, src1, src2 x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
 	src1Reg, ok2 := src1.(x86asm.Reg)
-	if !ok1 || !ok2 || !isXmm(dstReg) || !isXmm(src1Reg) {
-		return nil, fmt.Errorf("vaddsub requires XMM operands")
+	if !ok1 || !ok2 || (!isXmm(dstReg) && !isYmm(dstReg)) || (!isXmm(src1Reg) && !isYmm(src1Reg)) {
+		return nil, fmt.Errorf("vaddsub requires XMM or YMM operands")
 	}
+
+	lines := []string{"    {"}
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		s1Idx := ymmIdx(src1Reg)
+		s2Code, err := l.loadYmmArg(src2, nextPC, "s2")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, s2Code...)
+		lines = append(lines,
+			fmt.Sprintf("      xmm_reg_t s1_lo = ctx->xmm[%d];", s1Idx),
+			fmt.Sprintf("      xmm_reg_t s1_hi = ctx->ymmh[%d];", s1Idx),
+			"      xmm_reg_t res_lo = {0}, res_hi = {0};",
+		)
+		if op == x86asm.VADDSUBPS {
+			lines = append(lines,
+				"      res_lo.f32[0] = s1_lo.f32[0] - s2_lo.f32[0];",
+				"      res_lo.f32[1] = s1_lo.f32[1] + s2_lo.f32[1];",
+				"      res_lo.f32[2] = s1_lo.f32[2] - s2_lo.f32[2];",
+				"      res_lo.f32[3] = s1_lo.f32[3] + s2_lo.f32[3];",
+				"      res_hi.f32[0] = s1_hi.f32[0] - s2_hi.f32[0];",
+				"      res_hi.f32[1] = s1_hi.f32[1] + s2_hi.f32[1];",
+				"      res_hi.f32[2] = s1_hi.f32[2] - s2_hi.f32[2];",
+				"      res_hi.f32[3] = s1_hi.f32[3] + s2_hi.f32[3];",
+			)
+		} else {
+			lines = append(lines,
+				"      res_lo.f64[0] = s1_lo.f64[0] - s2_lo.f64[0];",
+				"      res_lo.f64[1] = s1_lo.f64[1] + s2_lo.f64[1];",
+				"      res_hi.f64[0] = s1_hi.f64[0] - s2_hi.f64[0];",
+				"      res_hi.f64[1] = s1_hi.f64[1] + s2_hi.f64[1];",
+			)
+		}
+		lines = append(lines,
+			fmt.Sprintf("      ctx->xmm[%d] = res_lo;", dIdx),
+			fmt.Sprintf("      ctx->ymmh[%d] = res_hi;", dIdx),
+			"    }",
+		)
+		return lines, nil
+	}
+
 	infoDst := regMap[dstReg]
 	infoSrc1 := regMap[src1Reg]
 	dIdx := int(dstReg - x86asm.X0)
 
-	lines := []string{"    {"}
 	s2Code, err := l.loadXmmArg(src2, nextPC, "s2")
 	if err != nil {
 		return nil, err
@@ -1312,14 +1393,12 @@ func (l *Lifter) liftVcvttpd2dq(dst, src x86asm.Arg, nextPC uint64) ([]string, e
 	return lines, nil
 }
 
-// liftVcvtdq2pd handles VCVTDQ2PD dst_xmm, src_xmm/m64
+// liftVcvtdq2pd handles VCVTDQ2PD dst_xmm/ymm, src_xmm/m64/m128
 func (l *Lifter) liftVcvtdq2pd(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
-	if !ok1 || !isXmm(dstReg) {
-		return nil, fmt.Errorf("vcvtdq2pd requires XMM destination")
+	if !ok1 || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("vcvtdq2pd requires XMM or YMM destination")
 	}
-	infoDst := regMap[dstReg]
-	dIdx := int(dstReg - x86asm.X0)
 
 	lines := []string{"    {"}
 	sCode, err := l.loadXmmArg(src, nextPC, "s")
@@ -1327,6 +1406,21 @@ func (l *Lifter) liftVcvtdq2pd(dst, src x86asm.Arg, nextPC uint64) ([]string, er
 		return nil, err
 	}
 	lines = append(lines, sCode...)
+
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		lines = append(lines,
+			fmt.Sprintf("      ctx->xmm[%d].f64[0] = (double)s.s32[0];", dIdx),
+			fmt.Sprintf("      ctx->xmm[%d].f64[1] = (double)s.s32[1];", dIdx),
+			fmt.Sprintf("      ctx->ymmh[%d].f64[0] = (double)s.s32[2];", dIdx),
+			fmt.Sprintf("      ctx->ymmh[%d].f64[1] = (double)s.s32[3];", dIdx),
+			"    }",
+		)
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
 	lines = append(lines,
 		"      xmm_reg_t res = {0};",
 		"      res.f64[0] = (double)s.s32[0];",
@@ -1338,14 +1432,12 @@ func (l *Lifter) liftVcvtdq2pd(dst, src x86asm.Arg, nextPC uint64) ([]string, er
 	return lines, nil
 }
 
-// liftVcvtph2ps handles VCVTPH2PS dst_xmm, src_xmm/m64 (F16C half to float)
+// liftVcvtph2ps handles VCVTPH2PS dst_xmm/ymm, src_xmm/m64/m128 (F16C half to float)
 func (l *Lifter) liftVcvtph2ps(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
-	if !ok1 || !isXmm(dstReg) {
-		return nil, fmt.Errorf("vcvtph2ps requires XMM destination")
+	if !ok1 || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("vcvtph2ps requires XMM or YMM destination")
 	}
-	infoDst := regMap[dstReg]
-	dIdx := int(dstReg - x86asm.X0)
 
 	lines := []string{"    {"}
 	sCode, err := l.loadXmmArg(src, nextPC, "s")
@@ -1353,9 +1445,15 @@ func (l *Lifter) liftVcvtph2ps(dst, src x86asm.Arg, nextPC uint64) ([]string, er
 		return nil, err
 	}
 	lines = append(lines, sCode...)
+
+	count := 4
+	if isYmm(dstReg) {
+		count = 8
+	}
+
 	lines = append(lines,
-		"      xmm_reg_t res = {0};",
-		"      for (int i = 0; i < 4; i++) {",
+		fmt.Sprintf("      float res_arr[%d];", count),
+		fmt.Sprintf("      for (int i = 0; i < %d; i++) {", count),
 		"        uint16_t h = s.u16[i];",
 		"        uint32_t sign = ((uint32_t)(h & 0x8000)) << 16;",
 		"        int32_t exp = (h >> 10) & 0x1F;",
@@ -1373,9 +1471,24 @@ func (l *Lifter) liftVcvtph2ps(dst, src x86asm.Arg, nextPC uint64) ([]string, er
 		"        } else {",
 		"          f_bits = sign | ((uint32_t)(exp + 112) << 23) | (mant << 13);",
 		"        }",
-		"        memcpy(&res.f32[i], &f_bits, 4);",
+		"        memcpy(&res_arr[i], &f_bits, 4);",
 		"      }",
-		fmt.Sprintf("      ctx->%s = res;", infoDst.BaseReg),
+	)
+
+	if isYmm(dstReg) {
+		dIdx := ymmIdx(dstReg)
+		lines = append(lines,
+			fmt.Sprintf("      memcpy(&ctx->xmm[%d], &res_arr[0], 16);", dIdx),
+			fmt.Sprintf("      memcpy(&ctx->ymmh[%d], &res_arr[4], 16);", dIdx),
+			"    }",
+		)
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
+	lines = append(lines,
+		fmt.Sprintf("      memcpy(&ctx->%s, &res_arr[0], 16);", infoDst.BaseReg),
 		fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx),
 		"    }",
 	)
@@ -1433,7 +1546,7 @@ func (l *Lifter) liftVcvtps2ph(dst, src, immArg x86asm.Arg, nextPC uint64) ([]st
 	return lines, nil
 }
 
-// liftVmxcsr handles VSTMXCSR and VLDMXCSR
+// liftVmxcsr handles VSTMXCSR, STMXCSR, VLDMXCSR, LDMXCSR
 func (l *Lifter) liftVmxcsr(isStore bool, arg x86asm.Arg, nextPC uint64) ([]string, error) {
 	mem, ok := arg.(x86asm.Mem)
 	if !ok {
@@ -1445,10 +1558,10 @@ func (l *Lifter) liftVmxcsr(isStore bool, arg x86asm.Arg, nextPC uint64) ([]stri
 	}
 	if isStore {
 		return []string{
-			fmt.Sprintf("    MEM_U32(%s) = 0x1F80;", addr),
+			fmt.Sprintf("    MEM_U32(%s) = (ctx->mxcsr != 0) ? ctx->mxcsr : 0x1F80;", addr),
 		}, nil
 	}
 	return []string{
-		fmt.Sprintf("    { (void)MEM_U32(%s); }", addr),
+		fmt.Sprintf("    ctx->mxcsr = MEM_U32(%s);", addr),
 	}, nil
 }

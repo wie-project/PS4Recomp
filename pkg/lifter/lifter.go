@@ -130,9 +130,14 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.FUCOMI, x86asm.FUCOMIP, x86asm.FCOMI, x86asm.FCOMIP,
 		x86asm.FLDCW, x86asm.FNSTCW,
 		x86asm.FISTTP, x86asm.FCOMP, x86asm.FCOM, x86asm.FICOM, x86asm.FICOMP,
+		x86asm.FUCOM, x86asm.FUCOMPP,
 		x86asm.FCMOVB, x86asm.FCMOVE, x86asm.FCMOVNB, x86asm.FCMOVU,
-		x86asm.FIDIVR, x86asm.FDIVRP, x86asm.FSUBR, x86asm.FLDL2T, x86asm.FBSTP,
-		x86asm.FNOP, x86asm.FNSTENV, x86asm.FNSTSW, x86asm.FYL2XP1,
+		x86asm.FCMOVNE, x86asm.FCMOVBE, x86asm.FCMOVNBE, x86asm.FCMOVNU,
+		x86asm.FIDIVR, x86asm.FDIVRP, x86asm.FSUBR, x86asm.FISUBR, x86asm.FLDL2T, x86asm.FBSTP,
+		x86asm.FNOP, x86asm.FNSTENV, x86asm.FLDENV, x86asm.FNSTSW, x86asm.FYL2XP1,
+		x86asm.FNCLEX, x86asm.FFREEP, x86asm.FSQRT, x86asm.FRNDINT, x86asm.FXTRACT,
+		x86asm.FSCALE, x86asm.FPREM1, x86asm.FRSTOR, x86asm.FXSAVE, x86asm.FXRSTOR,
+		x86asm.STMXCSR, x86asm.LDMXCSR,
 		// Control flow, ALU, system
 		x86asm.LOOP, x86asm.LOOPE, x86asm.LOOPNE, x86asm.LRET, x86asm.LCALL, x86asm.LJMP,
 		x86asm.RCL, x86asm.RCR, x86asm.CMC, x86asm.XLATB, x86asm.RDTSC,
@@ -159,7 +164,9 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		// BMI1 / BMI2 opcodes
 		x86asm.ANDN, x86asm.BEXTR, x86asm.BLSI, x86asm.BLSMSK, x86asm.BLSR, x86asm.BZHI,
 		x86asm.MULX, x86asm.RORX, x86asm.SARX, x86asm.SHLX, x86asm.SHRX,
-		x86asm.VPCMPISTRI, x86asm.PCMPISTRI:
+		x86asm.VPCMPISTRI, x86asm.PCMPISTRI, x86asm.VPCMPESTRI, x86asm.PCMPESTRI,
+		x86asm.VMOVNTDQA, x86asm.VMOVNTPD, x86asm.MOVNTDQA, x86asm.MOVNTPD,
+		x86asm.CMPXCHG16B, x86asm.CRC32, x86asm.INSD, x86asm.OUTSD, x86asm.OUTSB:
 		return true
 	default:
 		return isSetcc(op) || isCmovcc(op) || IsJcc(op)
@@ -519,7 +526,8 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		lines = append(lines, "    /* fwait no-op */")
 
 	// Vector/SSE operations
-	case x86asm.MOVUPS, x86asm.MOVAPS, x86asm.MOVDQU, x86asm.MOVDQA, x86asm.MOVUPD, x86asm.MOVAPD:
+	case x86asm.MOVUPS, x86asm.MOVAPS, x86asm.MOVDQU, x86asm.MOVDQA, x86asm.MOVUPD, x86asm.MOVAPD,
+		x86asm.MOVNTDQ, x86asm.MOVNTDQA, x86asm.MOVNTPD, x86asm.MOVNTPS:
 		code, err := l.liftVectorMove(args[0], args[1], nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
@@ -1186,13 +1194,6 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		}
 		lines = append(lines, code...)
 
-	case x86asm.MOVNTDQ:
-		code, err := l.liftVectorMove(args[0], args[1], nextPC)
-		if err != nil {
-			return nil, fmt.Errorf("0x%x: %w", pc, err)
-		}
-		lines = append(lines, code...)
-
 	case x86asm.ADDPS:
 		code, err := l.liftPackedF32("+", args[0], args[1], nextPC)
 		if err != nil {
@@ -1492,7 +1493,7 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 	case x86asm.LFENCE, x86asm.MFENCE, x86asm.SFENCE:
 		lines = append(lines, "    __sync_synchronize();")
 	case x86asm.VMOVAPS, x86asm.VMOVUPS, x86asm.VMOVUPD, x86asm.VMOVAPD, x86asm.VMOVDQA, x86asm.VMOVDQU, x86asm.VMOVD, x86asm.VMOVQ,
-		x86asm.VMOVSS, x86asm.VMOVSD, x86asm.VMOVNTPS, x86asm.VMOVNTDQ, x86asm.VBROADCASTSS, x86asm.VMOVSLDUP,
+		x86asm.VMOVSS, x86asm.VMOVSD, x86asm.VMOVNTPS, x86asm.VMOVNTDQ, x86asm.VMOVNTDQA, x86asm.VMOVNTPD, x86asm.VBROADCASTSS, x86asm.VMOVSLDUP,
 		x86asm.VADDSS, x86asm.VADDSD, x86asm.VSUBSS, x86asm.VSUBSD,
 		x86asm.VMULSS, x86asm.VMULSD, x86asm.VDIVSS, x86asm.VDIVSD,
 		x86asm.VADDPS, x86asm.VSUBPS, x86asm.VMULPS, x86asm.VDIVPS,
@@ -1551,6 +1552,13 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 
 	case x86asm.VPCMPISTRI, x86asm.PCMPISTRI:
 		code, err := l.liftPcmpistri(op, args, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.VPCMPESTRI, x86asm.PCMPESTRI:
+		code, err := l.liftPcmpestri(op, args, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}
@@ -1736,7 +1744,14 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		}
 		lines = append(lines, code...)
 
-	case x86asm.FCMOVB, x86asm.FCMOVE, x86asm.FCMOVNB, x86asm.FCMOVU:
+	case x86asm.FUCOM:
+		lines = append(lines, l.liftFucom(0, args[:])...)
+
+	case x86asm.FUCOMPP:
+		lines = append(lines, l.liftFucom(2, args[:])...)
+
+	case x86asm.FCMOVB, x86asm.FCMOVE, x86asm.FCMOVNB, x86asm.FCMOVU,
+		x86asm.FCMOVNE, x86asm.FCMOVBE, x86asm.FCMOVNBE, x86asm.FCMOVNU:
 		code, err := l.liftFcmov(op, args[0])
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
@@ -1755,6 +1770,13 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 
 	case x86asm.FSUBR:
 		code, err := l.liftFsubr(args, defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.FISUBR:
+		code, err := l.liftFisubr(args[0], defMemSz, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}
@@ -1780,6 +1802,55 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		}
 		lines = append(lines, code...)
 
+	case x86asm.FLDENV:
+		code, err := l.liftFldenv(args[0], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.FNCLEX:
+		lines = append(lines, l.liftFnclex()...)
+
+	case x86asm.FFREEP:
+		lines = append(lines, l.liftFfreep()...)
+
+	case x86asm.FSQRT:
+		lines = append(lines, l.liftFsqrt()...)
+
+	case x86asm.FRNDINT:
+		lines = append(lines, l.liftFrndint()...)
+
+	case x86asm.FXTRACT:
+		lines = append(lines, l.liftFxtract()...)
+
+	case x86asm.FSCALE:
+		lines = append(lines, l.liftFscale()...)
+
+	case x86asm.FPREM1:
+		lines = append(lines, l.liftFprem1()...)
+
+	case x86asm.FRSTOR:
+		code, err := l.liftFrstor(args[0], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.FXSAVE:
+		code, err := l.liftFxsave(args[0], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.FXRSTOR:
+		code, err := l.liftFxrstor(args[0], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
 	case x86asm.FNSTSW:
 		code, err := l.liftFnstsw(args[0], nextPC)
 		if err != nil {
@@ -1789,6 +1860,23 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 
 	case x86asm.FYL2XP1:
 		lines = append(lines, l.liftFyl2xp1()...)
+
+	case x86asm.CMPXCHG16B:
+		code, err := l.liftCmpxchg16b(args[0], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.CRC32:
+		code, err := l.liftCrc32(args[0], args[1], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.INSD, x86asm.OUTSD, x86asm.OUTSB:
+		lines = append(lines, l.liftPortIO(op)...)
 
 	default:
 		// Check SETcc

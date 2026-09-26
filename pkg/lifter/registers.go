@@ -117,6 +117,24 @@ var regMap = map[x86asm.Reg]RegInfo{
 	x86asm.F5: {BaseReg: "FPU_ST(5)", Size: 8},
 	x86asm.F6: {BaseReg: "FPU_ST(6)", Size: 8},
 	x86asm.F7: {BaseReg: "FPU_ST(7)", Size: 8},
+
+	// MMX (M0-M7)
+	x86asm.M0: {BaseReg: "mmx[0]", Size: 8},
+	x86asm.M1: {BaseReg: "mmx[1]", Size: 8},
+	x86asm.M2: {BaseReg: "mmx[2]", Size: 8},
+	x86asm.M3: {BaseReg: "mmx[3]", Size: 8},
+	x86asm.M4: {BaseReg: "mmx[4]", Size: 8},
+	x86asm.M5: {BaseReg: "mmx[5]", Size: 8},
+	x86asm.M6: {BaseReg: "mmx[6]", Size: 8},
+	x86asm.M7: {BaseReg: "mmx[7]", Size: 8},
+
+	// Segment registers (16-bit selector in x86-64)
+	x86asm.FS: {BaseReg: "fs_base", Size: 2},
+	x86asm.GS: {BaseReg: "gs_base", Size: 2},
+	x86asm.CS: {BaseReg: "cs", Size: 2},
+	x86asm.DS: {BaseReg: "ds", Size: 2},
+	x86asm.ES: {BaseReg: "es", Size: 2},
+	x86asm.SS: {BaseReg: "ss", Size: 2},
 }
 
 type regReadEntry struct {
@@ -136,6 +154,14 @@ var (
 	regWriteTable [256]regWriteEntry
 )
 
+func isMmx(reg x86asm.Reg) bool {
+	return reg >= x86asm.M0 && reg <= x86asm.M7
+}
+
+func mmxIdx(reg x86asm.Reg) int {
+	return int(reg - x86asm.M0)
+}
+
 func init() {
 	for r := x86asm.F0; r <= x86asm.F7; r++ {
 		idx := int(r - x86asm.F0)
@@ -149,6 +175,18 @@ func init() {
 			suffix: ");",
 			ok:     true,
 		}
+	}
+
+	// Segment register read/write special handling:
+	// FS: reads ctx->fs_base, writes ctx->fs_base
+	// GS: reads 0, writes no-op (or ctx->gs_base if needed)
+	// CS, DS, ES, SS: in x86-64 flat mode, reads 0, writes ignored
+	regReadTable[x86asm.FS] = regReadEntry{expr: "((uint16_t)ctx->fs_base)", size: 2, ok: true}
+	regWriteTable[x86asm.FS] = regWriteEntry{prefix: "ctx->fs_base = (uint64_t)(uint16_t)(", suffix: ");", ok: true}
+
+	for _, seg := range []x86asm.Reg{x86asm.GS, x86asm.CS, x86asm.DS, x86asm.ES, x86asm.SS} {
+		regReadTable[seg] = regReadEntry{expr: "((uint16_t)0)", size: 2, ok: true}
+		regWriteTable[seg] = regWriteEntry{prefix: "/* ignored seg write: */ (void)(", suffix: ");", ok: true}
 	}
 
 	for reg, info := range regMap {

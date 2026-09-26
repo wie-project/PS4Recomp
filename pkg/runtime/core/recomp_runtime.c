@@ -164,6 +164,8 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
     uint64_t tcb_addr = image_end;
     ctx->fs_base = tcb_addr;
     MEM_U64(tcb_addr) = tcb_addr;
+    ctx->mxcsr = 0x1f80;
+    ctx->fpu_cw = 0x037f;
 
     // Set up process arguments at tcb_addr + 0x10000 for _start_ps4_c
     uint64_t args_addr = tcb_addr + 0x10000ULL;
@@ -291,33 +293,28 @@ GuestContext *recomp_init_runtime_file(const char *image_filename, size_t reques
         }
     }
     fclose(fp);
+    return ctx;
+}
 
-    // Initialize stack canary if needed
-    if (ctx->mem_base) {
-        uint64_t *canary_ptr = (uint64_t *)(ctx->mem_base + 0x96f05d8ULL);
-        if (*canary_ptr == 0) {
-            uint64_t canary_addr = 0x9f50000ULL;
-            *(uint64_t *)(ctx->mem_base + canary_addr) = 0x595e9fbd94fda766ULL;
-            *canary_ptr = canary_addr;
-            printf("[ps4-recomp] Initialized stack canary at 0x%llx\n", (unsigned long long)canary_addr);
-        }
+void recomp_init_process_param(GuestContext *ctx, uint64_t proc_param_addr) {
+    if (!ctx || !ctx->mem_base || proc_param_addr == 0) return;
+    if (proc_param_addr + 0x40 > ctx->mem_size) return;
 
-        // Call SceLibcParam init function to initialize custom memory allocator
-        uint64_t proc_param_addr = 0x9800000ULL;
-        uint64_t libc_param_addr = *(uint64_t *)(ctx->mem_base + proc_param_addr + 0x38ULL);
-        if (libc_param_addr != 0) {
-            uint64_t malloc_replace_addr = *(uint64_t *)(ctx->mem_base + libc_param_addr + 0x30ULL);
-            if (malloc_replace_addr != 0) {
-                uint64_t init_func = *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x10ULL);
-                if (init_func != 0) {
-                    printf("[ps4-recomp] Calling SceLibcParam init function at 0x%llx...\n", (unsigned long long)init_func);
-                    recomp_call_guest(ctx, init_func);
-                }
+    // SceKernelProcessParam structure has libc_param at offset 0x38
+    uint64_t libc_param_addr = *(uint64_t *)(ctx->mem_base + proc_param_addr + 0x38ULL);
+    if (libc_param_addr != 0 && libc_param_addr + 0x38 <= ctx->mem_size) {
+        // SceLibcParam has malloc_replace at offset 0x30
+        uint64_t malloc_replace_addr = *(uint64_t *)(ctx->mem_base + libc_param_addr + 0x30ULL);
+        if (malloc_replace_addr != 0 && malloc_replace_addr + 0x18 <= ctx->mem_size) {
+            // SceLibcMallocReplace has init function pointer at offset 0x10
+            uint64_t init_func = *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x10ULL);
+            if (init_func != 0 && init_func < ctx->mem_size) {
+                printf("[ps4-recomp] Initializing custom memory allocator via SceLibcParam at 0x%llx...\n",
+                       (unsigned long long)init_func);
+                recomp_call_guest(ctx, init_func);
             }
         }
     }
-
-    return ctx;
 }
 
 void recomp_free_runtime(GuestContext *ctx) {
@@ -806,6 +803,148 @@ void recomp_vpcmpistri(GuestContext *ctx, const void *src2_ptr, const void *src1
     ctx->rcx = (uint64_t)index;
 
     // Update EFLAGS: CF, ZF, SF, OF, clear AF & PF
+    ctx->cf = (int_res2 != 0);
+    ctx->zf = (len2 < sz);
+    ctx->sf = (len1 < sz);
+    ctx->of = (int_res2 & 1);
+    ctx->af = 0;
+    ctx->pf = 0;
+}
+
+void recomp_vpcmpe_stri(GuestContext *ctx, const void *src2_ptr, const void *src1_ptr, uint8_t imm8) {
+    int is_word = (imm8 & 1);
+    int is_signed = ((imm8 >> 1) & 1);
+    int agg = ((imm8 >> 2) & 3);
+    int pol = ((imm8 >> 4) & 3);
+    int msb_index = ((imm8 >> 6) & 1);
+
+    int sz = is_word ? 8 : 16;
+    int len1 = (int)(int32_t)ctx->rax;
+    int len2 = (int)(int32_t)ctx->rdx;
+    if (len1 < 0) len1 = 0; else if (len1 > sz) len1 = sz;
+    if (len2 < 0) len2 = 0; else if (len2 > sz) len2 = sz;
+
+    const uint8_t *s2_bytes = (const uint8_t *)src2_ptr;
+    const uint8_t *s1_bytes = (const uint8_t *)src1_ptr;
+
+    uint32_t int_res1 = 0;
+
+    for (int i = 0; i < sz; i++) {
+        int match = 0;
+        switch (agg) {
+            case 0: // Equal Any
+                if (i < len1) {
+                    for (int j = 0; j < len2; j++) {
+                        if (!is_word) {
+                            if (s1_bytes[i] == s2_bytes[j]) { match = 1; break; }
+                        } else {
+                            const uint16_t *s2_w = (const uint16_t *)src2_ptr;
+                            const uint16_t *s1_w = (const uint16_t *)src1_ptr;
+                            if (s1_w[i] == s2_w[j]) { match = 1; break; }
+                        }
+                    }
+                }
+                break;
+            case 1: // Ranges
+                if (i < len1) {
+                    for (int j = 0; j < sz; j += 2) {
+                        if (j < len2) {
+                            if (!is_word) {
+                                if (!is_signed) {
+                                    uint8_t lo = s2_bytes[j];
+                                    uint8_t hi = (j + 1 < len2) ? s2_bytes[j + 1] : 0xFF;
+                                    if (s1_bytes[i] >= lo && s1_bytes[i] <= hi) { match = 1; break; }
+                                } else {
+                                    int8_t lo = (int8_t)s2_bytes[j];
+                                    int8_t hi = (j + 1 < len2) ? (int8_t)s2_bytes[j + 1] : (int8_t)0x7F;
+                                    int8_t v = (int8_t)s1_bytes[i];
+                                    if (v >= lo && v <= hi) { match = 1; break; }
+                                }
+                            } else {
+                                const uint16_t *s2_w = (const uint16_t *)src2_ptr;
+                                const uint16_t *s1_w = (const uint16_t *)src1_ptr;
+                                if (!is_signed) {
+                                    uint16_t lo = s2_w[j];
+                                    uint16_t hi = (j + 1 < len2) ? s2_w[j + 1] : 0xFFFF;
+                                    if (s1_w[i] >= lo && s1_w[i] <= hi) { match = 1; break; }
+                                } else {
+                                    int16_t lo = (int16_t)s2_w[j];
+                                    int16_t hi = (j + 1 < len2) ? (int16_t)s2_w[j + 1] : (int16_t)0x7FFF;
+                                    int16_t v = (int16_t)s1_w[i];
+                                    if (v >= lo && v <= hi) { match = 1; break; }
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
+            case 2: // Equal Each
+                if (i < len1 && i < len2) {
+                    if (!is_word) {
+                        match = (s1_bytes[i] == s2_bytes[i]);
+                    } else {
+                        const uint16_t *s2_w = (const uint16_t *)src2_ptr;
+                        const uint16_t *s1_w = (const uint16_t *)src1_ptr;
+                        match = (s1_w[i] == s2_w[i]);
+                    }
+                } else if (i >= len1 && i >= len2) {
+                    match = 1;
+                }
+                break;
+            case 3: // Equal Ordered
+                match = 1;
+                for (int k = 0; k < sz - i; k++) {
+                    if (k < len2) {
+                        if (i + k >= len1) {
+                            match = 0;
+                            break;
+                        }
+                        if (!is_word) {
+                            if (s1_bytes[i + k] != s2_bytes[k]) { match = 0; break; }
+                        } else {
+                            const uint16_t *s2_w = (const uint16_t *)src2_ptr;
+                            const uint16_t *s1_w = (const uint16_t *)src1_ptr;
+                            if (s1_w[i + k] != s2_w[k]) { match = 0; break; }
+                        }
+                    }
+                }
+                break;
+        }
+        if (match) {
+            int_res1 |= (1U << i);
+        }
+    }
+
+    uint32_t int_res2 = 0;
+    switch (pol) {
+        case 0:
+            int_res2 = int_res1;
+            break;
+        case 1:
+            int_res2 = (~int_res1) & ((1U << sz) - 1);
+            break;
+        case 2:
+            int_res2 = int_res1;
+            break;
+        case 3:
+            for (int i = 0; i < len1; i++) {
+                if (!((int_res1 >> i) & 1)) {
+                    int_res2 |= (1U << i);
+                }
+            }
+            break;
+    }
+
+    int index = sz;
+    if (int_res2 != 0) {
+        if (!msb_index) {
+            index = __builtin_ctz(int_res2);
+        } else {
+            index = 31 - __builtin_clz(int_res2);
+        }
+    }
+
+    ctx->rcx = (uint64_t)index;
     ctx->cf = (int_res2 != 0);
     ctx->zf = (len2 < sz);
     ctx->sf = (len1 < sz);

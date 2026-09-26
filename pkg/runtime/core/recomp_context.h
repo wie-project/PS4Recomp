@@ -81,6 +81,8 @@ typedef struct GuestContext {
   int fpu_top;
   uint16_t fpu_cw;
   uint16_t fpu_sw;
+  uint32_t mxcsr;
+  uint64_t mmx[8];
 
   // Guest memory mapping
   uint8_t *mem_base;
@@ -392,6 +394,31 @@ void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip);
 
 // SIMD helpers
 void recomp_vpcmpistri(GuestContext *ctx, const void *src2_ptr, const void *src1_ptr, uint8_t imm8);
+void recomp_vpcmpe_stri(GuestContext *ctx, const void *src2_ptr, const void *src1_ptr, uint8_t imm8);
+
+// CRC32 helpers (Castagnoli 0x1EDC6F41 polynomial)
+static inline uint32_t recomp_crc32_u8(uint32_t crc, uint8_t val) {
+  crc ^= val;
+  for (int i = 0; i < 8; i++) {
+    crc = (crc >> 1) ^ (0x82F63B78U & (-(crc & 1)));
+  }
+  return crc;
+}
+
+static inline uint32_t recomp_crc32_u16(uint32_t crc, uint16_t val) {
+  crc = recomp_crc32_u8(crc, (uint8_t)val);
+  return recomp_crc32_u8(crc, (uint8_t)(val >> 8));
+}
+
+static inline uint32_t recomp_crc32_u32(uint32_t crc, uint32_t val) {
+  crc = recomp_crc32_u16(crc, (uint16_t)val);
+  return recomp_crc32_u16(crc, (uint16_t)(val >> 16));
+}
+
+static inline uint64_t recomp_crc32_u64(uint64_t crc, uint64_t val) {
+  uint32_t c = recomp_crc32_u32((uint32_t)crc, (uint32_t)val);
+  return (uint64_t)recomp_crc32_u32(c, (uint32_t)(val >> 32));
+}
 
 #ifdef __cplusplus
 }

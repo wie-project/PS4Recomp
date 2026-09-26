@@ -564,6 +564,23 @@ func (l *Lifter) liftImul(args x86asm.Args, defMemSz int, nextPC uint64) ([]stri
 				"    }",
 			}, nil
 		}
+		if sz == 2 {
+			return []string{
+				fmt.Sprintf("    { int32_t res = (int32_t)(int16_t)ctx->rax * (int16_t)(%s);", sRead),
+				"      ctx->rax = (ctx->rax & ~0xffffULL) | ((uint64_t)(uint16_t)res);",
+				"      ctx->rdx = (ctx->rdx & ~0xffffULL) | ((uint64_t)(uint16_t)(res >> 16));",
+				"      ctx->cf = ctx->of = (res != (int16_t)res);",
+				"    }",
+			}, nil
+		}
+		if sz == 1 {
+			return []string{
+				fmt.Sprintf("    { int16_t res = (int16_t)(int8_t)ctx->rax * (int8_t)(%s);", sRead),
+				"      ctx->rax = (ctx->rax & ~0xffffULL) | ((uint64_t)(uint16_t)res);",
+				"      ctx->cf = ctx->of = (res != (int8_t)res);",
+				"    }",
+			}, nil
+		}
 		return nil, fmt.Errorf("unsupported 1-arg IMUL size: %d", sz)
 	}
 
@@ -658,6 +675,23 @@ func (l *Lifter) liftMul(src x86asm.Arg, defMemSz int, nextPC uint64) ([]string,
 			"      ctx->rax = (uint64_t)(uint32_t)res;",
 			"      ctx->rdx = (uint64_t)(uint32_t)(res >> 32);",
 			"      ctx->cf = ctx->of = (ctx->rdx != 0);",
+			"    }",
+		}, nil
+	}
+	if sz == 2 {
+		return []string{
+			fmt.Sprintf("    { uint32_t res = (uint32_t)(uint16_t)ctx->rax * (uint16_t)(%s);", sRead),
+			"      ctx->rax = (ctx->rax & ~0xffffULL) | ((uint64_t)(uint16_t)res);",
+			"      ctx->rdx = (ctx->rdx & ~0xffffULL) | ((uint64_t)(uint16_t)(res >> 16));",
+			"      ctx->cf = ctx->of = (ctx->rdx != 0);",
+			"    }",
+		}, nil
+	}
+	if sz == 1 {
+		return []string{
+			fmt.Sprintf("    { uint16_t res = (uint16_t)(uint8_t)ctx->rax * (uint8_t)(%s);", sRead),
+			"      ctx->rax = (ctx->rax & ~0xffffULL) | ((uint64_t)res);",
+			"      ctx->cf = ctx->of = ((res & 0xff00) != 0);",
 			"    }",
 		}, nil
 	}
@@ -923,6 +957,29 @@ func (l *Lifter) liftDiv(src x86asm.Arg, defMemSz int, nextPC uint64) ([]string,
 			"    }",
 		}, nil
 	}
+	if sz == 2 {
+		return []string{
+			"    { uint32_t dividend = ((uint32_t)(uint16_t)ctx->rdx << 16) | (uint16_t)ctx->rax;",
+			fmt.Sprintf("      uint16_t divisor = (uint16_t)(%s);", sRead),
+			"      if (divisor != 0) {",
+			"        ctx->rax = (ctx->rax & ~0xffffULL) | ((uint64_t)(uint16_t)(dividend / divisor));",
+			"        ctx->rdx = (ctx->rdx & ~0xffffULL) | ((uint64_t)(uint16_t)(dividend % divisor));",
+			"      }",
+			"    }",
+		}, nil
+	}
+	if sz == 1 {
+		return []string{
+			"    { uint16_t dividend = (uint16_t)ctx->rax;",
+			fmt.Sprintf("      uint8_t divisor = (uint8_t)(%s);", sRead),
+			"      if (divisor != 0) {",
+			"        uint8_t quot = (uint8_t)(dividend / divisor);",
+			"        uint8_t rem = (uint8_t)(dividend % divisor);",
+			"        ctx->rax = (ctx->rax & ~0xffffULL) | ((uint64_t)rem << 8) | quot;",
+			"      }",
+			"    }",
+		}, nil
+	}
 	return nil, fmt.Errorf("unsupported DIV size: %d", sz)
 }
 
@@ -955,6 +1012,29 @@ func (l *Lifter) liftIdiv(src x86asm.Arg, defMemSz int, nextPC uint64) ([]string
 			"      if (divisor != 0) {",
 			"        ctx->rax = (uint64_t)(uint32_t)(int32_t)(dividend / divisor);",
 			"        ctx->rdx = (uint64_t)(uint32_t)(int32_t)(dividend % divisor);",
+			"      }",
+			"    }",
+		}, nil
+	}
+	if sz == 2 {
+		return []string{
+			"    { int32_t dividend = ((int32_t)(int16_t)ctx->rdx << 16) | (uint16_t)ctx->rax;",
+			fmt.Sprintf("      int16_t divisor = (int16_t)(%s);", sRead),
+			"      if (divisor != 0) {",
+			"        ctx->rax = (ctx->rax & ~0xffffULL) | ((uint64_t)(uint16_t)(dividend / divisor));",
+			"        ctx->rdx = (ctx->rdx & ~0xffffULL) | ((uint64_t)(uint16_t)(dividend % divisor));",
+			"      }",
+			"    }",
+		}, nil
+	}
+	if sz == 1 {
+		return []string{
+			"    { int16_t dividend = (int16_t)(int8_t)(ctx->rax & 0xff); /* or full AX */ dividend = (int16_t)ctx->rax;",
+			fmt.Sprintf("      int8_t divisor = (int8_t)(%s);", sRead),
+			"      if (divisor != 0) {",
+			"        int8_t quot = (int8_t)(dividend / divisor);",
+			"        int8_t rem = (int8_t)(dividend % divisor);",
+			"        ctx->rax = (ctx->rax & ~0xffffULL) | (((uint64_t)(uint8_t)rem) << 8) | ((uint8_t)quot);",
 			"      }",
 			"    }",
 		}, nil
@@ -1323,4 +1403,92 @@ func (l *Lifter) liftLar(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]st
 		lines = append(lines, "    "+w)
 	}
 	return lines, nil
+}
+
+func (l *Lifter) liftCmpxchg16b(memArg x86asm.Arg, nextPC uint64) ([]string, error) {
+	mem, ok := memArg.(x86asm.Mem)
+	if !ok {
+		return nil, fmt.Errorf("cmpxchg16b operand must be memory")
+	}
+	addr, err := MemAddrExpr(mem, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"    {",
+		fmt.Sprintf("      unsigned __int128 *p = (unsigned __int128 *)(ctx->mem_base + (%s));", addr),
+		"      unsigned __int128 expected = ((unsigned __int128)ctx->rdx << 64) | ctx->rax;",
+		"      unsigned __int128 desired = ((unsigned __int128)ctx->rcx << 64) | ctx->rbx;",
+		"      unsigned __int128 actual = __sync_val_compare_and_swap(p, expected, desired);",
+		"      if (actual == expected) {",
+		"        ctx->zf = 1;",
+		"      } else {",
+		"        ctx->zf = 0;",
+		"        ctx->rax = (uint64_t)actual;",
+		"        ctx->rdx = (uint64_t)(actual >> 64);",
+		"      }",
+		"    }",
+	}, nil
+}
+
+func (l *Lifter) liftCrc32(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok {
+		return nil, fmt.Errorf("crc32 destination must be register")
+	}
+	sz := defMemSz
+	if reg, ok := src.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	sRead, _, err := l.getOperandRead(src, sz, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	dRead, _, err := l.getOperandRead(dst, 8, nextPC)
+	if err != nil {
+		return nil, err
+	}
+
+	var callExpr string
+	switch sz {
+	case 1:
+		callExpr = fmt.Sprintf("recomp_crc32_u8((uint32_t)(%s), (uint8_t)(%s))", dRead, sRead)
+	case 2:
+		callExpr = fmt.Sprintf("recomp_crc32_u16((uint32_t)(%s), (uint16_t)(%s))", dRead, sRead)
+	case 4:
+		callExpr = fmt.Sprintf("recomp_crc32_u32((uint32_t)(%s), (uint32_t)(%s))", dRead, sRead)
+	case 8:
+		callExpr = fmt.Sprintf("recomp_crc32_u64((uint64_t)(%s), (uint64_t)(%s))", dRead, sRead)
+	default:
+		return nil, fmt.Errorf("unsupported CRC32 size: %d", sz)
+	}
+
+	wDst, err := GetRegWriteStmt(dstReg, callExpr)
+	if err != nil {
+		return nil, err
+	}
+	return []string{"    " + wDst}, nil
+}
+
+func (l *Lifter) liftPortIO(op x86asm.Op) []string {
+	// User-space guest binaries may contain legacy/unused port string instructions (e.g. INSD, OUTSD, OUTSB).
+	// On x86, INSD increments/decrements RDI by 4 depending on DF; OUTSD / OUTSB updates RSI by 4 or 1.
+	switch op {
+	case x86asm.INSD:
+		return []string{
+			"    if (ctx->df) { ctx->rdi -= 4; } else { ctx->rdi += 4; }",
+		}
+	case x86asm.OUTSD:
+		return []string{
+			"    if (ctx->df) { ctx->rsi -= 4; } else { ctx->rsi += 4; }",
+		}
+	case x86asm.OUTSB:
+		return []string{
+			"    if (ctx->df) { ctx->rsi -= 1; } else { ctx->rsi += 1; }",
+		}
+	default:
+		return nil
+	}
 }

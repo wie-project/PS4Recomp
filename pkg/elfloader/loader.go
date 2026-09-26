@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	PT_SCE_DYNLIBDATA elf.ProgType = 0x61000000
-	PT_SCE_RELRO      elf.ProgType = 0x61000010
+	PT_SCE_DYNLIBDATA   elf.ProgType = 0x61000000
+	PT_SCE_PROCPARAM    elf.ProgType = 0x61000001
+	PT_SCE_MODULE_PARAM elf.ProgType = 0x61000002
+	PT_SCE_RELRO        elf.ProgType = 0x61000010
 
 	R_X86_64_JUMP_SLOT = 7
 	R_X86_64_RELATIVE  = 8
@@ -90,6 +92,12 @@ type LoadedELF struct {
 
 	MinVAddr uint64
 	MaxVAddr uint64
+
+	// ProcParamAddr and ProcParamSize store the guest virtual address and extent of PT_SCE_PROCPARAM.
+	ProcParamAddr uint64
+	ProcParamSize uint64
+	// CanaryAddr tracks the guest virtual address allocated for the stack canary value.
+	CanaryAddr uint64
 
 	// MemoryImage holds the pre-mapped guest memory image with relative relocs applied.
 	MemoryImage []byte
@@ -177,6 +185,10 @@ func LoadELFBytes(data []byte) (*LoadedELF, error) {
 	for _, prog := range file.Progs {
 		if prog.Type == PT_SCE_DYNLIBDATA && prog.Filesz > 0 && prog.Off+prog.Filesz <= uint64(len(data)) {
 			loaded.DynlibData = data[prog.Off : prog.Off+prog.Filesz]
+		}
+		if prog.Type == PT_SCE_PROCPARAM {
+			loaded.ProcParamAddr = prog.Vaddr
+			loaded.ProcParamSize = prog.Memsz
 		}
 		if !isMappedProg(prog.Type) || prog.Memsz == 0 {
 			continue
@@ -387,24 +399,28 @@ func applyRelaTable(loaded *LoadedELF, relData []byte, isPlt bool) {
 }
 
 func applyStackCanary(loaded *LoadedELF, gotOffset uint64) {
-	guardAddr := (loaded.MaxVAddr + 4095) &^ 4095
-	if uint64(len(loaded.MemoryImage)) < guardAddr+4096 {
-		newImg := make([]byte, guardAddr+4096)
-		copy(newImg, loaded.MemoryImage)
-		loaded.MemoryImage = newImg
-		loaded.MaxVAddr = guardAddr + 4096
-		for _, seg := range loaded.Segments {
-			end := seg.Vaddr + seg.Memsz
-			if end > uint64(len(loaded.MemoryImage)) {
-				end = uint64(len(loaded.MemoryImage))
-			}
-			if seg.Vaddr < end {
-				seg.Data = loaded.MemoryImage[seg.Vaddr:end]
+	guardAddr := loaded.CanaryAddr
+	if guardAddr == 0 {
+		guardAddr = (loaded.MaxVAddr + 4095) &^ 4095
+		if uint64(len(loaded.MemoryImage)) < guardAddr+4096 {
+			newImg := make([]byte, guardAddr+4096)
+			copy(newImg, loaded.MemoryImage)
+			loaded.MemoryImage = newImg
+			loaded.MaxVAddr = guardAddr + 4096
+			for _, seg := range loaded.Segments {
+				end := seg.Vaddr + seg.Memsz
+				if end > uint64(len(loaded.MemoryImage)) {
+					end = uint64(len(loaded.MemoryImage))
+				}
+				if seg.Vaddr < end {
+					seg.Data = loaded.MemoryImage[seg.Vaddr:end]
+				}
 			}
 		}
+		const canaryValue = uint64(0x595e9fbd94fda766)
+		binary.LittleEndian.PutUint64(loaded.MemoryImage[guardAddr:guardAddr+8], canaryValue)
+		loaded.CanaryAddr = guardAddr
 	}
-	const canaryValue = uint64(0x595e9fbd94fda766)
-	binary.LittleEndian.PutUint64(loaded.MemoryImage[guardAddr:guardAddr+8], canaryValue)
 	if gotOffset+8 <= uint64(len(loaded.MemoryImage)) {
 		binary.LittleEndian.PutUint64(loaded.MemoryImage[gotOffset:gotOffset+8], guardAddr)
 	}

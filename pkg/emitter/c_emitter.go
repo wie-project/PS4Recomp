@@ -1556,6 +1556,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    recomp_init_process_param(ctx, 0x%xULL);
+
     if (strcmp("%s", "_start") != 0) {
         printf("[ps4-recomp] Calling global constructors (.init_array)...\n");
         // Run .init_array
@@ -1578,7 +1580,7 @@ int main(int argc, char **argv) {
     recomp_free_runtime(ctx);
     return 0;
 }
-`, vfsInitArg, entryName, e.formatInitArray(), entryName, entryAddr, entryAddr)
+`, vfsInitArg, e.elf.ProcParamAddr, entryName, e.formatInitArray(), entryName, entryAddr, entryAddr)
 
 	return writeFileIfChanged(path, []byte(content))
 }

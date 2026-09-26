@@ -45,6 +45,12 @@ func TestHogwartsImportLibNames(t *testing.T) {
 		t.Fatalf("LibraryForNID(%s)=%q looks like an encoded id", name, lib)
 	}
 	t.Logf("%s -> %s (libs=%d)", name, lib, len(loaded.ImportLibs))
+	if loaded.ProcParamAddr != 0x9800000 {
+		t.Errorf("expected ProcParamAddr 0x9800000, got 0x%x", loaded.ProcParamAddr)
+	}
+	if loaded.CanaryAddr == 0 {
+		t.Errorf("expected CanaryAddr to be allocated")
+	}
 }
 
 func TestResolveNID(t *testing.T) {

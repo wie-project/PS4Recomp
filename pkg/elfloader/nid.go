@@ -51,9 +51,18 @@ func initNIDDB() {
 	}
 }
 
+// specialNIDs maps well-known Sony symbol hashes (such as libc globals)
+// to their canonical plaintext names.
+var specialNIDs = map[string]string{
+	"f7uOxY9mM1U": "__stack_chk_guard",
+}
+
 // ResolveNID returns the human-readable function name for a Sony NID if known.
 func ResolveNID(nidOrSym string) (string, bool) {
 	prefix := NIDPrefix(nidOrSym)
+	if name, ok := specialNIDs[prefix]; ok {
+		return name, true
+	}
 	nidDBOnce.Do(initNIDDB)
 	name, ok := nidToName[prefix]
 	return name, ok
