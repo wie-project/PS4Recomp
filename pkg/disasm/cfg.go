@@ -773,6 +773,9 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 					if d.seedableFunc(target) {
 						discoveredCalls = append(discoveredCalls, target)
 					}
+					for _, jmpTarget := range d.findJumpTableTargets(target, entryAddr, fnEnd) {
+						edge(jmpTarget)
+					}
 				}
 			default:
 				if isJcc(inst.Op) {
