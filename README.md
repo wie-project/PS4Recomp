@@ -110,21 +110,11 @@ PS4Recomp is being actively validated against large-scale commercial PlayStation
 [ps4-recomp] Loading guest memory image (312811520 bytes), allocated dynamic address space (524288.0 MB)
 [ps4-recomp] Initializing custom memory allocator via SceLibcParam at 0x4188230...
 [ps4-recomp] Executing _start (0xf9a50)...
-[ps4-recomp] WARN: Called unresolved function at RIP=0x96f3810 (RSP=0x7ffffef20)
-[ps4-recomp] WARN: Called unresolved function at RIP=0x96f3810 (RSP=0x7ffffef30)
-
-sceKernelMemoryPoolCommit failed with error code 0xffffffea. (Original Type: CPU, Type: CPU, Size: 0, Alignment: 65536)
-
-PS4 OOM: CPU 0.00 MB, Garlic 00000.00 MB, Onion 00000.00 MB, FrameBuffer 00000.00 MB, OnionDirect 00000.00 MB, Flexible 00000.00 MB
-LowLevelFatalError [File:Unknown] [Line: 197]
-Ran out of memory allocating 0 bytes with alignment 65536
-
-FATAL: Unresolved indirect jump/call to 0x0 (from RIP=0x0)
-Registers:
-  RAX=0x0000000000000000 RBX=0x0000000000000000 RCX=0x0000001001074d54 RDX=0x0000000000000005
-  RSI=0x00000007ffffe908 RDI=0x0000000000000000 RBP=0x00000007ffffeb38 RSP=0x00000007ffffe820
-  R8 =0x000000000b2cb660 R9 =0x0000000000000000 R10=0x0000000000000015 R11=0x0000000000000040
-  R12=0x00000007ffffe908 R13=0x0000001001074d54 R14=0x000000000710f35a R15=0x0000000000000000
+GoodPGO
+File root is /app0/!
+Used memory before allocating anything was 0.00MB
+FIOS2: built with SDK version 0x09508001
+*** stack smashing detected ***: terminated
 ```
 
 The runtime includes an informative diagnostic layer for unresolved imports and indirect jump dispatching, reporting symbol names, NIDs, calling libraries, and guest stack heuristics.
