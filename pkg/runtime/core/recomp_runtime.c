@@ -379,7 +379,12 @@ GuestContext *recomp_init_runtime_file(const char *image_filename, size_t reques
 }
 
 void recomp_init_process_param(GuestContext *ctx, uint64_t proc_param_addr) {
-    if (!ctx || !ctx->mem_base || proc_param_addr == 0) return;
+    if (!ctx) return;
+    ctx->proc_param_addr = proc_param_addr;
+    if (ctx->process_ctx) {
+        ctx->process_ctx->proc_param_addr = proc_param_addr;
+    }
+    if (!ctx->mem_base || proc_param_addr == 0) return;
     if (proc_param_addr + 0x40 > ctx->mem_size) return;
 
     // SceKernelProcessParam structure has libc_param at offset 0x38
@@ -397,6 +402,12 @@ void recomp_init_process_param(GuestContext *ctx, uint64_t proc_param_addr) {
             }
         }
     }
+}
+
+void shim_sceKernelGetProcParam(GuestContext *ctx) {
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    ctx->rax = proc->proc_param_addr;
+    SHIM_RETURN();
 }
 
 void recomp_free_runtime(GuestContext *ctx) {

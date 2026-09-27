@@ -267,6 +267,7 @@ void shim_sceKernelMemoryPoolReserve(GuestContext *ctx);
 void shim_sceKernelMemoryPoolExpand(GuestContext *ctx);
 void shim_sceKernelMemoryPoolCommit(GuestContext *ctx);
 void shim_sceKernelMemoryPoolDecommit(GuestContext *ctx);
+void shim_sceKernelGetProcParam(GuestContext *ctx);
 
 // System Service shims
 void shim_sceSystemServiceParamGetInt(GuestContext *ctx);

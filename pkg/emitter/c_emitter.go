@@ -181,6 +181,8 @@ var CanonicalShims = map[string]string{
 	"sceKernelMemoryPoolExpand":            "shim_sceKernelMemoryPoolExpand",
 	"sceKernelMemoryPoolCommit":            "shim_sceKernelMemoryPoolCommit",
 	"sceKernelMemoryPoolDecommit":          "shim_sceKernelMemoryPoolDecommit",
+	"sceKernelGetProcParam":                "shim_sceKernelGetProcParam",
+	"959qrazPIrg":                          "shim_sceKernelGetProcParam",
 	// Event Queue
 	"sceKernelCreateEqueue": "shim_sceKernelCreateEqueue",
 	"sceKernelDeleteEqueue": "shim_sceKernelDeleteEqueue",

@@ -254,26 +254,50 @@ int sceKernelMapFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t lengt
 }
 
 int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut) {
-    (void)ctx;
     if (!sizeOut) return -EINVAL;
-    *sizeOut = 512ULL * 1024 * 1024; // 512MB default flexible memory size (ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE)
+    uint64_t default_size = 512ULL * 1024 * 1024; // 512MB default
+    if (ctx && ctx->mem_base) {
+        GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+        if (proc->proc_param_addr != 0 && proc->proc_param_addr + 0x48 <= proc->mem_size) {
+            // OrbisProcParam has mem_param pointer at offset +0x40
+            uint64_t mem_param_addr = *(uint64_t *)(proc->mem_base + proc->proc_param_addr + 0x40ULL);
+            if (mem_param_addr != 0 && mem_param_addr + 0x18 <= proc->mem_size) {
+                // OrbisKernelMemParam has flexible_memory_size pointer at offset +0x10
+                uint64_t flex_ptr = *(uint64_t *)(proc->mem_base + mem_param_addr + 0x10ULL);
+                if (flex_ptr != 0 && flex_ptr + 8 <= proc->mem_size) {
+                    uint64_t flex_extra = *(uint64_t *)(proc->mem_base + flex_ptr);
+                    if (flex_extra > 0 && flex_extra < 4ULL * 1024 * 1024 * 1024) {
+                        // Base flexible memory is 272MB (0x11000000)
+                        *sizeOut = flex_extra + (272ULL * 1024 * 1024);
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+    *sizeOut = default_size;
     return 0;
 }
 
 size_t sceKernelAvailableFlexibleMemorySize(GuestContext *ctx) {
     if (!ctx) return 0;
     GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    uint64_t total_fmem = 512ULL * 1024 * 1024;
+    sceKernelConfiguredFlexibleMemorySize(ctx, &total_fmem);
+
     pthread_mutex_lock(&proc->vm_mutex);
-    size_t free_total = 0;
+    size_t used = 0;
     GuestVMExtent *curr = proc->vm_extents;
     while (curr) {
-        if (curr->is_free) {
-            free_total += curr->size;
+        if (!curr->is_free && strstr(curr->name, "flexible")) {
+            used += curr->size;
         }
         curr = curr->next;
     }
     pthread_mutex_unlock(&proc->vm_mutex);
-    return free_total;
+
+    if (used >= total_fmem) return 0;
+    return (size_t)(total_fmem - used);
 }
 
 int sceKernelVirtualQuery(GuestContext *ctx, const void *addr, int flags, OrbisKernelVirtualQueryInfo *info, size_t infoSize) {
@@ -353,7 +377,8 @@ int sceKernelMemoryPoolCommit(GuestContext *ctx, void *addr, size_t len, int typ
     (void)type;
     (void)prot;
     (void)flags;
-    if (!addr || len == 0) return -EINVAL;
+    if (!addr) return -EINVAL;
+    if (len == 0) return 0; // ORBIS_OK for zero-length commit
     return 0; // ORBIS_OK
 }
 
@@ -494,11 +519,13 @@ void shim_sceKernelMapFlexibleMemory(GuestContext *ctx) {
 
 void shim_sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx) {
     uint64_t sizeOutGuest = ctx->rdi;
+    uint64_t cfg_size = 512ULL * 1024 * 1024;
+    int rc = sceKernelConfiguredFlexibleMemorySize(ctx, &cfg_size);
     if (sizeOutGuest == 0) {
         ctx->rax = (uint64_t)(int64_t)-EINVAL;
     } else if (ctx->mem_base && sizeOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
-        *(uint64_t *)(ctx->mem_base + sizeOutGuest) = 512ULL * 1024 * 1024;
-        ctx->rax = 0;
+        *(uint64_t *)(ctx->mem_base + sizeOutGuest) = cfg_size;
+        ctx->rax = (uint64_t)(int64_t)rc;
     } else {
         ctx->rax = (uint64_t)(int64_t)-EFAULT;
     }
@@ -506,7 +533,14 @@ void shim_sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx) {
 }
 
 void shim_sceKernelAvailableFlexibleMemorySize(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceKernelAvailableFlexibleMemorySize(ctx);
+    size_t avail = sceKernelAvailableFlexibleMemorySize(ctx);
+    uint64_t sizeOutGuest = ctx->rdi;
+    if (sizeOutGuest != 0 && ctx->mem_base && sizeOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+        *(uint64_t *)(ctx->mem_base + sizeOutGuest) = (uint64_t)avail;
+        ctx->rax = 0; // ORBIS_OK
+    } else {
+        ctx->rax = (uint64_t)avail;
+    }
     SHIM_RETURN();
 }
 

@@ -105,6 +105,9 @@ typedef struct GuestContext {
   // Process root context (shared across threads)
   struct GuestContext *process_ctx;
 
+  // Process parameters address (SceKernelProcessParam)
+  uint64_t proc_param_addr;
+
   // Active exception unwinding frame stack
   UnwindFrame *unwind_frame;
 } GuestContext;
