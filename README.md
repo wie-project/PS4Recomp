@@ -103,8 +103,6 @@ Manage retail and homebrew `.pkg` files directly:
 
 ### Hogwarts Legacy (Unreal Engine 4)
 
-PS4Recomp is being actively validated against large-scale commercial PlayStation 4 titles on Apple Silicon, including **Hogwarts Legacy Deluxe Edition (CUSA12771)**. The static recompiler successfully parses and lifts the 312 MB guest binary and all companion PRX modules, initializes UMA unified direct memory, configures custom allocators via `SceLibcParam`, executes `_start`, and drives deep into Unreal Engine 4's core subsystem initialization:
-
 ```text
 [ps4-recomp] Initializing runtime...
 [ps4-recomp] Loading guest memory image (312811520 bytes), allocated dynamic address space (524288.0 MB)
