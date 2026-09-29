@@ -112,54 +112,8 @@ GoodPGO
 File root is /app0/!
 Used memory before allocating anything was 0.00MB
 FIOS2: built with SDK version 0x09508001
-
-FATAL: Unresolved indirect jump/call to 0x96f3948 (from RIP=0x96f3948)
-Registers:
-  RAX=0x0000000000000000 RBX=0x00000007ffffe2e0 RCX=0x0000000009f4a000 RDX=0x000000000a30f22a
-  RSI=0x00000007ffffe1c0 RDI=0x00000007ffffe2e0 RBP=0x00000007ffffe658 RSP=0x00000007ffffe298
-  R8 =0x000000000a32d1f8 R9 =0x000000000000000b R10=0x000000000a30bdd0 R11=0x0000000009f4a000
-  R12=0x0000001001074cf0 R13=0x0000001000520670 R14=0x0000000000000000 R15=0x0000000008652f10
-Guest call stack heuristic (RSP=0x7ffffe298):
-  frame #0: 0x00000000041816b5 (RSP+0x0)
-  frame #1: 0x0000000009ca6e90 (RSP+0x10)
-  frame #2: 0x00000007ffffe2f8 (RSP+0x20)
-  frame #3: 0x0000000004187746 (RSP+0x28)
-  frame #4: 0x00000007ffffe5f0 (RSP+0x30)
-  frame #5: 0x00000007ffffe5e8 (RSP+0x38)
-  frame #6: 0x0000000009ca6e90 (RSP+0x50)
-  frame #7: 0x00000007ffffe338 (RSP+0x60)
-  frame #8: 0x0000000004187746 (RSP+0x68)
-  frame #9: 0x00000007ffffe5f0 (RSP+0x70)
-  frame #10: 0x0000000009ca6e90 (RSP+0x90)
-  frame #11: 0x00000007ffffe378 (RSP+0xa0)
-  frame #12: 0x0000000004187797 (RSP+0xa8)
-  frame #13: 0x0000000009c66df0 (RSP+0xb0)
-  frame #14: 0x00000007ffffe5e8 (RSP+0xb8)
-  frame #15: 0x0000000009ca6e90 (RSP+0xd0)
-  frame #16: 0x00000007ffffe3b8 (RSP+0xe0)
-  frame #17: 0x0000000004187746 (RSP+0xe8)
-  frame #18: 0x00000007ffffe5f0 (RSP+0xf0)
-  frame #19: 0x00000007ffffe5e8 (RSP+0xf8)
-  frame #20: 0x0000000009ca6e90 (RSP+0x110)
-  frame #21: 0x00000007ffffe3f8 (RSP+0x120)
-  frame #22: 0x0000000004187746 (RSP+0x128)
-  frame #23: 0x00000007ffffe5f0 (RSP+0x130)
-  frame #24: 0x00000007ffffe5e8 (RSP+0x138)
-  frame #25: 0x0000000009ca6e90 (RSP+0x150)
-  frame #26: 0x00000007ffffe438 (RSP+0x160)
-  frame #27: 0x0000000004187746 (RSP+0x168)
-  frame #28: 0x00000007ffffe5f0 (RSP+0x170)
-  frame #29: 0x00000007ffffe5e8 (RSP+0x178)
-  frame #30: 0x0000000009ca6e90 (RSP+0x190)
-  frame #31: 0x00000007ffffe478 (RSP+0x1a0)
-  frame #32: 0x0000000004187746 (RSP+0x1a8)
-  frame #33: 0x00000007ffffe5f0 (RSP+0x1b0)
-  frame #34: 0x00000007ffffe5e8 (RSP+0x1b8)
-  frame #35: 0x0000000009ca6e90 (RSP+0x1d0)
-  frame #36: 0x00000007ffffe4b8 (RSP+0x1e0)
-  frame #37: 0x0000000004187746 (RSP+0x1e8)
-  frame #38: 0x00000007ffffe5f0 (RSP+0x1f0)
-  frame #39: 0x00000007ffffe5e8 (RSP+0x1f8)
+[ps4-recomp] WARN: Called unimplemented function 'sceAppContentInitialize' (NID: R9lA82OraNs, Lib: libSceAppContent) at RIP=0x96f3858 (caller RIP=0x4181a1c, RSP=0x7ffffe298)
+[ps4-recomp] WARN: Called unimplemented function 'sceAppContentTemporaryDataMount2' (NID: buYbeLOGWmA, Lib: libSceAppContent) at RIP=0x96f3868 (caller RIP=0x4181a2d, RSP=0x7ffffe298)
 ```
 
 ---
