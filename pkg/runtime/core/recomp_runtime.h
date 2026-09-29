@@ -48,6 +48,8 @@ void shim_strncpy(GuestContext *ctx);
 void shim_strcmp(GuestContext *ctx);
 void shim_read(GuestContext *ctx);
 void shim_readv(GuestContext *ctx);
+void shim_sceKernelPread(GuestContext *ctx);
+void shim_sceKernelPreadv(GuestContext *ctx);
 void shim_open(GuestContext *ctx);
 void shim_close(GuestContext *ctx);
 void shim_lseek(GuestContext *ctx);
@@ -636,6 +638,25 @@ void shim_sceVoiceQoSGetStatus(GuestContext *ctx);
 void shim_sceKernelLoadStartModule(GuestContext *ctx);
 void shim_sceKernelDlsym(GuestContext *ctx);
 
+// Kernel AIO (Asynchronous I/O)
+void ps4_aio_init(void);
+void ps4_aio_destroy(void);
+void shim_sceKernelAioInitializeImpl(GuestContext *ctx);
+void shim_sceKernelAioInitializeParam(GuestContext *ctx);
+void shim_sceKernelAioSetParam(GuestContext *ctx);
+void shim_sceKernelAioSubmitReadCommands(GuestContext *ctx);
+void shim_sceKernelAioSubmitReadCommandsMultiple(GuestContext *ctx);
+void shim_sceKernelAioSubmitWriteCommands(GuestContext *ctx);
+void shim_sceKernelAioSubmitWriteCommandsMultiple(GuestContext *ctx);
+void shim_sceKernelAioPollRequest(GuestContext *ctx);
+void shim_sceKernelAioPollRequests(GuestContext *ctx);
+void shim_sceKernelAioCancelRequest(GuestContext *ctx);
+void shim_sceKernelAioCancelRequests(GuestContext *ctx);
+void shim_sceKernelAioDeleteRequest(GuestContext *ctx);
+void shim_sceKernelAioDeleteRequests(GuestContext *ctx);
+void shim_sceKernelAioWaitRequest(GuestContext *ctx);
+void shim_sceKernelAioWaitRequests(GuestContext *ctx);
+
 // Subsystem teardown and lifecycle
 void recomp_free_thread_context(GuestContext *ctx);
 void ps4_direct_mem_destroy(void);
@@ -646,6 +667,7 @@ void ps4_equeue_destroy(void);
 void ps4_metal_screen_destroy(void);
 void ps4_keyboard_destroy(void);
 void ps4_vfs_destroy(void);
+
 
 // SIMD String helpers
 void recomp_vpcmpistri(GuestContext *ctx, const void *src2_ptr, const void *src1_ptr, uint8_t imm8);

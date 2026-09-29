@@ -638,6 +638,44 @@ var CanonicalShims = map[string]string{
 	"sceVoiceQoSConnect":                    "shim_sceVoiceQoSConnect",
 	"sceVoiceQoSDisconnect":                 "shim_sceVoiceQoSDisconnect",
 	"sceVoiceQoSGetStatus":                  "shim_sceVoiceQoSGetStatus",
+
+	// Kernel File System (pread / preadv)
+	"sceKernelPread":                        "shim_sceKernelPread",
+	"+r3rMFwItV4":                           "shim_sceKernelPread",
+	"sceKernelPreadv":                       "shim_sceKernelPreadv",
+	"yTj62I7kw4s":                           "shim_sceKernelPreadv",
+
+	// Kernel AIO (Asynchronous I/O)
+	"sceKernelAioInitializeImpl":            "shim_sceKernelAioInitializeImpl",
+	"vYU8P9Td2Zo":                           "shim_sceKernelAioInitializeImpl",
+	"sceKernelAioInitializeParam":           "shim_sceKernelAioInitializeParam",
+	"nu4a0-arQis":                           "shim_sceKernelAioInitializeParam",
+	"sceKernelAioSetParam":                  "shim_sceKernelAioSetParam",
+	"9WK-vhNXimw":                           "shim_sceKernelAioSetParam",
+	"sceKernelAioSubmitReadCommands":        "shim_sceKernelAioSubmitReadCommands",
+	"HgX7+AORI58":                           "shim_sceKernelAioSubmitReadCommands",
+	"sceKernelAioSubmitReadCommandsMultiple":"shim_sceKernelAioSubmitReadCommandsMultiple",
+	"lXT0m3P-vs4":                           "shim_sceKernelAioSubmitReadCommandsMultiple",
+	"sceKernelAioSubmitWriteCommands":       "shim_sceKernelAioSubmitWriteCommands",
+	"XQ8C8y+de+E":                           "shim_sceKernelAioSubmitWriteCommands",
+	"sceKernelAioSubmitWriteCommandsMultiple":"shim_sceKernelAioSubmitWriteCommandsMultiple",
+	"xT3Cpz0yh6Y":                           "shim_sceKernelAioSubmitWriteCommandsMultiple",
+	"sceKernelAioPollRequest":               "shim_sceKernelAioPollRequest",
+	"2pOuoWoCxdk":                           "shim_sceKernelAioPollRequest",
+	"sceKernelAioPollRequests":              "shim_sceKernelAioPollRequests",
+	"o7O4z3jwKzo":                           "shim_sceKernelAioPollRequests",
+	"sceKernelAioCancelRequest":             "shim_sceKernelAioCancelRequest",
+	"fR521KIGgb8":                           "shim_sceKernelAioCancelRequest",
+	"sceKernelAioCancelRequests":            "shim_sceKernelAioCancelRequests",
+	"3Lca1XBrQdY":                           "shim_sceKernelAioCancelRequests",
+	"sceKernelAioDeleteRequest":             "shim_sceKernelAioDeleteRequest",
+	"5TgME6AYty4":                           "shim_sceKernelAioDeleteRequest",
+	"sceKernelAioDeleteRequests":            "shim_sceKernelAioDeleteRequests",
+	"Ft3EtsZzAoY":                           "shim_sceKernelAioDeleteRequests",
+	"sceKernelAioWaitRequest":               "shim_sceKernelAioWaitRequest",
+	"KOF-oJbQVvc":                           "shim_sceKernelAioWaitRequest",
+	"sceKernelAioWaitRequests":              "shim_sceKernelAioWaitRequests",
+	"lgK+oIWkJyA":                           "shim_sceKernelAioWaitRequests",
 }
 
 var (
@@ -1459,6 +1497,7 @@ func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
 					return err
 				}
 			}
+		} else {
 			emitUnresolved := func(addr uint64, kind string) error {
 				if _, ok := registeredAddrs[addr]; ok {
 					return nil
@@ -1498,6 +1537,11 @@ func (e *CEmitter) emitPLTRegistrations(w *bufio.Writer) error {
 				} else {
 					if rel.PltAddr != 0 {
 						if err := emitUnresolved(rel.PltAddr, "PLT"); err != nil {
+							return err
+						}
+					}
+					if rel.Offset != 0 {
+						if err := emitUnresolved(rel.Offset, "GOT"); err != nil {
 							return err
 						}
 					}

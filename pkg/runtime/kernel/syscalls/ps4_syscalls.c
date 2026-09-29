@@ -240,6 +240,52 @@ void shim_readv(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+// sceKernelPread(fd, buf, nbytes, offset)
+void shim_sceKernelPread(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t buf_addr = ctx->rsi;
+  size_t nbytes = (size_t)ctx->rdx;
+  off_t offset = (off_t)ctx->rcx;
+
+  ssize_t ret = pread(fd, ctx->mem_base + buf_addr, nbytes, offset);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+  }
+  ctx->rax = (uint64_t)ret;
+  SHIM_RETURN();
+}
+
+// sceKernelPreadv(fd, iov, iovcnt, offset)
+void shim_sceKernelPreadv(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t iov_addr = ctx->rsi;
+  int iovcnt = (int)ctx->rdx;
+  off_t offset = (off_t)ctx->rcx;
+
+  if (iovcnt <= 0 || iovcnt > 1024) {
+    set_guest_errno(ctx, EINVAL);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+
+  struct guest_iovec *guest_iov =
+      (struct guest_iovec *)(ctx->mem_base + iov_addr);
+  struct iovec host_iov[iovcnt];
+
+  for (int i = 0; i < iovcnt; i++) {
+    host_iov[i].iov_base = ctx->mem_base + guest_iov[i].iov_base;
+    host_iov[i].iov_len = (size_t)guest_iov[i].iov_len;
+  }
+
+  ssize_t ret = preadv(fd, host_iov, iovcnt, offset);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+  }
+  ctx->rax = (uint64_t)ret;
+  SHIM_RETURN();
+}
+
+
 // fcntl
 void shim_fcntl(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
