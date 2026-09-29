@@ -113,7 +113,7 @@ File root is /app0/!
 Used memory before allocating anything was 0.00MB
 FIOS2: built with SDK version 0x09508001
 [ps4-recomp] WARN: Called unimplemented function 'sceAppContentInitialize' (NID: R9lA82OraNs, Lib: libSceAppContent) at RIP=0x96f3858 (caller RIP=0x4181a1c, RSP=0x7ffffe298)
-[ps4-recomp] WARN: Called unimplemented function 'sceAppContentTemporaryDataMount2' (NID: buYbeLOGWmA, Lib: libSceAppContent) at RIP=0x96f3868 (caller RIP=0x4181a2d, RSP=0x7ffffe298)
+zsh: abort
 ```
 
 ---
