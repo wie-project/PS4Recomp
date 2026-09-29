@@ -90,6 +90,55 @@ func TestMatchPICSwitchFromBytes(t *testing.T) {
 	}
 }
 
+func TestMatchPICSwitchInterleaved(t *testing.T) {
+	img := make([]byte, 0x400)
+	entry := uint64(0x100)
+	pc := entry
+	put := func(b ...byte) {
+		copy(img[pc:], b)
+		pc += uint64(len(b))
+	}
+
+	put(0x83, 0xfe, 0x05)             // cmp esi, 5
+	put(0x77, 0x20)                   // ja +0x20
+	leaPC := pc
+	put(0x48, 0x8d, 0x05, 0, 0, 0, 0) // lea rax, [rip+table]
+	put(0x48, 0x63, 0x0c, 0xb0)       // movsxd rcx, [rax+rsi*4]
+	put(0xbf, 0x0a, 0x00, 0x00, 0x00) // mov edi, 0xa  (interleaved)
+	put(0xba, 0x10, 0x00, 0x00, 0x00) // mov edx, 0x10 (interleaved)
+	put(0x48, 0x01, 0xc1)             // add rcx, rax
+	put(0xff, 0xe1)                   // jmp rcx
+
+	table := uint64(0x200)
+	leaNext := leaPC + 7
+	disp := int32(int64(table) - int64(leaNext))
+	binary.LittleEndian.PutUint32(img[leaPC+3:], uint32(disp))
+
+	var window []Instruction
+	pc = entry
+	for i := 0; i < 16; i++ {
+		inst, err := x86asm.Decode(img[pc:], 64)
+		if err != nil {
+			t.Fatalf("decode 0x%x: %v", pc, err)
+		}
+		window = append(window, Instruction{Address: pc, Inst: inst})
+		pc += uint64(inst.Len)
+		if inst.Op == x86asm.JMP {
+			break
+		}
+	}
+	sw, ok := matchPICSwitch(window, nil, nil)
+	if !ok {
+		t.Fatal("expected PIC switch match with interleaved instructions")
+	}
+	if sw.tableAddr != table {
+		t.Fatalf("table=0x%x want 0x%x", sw.tableAddr, table)
+	}
+	if sw.count != 6 {
+		t.Fatalf("count=%d want 6", sw.count)
+	}
+}
+
 func TestJumpTableLeadersWithoutRodata(t *testing.T) {
 	img := make([]byte, 0x400)
 	entry, case0, case1, case2, def, _ := assembleClangSwitch(img)
@@ -296,6 +345,152 @@ func TestMatchPICSwitchSplitAcrossBlocks(t *testing.T) {
 	}
 	if sw.count != 17 {
 		t.Errorf("count=%d, want 17", sw.count)
+	}
+}
+
+func TestMatchAbs64JumpTable(t *testing.T) {
+	img := make([]byte, 0x1000)
+	entry := uint64(0x100)
+	pc := entry
+	put := func(b ...byte) {
+		copy(img[pc:], b)
+		pc += uint64(len(b))
+	}
+
+	put(0x48, 0x83, 0xff, 0x03) // cmp rdi, 3
+	jaPC := pc
+	put(0x77, 0x00) // ja default (disp patched)
+
+	leaPC := pc
+	put(0x48, 0x8d, 0x05, 0, 0, 0, 0) // lea rax, [rip+table]
+	put(0x48, 0x8b, 0x14, 0xf8)       // mov rdx, [rax+rdi*8]
+	put(0xff, 0xe2)                   // jmp rdx
+
+	case0 := pc
+	put(0x90, 0xc3)
+	case1 := pc
+	put(0x90, 0xc3)
+	case2 := pc
+	put(0x90, 0xc3)
+	case3 := pc
+	put(0x90, 0xc3)
+	def := pc
+	put(0x90, 0xc3)
+
+	img[jaPC+1] = byte(int8(int64(def) - int64(jaPC+2)))
+
+	table := uint64(0x500)
+	leaNext := leaPC + 7
+	disp := int32(int64(table) - int64(leaNext))
+	binary.LittleEndian.PutUint32(img[leaPC+3:], uint32(disp))
+	binary.LittleEndian.PutUint64(img[table+0:], case0)
+	binary.LittleEndian.PutUint64(img[table+8:], case1)
+	binary.LittleEndian.PutUint64(img[table+16:], case2)
+	binary.LittleEndian.PutUint64(img[table+24:], case3)
+
+	loaded := switchTestELF(img)
+	d, err := NewDisassembler(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var window []Instruction
+	p := entry
+	for p < case0 {
+		inst, err := x86asm.Decode(img[p:], 64)
+		if err != nil {
+			t.Fatalf("decode at 0x%x: %v", p, err)
+		}
+		window = append(window, Instruction{Address: p, Inst: inst})
+		p += uint64(inst.Len)
+	}
+
+	res, ok := d.ResolveJumpTable(window, nil, nil, entry, 0x600)
+	if !ok {
+		t.Fatal("expected 64-bit jump table resolution")
+	}
+	if res.Format != TableFormatAbs64 {
+		t.Errorf("got format %v, want TableFormatAbs64", res.Format)
+	}
+	if res.Count != 4 {
+		t.Errorf("got count %d, want 4", res.Count)
+	}
+	if len(res.Targets) != 4 {
+		t.Fatalf("got %d targets, want 4", len(res.Targets))
+	}
+	expected := []uint64{case0, case1, case2, case3}
+	for i, exp := range expected {
+		if res.Targets[i] != exp {
+			t.Errorf("target[%d] = 0x%x, want 0x%x", i, res.Targets[i], exp)
+		}
+	}
+}
+
+func TestMatchAbs64DirectMemJump(t *testing.T) {
+	img := make([]byte, 0x1000)
+	entry := uint64(0x100)
+	pc := entry
+	put := func(b ...byte) {
+		copy(img[pc:], b)
+		pc += uint64(len(b))
+	}
+
+	put(0x48, 0x83, 0xff, 0x02) // cmp rdi, 2
+	jaPC := pc
+	put(0x77, 0x00) // ja default
+
+	leaPC := pc
+	put(0x48, 0x8d, 0x05, 0, 0, 0, 0) // lea rax, [rip+table]
+	put(0xff, 0x24, 0xf8)             // jmp [rax+rdi*8]
+
+	case0 := pc
+	put(0x90, 0xc3)
+	case1 := pc
+	put(0x90, 0xc3)
+	case2 := pc
+	put(0x90, 0xc3)
+	def := pc
+	put(0x90, 0xc3)
+
+	img[jaPC+1] = byte(int8(int64(def) - int64(jaPC+2)))
+
+	table := uint64(0x600)
+	leaNext := leaPC + 7
+	disp := int32(int64(table) - int64(leaNext))
+	binary.LittleEndian.PutUint32(img[leaPC+3:], uint32(disp))
+	binary.LittleEndian.PutUint64(img[table+0:], case0)
+	binary.LittleEndian.PutUint64(img[table+8:], case1)
+	binary.LittleEndian.PutUint64(img[table+16:], case2)
+
+	loaded := switchTestELF(img)
+	d, err := NewDisassembler(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var window []Instruction
+	p := entry
+	for p < case0 {
+		inst, err := x86asm.Decode(img[p:], 64)
+		if err != nil {
+			t.Fatalf("decode at 0x%x: %v", p, err)
+		}
+		window = append(window, Instruction{Address: p, Inst: inst})
+		p += uint64(inst.Len)
+	}
+
+	res, ok := d.ResolveJumpTable(window, nil, nil, entry, 0x700)
+	if !ok {
+		t.Fatal("expected direct memory 64-bit jump table resolution")
+	}
+	if res.Format != TableFormatAbs64 {
+		t.Errorf("got format %v, want TableFormatAbs64", res.Format)
+	}
+	if res.Count != 3 {
+		t.Errorf("got count %d, want 3", res.Count)
+	}
+	if len(res.Targets) != 3 {
+		t.Fatalf("got %d targets, want 3", len(res.Targets))
 	}
 }
 

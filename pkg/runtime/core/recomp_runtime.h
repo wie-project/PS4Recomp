@@ -390,6 +390,7 @@ void shim_sceSysmoduleIsLoaded(GuestContext *ctx);
 void shim_sceSysmoduleUnloadModule(GuestContext *ctx);
 void shim_sceSysmoduleLoadModuleInternal(GuestContext *ctx);
 void shim_sceSysmoduleUnloadModuleInternal(GuestContext *ctx);
+void shim_sceSysmoduleLoadModuleInternalWithArg(GuestContext *ctx);
 
 // FreeType shims
 void shim_FT_Init_FreeType(GuestContext *ctx);

@@ -30,8 +30,10 @@ type BasicBlock struct {
 type Function struct {
 	Name       string
 	EntryAddr  uint64
+	EndAddr    uint64
 	Blocks     map[uint64]*BasicBlock
 	BlockOrder []uint64 // Topologically or address-sorted block start addresses
+	JumpTables map[uint64][]uint64 // Map of indirect jump PC -> target addresses
 }
 
 // CapHitInfo records diagnostic information about a function decode that hit safety caps.
@@ -436,8 +438,10 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 	fn := &Function{
 		Name:       symName,
 		EntryAddr:  entryAddr,
+		EndAddr:    entryAddr + size,
 		Blocks:     make(map[uint64]*BasicBlock, 8),
 		BlockOrder: make([]uint64, 0, 8),
+		JumpTables: make(map[uint64][]uint64),
 	}
 
 	fnEnd := entryAddr + size
@@ -557,8 +561,9 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			}
 
 		case isIndirectJump(inst.Inst):
-			if sw, ok := matchPICSwitch(insts[:i+1], nil, nil); ok {
-				for _, target := range d.jumpTableTargets(sw, entryAddr, fnEnd) {
+			if sw, ok := d.ResolveJumpTable(insts[:i+1], nil, nil, entryAddr, fnEnd); ok && len(sw.Targets) > 0 {
+				fn.JumpTables[inst.Address] = sw.Targets
+				for _, target := range sw.Targets {
 					if target >= entryAddr && target < fnEnd {
 						leaders[target] = true
 					} else {
@@ -626,9 +631,10 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	}
 
 	fn := &Function{
-		Name:      symName,
-		EntryAddr: entryAddr,
-		Blocks:    make(map[uint64]*BasicBlock),
+		Name:       symName,
+		EntryAddr:  entryAddr,
+		Blocks:     make(map[uint64]*BasicBlock),
+		JumpTables: make(map[uint64][]uint64),
 	}
 
 	var discoveredCalls []uint64
@@ -788,8 +794,9 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 						return 0, false
 					}
 
-					if sw, ok := matchPICSwitch(curBlock, findTableAddr, findCount); ok {
-						for _, target := range d.jumpTableTargets(sw, entryAddr, fnEnd) {
+					if sw, ok := d.ResolveJumpTable(curBlock, findTableAddr, findCount, entryAddr, fnEnd); ok && len(sw.Targets) > 0 {
+						fn.JumpTables[pc] = sw.Targets
+						for _, target := range sw.Targets {
 							edge(target)
 						}
 					}
@@ -914,6 +921,14 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 		fn.BlockOrder = append(fn.BlockOrder, addr)
 	}
 	slices.Sort(fn.BlockOrder)
+
+	maxEnd := entryAddr
+	for _, b := range fn.Blocks {
+		if b.EndAddr > maxEnd {
+			maxEnd = b.EndAddr
+		}
+	}
+	fn.EndAddr = maxEnd
 
 	d.analyzeBlockFlagLiveness(fn)
 	return fn, discoveredCalls, nil

@@ -283,6 +283,27 @@ void shim_sceSysmoduleUnloadModuleInternal(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+int32_t sceSysmoduleLoadModuleInternalWithArg(uint32_t moduleId, int32_t argc, const void *argv, uint64_t unk, int32_t *res_out) {
+    (void)argc;
+    (void)argv;
+    (void)unk;
+    if (res_out) {
+        *res_out = 0;
+    }
+    return (int32_t)sceSysmoduleLoadModuleInternal(moduleId);
+}
+
+void shim_sceSysmoduleLoadModuleInternalWithArg(GuestContext *ctx) {
+    uint32_t moduleId = (uint32_t)ctx->rdi;
+    int32_t argc = (int32_t)ctx->rsi;
+    const void *argv = ctx->rdx ? (const void *)(ctx->mem_base + ctx->rdx) : NULL;
+    uint64_t unk = ctx->rcx;
+    int32_t *res_out = ctx->r8 ? (int32_t *)(ctx->mem_base + ctx->r8) : NULL;
+    int32_t ret = sceSysmoduleLoadModuleInternalWithArg(moduleId, argc, argv, unk, res_out);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
 int32_t sceKernelLoadStartModule(const char *name, size_t argc, const void *argv, uint32_t flags, void *opt, int *res) {
     (void)argc;
     (void)argv;

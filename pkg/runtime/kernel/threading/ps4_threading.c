@@ -4,6 +4,26 @@
 #include <signal.h>
 
 // Multi-threading runtime support
+typedef struct RecompPthreadAttr {
+  uint32_t sched_policy;
+  int32_t sched_inherit;
+  int32_t prio;
+  int32_t suspend;
+  uint32_t flags;
+  uint64_t stackaddr_attr;
+  uint64_t stacksize_attr;
+  uint64_t guardsize_attr;
+  uint64_t cpusetsize;
+  uint64_t cpuset;
+} RecompPthreadAttr;
+
+static RecompPthreadAttr *get_pthread_attr(GuestContext *ctx, uint64_t attr_addr) {
+  if (!attr_addr) return NULL;
+  uint64_t ptr = *(uint64_t *)(ctx->mem_base + attr_addr);
+  if (!ptr) return NULL;
+  return (RecompPthreadAttr *)ptr;
+}
+
 typedef struct RecompThread {
   pthread_t host_thread;
   uint64_t thread_id;
@@ -133,8 +153,13 @@ void shim_pthread_create(GuestContext *ctx) {
   t->thread_id = ++g_thread_counter;
   pthread_mutex_unlock(&g_threads_mutex);
 
-  // 4MB guest stack
-  GuestContext *child_ctx = recomp_create_thread_context(ctx, 4 * 1024 * 1024);
+  uint64_t stack_size = 4 * 1024 * 1024;
+  RecompPthreadAttr *attr = get_pthread_attr(ctx, attr_addr);
+  if (attr && attr->stacksize_attr >= 16 * 1024) {
+    stack_size = attr->stacksize_attr;
+  }
+
+  GuestContext *child_ctx = recomp_create_thread_context(ctx, stack_size);
   if (!child_ctx) {
     free(t);
     set_guest_errno(ctx, ENOMEM);
@@ -283,24 +308,66 @@ void shim_pthread_getspecific(GuestContext *ctx) {
 
 void shim_pthread_attr_init(GuestContext *ctx) {
   uint64_t attr_addr = ctx->rdi;
-  if (attr_addr) {
-    memset(ctx->mem_base + attr_addr, 0, 64);
+  if (!attr_addr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
   }
+  RecompPthreadAttr *pattr = (RecompPthreadAttr *)calloc(1, sizeof(RecompPthreadAttr));
+  if (!pattr) {
+    ctx->rax = (uint64_t)ENOMEM;
+    SHIM_RETURN();
+  }
+  pattr->sched_policy = 1; // Fifo
+  pattr->sched_inherit = 4; // InheritSched
+  pattr->prio = 700; // ORBIS_KERNEL_PRIO_FIFO_DEFAULT
+  pattr->suspend = 0;
+  pattr->flags = 2; // ScopeSystem
+  pattr->stackaddr_attr = 0;
+  pattr->stacksize_attr = 1024 * 1024; // 1MB default
+  pattr->guardsize_attr = 0;
+  pattr->cpusetsize = 0;
+  pattr->cpuset = 0;
+
+  *(uint64_t *)(ctx->mem_base + attr_addr) = (uint64_t)pattr;
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_pthread_attr_destroy(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  if (attr_addr) {
+    RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
+    if (pattr) {
+      free(pattr);
+      *(uint64_t *)(ctx->mem_base + attr_addr) = 0;
+    }
+  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_pthread_attr_setdetachstate(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  int detachstate = (int)ctx->rsi;
+  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
+  if (pattr) {
+    if (detachstate) {
+      pattr->flags |= 1; // Detached
+    } else {
+      pattr->flags &= ~1;
+    }
+  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_pthread_attr_setstacksize(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  size_t stacksize = (size_t)ctx->rsi;
+  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
+  if (pattr) {
+    pattr->stacksize_attr = stacksize;
+  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -405,11 +472,9 @@ void shim_scePthreadCreate(GuestContext *ctx) {
   pthread_mutex_unlock(&g_threads_mutex);
 
   uint64_t stack_size = 4 * 1024 * 1024;
-  if (attr_addr) {
-    uint64_t requested_stack = *(uint64_t *)(ctx->mem_base + attr_addr + 8);
-    if (requested_stack >= 64 * 1024) {
-      stack_size = requested_stack;
-    }
+  RecompPthreadAttr *attr = get_pthread_attr(ctx, attr_addr);
+  if (attr && attr->stacksize_attr >= 16 * 1024) {
+    stack_size = attr->stacksize_attr;
   }
 
   GuestContext *child_ctx = recomp_create_thread_context(ctx, stack_size);
@@ -530,13 +595,7 @@ void shim_scePthreadAttrDestroy(GuestContext *ctx) {
 }
 
 void shim_scePthreadAttrSetstacksize(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  size_t stacksize = (size_t)ctx->rsi;
-  if (attr_addr) {
-    *(uint64_t *)(ctx->mem_base + attr_addr + 8) = stacksize;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
+  shim_pthread_attr_setstacksize(ctx);
 }
 
 void shim_scePthreadAttrSetdetachstate(GuestContext *ctx) {
@@ -544,30 +603,57 @@ void shim_scePthreadAttrSetdetachstate(GuestContext *ctx) {
 }
 
 void shim_scePthreadAttrSetschedpolicy(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint32_t policy = (uint32_t)ctx->rsi;
+  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
+  if (pattr) {
+    pattr->sched_policy = policy;
+  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrSetschedparam(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t param_addr = ctx->rsi;
+  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
+  if (pattr && param_addr) {
+    pattr->prio = *(int32_t *)(ctx->mem_base + param_addr);
+  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrGetschedparam(GuestContext *ctx) {
-  uint64_t sp_addr = ctx->rsi;
-  if (sp_addr) {
-    *(int32_t *)(ctx->mem_base + sp_addr) = 0;
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t param_addr = ctx->rsi;
+  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
+  if (param_addr) {
+    *(int32_t *)(ctx->mem_base + param_addr) = pattr ? pattr->prio : 700;
   }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrSetinheritsched(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  int32_t inherit = (int32_t)ctx->rsi;
+  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
+  if (pattr) {
+    pattr->sched_inherit = inherit;
+  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrSetaffinity(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t mask = ctx->rsi;
+  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
+  if (pattr) {
+    pattr->cpuset = mask;
+    pattr->cpusetsize = sizeof(uint64_t);
+  }
   ctx->rax = 0;
   SHIM_RETURN();
 }

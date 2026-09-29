@@ -736,8 +736,17 @@ void shim_syscall(GuestContext *ctx) {
 
 // Stack protector canary check failure
 void shim___stack_chk_fail(GuestContext *ctx) {
-  (void)ctx;
-  fprintf(stderr, "*** stack smashing detected ***: terminated\n");
+  uint64_t ret_addr = (ctx && ctx->mem_base && ctx->rsp + 8 <= ctx->mem_size) ? MEM_U64(ctx->rsp) : 0;
+  uint64_t r14_val = (ctx && ctx->mem_base && ctx->r14 + 8 <= ctx->mem_size) ? MEM_U64(ctx->r14) : 0;
+  uint64_t stack_canary = (ctx && ctx->mem_base && ctx->rbp >= 0x30 && ctx->rbp - 0x30 + 8 <= ctx->mem_size) ? MEM_U64(ctx->rbp - 0x30) : 0;
+  fprintf(stderr, "*** stack smashing detected ***: terminated (caller=0x%llx, rsp=0x%llx, rbp=0x%llx, r14=0x%llx, *r14=0x%llx, [rbp-0x30]=0x%llx, rax=0x%llx)\n",
+          (unsigned long long)ret_addr,
+          (unsigned long long)(ctx ? ctx->rsp : 0),
+          (unsigned long long)(ctx ? ctx->rbp : 0),
+          (unsigned long long)(ctx ? ctx->r14 : 0),
+          (unsigned long long)r14_val,
+          (unsigned long long)stack_canary,
+          (unsigned long long)(ctx ? ctx->rax : 0));
   abort();
 }
 

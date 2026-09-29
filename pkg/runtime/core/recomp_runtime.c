@@ -246,6 +246,7 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
     uint64_t tcb_addr = image_end;
     ctx->fs_base = tcb_addr;
     MEM_U64(tcb_addr) = tcb_addr;
+    MEM_U64(tcb_addr + 0x28ULL) = 0x595e9fbd94fda766ULL;
     ctx->mxcsr = 0x1f80;
     ctx->fpu_cw = 0x037f;
 
@@ -716,8 +717,9 @@ GuestContext *recomp_create_thread_context(GuestContext *parent, uint64_t stack_
     }
     uint64_t tcb_base = stack_base + stack_size;
 
-    // Initialize FS TCB base
+    // Initialize FS TCB base and stack canary
     *(uint64_t*)(parent->mem_base + tcb_base) = tcb_base;
+    *(uint64_t*)(parent->mem_base + tcb_base + 0x28ULL) = 0x595e9fbd94fda766ULL;
 
     GuestContext *t_ctx = (GuestContext *)calloc(1, sizeof(GuestContext));
     if (!t_ctx) return NULL;

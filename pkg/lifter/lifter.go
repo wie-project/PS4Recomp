@@ -2,6 +2,7 @@ package lifter
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 
 	"ps4-recomp/pkg/disasm"
@@ -463,13 +464,64 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 			if err != nil {
 				return nil, fmt.Errorf("0x%x: %w", pc, err)
 			}
-			lines = append(
-				lines,
-				"    RECOMP_POP_UNWIND();",
-				fmt.Sprintf("    ctx->rip = %s;", targetExpr),
-				fmt.Sprintf("    recomp_dispatch(ctx, %s);", targetExpr),
-				"    return;",
-			)
+
+			// Local switch: if this indirect jump has recovered targets within the function,
+			// emit a direct native switch to avoid exiting the C function.
+			var localTargets []uint64
+			if fn != nil && len(fn.JumpTables) > 0 {
+				if targets, ok := fn.JumpTables[pc]; ok {
+					for _, t := range targets {
+						if _, hasBlock := fn.Blocks[t]; hasBlock {
+							localTargets = append(localTargets, t)
+						}
+					}
+				}
+			}
+
+			if len(localTargets) > 0 {
+				slices.Sort(localTargets)
+				localTargets = slices.Compact(localTargets)
+
+				lines = append(lines, fmt.Sprintf("    switch (%s) {", targetExpr))
+				for _, t := range localTargets {
+					lines = append(lines, fmt.Sprintf("    case 0x%xULL: goto loc_0x%x;", t, t))
+				}
+				lines = append(lines,
+					"    default:",
+					"        RECOMP_POP_UNWIND();",
+					fmt.Sprintf("        ctx->rip = %s;", targetExpr),
+					fmt.Sprintf("        recomp_dispatch(ctx, %s);", targetExpr),
+					"        return;",
+					"    }",
+				)
+			} else if fn != nil && len(fn.Blocks) > 1 && fn.EndAddr > fn.EntryAddr {
+				// In-function fallback: if target falls inside the function extent,
+				// check against known basic blocks before exiting to global dispatch.
+				lines = append(lines,
+					fmt.Sprintf("    if (%s >= 0x%xULL && %s < 0x%xULL) {", targetExpr, fn.EntryAddr, targetExpr, fn.EndAddr),
+					fmt.Sprintf("        switch (%s) {", targetExpr),
+				)
+				for _, blockAddr := range fn.BlockOrder {
+					lines = append(lines, fmt.Sprintf("        case 0x%xULL: goto loc_0x%x;", blockAddr, blockAddr))
+				}
+				lines = append(lines,
+					"        default: break;",
+					"        }",
+					"    }",
+					"    RECOMP_POP_UNWIND();",
+					fmt.Sprintf("    ctx->rip = %s;", targetExpr),
+					fmt.Sprintf("    recomp_dispatch(ctx, %s);", targetExpr),
+					"    return;",
+				)
+			} else {
+				lines = append(
+					lines,
+					"    RECOMP_POP_UNWIND();",
+					fmt.Sprintf("    ctx->rip = %s;", targetExpr),
+					fmt.Sprintf("    recomp_dispatch(ctx, %s);", targetExpr),
+					"    return;",
+				)
+			}
 		}
 
 	case x86asm.LOOP, x86asm.LOOPE, x86asm.LOOPNE:

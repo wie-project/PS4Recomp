@@ -289,11 +289,13 @@ var CanonicalShims = map[string]string{
 	"sceKeyboardGetKey2Char": "shim_sceKeyboardGetKey2Char",
 	"sceKeyboardGetHandle":   "shim_sceKeyboardGetHandle",
 	// Sysmodule
-	"sceSysmoduleLoadModule":           "shim_sceSysmoduleLoadModule",
-	"sceSysmoduleIsLoaded":             "shim_sceSysmoduleIsLoaded",
-	"sceSysmoduleUnloadModule":         "shim_sceSysmoduleUnloadModule",
-	"sceSysmoduleLoadModuleInternal":   "shim_sceSysmoduleLoadModuleInternal",
-	"sceSysmoduleUnloadModuleInternal": "shim_sceSysmoduleUnloadModuleInternal",
+	"sceSysmoduleLoadModule":                  "shim_sceSysmoduleLoadModule",
+	"sceSysmoduleIsLoaded":                    "shim_sceSysmoduleIsLoaded",
+	"sceSysmoduleUnloadModule":                "shim_sceSysmoduleUnloadModule",
+	"sceSysmoduleLoadModuleInternal":          "shim_sceSysmoduleLoadModuleInternal",
+	"sceSysmoduleUnloadModuleInternal":        "shim_sceSysmoduleUnloadModuleInternal",
+	"sceSysmoduleLoadModuleInternalWithArg":   "shim_sceSysmoduleLoadModuleInternalWithArg",
+	"hHrGoGoNf+s":                             "shim_sceSysmoduleLoadModuleInternalWithArg",
 	// FreeType
 	"FT_Init_FreeType":   "shim_FT_Init_FreeType",
 	"FT_New_Face":        "shim_FT_New_Face",
@@ -1568,6 +1570,8 @@ func (e *CEmitter) EmitMainRunner(path string) (err error) {
 extern void recomp_init_dispatch_table(void);
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     printf("[ps4-recomp] Initializing runtime...\n");
     ps4_vfs_init(%s);
     recomp_init_dispatch_table();

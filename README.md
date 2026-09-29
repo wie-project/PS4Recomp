@@ -115,24 +115,6 @@ FIOS2: built with SDK version 0x09508001
 *** stack smashing detected ***: terminated
 ```
 
-The runtime includes an informative diagnostic layer for unresolved imports and indirect jump dispatching, reporting symbol names, NIDs, calling libraries, and guest stack heuristics.
-
----
-
-## Verification Test Suite
-
-Run unit tests and end-to-end integration validations:
-
-```bash
-# Run all Go package unit tests
-go test ./...
-
-# Run the end-to-end POSIX, BSD Sockets & libkernel validation test:
-cd tests/posix_net_test
-# (Recompilation test validates I/O, rwlocks, and TCP loopback client/server)
-./recomp_out/posix_net_test.app/Contents/MacOS/posix_net_test
-```
-
 ---
 
 ## Project Structure

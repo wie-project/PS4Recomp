@@ -656,3 +656,23 @@ func (l *LoadedELF) CodeCeiling(addr uint64) uint64 {
 	}
 	return 0
 }
+
+// FuncExtent returns the unwind function extent [Start, End) containing addr, if any.
+func (l *LoadedELF) FuncExtent(addr uint64) (AddrRange, bool) {
+	if l == nil || len(l.FuncBounds) == 0 {
+		return AddrRange{}, false
+	}
+	i, ok := slices.BinarySearchFunc(l.FuncBounds, addr, func(r AddrRange, addr uint64) int {
+		if addr >= r.End {
+			return -1
+		}
+		if addr < r.Start {
+			return 1
+		}
+		return 0
+	})
+	if ok {
+		return l.FuncBounds[i], true
+	}
+	return AddrRange{}, false
+}

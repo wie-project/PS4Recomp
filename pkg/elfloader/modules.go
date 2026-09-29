@@ -254,6 +254,9 @@ func (l *LoadedELF) ApplyBias(delta uint64) error {
 	l.EntryPoint = shift(l.EntryPoint)
 	l.MinVAddr += delta
 	l.MaxVAddr += delta
+	if l.CanaryAddr != 0 {
+		l.CanaryAddr += delta
+	}
 	l.MemoryImage = newImg
 
 	for _, seg := range l.Segments {
@@ -327,7 +330,12 @@ func (l *LoadedELF) ApplyBias(delta uint64) error {
 				binary.LittleEndian.PutUint64(l.MemoryImage[rel.Offset:rel.Offset+8], rel.PltAddr)
 			}
 		case R_X86_64_64, R_X86_64_GLOB_DAT:
-			if int(rel.SymIdx) < len(l.DynSymbols) {
+			canonSym, _ := ResolveNID(rel.SymName)
+			if (rel.SymName == "__stack_chk_guard" || canonSym == "__stack_chk_guard") && l.CanaryAddr != 0 {
+				if rel.Offset+8 <= uint64(len(l.MemoryImage)) {
+					binary.LittleEndian.PutUint64(l.MemoryImage[rel.Offset:rel.Offset+8], l.CanaryAddr)
+				}
+			} else if int(rel.SymIdx) < len(l.DynSymbols) {
 				sym := l.DynSymbols[rel.SymIdx]
 				if sym.Address != 0 && rel.Offset+8 <= uint64(len(l.MemoryImage)) {
 					binary.LittleEndian.PutUint64(l.MemoryImage[rel.Offset:rel.Offset+8], sym.Address+uint64(rel.Addend))
@@ -377,6 +385,25 @@ func MergeImages(dst, src *LoadedELF) error {
 	dst.UnwindRanges = mergeRanges(append(dst.UnwindRanges, src.UnwindRanges...))
 	dst.DataRanges = mergeRanges(append(dst.DataRanges, src.DataRanges...))
 	dst.Relocations = append(dst.Relocations, src.Relocations...)
+
+	canaryTarget := dst.CanaryAddr
+	if canaryTarget == 0 {
+		canaryTarget = src.CanaryAddr
+		dst.CanaryAddr = src.CanaryAddr
+	}
+	if canaryTarget != 0 {
+		const canaryValue = uint64(0x595e9fbd94fda766)
+		if canaryTarget+8 <= uint64(len(dst.MemoryImage)) {
+			binary.LittleEndian.PutUint64(dst.MemoryImage[canaryTarget:canaryTarget+8], canaryValue)
+		}
+		for _, rel := range dst.Relocations {
+			canonSym, _ := ResolveNID(rel.SymName)
+			if (rel.SymName == "__stack_chk_guard" || canonSym == "__stack_chk_guard") && rel.Offset+8 <= uint64(len(dst.MemoryImage)) {
+				binary.LittleEndian.PutUint64(dst.MemoryImage[rel.Offset:rel.Offset+8], canaryTarget)
+			}
+		}
+	}
+
 	dst.InitArray = append(dst.InitArray, src.InitArray...)
 	for _, sym := range src.Symbols {
 		addSymbol(dst, sym)
@@ -485,6 +512,12 @@ func ResolveModuleRelocations(main *LoadedELF, companionExports []Symbol) error 
 		switch rel.Type {
 		case R_X86_64_JUMP_SLOT, R_X86_64_GLOB_DAT, R_X86_64_64:
 			if rel.SymName == "" {
+				continue
+			}
+
+			canonSym, _ := ResolveNID(rel.SymName)
+			if (rel.SymName == "__stack_chk_guard" || canonSym == "__stack_chk_guard") && main.CanaryAddr != 0 {
+				binary.LittleEndian.PutUint64(main.MemoryImage[rel.Offset:rel.Offset+8], main.CanaryAddr)
 				continue
 			}
 

@@ -37,12 +37,15 @@ int32_t sceKernelLoadStartModule(const char *name, size_t argc,
                                  int *res);
 int32_t sceKernelDlsym(int32_t handle, const char *symbol, void **addr);
 
+int32_t sceSysmoduleLoadModuleInternalWithArg(uint32_t moduleId, int32_t argc, const void *argv, uint64_t unk, int32_t *res_out);
+
 // Guest ABI shims
 void shim_sceSysmoduleLoadModule(GuestContext *ctx);
 void shim_sceSysmoduleIsLoaded(GuestContext *ctx);
 void shim_sceSysmoduleUnloadModule(GuestContext *ctx);
 void shim_sceSysmoduleLoadModuleInternal(GuestContext *ctx);
 void shim_sceSysmoduleUnloadModuleInternal(GuestContext *ctx);
+void shim_sceSysmoduleLoadModuleInternalWithArg(GuestContext *ctx);
 void shim_sceKernelLoadStartModule(GuestContext *ctx);
 void shim_sceKernelDlsym(GuestContext *ctx);
 
