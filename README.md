@@ -1,6 +1,6 @@
 # PS4Recomp
 
-A static ahead-of-time (AOT) recompiler translating PlayStation 4 (x86-64 ELF) binaries into native Apple Silicon (ARM64 macOS) executables without JIT compilation, virtual machines, or MoltenVK overhead.
+A macOS Apple Silicon first static ahead-of-time (AOT) recompiler translating PlayStation 4 (x86-64 ELF) binaries into native executables without JIT compilation, virtual machines, or MoltenVK.
 
 ![PS4Recomp Native Metal Output](images/graphics_test_02.png)
 
@@ -136,6 +136,18 @@ zsh: abort
 │       └── modules/         # libSceVideoOut, AudioOut, Net, Pad, Dialog, Trophy
 └── tests/                   # Regression and integration test suites
 ```
+
+---
+
+## Other Platforms
+
+The project supports the implementation of other operating systems or architectures, while keeping macOS Apple Silicon as the main one, since in any case it is the main priority. All changes for other platforms should be considered for this purpose and either indirectly or directly move forward macOS support, or not break what has been done.
+
+---
+
+## AI Usage
+
+The project does not prohibit the use of neural networks for development. But under this condition, all the actions taken by them are verified not only by go and human tests, but also by assemblies of the recompiled binary file (since by chance changes can break the assembly of what is working)
 
 ---
 
