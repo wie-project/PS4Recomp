@@ -186,7 +186,7 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 	args := inst.Inst.Args
 
 	lines := dst
-	lines = append(lines, "    /* 0x"+strconv.FormatUint(pc, 16)+": "+inst.Inst.String()+" */")
+	lines = append(lines, "    /* 0x"+strconv.FormatUint(pc, 16)+" */")
 
 	// Determine effective memory/operand size from instruction
 	defMemSz := inst.Inst.MemBytes
@@ -486,7 +486,8 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 				for _, t := range localTargets {
 					lines = append(lines, fmt.Sprintf("    case 0x%xULL: goto loc_0x%x;", t, t))
 				}
-				lines = append(lines,
+				lines = append(
+					lines,
 					"    default:",
 					"        RECOMP_POP_UNWIND();",
 					fmt.Sprintf("        ctx->rip = %s;", targetExpr),
@@ -497,14 +498,16 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 			} else if fn != nil && len(fn.Blocks) > 1 && fn.EndAddr > fn.EntryAddr {
 				// In-function fallback: if target falls inside the function extent,
 				// check against known basic blocks before exiting to global dispatch.
-				lines = append(lines,
+				lines = append(
+					lines,
 					fmt.Sprintf("    if (%s >= 0x%xULL && %s < 0x%xULL) {", targetExpr, fn.EntryAddr, targetExpr, fn.EndAddr),
 					fmt.Sprintf("        switch (%s) {", targetExpr),
 				)
 				for _, blockAddr := range fn.BlockOrder {
 					lines = append(lines, fmt.Sprintf("        case 0x%xULL: goto loc_0x%x;", blockAddr, blockAddr))
 				}
-				lines = append(lines,
+				lines = append(
+					lines,
 					"        default: break;",
 					"        }",
 					"    }",
@@ -2027,25 +2030,30 @@ func (l *Lifter) getOperandRead(arg x86asm.Arg, defMemSz int, nextPC uint64) (st
 }
 
 func (l *Lifter) getOperandWrite(arg x86asm.Arg, sz int, valExpr string, nextPC uint64) ([]string, error) {
+	return l.appendOperandWrite(nil, arg, sz, valExpr, nextPC)
+}
+
+// appendOperandWrite appends a C write statement to dst without allocating a new slice each call.
+func (l *Lifter) appendOperandWrite(dst []string, arg x86asm.Arg, sz int, valExpr string, nextPC uint64) ([]string, error) {
 	switch a := arg.(type) {
 	case x86asm.Reg:
 		stmt, err := GetRegWriteStmt(a, valExpr)
 		if err != nil {
-			return nil, err
+			return dst, err
 		}
-		return []string{stmt}, nil
+		return append(dst, stmt), nil
 	case x86asm.Mem:
 		addr, err := MemAddrExpr(a, nextPC)
 		if err != nil {
-			return nil, err
+			return dst, err
 		}
 		stmt, err := MemWriteStmt(addr, sz, valExpr)
 		if err != nil {
-			return nil, err
+			return dst, err
 		}
-		return []string{stmt}, nil
+		return append(dst, stmt), nil
 	default:
-		return nil, fmt.Errorf("cannot write to operand of type %T", arg)
+		return dst, fmt.Errorf("cannot write to operand of type %T", arg)
 	}
 }
 

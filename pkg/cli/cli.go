@@ -555,6 +555,24 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 		ftLibs = []string{"-L/opt/homebrew/opt/freetype/lib", "-lfreetype"}
 	}
 
+	// Build a flags fingerprint: any flag change (opt level, asan, includes)
+	// must invalidate all cached object files.
+	var flagsKey strings.Builder
+	flagsKey.WriteString("-O")
+	flagsKey.WriteString(optLevel)
+	if asan {
+		flagsKey.WriteString(" -fsanitize=address,undefined")
+	}
+	for _, inc := range includeDirs {
+		flagsKey.WriteByte(' ')
+		flagsKey.WriteString(inc)
+	}
+	for _, f := range ftCflags {
+		flagsKey.WriteByte(' ')
+		flagsKey.WriteString(f)
+	}
+	flagsFingerprint := flagsKey.String()
+
 	objFiles := make([]string, len(cFiles))
 	errChan := make(chan error, len(cFiles))
 	jobs := make(chan int, len(cFiles))
@@ -566,11 +584,21 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 				cFile := cFiles[idx]
 				ext := filepath.Ext(cFile)
 				objFile := strings.TrimSuffix(cFile, ext) + ".o"
+				flagsFile := objFile + ".flags"
 				objFiles[idx] = objFile
 
+				// Check if object is up-to-date:
+				// 1. .o must exist and be newer than .c
+				// 2. .flags sidecar must match current compiler flags
+				upToDate := false
 				cStat, errC := os.Stat(cFile)
 				oStat, errO := os.Stat(objFile)
 				if errC == nil && errO == nil && oStat.ModTime().After(cStat.ModTime()) {
+					if prevFlags, err := os.ReadFile(flagsFile); err == nil {
+						upToDate = string(prevFlags) == flagsFingerprint
+					}
+				}
+				if upToDate {
 					continue
 				}
 
@@ -600,6 +628,9 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 					errChan <- fmt.Errorf("error compiling %s: %w\n%s", filepath.Base(cFile), err, string(out))
 					return
 				}
+
+				// Write flags sidecar so the next run can detect flag changes.
+				_ = os.WriteFile(flagsFile, []byte(flagsFingerprint), 0o644)
 			}
 		})
 	}
@@ -769,6 +800,16 @@ func copyFile(src, dst string) error {
 	srcInfo, err := in.Stat()
 	if err != nil {
 		return err
+	}
+
+	// Skip copy when destination already exists and is up-to-date.
+	// This is critical for Ninja incremental builds: if we truncate+rewrite
+	// headers even with identical content, Ninja sees a newer mtime on every
+	// header file and recompiles all generated C chunks unconditionally.
+	if dstInfo, err := os.Stat(dst); err == nil {
+		if dstInfo.Size() == srcInfo.Size() && !srcInfo.ModTime().After(dstInfo.ModTime()) {
+			return nil
+		}
 	}
 
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {

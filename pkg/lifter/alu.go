@@ -24,7 +24,7 @@ func (l *Lifter) liftMov(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]st
 	if err != nil {
 		return nil, err
 	}
-	return l.getOperandWrite(dst, sz, srcExpr, nextPC)
+	return l.appendOperandWrite(nil, dst, sz, srcExpr, nextPC)
 }
 
 func (l *Lifter) liftExtend(op x86asm.Op, dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
@@ -105,12 +105,10 @@ func (l *Lifter) liftAlu(inst disasm.Instruction, dst, src x86asm.Arg, defMemSz 
 		if !inst.SkipFlags {
 			lines = append(lines, fmt.Sprintf("      set_flags_add_u%d(ctx, a, b, res);", sz*8))
 		}
-		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		var err error
+		lines, err = l.appendOperandWrite(lines, dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
-		}
-		for _, ws := range writeStmts {
-			lines = append(lines, "    "+ws)
 		}
 
 	case x86asm.ADC:
@@ -119,12 +117,10 @@ func (l *Lifter) liftAlu(inst disasm.Instruction, dst, src x86asm.Arg, defMemSz 
 			fmt.Sprintf("      res = a + b + (%s)ctx->cf;", cType),
 			fmt.Sprintf("      set_flags_add_u%d(ctx, a, b, res);", sz*8),
 		)
-		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		var err error
+		lines, err = l.appendOperandWrite(lines, dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
-		}
-		for _, ws := range writeStmts {
-			lines = append(lines, "    "+ws)
 		}
 
 	case x86asm.SUB:
@@ -132,12 +128,10 @@ func (l *Lifter) liftAlu(inst disasm.Instruction, dst, src x86asm.Arg, defMemSz 
 		if !inst.SkipFlags {
 			lines = append(lines, fmt.Sprintf("      set_flags_sub_u%d(ctx, a, b, res);", sz*8))
 		}
-		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		var err error
+		lines, err = l.appendOperandWrite(lines, dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
-		}
-		for _, ws := range writeStmts {
-			lines = append(lines, "    "+ws)
 		}
 
 	case x86asm.CMP:
@@ -159,12 +153,10 @@ func (l *Lifter) liftAlu(inst disasm.Instruction, dst, src x86asm.Arg, defMemSz 
 		if !inst.SkipFlags {
 			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
 		}
-		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		var err error
+		lines, err = l.appendOperandWrite(lines, dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
-		}
-		for _, ws := range writeStmts {
-			lines = append(lines, "    "+ws)
 		}
 
 	case x86asm.OR:
@@ -172,12 +164,10 @@ func (l *Lifter) liftAlu(inst disasm.Instruction, dst, src x86asm.Arg, defMemSz 
 		if !inst.SkipFlags {
 			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
 		}
-		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		var err error
+		lines, err = l.appendOperandWrite(lines, dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
-		}
-		for _, ws := range writeStmts {
-			lines = append(lines, "    "+ws)
 		}
 
 	case x86asm.XOR:
@@ -185,12 +175,10 @@ func (l *Lifter) liftAlu(inst disasm.Instruction, dst, src x86asm.Arg, defMemSz 
 		if !inst.SkipFlags {
 			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
 		}
-		writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+		var err error
+		lines, err = l.appendOperandWrite(lines, dst, sz, "res", nextPC)
 		if err != nil {
 			return nil, err
-		}
-		for _, ws := range writeStmts {
-			lines = append(lines, "    "+ws)
 		}
 	}
 
@@ -240,13 +228,9 @@ func (l *Lifter) liftUnary(inst disasm.Instruction, dst x86asm.Arg, defMemSz int
 			"      res = ~a;",
 		)
 	}
-
-	writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+	lines, err = l.appendOperandWrite(lines, dst, sz, "res", nextPC)
 	if err != nil {
 		return nil, err
-	}
-	for _, ws := range writeStmts {
-		lines = append(lines, "    "+ws)
 	}
 	lines = append(lines, "    }")
 	return lines, nil
@@ -297,13 +281,9 @@ func (l *Lifter) liftShift(inst disasm.Instruction, dst, countArg x86asm.Arg, de
 			lines = append(lines, fmt.Sprintf("      set_flags_logic_u%d(ctx, res);", sz*8))
 		}
 	}
-
-	writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+	lines, err = l.appendOperandWrite(lines, dst, sz, "res", nextPC)
 	if err != nil {
 		return nil, err
-	}
-	for _, ws := range writeStmts {
-		lines = append(lines, "    "+ws)
 	}
 	lines = append(lines, "    }")
 	return lines, nil
@@ -344,12 +324,9 @@ func (l *Lifter) liftRotate(op x86asm.Op, dst, countArg x86asm.Arg, defMemSz int
 			fmt.Sprintf("      ctx->cf = (res >> %d) & 1;", bits-1),
 		)
 	}
-	writeStmts, err := l.getOperandWrite(dst, sz, "res", nextPC)
+	lines, err = l.appendOperandWrite(lines, dst, sz, "res", nextPC)
 	if err != nil {
 		return nil, err
-	}
-	for _, ws := range writeStmts {
-		lines = append(lines, "    "+ws)
 	}
 	lines = append(lines, "    }")
 	return lines, nil
@@ -1205,7 +1182,8 @@ func (l *Lifter) liftDoubleShift(op x86asm.Op, dst, src, cnt x86asm.Arg, defMemS
 	}
 
 	if op == x86asm.SHLD {
-		lines = append(lines,
+		lines = append(
+			lines,
 			fmt.Sprintf("        ctx->cf = (d >> (%d - count)) & 1;", totalBits),
 			fmt.Sprintf("        %s res = (d << count) | (s >> (%d - count));", cType, totalBits),
 			fmt.Sprintf("        if (count == 1) ctx->of = ((res >> %d) ^ ctx->cf) & 1;", totalBits-1),
@@ -1219,7 +1197,8 @@ func (l *Lifter) liftDoubleShift(op x86asm.Op, dst, src, cnt x86asm.Arg, defMemS
 		}
 		lines = append(lines, fmt.Sprintf("        set_flags_logic_u%d(ctx, res);", totalBits))
 	} else { // SHRD
-		lines = append(lines,
+		lines = append(
+			lines,
 			"        ctx->cf = (d >> (count - 1)) & 1;",
 			fmt.Sprintf("        %s res = (d >> count) | (s << (%d - count));", cType, totalBits),
 			fmt.Sprintf("        if (count == 1) ctx->of = (((res ^ d) >> %d) & 1);", totalBits-1),
