@@ -1,11 +1,4 @@
 tools/
-build_hello/
-build_exceptions/
-build_threading/
-build_memstress/
-exceptions.elf
-output_*/
 *.DS_Store
-build/
+.DS_Store
 ps4-recomp
-known_names.txt.gz

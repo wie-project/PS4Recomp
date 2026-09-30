@@ -145,7 +145,7 @@ We would like to express our deep gratitude and appreciation to the open-source 
 
 - **[OpenOrbis](https://github.com/OpenOrbis)**: For pioneering the open-source PS4 toolchain, header definitions, and system service reverse engineering.
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4)**: For their exceptional open-source PS4 emulator codebase, precise structure layouts, HLE module architectures, and invaluable documentation of Orbis system behaviors.
-- **The PlayStation NID Database Contributors**: For compiling and maintaining comprehensive symbol dictionaries and NID-to-name mappings across PlayStation 4 system libraries.
+- **[ps4libdoc](https://github.com/idc/ps4libdoc)**: For compiling and maintaining comprehensive symbol dictionaries and NID-to-name mappings across PlayStation 4 system libraries.
 
 ---
 
