@@ -1,4 +1,4 @@
 tools/
 *.DS_Store
 .DS_Store
-ps4-recomp
+/ps4-recomp

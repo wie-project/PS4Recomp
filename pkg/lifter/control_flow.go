@@ -166,11 +166,14 @@ func (l *Lifter) liftLoop(op x86asm.Op, arg x86asm.Arg, nextPC uint64, fn *disas
 		return nil, fmt.Errorf("loop requires relative target")
 	}
 	target := uint64(int64(nextPC) + int64(rel))
-	cond := "ctx->rcx != 0"
-	if op == x86asm.LOOPE {
+	var cond string
+	switch op {
+	case x86asm.LOOPE:
 		cond = "ctx->rcx != 0 && ctx->zf"
-	} else if op == x86asm.LOOPNE {
+	case x86asm.LOOPNE:
 		cond = "ctx->rcx != 0 && !ctx->zf"
+	default:
+		cond = "ctx->rcx != 0"
 	}
 
 	jumpTarget := fmt.Sprintf("goto loc_0x%x;", target)

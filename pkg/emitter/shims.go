@@ -1,0 +1,723 @@
+package emitter
+
+import (
+	"strings"
+	"sync"
+
+	"ps4-recomp/pkg/elfloader"
+)
+
+// CanonicalShims maps library/kernel symbol names and aliases to host runtime shims.
+var CanonicalShims = make(map[string]string, len(knownDirectShims)+len(shimAliases))
+
+func init() {
+	for _, name := range knownDirectShims {
+		CanonicalShims[name] = "shim_" + name
+	}
+	for alias, target := range shimAliases {
+		CanonicalShims[alias] = target
+	}
+}
+
+// shimAliases maps symbol aliases, wrappers, and NID overrides to their canonical host shims.
+var shimAliases = map[string]string{
+	// General
+	"__error": "shim_error",
+	// C++ ABI guard shims
+	"__cxa_guard_acquire": "shim_cxa_guard_acquire",
+	"__cxa_guard_release": "shim_cxa_guard_release",
+	"__cxa_guard_abort":   "shim_cxa_guard_abort",
+	"3GPpjQdAMTw":         "shim_cxa_guard_acquire",
+	"9rAeANT2tyE":         "shim_cxa_guard_release",
+	"2emaaluWzUw":         "shim_cxa_guard_abort",
+	// Direct Memory & VMM
+	"sceKernelMapDirectMemory2":       "shim_sceKernelMapDirectMemory",
+	"sceKernelMapNamedDirectMemory":   "shim_sceKernelMapDirectMemory",
+	"sceKernelMapNamedFlexibleMemory": "shim_sceKernelMapFlexibleMemory",
+	"959qrazPIrg":                     "shim_sceKernelGetProcParam",
+	// Libc aliases with leading underscore
+	"_exit":           "shim_exit",
+	"_fcntl":          "shim_fcntl",
+	"_ioctl":          "shim_ioctl",
+	"_open":           "shim_open",
+	"_read":           "shim_read",
+	"_readv":          "shim_readv",
+	"_write":          "shim_write",
+	"_writev":         "shim_writev",
+	"sceKernelMunmap": "shim_munmap",
+	// Sysmodule
+	"hHrGoGoNf+s": "shim_sceSysmoduleLoadModuleInternalWithArg",
+	// libkernel File I/O & System Events
+	"sceKernelOpen":     "shim_open",
+	"sceKernelClose":    "shim_close",
+	"sceKernelRead":     "shim_read",
+	"sceKernelWrite":    "shim_write",
+	"sceKernelLseek":    "shim_lseek",
+	"sceKernelStat":     "shim_stat",
+	"sceKernelFstat":    "shim_fstat",
+	"sceKernelChmod":    "shim_chmod",
+	"sceKernelUtimes":   "shim_utimes",
+	"sceKernelGetdents": "shim_getdents",
+	// libScePosix BSD Sockets & System
+	"__sys_socketex":          "shim_socket",
+	"scePthreadRwlockInit":    "shim_pthread_rwlock_init",
+	"scePthreadRwlockDestroy": "shim_pthread_rwlock_destroy",
+	"scePthreadRwlockRdlock":  "shim_pthread_rwlock_rdlock",
+	"scePthreadRwlockWrlock":  "shim_pthread_rwlock_wrlock",
+	"scePthreadRwlockUnlock":  "shim_pthread_rwlock_unlock",
+	// Kernel File System (pread / preadv)
+	"+r3rMFwItV4": "shim_sceKernelPread",
+	"yTj62I7kw4s": "shim_sceKernelPreadv",
+	// Kernel AIO (Asynchronous I/O)
+	"vYU8P9Td2Zo": "shim_sceKernelAioInitializeImpl",
+	"nu4a0-arQis": "shim_sceKernelAioInitializeParam",
+	"9WK-vhNXimw": "shim_sceKernelAioSetParam",
+	"HgX7+AORI58": "shim_sceKernelAioSubmitReadCommands",
+	"lXT0m3P-vs4": "shim_sceKernelAioSubmitReadCommandsMultiple",
+	"XQ8C8y+de+E": "shim_sceKernelAioSubmitWriteCommands",
+	"xT3Cpz0yh6Y": "shim_sceKernelAioSubmitWriteCommandsMultiple",
+	"2pOuoWoCxdk": "shim_sceKernelAioPollRequest",
+	"o7O4z3jwKzo": "shim_sceKernelAioPollRequests",
+	"fR521KIGgb8": "shim_sceKernelAioCancelRequest",
+	"3Lca1XBrQdY": "shim_sceKernelAioCancelRequests",
+	"5TgME6AYty4": "shim_sceKernelAioDeleteRequest",
+	"Ft3EtsZzAoY": "shim_sceKernelAioDeleteRequests",
+	"KOF-oJbQVvc": "shim_sceKernelAioWaitRequest",
+	"lgK+oIWkJyA": "shim_sceKernelAioWaitRequests",
+}
+
+// knownDirectShims contains symbol names whose host shim is "shim_" + name.
+var knownDirectShims = []string{
+	// General
+	"sceKernelUsleep",
+	"sysconf",
+	"open",
+	"fcntl",
+	"mmap",
+	"munmap",
+	"madvise",
+	"sigprocmask",
+	"sigaction",
+	"fstat",
+	"close",
+	"read",
+	"readv",
+	"write",
+	"writev",
+	"ioctl",
+	"nanosleep",
+	"lseek",
+	"exit",
+	"poll",
+	"raise",
+	"pthread_sigmask",
+	"cpuset_getaffinity",
+	"getrlimit",
+	"sched_yield",
+	"pthread_create",
+	"pthread_join",
+	"pthread_detach",
+	"pthread_self",
+	"pthread_equal",
+	"pthread_once",
+	"pthread_key_create",
+	"pthread_setspecific",
+	"pthread_getspecific",
+	"pthread_mutex_init",
+	"pthread_mutex_lock",
+	"pthread_mutex_trylock",
+	"pthread_mutex_unlock",
+	"pthread_mutex_destroy",
+	"pthread_mutexattr_init",
+	"pthread_mutexattr_settype",
+	"pthread_mutexattr_destroy",
+	"pthread_cond_init",
+	"pthread_cond_wait",
+	"pthread_cond_timedwait",
+	"pthread_cond_signal",
+	"pthread_cond_broadcast",
+	"pthread_cond_destroy",
+	"pthread_rwlock_rdlock",
+	"pthread_rwlock_wrlock",
+	"pthread_rwlock_unlock",
+	"syscall",
+	// Orbis Pthread threading & synchronization
+	"scePthreadCreate",
+	"scePthreadJoin",
+	"scePthreadDetach",
+	"scePthreadExit",
+	"scePthreadSelf",
+	"scePthreadEqual",
+	"scePthreadYield",
+	"scePthreadGetthreadid",
+	"scePthreadSetprio",
+	"scePthreadGetprio",
+	"scePthreadSetaffinity",
+	"scePthreadGetaffinity",
+	"scePthreadAttrInit",
+	"scePthreadAttrDestroy",
+	"scePthreadAttrSetstacksize",
+	"scePthreadAttrSetdetachstate",
+	"scePthreadAttrSetschedpolicy",
+	"scePthreadAttrSetschedparam",
+	"scePthreadAttrGetschedparam",
+	"scePthreadAttrSetinheritsched",
+	"scePthreadAttrSetaffinity",
+	"scePthreadMutexInit",
+	"scePthreadMutexLock",
+	"scePthreadMutexTrylock",
+	"scePthreadMutexUnlock",
+	"scePthreadMutexDestroy",
+	"scePthreadMutexattrInit",
+	"scePthreadMutexattrDestroy",
+	"scePthreadMutexattrSettype",
+	"scePthreadMutexattrSetprotocol",
+	"scePthreadCondInit",
+	"scePthreadCondDestroy",
+	"scePthreadCondSignal",
+	"scePthreadCondBroadcast",
+	"scePthreadCondWait",
+	"scePthreadCondTimedwait",
+	"scePthreadCondattrInit",
+	"scePthreadCondattrDestroy",
+	"scePthreadKeyCreate",
+	"scePthreadKeyDelete",
+	"scePthreadSetspecific",
+	"scePthreadGetspecific",
+	"__tls_get_addr",
+	// Orbis Event Flags
+	"sceKernelCreateEventFlag",
+	"sceKernelDeleteEventFlag",
+	"sceKernelSetEventFlag",
+	"sceKernelClearEventFlag",
+	"sceKernelWaitEventFlag",
+	"sceKernelPollEventFlag",
+	// Orbis Timers & CPU Configuration
+	"sceKernelGetProcessTimeCounter",
+	"sceKernelGetProcessTimeCounterFrequency",
+	"sceKernelGetProcessTime",
+	"sceKernelGetTscFrequency",
+	"sceKernelReadTsc",
+	"sceKernelGettimeofday",
+	"sceKernelGetCurrentCpu",
+	"sceKernelGetCpumode",
+	"sceKernelIsNeoMode",
+	"sceKernelHasNeoMode",
+	"sceKernelIsAuthenticNeo",
+	"sceKernelGetSystemSwVersion",
+	// every module uses one implementation that copies through mem_base.
+	"memcpy",
+	"memmove",
+	"memset",
+	"strlen",
+	"strcpy",
+	"strncpy",
+	"strcmp",
+	// Direct Memory & VMM
+	"sceKernelAllocateDirectMemory",
+	"sceKernelAllocateMainDirectMemory",
+	"sceKernelGetDirectMemorySize",
+	"sceKernelAvailableDirectMemorySize",
+	"sceKernelMapDirectMemory",
+	"sceKernelReleaseDirectMemory",
+	"sceKernelMapFlexibleMemory",
+	"sceKernelConfiguredFlexibleMemorySize",
+	"sceKernelAvailableFlexibleMemorySize",
+	"sceKernelVirtualQuery",
+	"sceKernelQueryMemoryProtection",
+	"sceKernelMemoryPoolReserve",
+	"sceKernelMemoryPoolExpand",
+	"sceKernelMemoryPoolCommit",
+	"sceKernelMemoryPoolDecommit",
+	"sceKernelGetProcParam",
+	// Event Queue
+	"sceKernelCreateEqueue",
+	"sceKernelDeleteEqueue",
+	"sceKernelWaitEqueue",
+	// VideoOut display
+	"sceVideoOutOpen",
+	"sceVideoOutClose",
+	"sceVideoOutSetBufferAttribute",
+	"sceVideoOutRegisterBuffers",
+	"sceVideoOutSetFlipRate",
+	"sceVideoOutAddFlipEvent",
+	"sceVideoOutSubmitFlip",
+	"sceVideoOutGetFlipStatus",
+	"sceVideoOutGetResolutionStatus",
+	"sceVideoOutIsFlipPending",
+	"sceVideoOutUnregisterBuffers",
+	// Stack Protector
+	"__stack_chk_fail",
+	// Time & Resource
+	"clock_gettime",
+	"gettimeofday",
+	"getrusage",
+	// Pthread attributes & sched
+	"pthread_attr_init",
+	"pthread_attr_destroy",
+	"pthread_attr_setdetachstate",
+	"pthread_attr_setstacksize",
+	"pthread_getschedparam",
+	"pthread_setschedparam",
+	"pthread_setcanceltype",
+	"sched_get_priority_max",
+	"sched_get_priority_min",
+	// POSIX Semaphores
+	"sem_init",
+	"sem_destroy",
+	"sem_wait",
+	"sem_trywait",
+	"sem_post",
+	"sem_getvalue",
+	// AudioOut
+	"sceAudioOutInit",
+	"sceAudioOutOpen",
+	"sceAudioOutOutput",
+	"sceAudioOutClose",
+	// User Service & System Service
+	"sceUserServiceInitialize",
+	"sceUserServiceGetInitialUser",
+	"sceUserServiceGetLoginUserIdList",
+	"sceUserServiceGetUserName",
+	"sceUserServiceGetEvent",
+	"sceUserServiceTerminate",
+	"sceSystemServiceParamGetInt",
+	"sceSystemServiceParamGetString",
+	"sceSystemServiceHideSplashScreen",
+	"sceSystemServiceGetStatus",
+	"sceSystemServiceGetDisplaySafeAreaInfo",
+	"sceSystemServiceReceiveEvent",
+	// PlayGo
+	"scePlayGoInitialize",
+	"scePlayGoTerminate",
+	"scePlayGoOpen",
+	"scePlayGoClose",
+	"scePlayGoGetProgress",
+	"scePlayGoGetLocus",
+	"scePlayGoGetLanguageMask",
+	"scePlayGoSetLanguageMask",
+	"scePlayGoGetInstallSpeed",
+	"scePlayGoSetInstallSpeed",
+	"scePlayGoGetToDoList",
+	"scePlayGoGetEta",
+	"scePlayGoPrefetch",
+	// RTC (Real Time Clock)
+	"sceRtcGetCurrentTick",
+	"sceRtcGetTick",
+	"sceRtcSetTick",
+	"sceRtcGetTickResolution",
+	"sceRtcGetCurrentClockLocalTime",
+	"sceRtcGetDayOfWeek",
+	"sceRtcIsLeapYear",
+	// Random
+	"sceRandomGetRandomNumber",
+	// Pad Subsystem
+	"scePadInit",
+	"scePadOpen",
+	"scePadClose",
+	"scePadReadState",
+	"scePadRead",
+	"scePadGetHandle",
+	// Keyboard Subsystem
+	"sceKeyboardInit",
+	"sceKeyboardOpen",
+	"sceKeyboardClose",
+	"sceKeyboardReadState",
+	"sceKeyboardGetKey2Char",
+	"sceKeyboardGetHandle",
+	// Sysmodule
+	"sceSysmoduleLoadModule",
+	"sceSysmoduleIsLoaded",
+	"sceSysmoduleUnloadModule",
+	"sceSysmoduleLoadModuleInternal",
+	"sceSysmoduleUnloadModuleInternal",
+	"sceSysmoduleLoadModuleInternalWithArg",
+	// FreeType
+	"FT_Init_FreeType",
+	"FT_New_Face",
+	"FT_Set_Pixel_Sizes",
+	"FT_Get_Char_Index",
+	"FT_Load_Glyph",
+	"FT_Render_Glyph",
+	// CommonDialog & MsgDialog
+	"sceCommonDialogInitialize",
+	"sceCommonDialogIsUsed",
+	"sceMsgDialogInitialize",
+	"sceMsgDialogOpen",
+	"sceMsgDialogGetResult",
+	"sceMsgDialogGetStatus",
+	"sceMsgDialogUpdateStatus",
+	"sceMsgDialogClose",
+	"sceMsgDialogTerminate",
+	"sceMsgDialogProgressBarInc",
+	"sceMsgDialogProgressBarSetMsg",
+	"sceMsgDialogProgressBarSetValue",
+	// libSceImeDialog
+	"sceImeDialogInit",
+	"sceImeDialogGetStatus",
+	"sceImeDialogGetResult",
+	"sceImeDialogAbort",
+	"sceImeDialogTerm",
+	"sceImeDialogGetPanelSizeExtended",
+	// libSceSaveDataDialog
+	"sceSaveDataDialogInitialize",
+	"sceSaveDataDialogOpen",
+	"sceSaveDataDialogUpdateStatus",
+	"sceSaveDataDialogGetStatus",
+	"sceSaveDataDialogGetResult",
+	"sceSaveDataDialogTerminate",
+	// libSceErrorDialog
+	"sceErrorDialogInitialize",
+	"sceErrorDialogOpen",
+	"sceErrorDialogUpdateStatus",
+	"sceErrorDialogGetStatus",
+	"sceErrorDialogTerminate",
+	// libSceInvitationDialog
+	"sceInvitationDialogInitialize",
+	"sceInvitationDialogOpenA",
+	"sceInvitationDialogUpdateStatus",
+	"sceInvitationDialogGetStatus",
+	"sceInvitationDialogGetResultA",
+	"sceInvitationDialogTerminate",
+	// libSceNpProfileDialog
+	"sceNpProfileDialogInitialize",
+	"sceNpProfileDialogOpenA",
+	"sceNpProfileDialogUpdateStatus",
+	"sceNpProfileDialogGetStatus",
+	"sceNpProfileDialogGetResult",
+	"sceNpProfileDialogTerminate",
+	// libSceVideoRecording
+	"sceVideoRecordingQueryMemSize2",
+	"sceVideoRecordingOpen2",
+	"sceVideoRecordingClose",
+	"sceVideoRecordingStart",
+	"sceVideoRecordingStop",
+	"sceVideoRecordingGetStatus",
+	"sceVideoRecordingSetInfo",
+	// libSceScreenShot
+	"sceScreenShotEnable",
+	"sceScreenShotDisable",
+	// libSceSharePlay
+	"sceSharePlayInitialize",
+	"sceSharePlayTerminate",
+	"sceSharePlaySetProhibition",
+	// libSceMouse
+	"sceMouseInit",
+	"sceMouseOpen",
+	"sceMouseClose",
+	"sceMouseRead",
+	// NpTrophy
+	"sceNpTrophyInit",
+	"sceNpTrophyTerm",
+	"sceNpTrophyCreateContext",
+	"sceNpTrophyDestroyContext",
+	"sceNpTrophyCreateHandle",
+	"sceNpTrophyDestroyHandle",
+	"sceNpTrophyRegisterContext",
+	"sceNpTrophyUnlockTrophy",
+	"sceNpTrophyShowTrophyList",
+	// Dynamic Module Loader
+	"sceKernelLoadStartModule",
+	"sceKernelDlsym",
+	// libkernel File I/O & System Events
+	"sceKernelTriggerUserEvent",
+	"sceKernelAddUserEventEdge",
+	"sceKernelStopUnloadModule",
+	"sceKernelGetPrtAperture",
+	// libScePosix BSD Sockets & System
+	"socket",
+	"connect",
+	"bind",
+	"listen",
+	"accept",
+	"send",
+	"recv",
+	"sendto",
+	"recvfrom",
+	"setsockopt",
+	"getsockopt",
+	"getsockname",
+	"getpeername",
+	"shutdown",
+	"select",
+	"inet_pton",
+	"usleep",
+	"stat",
+	"getpid",
+	"pthread_exit",
+	"pthread_key_delete",
+	"pthread_rwlock_init",
+	"pthread_rwlock_destroy",
+	"pthread_rename_np",
+	"pthread_create_name_np",
+	"unlink",
+	// Pad Subsystem additional methods
+	"scePadSetVibration",
+	"scePadGetControllerInformation",
+	"scePadSetLightBar",
+	"scePadResetOrientation",
+	"scePadResetLightBar",
+	// VideoOut additional methods
+	"sceVideoOutGetVblankStatus",
+	"sceVideoOutGetDeviceCapabilityInfo_",
+	"sceVideoOutModeSetAny_",
+	// libSceNet Shims
+	"sceNetInit",
+	"sceNetTerm",
+	"sceNetErrnoLoc",
+	"sceNetSocket",
+	"sceNetSocketClose",
+	"sceNetBind",
+	"sceNetListen",
+	"sceNetAccept",
+	"sceNetConnect",
+	"sceNetSend",
+	"sceNetRecv",
+	"sceNetSendto",
+	"sceNetRecvfrom",
+	"sceNetSetsockopt",
+	"sceNetGetsockopt",
+	"sceNetGetsockname",
+	"sceNetGetpeername",
+	"sceNetShutdown",
+	"sceNetHtons",
+	"sceNetHtonl",
+	"sceNetHtonll",
+	"sceNetNtohs",
+	"sceNetNtohl",
+	"sceNetNtohll",
+	"sceNetInetPton",
+	"sceNetInetNtop",
+	"sceNetPoolCreate",
+	"sceNetPoolDestroy",
+	"sceNetResolverCreate",
+	"sceNetResolverDestroy",
+	"sceNetResolverStartNtoa",
+	"sceNetResolverStartAton",
+	"sceNetResolverStartNtoaMultipleRecords",
+	"sceNetEpollCreate",
+	"sceNetEpollDestroy",
+	"sceNetEpollControl",
+	"sceNetEpollWait",
+	"sceNetGetMacAddress",
+	"sceNetGetSockInfo",
+	// libSceHttp & libSceHttp2
+	"sceHttpInit",
+	"sceHttpTerm",
+	"sceHttpCreateTemplate",
+	"sceHttpDeleteTemplate",
+	"sceHttpCreateConnectionWithURL",
+	"sceHttpDeleteConnection",
+	"sceHttpCreateRequestWithURL",
+	"sceHttpCreateRequestWithURL2",
+	"sceHttpDeleteRequest",
+	"sceHttpSendRequest",
+	"sceHttpAbortRequest",
+	"sceHttpWaitRequest",
+	"sceHttpReadData",
+	"sceHttpGetStatusCode",
+	"sceHttpGetResponseContentLength",
+	"sceHttpGetAllResponseHeaders",
+	"sceHttpAddRequestHeader",
+	"sceHttpSetNonblock",
+	"sceHttpGetLastErrno",
+	"sceHttpUriParse",
+	"sceHttpUriBuild",
+	"sceHttpCreateEpoll",
+	"sceHttpSetEpoll",
+	"sceHttpDestroyEpoll",
+	"sceHttp2Init",
+	"sceHttp2Term",
+	// libSceSsl
+	"sceSslInit",
+	"sceSslTerm",
+	"sceSslGetCaCerts",
+	// libSceJson2 C++ mangled symbols
+	"_ZN3sce4Json12MemAllocatorC2Ev",
+	"_ZN3sce4Json12MemAllocatorD2Ev",
+	"_ZN3sce4Json14InitParameter2C1Ev",
+	"_ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv",
+	"_ZN3sce4Json14InitParameter217setFileBufferSizeEm",
+	"_ZN3sce4Json11InitializerC1Ev",
+	"_ZN3sce4Json11InitializerD1Ev",
+	"_ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E",
+	"_ZN3sce4Json11Initializer9terminateEv",
+	"_ZN3sce4Json6StringC1EPKc",
+	"_ZN3sce4Json6StringD1Ev",
+	"_ZNK3sce4Json6String5c_strEv",
+	"_ZN3sce4Json5ValueC1Ev",
+	"_ZN3sce4Json5ValueD1Ev",
+	"_ZN3sce4Json5ValueaSERKS1_",
+	"_ZN3sce4Json5ValueC1ERKNS0_6StringE",
+	"_ZNK3sce4Json5Value9getStringEv",
+	"_ZNK3sce4Json5ValueixEPKc",
+	"_ZN3sce4Json6ObjectC1Ev",
+	"_ZN3sce4Json6ObjectC1ERKS1_",
+	"_ZN3sce4Json6ObjectD1Ev",
+	"_ZN3sce4Json6ObjectixERKNS0_6StringE",
+	"_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm",
+	// libSceNp (NpManager, NpAuth, NpMatching2, NpSignaling, NpWebApi, NpScore, NpTus, NpCommerce, NpUtility, NpGameIntent)
+	"sceNpCheckNpAvailability",
+	"sceNpCheckNpAvailabilityA",
+	"sceNpCheckPlus",
+	"sceNpCreateAsyncRequest",
+	"sceNpCreateRequest",
+	"sceNpDeleteRequest",
+	"sceNpGetAccountCountry",
+	"sceNpGetAccountCountryA",
+	"sceNpGetAccountDateOfBirth",
+	"sceNpGetAccountDateOfBirthA",
+	"sceNpGetAccountId",
+	"sceNpGetAccountIdA",
+	"sceNpGetAccountLanguage",
+	"sceNpGetAccountLanguageA",
+	"sceNpGetGamePresenceStatus",
+	"sceNpGetGamePresenceStatusA",
+	"sceNpGetNpId",
+	"sceNpGetNpReachabilityState",
+	"sceNpGetOnlineId",
+	"sceNpGetState",
+	"sceNpHasSignedUp",
+	"sceNpIsPlusMember",
+	"sceNpPollAsync",
+	"sceNpWaitAsync",
+	"sceNpRegisterStateCallback",
+	"sceNpRegisterStateCallbackA",
+	"sceNpUnregisterStateCallback",
+	"sceNpUnregisterStateCallbackA",
+	"sceNpAuthCreateRequest",
+	"sceNpAuthCreateAsyncRequest",
+	"sceNpAuthDeleteRequest",
+	"sceNpAuthGetAuthorizationCode",
+	"sceNpAuthGetAuthorizationCodeA",
+	"sceNpAuthPollAsync",
+	"sceNpAuthWaitAsync",
+	"sceNpMatching2Initialize",
+	"sceNpMatching2Terminate",
+	"sceNpMatching2CreateContext",
+	"sceNpMatching2CreateContextA",
+	"sceNpSignalingInitialize",
+	"sceNpSignalingTerminate",
+	"sceNpSignalingCreateContext",
+	"sceNpSignalingCreateContextA",
+	"sceNpWebApiInitialize",
+	"sceNpWebApiTerminate",
+	"sceNpWebApiCreateContext",
+	"sceNpWebApiCreateContextA",
+	"sceNpWebApiDeleteContext",
+	"sceNpWebApiCreateRequest",
+	"sceNpWebApiSendRequest",
+	"sceNpWebApiSendRequest2",
+	"sceNpWebApiDeleteRequest",
+	"sceNpScoreCreateNpTitleCtx",
+	"sceNpScoreCreateNpTitleCtxA",
+	"sceNpScoreDeleteNpTitleCtx",
+	"sceNpScoreCreateRequest",
+	"sceNpScoreDeleteRequest",
+	"sceNpScorePollAsync",
+	"sceNpScoreWaitAsync",
+	"sceNpTusCreateNpTitleCtx",
+	"sceNpTusCreateNpTitleCtxA",
+	"sceNpTusDeleteNpTitleCtx",
+	"sceNpTusCreateRequest",
+	"sceNpTusDeleteRequest",
+	"sceNpTusPollAsync",
+	"sceNpTusWaitAsync",
+	"sceNpCommerceDialogInitialize",
+	"sceNpCommerceDialogTerminate",
+	"sceNpCommerceDialogClose",
+	"sceNpCommerceDialogGetStatus",
+	"sceNpCommerceDialogGetResult",
+	"sceNpCommerceDialogOpen",
+	"sceNpUtilityInit",
+	"sceNpUtilityTerm",
+	"sceNpGameIntentInitialize",
+	"sceNpGameIntentTerminate",
+	// libSceVoiceQoS
+	"sceVoiceQoSInit",
+	"sceVoiceQoSInitHQ",
+	"sceVoiceQoSEnd",
+	"sceVoiceQoSConnect",
+	"sceVoiceQoSDisconnect",
+	"sceVoiceQoSGetStatus",
+	// Kernel File System (pread / preadv)
+	"sceKernelPread",
+	"sceKernelPreadv",
+	// Kernel AIO (Asynchronous I/O)
+	"sceKernelAioInitializeImpl",
+	"sceKernelAioInitializeParam",
+	"sceKernelAioSetParam",
+	"sceKernelAioSubmitReadCommands",
+	"sceKernelAioSubmitReadCommandsMultiple",
+	"sceKernelAioSubmitWriteCommands",
+	"sceKernelAioSubmitWriteCommandsMultiple",
+	"sceKernelAioPollRequest",
+	"sceKernelAioPollRequests",
+	"sceKernelAioCancelRequest",
+	"sceKernelAioCancelRequests",
+	"sceKernelAioDeleteRequest",
+	"sceKernelAioDeleteRequests",
+	"sceKernelAioWaitRequest",
+	"sceKernelAioWaitRequests",
+}
+
+var (
+	canonicalNIDMapOnce sync.Once
+	canonicalNIDMap     map[string]string
+)
+
+func initCanonicalNIDMap() {
+	canonicalNIDMap = make(map[string]string, len(CanonicalShims)*2)
+	for plain, shim := range CanonicalShims {
+		if nid := elfloader.CalculateNID(plain); nid != "" {
+			canonicalNIDMap[nid] = shim
+		}
+		if !strings.HasPrefix(plain, "_") {
+			if nid := elfloader.CalculateNID("_" + plain); nid != "" {
+				canonicalNIDMap[nid] = shim
+			}
+		}
+	}
+}
+
+func nidPrefix(name string) string {
+	if i := strings.IndexByte(name, '#'); i >= 0 {
+		return name[:i]
+	}
+	return ""
+}
+
+func shimByNID(nid string) (string, bool) {
+	if nid == "" {
+		return "", false
+	}
+	canonicalNIDMapOnce.Do(initCanonicalNIDMap)
+	shim, ok := canonicalNIDMap[nid]
+	return shim, ok
+}
+
+// LookupShim looks up a host shim for a symbol name or Sony NID (hash#lib#mod).
+func LookupShim(name string) (string, bool) {
+	if shim, ok := CanonicalShims[name]; ok {
+		return shim, true
+	}
+	stripped := strings.TrimPrefix(name, "_")
+	if shim, ok := CanonicalShims[stripped]; ok {
+		return shim, true
+	}
+	if nid := nidPrefix(name); nid != "" {
+		if shim, ok := shimByNID(nid); ok {
+			return shim, true
+		}
+		if resolved, ok := elfloader.ResolveNID(nid); ok {
+			if shim, hit := CanonicalShims[resolved]; hit {
+				return shim, true
+			}
+			strippedResolved := strings.TrimPrefix(resolved, "_")
+			if shim, hit := CanonicalShims[strippedResolved]; hit {
+				return shim, true
+			}
+		}
+	}
+	return "", false
+}

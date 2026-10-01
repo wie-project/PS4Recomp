@@ -201,19 +201,19 @@ func (r *AnalysisReport) SummaryString() string {
 	sb.WriteString("===================================================================\n")
 	sb.WriteString("  PS4 Binary Reachable CFG Instruction Coverage Analysis\n")
 	sb.WriteString("===================================================================\n")
-	sb.WriteString(fmt.Sprintf("Binary File:            %s\n", filepath.Base(r.BinaryPath)))
-	sb.WriteString(fmt.Sprintf("Binary Size:            %.2f MB (%d bytes)\n", float64(r.BinarySize)/(1024*1024), r.BinarySize))
-	sb.WriteString(fmt.Sprintf("CFG Seeds:              %d\n", r.SeedCount))
-	sb.WriteString(fmt.Sprintf("Unwind Functions:       %d\n", r.UnwindFunctions))
-	sb.WriteString(fmt.Sprintf("Unwind Data Ranges:     %d\n", r.DataRanges))
-	sb.WriteString(fmt.Sprintf("Reachable Functions:    %d\n", r.FunctionCount))
-	sb.WriteString(fmt.Sprintf("Decode Cap Hits:        %d\n", r.CapHits))
-	sb.WriteString(fmt.Sprintf("Privileged Stops:       %d\n", r.PrivilegedStops))
-	sb.WriteString(fmt.Sprintf("Total Disassembled:     %d instructions\n", r.TotalInstructions))
-	sb.WriteString(fmt.Sprintf("Unique Opcodes:         %d\n", r.UniqueOpcodes))
-	sb.WriteString(fmt.Sprintf("Supported by Lifter:    %d instructions (%.2f%%)\n", r.SupportedCount, r.CoveragePercent))
-	sb.WriteString(fmt.Sprintf("Missing / Unsupported:  %d instructions (%.2f%%)\n", r.UnsupportedCount, 100.0-r.CoveragePercent))
-	sb.WriteString(fmt.Sprintf("Missing Unique Opcodes: %d\n", r.MissingUniqueOps))
+	fmt.Fprintf(&sb, "Binary File:            %s\n", filepath.Base(r.BinaryPath))
+	fmt.Fprintf(&sb, "Binary Size:            %.2f MB (%d bytes)\n", float64(r.BinarySize)/(1024*1024), r.BinarySize)
+	fmt.Fprintf(&sb, "CFG Seeds:              %d\n", r.SeedCount)
+	fmt.Fprintf(&sb, "Unwind Functions:       %d\n", r.UnwindFunctions)
+	fmt.Fprintf(&sb, "Unwind Data Ranges:     %d\n", r.DataRanges)
+	fmt.Fprintf(&sb, "Reachable Functions:    %d\n", r.FunctionCount)
+	fmt.Fprintf(&sb, "Decode Cap Hits:        %d\n", r.CapHits)
+	fmt.Fprintf(&sb, "Privileged Stops:       %d\n", r.PrivilegedStops)
+	fmt.Fprintf(&sb, "Total Disassembled:     %d instructions\n", r.TotalInstructions)
+	fmt.Fprintf(&sb, "Unique Opcodes:         %d\n", r.UniqueOpcodes)
+	fmt.Fprintf(&sb, "Supported by Lifter:    %d instructions (%.2f%%)\n", r.SupportedCount, r.CoveragePercent)
+	fmt.Fprintf(&sb, "Missing / Unsupported:  %d instructions (%.2f%%)\n", r.UnsupportedCount, 100.0-r.CoveragePercent)
+	fmt.Fprintf(&sb, "Missing Unique Opcodes: %d\n", r.MissingUniqueOps)
 
 	if len(r.MissingOpcodes) > 0 {
 		sb.WriteString("\n-------------------------------------------------------------------\n")
@@ -227,11 +227,11 @@ func (r *AnalysisReport) SummaryString() string {
 			if r.TotalInstructions > 0 {
 				pct = (float64(m.Count) / float64(r.TotalInstructions)) * 100.0
 			}
-			sb.WriteString(fmt.Sprintf("  [%-2d]  %-22s  %-12d  (%.3f%%)\n", i+1, m.Name, m.Count, pct))
+			fmt.Fprintf(&sb, "  [%-2d]  %-22s  %-12d  (%.3f%%)\n", i+1, m.Name, m.Count, pct)
 			if i+1 >= limit {
 				rest := len(r.MissingOpcodes) - limit
 				if rest > 0 {
-					sb.WriteString(fmt.Sprintf("  ... and %d more missing opcodes\n", rest))
+					fmt.Fprintf(&sb, "  ... and %d more missing opcodes\n", rest)
 				}
 				break
 			}
@@ -245,8 +245,8 @@ func (r *AnalysisReport) SummaryString() string {
 		sb.WriteString("  Decode Safety Cap Hits\n")
 		sb.WriteString("-------------------------------------------------------------------\n")
 		for _, hit := range r.CapHitDetails {
-			sb.WriteString(fmt.Sprintf("  - %s (0x%x): %s at PC 0x%x (%d insts decoded)\n",
-				hit.Name, hit.EntryAddr, hit.Reason, hit.PC, hit.InstCount))
+			fmt.Fprintf(&sb, "  - %s (0x%x): %s at PC 0x%x (%d insts decoded)\n",
+				hit.Name, hit.EntryAddr, hit.Reason, hit.PC, hit.InstCount)
 		}
 	}
 

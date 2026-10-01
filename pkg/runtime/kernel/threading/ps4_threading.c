@@ -1,4 +1,5 @@
 #include "recomp_runtime.h"
+#include "ps4_threading.h"
 #include <errno.h>
 #include <sched.h>
 #include <signal.h>

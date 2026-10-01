@@ -131,7 +131,10 @@ func TestNetworkingResolvedHostShims(t *testing.T) {
 }
 
 func TestHogwartsUnresolvedLibraryNames(t *testing.T) {
-	path := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/extracted/eboot.bin"
+	path := os.Getenv("PS4_RETAIL_EBOOT")
+	if path == "" {
+		t.Skip("PS4_RETAIL_EBOOT not set")
+	}
 	loaded, err := elfloader.LoadELF(path)
 	if err != nil {
 		t.Skip(err)
@@ -153,12 +156,15 @@ func TestHogwartsUnresolvedLibraryNames(t *testing.T) {
 }
 
 func TestPrintHogwartsNetworkUnresolved(t *testing.T) {
-	path := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/extracted/eboot.bin"
+	path := os.Getenv("PS4_RETAIL_EBOOT")
+	if path == "" {
+		t.Skip("PS4_RETAIL_EBOOT not set")
+	}
 	loaded, err := elfloader.LoadELF(path)
 	if err != nil {
 		t.Skip(err)
 	}
-	appDir := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/extracted"
+	appDir := filepath.Dir(path)
 	refs := elfloader.DiscoverCompanionModules(path, appDir, loaded.MemoryImage)
 	var modules []GuestModule
 	nextBase := (loaded.MaxVAddr + 0xFFFF) &^ 0xFFFF
@@ -192,7 +198,10 @@ func TestPrintHogwartsNetworkUnresolved(t *testing.T) {
 }
 
 func TestHLEReportWrite(t *testing.T) {
-	path := "../../tools/OpenOrbis/PS4Toolchain/samples/hello_world/hello_world/x64/Debug/hello_world.elf"
+	path := os.Getenv("PS4_TEST_ELF")
+	if path == "" {
+		path = "../../hello_world.elf"
+	}
 	if _, err := os.Stat(path); err != nil {
 		t.Skip(path)
 	}

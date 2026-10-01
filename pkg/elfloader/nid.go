@@ -30,7 +30,7 @@ func initNIDDB() {
 	if err != nil {
 		return
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 
 	scanner := bufio.NewScanner(zr)
 	for scanner.Scan() {

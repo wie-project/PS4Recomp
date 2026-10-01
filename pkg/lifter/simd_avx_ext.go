@@ -875,14 +875,15 @@ func (l *Lifter) liftPmaddExtra(op x86asm.Op, dst, src1, src2 x86asm.Arg, nextPC
 	lines = append(lines, fmt.Sprintf("      xmm_reg_t s1 = ctx->%s;", infoSrc1.BaseReg))
 	lines = append(lines, "      xmm_reg_t res;")
 
-	if op == x86asm.VPMADDWD {
+	switch op {
+	case x86asm.VPMADDWD:
 		for i := 0; i < 4; i++ {
 			lines = append(lines,
 				fmt.Sprintf("      res.s32[%d] = (int32_t)s1.s16[%d] * (int32_t)s2.s16[%d] + (int32_t)s1.s16[%d] * (int32_t)s2.s16[%d];",
 					i, 2*i, 2*i, 2*i+1, 2*i+1),
 			)
 		}
-	} else if op == x86asm.VPMADDUBSW {
+	case x86asm.VPMADDUBSW:
 		for i := 0; i < 8; i++ {
 			lines = append(lines,
 				fmt.Sprintf("      { int32_t prod = (int32_t)s1.u8[%d] * (int32_t)s2.s8[%d] + (int32_t)s1.u8[%d] * (int32_t)s2.s8[%d];",
@@ -1103,11 +1104,12 @@ func (l *Lifter) liftVpabs(op x86asm.Op, dst, src x86asm.Arg, nextPC uint64) ([]
 	lines = append(lines, sCode...)
 	lines = append(lines, "      xmm_reg_t res = {0};")
 
-	if op == x86asm.VPABSD {
+	switch op {
+	case x86asm.VPABSD:
 		for i := 0; i < 4; i++ {
 			lines = append(lines, fmt.Sprintf("      res.u32[%d] = (s.s32[%d] < 0) ? (uint32_t)(-s.s32[%d]) : (uint32_t)s.s32[%d];", i, i, i, i))
 		}
-	} else if op == x86asm.VPABSW {
+	case x86asm.VPABSW:
 		for i := 0; i < 8; i++ {
 			lines = append(lines, fmt.Sprintf("      res.u16[%d] = (s.s16[%d] < 0) ? (uint16_t)(-s.s16[%d]) : (uint16_t)s.s16[%d];", i, i, i, i))
 		}
@@ -1262,14 +1264,15 @@ func (l *Lifter) liftVaddsub(op x86asm.Op, dst, src1, src2 x86asm.Arg, nextPC ui
 	lines = append(lines, fmt.Sprintf("      xmm_reg_t s1 = ctx->%s;", infoSrc1.BaseReg))
 	lines = append(lines, "      xmm_reg_t res = {0};")
 
-	if op == x86asm.VADDSUBPS {
+	switch op {
+	case x86asm.VADDSUBPS:
 		lines = append(lines,
 			"      res.f32[0] = s1.f32[0] - s2.f32[0];",
 			"      res.f32[1] = s1.f32[1] + s2.f32[1];",
 			"      res.f32[2] = s1.f32[2] - s2.f32[2];",
 			"      res.f32[3] = s1.f32[3] + s2.f32[3];",
 		)
-	} else if op == x86asm.VADDSUBPD {
+	case x86asm.VADDSUBPD:
 		lines = append(lines,
 			"      res.f64[0] = s1.f64[0] - s2.f64[0];",
 			"      res.f64[1] = s1.f64[1] + s2.f64[1];",

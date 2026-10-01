@@ -1,4 +1,5 @@
 #include "recomp_runtime.h"
+#include "ps4_syscalls.h"
 #include "ps4_vfs.h"
 #include <errno.h>
 #include <fcntl.h>

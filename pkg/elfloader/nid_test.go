@@ -3,8 +3,17 @@ package elfloader
 import (
 	"encoding/binary"
 	"os"
+	"path/filepath"
 	"testing"
 )
+
+func getRetailEboot(t *testing.T) string {
+	path := os.Getenv("PS4_RETAIL_EBOOT")
+	if path == "" {
+		t.Skip("Retail game eboot not provided (set PS4_RETAIL_EBOOT)")
+	}
+	return path
+}
 
 func TestCalculateNID(t *testing.T) {
 	got := CalculateNID("_Z19testLibraryFunctionPcmi")
@@ -32,7 +41,7 @@ func TestDecodeSCEID(t *testing.T) {
 }
 
 func TestHogwartsImportLibNames(t *testing.T) {
-	path := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/extracted/eboot.bin"
+	path := getRetailEboot(t)
 	loaded, err := LoadELF(path)
 	if err != nil {
 		t.Skip(err)
@@ -58,8 +67,8 @@ func TestHogwartsImportLibNames(t *testing.T) {
 }
 
 func TestHogwartsCanaryResolution(t *testing.T) {
-	ebootPath := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/extracted/eboot.bin"
-	fiosPath := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/extracted/sce_module/libSceFios2.prx"
+	ebootPath := getRetailEboot(t)
+	fiosPath := filepath.Join(filepath.Dir(ebootPath), "sce_module", "libSceFios2.prx")
 	main, err := LoadELF(ebootPath)
 	if err != nil {
 		t.Skip(err)
@@ -103,8 +112,8 @@ func TestHogwartsCanaryResolution(t *testing.T) {
 }
 
 func TestHogwartsFullCanaryInGuestImage(t *testing.T) {
-	ebootPath := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/extracted/eboot.bin"
-	appDir := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/extracted"
+	ebootPath := getRetailEboot(t)
+	appDir := filepath.Dir(ebootPath)
 	main, err := LoadELF(ebootPath)
 	if err != nil {
 		t.Skip(err)
@@ -142,8 +151,7 @@ func TestHogwartsFullCanaryInGuestImage(t *testing.T) {
 	if val != main.CanaryAddr {
 		t.Fatalf("expected 0xa3203a8 to point to 0x%x, got 0x%x", main.CanaryAddr, val)
 	}
-	if os.Getenv("UPDATE_GUEST_IMAGE") == "1" {
-		target := "/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/build/guest_image.bin"
+	if target := os.Getenv("UPDATE_GUEST_IMAGE_PATH"); target != "" {
 		if err := os.WriteFile(target, main.MemoryImage, 0o644); err != nil {
 			t.Fatalf("failed to update guest_image.bin: %v", err)
 		}

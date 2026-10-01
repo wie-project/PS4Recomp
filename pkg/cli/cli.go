@@ -465,7 +465,7 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	}
 
 	cflagsStr := strings.Join(append(cflags, incFlags...), " ")
-	sb.WriteString(fmt.Sprintf("cflags = %s\n\n", cflagsStr))
+	fmt.Fprintf(&sb, "cflags = %s\n\n", cflagsStr)
 
 	sb.WriteString("rule compile_c\n")
 	sb.WriteString("  command = clang -MD -MF $out.d $cflags -c $in -o $out\n")
@@ -492,7 +492,7 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	ldflags = append(ldflags, ftLibs...)
 	ldflagsStr := strings.Join(ldflags, " ")
 
-	sb.WriteString(fmt.Sprintf("ldflags = %s\n\n", ldflagsStr))
+	fmt.Fprintf(&sb, "ldflags = %s\n\n", ldflagsStr)
 	sb.WriteString("rule link_bin\n")
 	sb.WriteString("  command = clang $in $ldflags -o $out\n")
 	sb.WriteString("  description = LINK $out\n\n")
@@ -510,7 +510,7 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		if ext == ".m" {
 			rule = "compile_m"
 		}
-		sb.WriteString(fmt.Sprintf("build %s: %s %s\n", objFile, rule, relCFile))
+		fmt.Fprintf(&sb, "build %s: %s %s\n", objFile, rule, relCFile)
 	}
 
 	relTargetBin, err := filepath.Rel(outDir, targetBin)
@@ -518,8 +518,8 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		relTargetBin = filepath.Base(targetBin)
 	}
 
-	sb.WriteString(fmt.Sprintf("\nbuild %s: link_bin %s\n", relTargetBin, strings.Join(objFiles, " ")))
-	sb.WriteString(fmt.Sprintf("default %s\n", relTargetBin))
+	fmt.Fprintf(&sb, "\nbuild %s: link_bin %s\n", relTargetBin, strings.Join(objFiles, " "))
+	fmt.Fprintf(&sb, "default %s\n", relTargetBin)
 
 	ninjaPath := filepath.Join(outDir, "build.ninja")
 	existing, err := os.ReadFile(ninjaPath)
@@ -796,7 +796,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	srcInfo, err := in.Stat()
 	if err != nil {
@@ -828,9 +828,12 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
 		return err
 	}
 	_ = os.Chmod(dst, mode)

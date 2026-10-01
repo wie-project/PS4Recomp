@@ -1,4 +1,5 @@
 #include "recomp_runtime.h"
+#include "ps4_sync.h"
 #include <errno.h>
 
 #define MUTEX_MAP_SIZE 1024

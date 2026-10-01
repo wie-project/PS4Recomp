@@ -8,7 +8,7 @@ import (
 )
 
 func TestMapGuestPath(t *testing.T) {
-	app := "/tmp/game"
+	app := filepath.Join(t.TempDir(), "game")
 	if got := MapGuestPath("/app0/sce_module/libExample.prx", app); got != filepath.Join(app, "sce_module", "libExample.prx") {
 		t.Fatalf("got %q", got)
 	}

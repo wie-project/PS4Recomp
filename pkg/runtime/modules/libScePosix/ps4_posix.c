@@ -1,4 +1,5 @@
 #include "ps4_posix.h"
+#include "ps4_threading.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

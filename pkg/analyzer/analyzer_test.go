@@ -4,9 +4,11 @@ import (
 	"os"
 	"testing"
 )
-
 func TestAnalyzeBinary(t *testing.T) {
-	elfPath := "../../tools/OpenOrbis/PS4Toolchain/samples/graphics/graphics/x64/Debug/graphics.elf"
+	elfPath := os.Getenv("PS4_TEST_ELF")
+	if elfPath == "" {
+		elfPath = "../../hello_world.elf"
+	}
 	if _, err := os.Stat(elfPath); err != nil {
 		t.Skipf("Sample ELF %s not found", elfPath)
 	}
