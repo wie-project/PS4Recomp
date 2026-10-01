@@ -19,6 +19,21 @@ static DirectMemBlock *g_direct_blocks = NULL;
 static pthread_mutex_t g_direct_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int g_direct_inited = 0;
 
+static size_t get_total_direct_mem_size(void) {
+    const char *env = getenv("PS4_DIRECT_MEM_SIZE");
+    if (env && *env) {
+        char *end = NULL;
+        unsigned long long val = strtoull(env, &end, 0);
+        if (end && *end) {
+            if (*end == 'g' || *end == 'G') val *= 1024ULL * 1024 * 1024;
+            else if (*end == 'm' || *end == 'M') val *= 1024ULL * 1024;
+            else if (*end == 'k' || *end == 'K') val *= 1024ULL;
+        }
+        if (val > 0) return (size_t)val;
+    }
+    return PS4_DIRECT_MEM_TOTAL_SIZE;
+}
+
 int ps4_direct_mem_init(void) {
     pthread_mutex_lock(&g_direct_mutex);
     if (!g_direct_inited) {
@@ -28,7 +43,7 @@ int ps4_direct_mem_init(void) {
             return -1;
         }
         g_direct_blocks->phys_offset = 0;
-        g_direct_blocks->size = PS4_DIRECT_MEM_TOTAL_SIZE;
+        g_direct_blocks->size = get_total_direct_mem_size();
         g_direct_blocks->is_free = 1;
         g_direct_blocks->mapped_guest_vaddr = 0;
         g_direct_blocks->next = NULL;
@@ -53,7 +68,7 @@ void ps4_direct_mem_destroy(void) {
 }
 
 size_t sceKernelGetDirectMemorySize(void) {
-    return PS4_DIRECT_MEM_TOTAL_SIZE;
+    return get_total_direct_mem_size();
 }
 
 size_t sceKernelAvailableDirectMemorySize(void) {
@@ -73,7 +88,11 @@ size_t sceKernelAvailableDirectMemorySize(void) {
 
 int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t length, size_t alignment, int type, off_t *physAddrOut) {
     (void)type;
-    if (!physAddrOut || length == 0) return -EINVAL;
+    printf("[ps4-mem] sceKernelAllocateDirectMemory: start=0x%llx end=0x%llx len=%zu (%.2f MB) align=%zu type=%d\n",
+           (unsigned long long)searchStart, (unsigned long long)searchEnd, length, (double)length / (1024.0 * 1024.0), alignment, type);
+    fflush(stdout);
+
+    if (!physAddrOut || length == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     if (alignment == 0) alignment = 4096;
     size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
 
@@ -101,9 +120,39 @@ int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t len
         curr = curr->next;
     }
 
+    // If no existing free block is large enough and searchEnd is not constrained, dynamically expand direct memory
+    if (!best && searchEnd <= 0) {
+        DirectMemBlock *last = g_direct_blocks;
+        while (last && last->next) last = last->next;
+        if (last) {
+            size_t expand_sz = aligned_len + 1024ULL * 1024 * 1024; // Requested size + 1GB headroom
+            if (last->is_free) {
+                last->size += expand_sz;
+                best = last;
+            } else {
+                DirectMemBlock *expand = (DirectMemBlock *)calloc(1, sizeof(DirectMemBlock));
+                if (expand) {
+                    expand->phys_offset = last->phys_offset + last->size;
+                    expand->size = expand_sz;
+                    expand->is_free = 1;
+                    expand->prev = last;
+                    last->next = expand;
+                    best = expand;
+                }
+            }
+            if (best) {
+                printf("[ps4-mem] Dynamically expanded direct memory pool by %.2f MB (total headroom)\n",
+                       (double)expand_sz / (1024.0 * 1024.0));
+                fflush(stdout);
+            }
+        }
+    }
+
     if (!best) {
+        fprintf(stderr, "[ps4-mem] ERROR: sceKernelAllocateDirectMemory FAILED! len=%zu (%.2f MB)\n",
+                length, (double)length / (1024.0 * 1024.0));
         pthread_mutex_unlock(&g_direct_mutex);
-        return -ENOMEM;
+        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
     }
 
     off_t alloc_start = (best->phys_offset + alignment - 1) & ~(alignment - 1);
@@ -144,12 +193,12 @@ int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t len
     return 0;
 }
 
-int sceKernelAllocateMainDirectMemory(size_t length, size_t alignment, int type, off_t *physAddrOut) {
-    return sceKernelAllocateDirectMemory(0, -1, length, alignment, type, physAddrOut);
-}
-
 int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, off_t physAddr, size_t alignment) {
-    if (!ctx || !addrInOut || length == 0) return -EINVAL;
+    printf("[ps4-mem] sceKernelMapDirectMemory: in=%p len=%zu (%.2f MB) prot=0x%x flags=0x%x phys=0x%llx align=%zu\n",
+           addrInOut ? *addrInOut : NULL, length, (double)length / (1024.0 * 1024.0), prot, flags, (unsigned long long)physAddr, alignment);
+    fflush(stdout);
+
+    if (!ctx || !addrInOut || length == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     if (alignment == 0) alignment = 4096;
     size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
 
@@ -167,8 +216,9 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
     }
 
     if (!found) {
+        fprintf(stderr, "[ps4-mem] ERROR: sceKernelMapDirectMemory: physAddr 0x%llx not found or free!\n", (unsigned long long)physAddr);
         pthread_mutex_unlock(&g_direct_mutex);
-        return -EINVAL;
+        return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     }
 
     uint64_t vaddr = (uint64_t)-1;
@@ -178,18 +228,22 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
         vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_len, prot, flags, "direct_mem");
     }
 
-    // If no fixed address requested or fixed mapping failed, allocate dynamically
+    // If no fixed address requested or fixed mapping failed, allocate dynamically with alignment
     if (vaddr == (uint64_t)-1) {
-        vaddr = recomp_vm_alloc_named(ctx, aligned_len, prot, flags, "direct_mem");
+        vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_len, alignment, prot, flags, "direct_mem");
     }
 
     if (vaddr == (uint64_t)-1) {
+        fprintf(stderr, "[ps4-mem] ERROR: sceKernelMapDirectMemory failed to allocate VM extent! len=%zu align=%zu\n", aligned_len, alignment);
         pthread_mutex_unlock(&g_direct_mutex);
-        return -ENOMEM;
+        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
     }
 
     found->mapped_guest_vaddr = vaddr;
     *addrInOut = (void *)vaddr;
+
+    printf("[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=%p\n", (void *)vaddr);
+    fflush(stdout);
 
     pthread_mutex_unlock(&g_direct_mutex);
     return 0;
@@ -228,28 +282,75 @@ int sceKernelReleaseDirectMemory(off_t physAddr, size_t length) {
         curr = curr->next;
     }
     pthread_mutex_unlock(&g_direct_mutex);
-    return -EINVAL;
+    return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
 }
 
-int sceKernelMapFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags) {
-    if (!ctx || !addrInOut || length == 0) return -EINVAL;
-    size_t aligned_len = (length + 4095ULL) & ~4095ULL;
+int sceKernelMapNamedFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, const char *name) {
+    printf("[ps4-mem] sceKernelMapNamedFlexibleMemory (%s): in=%p len=%zu (%.2f MB) prot=0x%x flags=0x%x\n",
+           name ? name : "null", addrInOut ? *addrInOut : NULL, length, (double)length / (1024.0 * 1024.0), prot, flags);
+    fflush(stdout);
+
+    if (!ctx || !addrInOut || length == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    const char *tag = (name && *name) ? name : "flexible_mem";
+
+    // In Orbis OS, flexible memory allocations are aligned to 64KB (0x10000)
+    size_t alignment = 65536;
+    size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
 
     uint64_t vaddr = (uint64_t)-1;
     if (*addrInOut != NULL) {
         uint64_t req_vaddr = (uint64_t)*addrInOut;
-        vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_len, prot, flags, "flexible_mem");
+        vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_len, prot, flags, tag);
     }
 
     if (vaddr == (uint64_t)-1) {
-        vaddr = recomp_vm_alloc_named(ctx, aligned_len, prot, flags, "flexible_mem");
+        vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_len, alignment, prot, flags, tag);
     }
 
     if (vaddr == (uint64_t)-1) {
-        return -ENOMEM;
+        fprintf(stderr, "[vmm] sceKernelMapNamedFlexibleMemory FAILED: tag=%s, len=%zu (0x%zx), in_addr=%p\n",
+                tag, length, length, *addrInOut);
+        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
     }
 
     *addrInOut = (void *)vaddr;
+    printf("[ps4-mem] sceKernelMapNamedFlexibleMemory SUCCESS: out=%p\n", (void *)vaddr);
+    fflush(stdout);
+    return 0;
+}
+
+int sceKernelMapFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags) {
+    return sceKernelMapNamedFlexibleMemory(ctx, addrInOut, length, prot, flags, "flexible_mem");
+}
+
+int sceKernelReserveVirtualRange(GuestContext *ctx, void **addrInOut, size_t length, int flags, size_t alignment) {
+    printf("[ps4-mem] sceKernelReserveVirtualRange: in=%p len=%zu (%.2f MB) flags=0x%x align=%zu\n",
+           addrInOut ? *addrInOut : NULL, length, (double)length / (1024.0 * 1024.0), flags, alignment);
+    fflush(stdout);
+
+    if (!ctx || !addrInOut || length == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    if (alignment == 0) alignment = 65536;
+    size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
+
+    uint64_t vaddr = (uint64_t)-1;
+    if (*addrInOut != NULL) {
+        uint64_t req_vaddr = (uint64_t)*addrInOut;
+        vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_len, PROT_NONE, flags, "reserved");
+    }
+
+    if (vaddr == (uint64_t)-1) {
+        vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_len, alignment, PROT_NONE, flags, "reserved");
+    }
+
+    if (vaddr == (uint64_t)-1) {
+        fprintf(stderr, "[ps4-mem] ERROR: sceKernelReserveVirtualRange FAILED! in=%p len=%zu align=%zu\n",
+                addrInOut ? *addrInOut : NULL, length, alignment);
+        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
+    }
+
+    *addrInOut = (void *)vaddr;
+    printf("[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=%p\n", (void *)vaddr);
+    fflush(stdout);
     return 0;
 }
 
@@ -266,9 +367,12 @@ int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut) 
                 uint64_t flex_ptr = *(uint64_t *)(proc->mem_base + mem_param_addr + 0x10ULL);
                 if (flex_ptr != 0 && flex_ptr + 8 <= proc->mem_size) {
                     uint64_t flex_extra = *(uint64_t *)(proc->mem_base + flex_ptr);
-                    if (flex_extra > 0 && flex_extra < 4ULL * 1024 * 1024 * 1024) {
+                    if (flex_extra > 0 && flex_extra < 32ULL * 1024 * 1024 * 1024) {
                         // Base flexible memory is 272MB (0x11000000)
                         *sizeOut = flex_extra + (272ULL * 1024 * 1024);
+                        printf("[ps4-mem] sceKernelConfiguredFlexibleMemorySize (from proc_param): %llu (%.2f MB)\n",
+                               (unsigned long long)*sizeOut, (double)*sizeOut / (1024.0 * 1024.0));
+                        fflush(stdout);
                         return 0;
                     }
                 }
@@ -276,6 +380,9 @@ int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut) 
         }
     }
     *sizeOut = default_size;
+    printf("[ps4-mem] sceKernelConfiguredFlexibleMemorySize (default): %llu (%.2f MB)\n",
+           (unsigned long long)*sizeOut, (double)*sizeOut / (1024.0 * 1024.0));
+    fflush(stdout);
     return 0;
 }
 
@@ -338,9 +445,20 @@ int sceKernelQueryMemoryProtection(GuestContext *ctx, const void *addr, void **s
     return 0;
 }
 
+int sceKernelAllocateMainDirectMemory(size_t length, size_t alignment, int type, off_t *physAddrOut) {
+    printf("[ps4-mem] sceKernelAllocateMainDirectMemory: len=%zu (%.2f MB) align=%zu type=%d\n",
+           length, (double)length / (1024.0 * 1024.0), alignment, type);
+    fflush(stdout);
+    return sceKernelAllocateDirectMemory(0, -1, length, alignment, type, physAddrOut);
+}
+
 // Memory Pool implementation
 int sceKernelMemoryPoolReserve(GuestContext *ctx, void *addrIn, size_t len, size_t alignment, int flags, void **addrOut) {
-    if (!ctx || !addrOut || len == 0) return -EINVAL;
+    printf("[ps4-mem] sceKernelMemoryPoolReserve: in=%p len=%zu (%.2f MB) align=%zu flags=0x%x\n",
+           addrIn, len, (double)len / (1024.0 * 1024.0), alignment, flags);
+    fflush(stdout);
+
+    if (!ctx || !addrOut || len == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     if (alignment == 0) alignment = 2ULL * 1024 * 1024; // 2MB default alignment
     size_t aligned_size = (len + alignment - 1) & ~(alignment - 1);
 
@@ -354,20 +472,27 @@ int sceKernelMemoryPoolReserve(GuestContext *ctx, void *addrIn, size_t len, size
             vaddr = req_vaddr;
         }
     } else {
-        vaddr = recomp_vm_alloc_named(ctx, aligned_size, PROT_READ | PROT_WRITE, flags, "pool_reserved");
+        vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_size, alignment, PROT_READ | PROT_WRITE, flags, "pool_reserved");
     }
 
     if (vaddr == (uint64_t)-1) {
-        return -ENOMEM;
+        fprintf(stderr, "[ps4-mem] ERROR: sceKernelMemoryPoolReserve FAILED: in=%p len=%zu align=%zu\n",
+                addrIn, len, alignment);
+        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
     }
 
     *addrOut = (void *)vaddr;
+    printf("[ps4-mem] sceKernelMemoryPoolReserve SUCCESS: out=%p\n", (void *)vaddr);
+    fflush(stdout);
     return 0; // ORBIS_OK
 }
 
 int sceKernelMemoryPoolExpand(GuestContext *ctx, off_t searchStart, off_t searchEnd, size_t len, size_t alignment, off_t *physAddrOut) {
     (void)ctx;
-    if (len == 0 || !physAddrOut) return -EINVAL;
+    printf("[ps4-mem] sceKernelMemoryPoolExpand: start=0x%llx end=0x%llx len=%zu (%.2f MB) align=%zu\n",
+           (unsigned long long)searchStart, (unsigned long long)searchEnd, len, (double)len / (1024.0 * 1024.0), alignment);
+    fflush(stdout);
+    if (len == 0 || !physAddrOut) return 0x80020016;
     if (alignment == 0) alignment = 64ULL * 1024; // 64KB default alignment
     return sceKernelAllocateDirectMemory(searchStart, searchEnd, len, alignment, 3 /* POOLED */, physAddrOut);
 }
@@ -506,11 +631,53 @@ void shim_sceKernelMapFlexibleMemory(GuestContext *ctx) {
     int flags = (int)ctx->rcx;
 
     void *mappedAddr = NULL;
-    if (addrInOutGuest != 0) {
+    if (addrInOutGuest != 0 && ctx->mem_base && addrInOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
         mappedAddr = (void *)*(uint64_t *)(ctx->mem_base + addrInOutGuest);
     }
     int rc = sceKernelMapFlexibleMemory(ctx, &mappedAddr, length, prot, flags);
-    if (rc == 0 && addrInOutGuest != 0) {
+    if (rc == 0 && addrInOutGuest != 0 && ctx->mem_base && addrInOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+        *(uint64_t *)(ctx->mem_base + addrInOutGuest) = (uint64_t)mappedAddr;
+    }
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelMapNamedFlexibleMemory(GuestContext *ctx) {
+    uint64_t addrInOutGuest = ctx->rdi;
+    size_t length = (size_t)ctx->rsi;
+    int prot = (int)ctx->rdx;
+    int flags = (int)ctx->rcx;
+    uint64_t nameGuest = ctx->r8;
+
+    char name[32] = {0};
+    if (nameGuest != 0 && ctx->mem_base && nameGuest < ctx->mem_size) {
+        strncpy(name, (const char *)(ctx->mem_base + nameGuest), sizeof(name) - 1);
+    }
+
+    void *mappedAddr = NULL;
+    if (addrInOutGuest != 0 && ctx->mem_base && addrInOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+        mappedAddr = (void *)*(uint64_t *)(ctx->mem_base + addrInOutGuest);
+    }
+    int rc = sceKernelMapNamedFlexibleMemory(ctx, &mappedAddr, length, prot, flags, name[0] ? name : "flexible_mem");
+    if (rc == 0 && addrInOutGuest != 0 && ctx->mem_base && addrInOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+        *(uint64_t *)(ctx->mem_base + addrInOutGuest) = (uint64_t)mappedAddr;
+    }
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelReserveVirtualRange(GuestContext *ctx) {
+    uint64_t addrInOutGuest = ctx->rdi;
+    size_t length = (size_t)ctx->rsi;
+    int flags = (int)ctx->rdx;
+    size_t alignment = (size_t)ctx->rcx;
+
+    void *mappedAddr = NULL;
+    if (addrInOutGuest != 0 && ctx->mem_base && addrInOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+        mappedAddr = (void *)*(uint64_t *)(ctx->mem_base + addrInOutGuest);
+    }
+    int rc = sceKernelReserveVirtualRange(ctx, &mappedAddr, length, flags, alignment);
+    if (rc == 0 && addrInOutGuest != 0 && ctx->mem_base && addrInOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
         *(uint64_t *)(ctx->mem_base + addrInOutGuest) = (uint64_t)mappedAddr;
     }
     ctx->rax = (uint64_t)(int64_t)rc;

@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define PS4_DIRECT_MEM_TOTAL_SIZE (6ULL * 1024ULL * 1024ULL * 1024ULL) // 6 GB unified Direct Memory
+#define PS4_DIRECT_MEM_TOTAL_SIZE (16ULL * 1024ULL * 1024ULL * 1024ULL) // 16 GB unified Direct Memory
 
 typedef struct OrbisKernelVirtualQueryInfo {
     void *start;
@@ -39,6 +39,8 @@ int sceKernelReleaseDirectMemory(off_t physAddr, size_t length);
 
 // Flexible Memory & VMM
 int sceKernelMapFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags);
+int sceKernelMapNamedFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, const char *name);
+int sceKernelReserveVirtualRange(GuestContext *ctx, void **addrInOut, size_t length, int flags, size_t alignment);
 int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut);
 size_t sceKernelAvailableFlexibleMemorySize(GuestContext *ctx);
 int sceKernelVirtualQuery(GuestContext *ctx, const void *addr, int flags, OrbisKernelVirtualQueryInfo *info, size_t infoSize);
@@ -58,6 +60,8 @@ void shim_sceKernelMapDirectMemory(GuestContext *ctx);
 void shim_sceKernelGetDirectMemorySize(GuestContext *ctx);
 void shim_sceKernelAvailableDirectMemorySize(GuestContext *ctx);
 void shim_sceKernelMapFlexibleMemory(GuestContext *ctx);
+void shim_sceKernelMapNamedFlexibleMemory(GuestContext *ctx);
+void shim_sceKernelReserveVirtualRange(GuestContext *ctx);
 void shim_sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx);
 void shim_sceKernelAvailableFlexibleMemorySize(GuestContext *ctx);
 void shim_sceKernelVirtualQuery(GuestContext *ctx);

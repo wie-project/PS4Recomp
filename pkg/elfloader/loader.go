@@ -329,12 +329,56 @@ func parseRelocations(loaded *LoadedELF, file *elf.File) {
 		applyRelaTable(loaded, relData, name == ".rela.plt")
 	}
 
+	resolvePltAddresses(loaded)
+}
+
+func resolvePltAddresses(loaded *LoadedELF) {
+	var pltBase uint64
 	if pltSec, ok := loaded.Sections[".plt"]; ok {
+		pltBase = pltSec.Addr
+	} else {
+		// Section headers stripped (standard for PS4 retail ELFs).
+		// Find the PLT base by scanning executable segments for the trampoline of the first R_X86_64_JUMP_SLOT.
+		var firstJumpSlotGot uint64
+		for _, rel := range loaded.Relocations {
+			if rel.Type == R_X86_64_JUMP_SLOT {
+				firstJumpSlotGot = rel.Offset
+				break
+			}
+		}
+		if firstJumpSlotGot != 0 {
+			for _, seg := range loaded.Segments {
+				if seg.Flags&elf.PF_X == 0 {
+					continue
+				}
+				data := seg.Data
+				for i := 0; i+6 <= len(data); i++ {
+					// x86_64 PLT stub: jmpq *(%rip + disp32) -> ff 25 [disp32]
+					if data[i] == 0xff && data[i+1] == 0x25 {
+						disp := int32(binary.LittleEndian.Uint32(data[i+2 : i+6]))
+						pc := seg.Vaddr + uint64(i)
+						targetGot := uint64(int64(pc) + 6 + int64(disp))
+						if targetGot == firstJumpSlotGot {
+							if pc >= 16 {
+								pltBase = pc - 16
+							}
+							break
+						}
+					}
+				}
+				if pltBase != 0 {
+					break
+				}
+			}
+		}
+	}
+
+	if pltBase != 0 {
 		entryIdx := 0
 		for i := range loaded.Relocations {
 			rel := &loaded.Relocations[i]
 			if rel.Type == R_X86_64_JUMP_SLOT && rel.PltAddr == 0 {
-				rel.PltAddr = pltSec.Addr + 16*uint64(entryIdx+1)
+				rel.PltAddr = pltBase + 16*uint64(entryIdx+1)
 				entryIdx++
 				if rel.Offset+8 <= uint64(len(loaded.MemoryImage)) {
 					binary.LittleEndian.PutUint64(loaded.MemoryImage[rel.Offset:rel.Offset+8], rel.PltAddr)

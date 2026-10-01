@@ -194,6 +194,9 @@ func (e *CEmitter) functionAddrs() []uint64 {
 		}
 		return addrs
 	}
+	if e.disasm == nil {
+		return nil
+	}
 	addrs := make([]uint64, 0, len(e.disasm.Functions))
 	for addr := range e.disasm.Functions {
 		addrs = append(addrs, addr)
@@ -219,6 +222,9 @@ func (e *CEmitter) instCountByAddr() map[uint64]int {
 			m[f.Addr] = f.Insts
 		}
 		return m
+	}
+	if e.disasm == nil {
+		return nil
 	}
 	m := make(map[uint64]int, len(e.disasm.Functions))
 	for addr, fn := range e.disasm.Functions {
@@ -289,7 +295,7 @@ func (e *CEmitter) EmitChunkedCode(outDir string, targetBudget int) ([]string, e
 	}
 
 	dispatchPath := filepath.Join(outDir, "dispatch.c")
-	if err := e.emitDispatch(dispatchPath, len(chunks)); err != nil {
+	if err := e.EmitDispatch(dispatchPath, len(chunks)); err != nil {
 		return nil, fmt.Errorf("failed to emit dispatch.c: %w", err)
 	}
 	generatedFiles = append(generatedFiles, dispatchPath)
@@ -663,7 +669,7 @@ func (e *CEmitter) lookupCompanionExport(symName string) (uint64, bool) {
 	return 0, false
 }
 
-func (e *CEmitter) emitDispatch(path string, numChunks int) (err error) {
+func (e *CEmitter) EmitDispatch(path string, numChunks int) (err error) {
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
 

@@ -155,12 +155,38 @@ void shim_sched_yield(GuestContext *ctx) {
 
 // mmap
 void shim_mmap(GuestContext *ctx) {
+  uint64_t addr = ctx->rdi;
   size_t len = (size_t)ctx->rsi;
-  uint64_t alloc_addr = recomp_vm_alloc(ctx, len);
+  int prot = (int)ctx->rdx;
+  int flags = (int)ctx->rcx;
+  printf("[ps4-sys] mmap: addr=0x%llx len=%zu (%.2f MB) prot=0x%x flags=0x%x\n",
+         (unsigned long long)addr, len, (double)len / (1024.0 * 1024.0), prot, flags);
+  fflush(stdout);
+
+  if (len == 0) {
+    set_guest_errno(ctx, EINVAL);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+
+  size_t align = 65536;
+  size_t aligned_len = (len + align - 1) & ~(align - 1);
+
+  uint64_t alloc_addr = (uint64_t)-1;
+  if (addr != 0) {
+    alloc_addr = recomp_vm_alloc_fixed(ctx, addr, aligned_len, prot, flags, "mmap");
+  }
   if (alloc_addr == (uint64_t)-1) {
+    alloc_addr = recomp_vm_alloc_named_aligned(ctx, aligned_len, align, prot, flags, "mmap");
+  }
+
+  if (alloc_addr == (uint64_t)-1) {
+    fprintf(stderr, "[ps4-sys] mmap FAILED! len=%zu\n", len);
     set_guest_errno(ctx, ENOMEM);
     ctx->rax = (uint64_t)-1;
   } else {
+    printf("[ps4-sys] mmap SUCCESS: out=0x%llx\n", (unsigned long long)alloc_addr);
+    fflush(stdout);
     ctx->rax = alloc_addr;
   }
   SHIM_RETURN();
@@ -747,16 +773,57 @@ void shim_syscall(GuestContext *ctx) {
     }
     SHIM_RETURN();
   }
+  case 74: { // SYS_mprotect
+    uint64_t addr = ctx->rsi;
+    size_t len = (size_t)ctx->rdx;
+    int prot = (int)ctx->rcx;
+    GuestVMExtent *ext = recomp_vm_find(ctx, addr);
+    if (ext) {
+      ext->prot = prot;
+    }
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
   case 432: // SYS_thr_self
     ctx->rax = ctx->thread_id ? ctx->thread_id : 1;
     SHIM_RETURN();
-  case 477: { // SYS_mmap
-    size_t len = (size_t)ctx->rsi;
-    uint64_t alloc_addr = recomp_vm_alloc(ctx, len);
+  case 477: { // SYS_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset)
+    uint64_t addr = ctx->rsi;
+    size_t len = (size_t)ctx->rdx;
+    int prot = (int)ctx->rcx;
+    int flags = (int)ctx->r8;
+    int fd = (int)ctx->r9;
+    (void)fd;
+
+    printf("[ps4-sys] syscall 477 (SYS_mmap): addr=0x%llx len=%zu (%.2f MB) prot=0x%x flags=0x%x\n",
+           (unsigned long long)addr, len, (double)len / (1024.0 * 1024.0), prot, flags);
+    fflush(stdout);
+
+    if (len == 0) {
+      set_guest_errno(ctx, EINVAL);
+      ctx->rax = (uint64_t)-1;
+      SHIM_RETURN();
+    }
+
+    size_t align = 65536;
+    size_t aligned_len = (len + align - 1) & ~(align - 1);
+
+    uint64_t alloc_addr = (uint64_t)-1;
+    if (addr != 0) {
+      alloc_addr = recomp_vm_alloc_fixed(ctx, addr, aligned_len, prot, flags, "mmap_sys");
+    }
     if (alloc_addr == (uint64_t)-1) {
+      alloc_addr = recomp_vm_alloc_named_aligned(ctx, aligned_len, align, prot, flags, "mmap_sys");
+    }
+
+    if (alloc_addr == (uint64_t)-1) {
+      fprintf(stderr, "[ps4-sys] ERROR: syscall 477 (SYS_mmap) FAILED: addr=0x%llx len=%zu\n",
+              (unsigned long long)addr, len);
       set_guest_errno(ctx, ENOMEM);
       ctx->rax = (uint64_t)-1;
     } else {
+      printf("[ps4-sys] syscall 477 SUCCESS: out=0x%llx\n", (unsigned long long)alloc_addr);
+      fflush(stdout);
       ctx->rax = alloc_addr;
     }
     SHIM_RETURN();
@@ -774,7 +841,9 @@ void shim_syscall(GuestContext *ctx) {
     return;
   }
   default:
-    // Honest unsupported syscall: return -1 with ENOSYS
+    fprintf(stderr, "[ps4-sys] WARN: Unsupported syscall num=%d (rsi=0x%llx, rdx=0x%llx, rcx=0x%llx, r8=0x%llx)\n",
+            num, (unsigned long long)ctx->rsi, (unsigned long long)ctx->rdx,
+            (unsigned long long)ctx->rcx, (unsigned long long)ctx->r8);
     set_guest_errno(ctx, ENOSYS);
     ctx->rax = (uint64_t)-1;
     SHIM_RETURN();

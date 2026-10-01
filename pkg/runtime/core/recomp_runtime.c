@@ -501,35 +501,104 @@ void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip) {
   abort();
 }
 
-uint64_t recomp_vm_alloc_named(GuestContext *ctx, size_t size, int prot,
-                               int flags, const char *name) {
+uint64_t recomp_vm_alloc_named_aligned(GuestContext *ctx, size_t size,
+                                       size_t alignment, int prot, int flags,
+                                       const char *name) {
   if (!ctx || size == 0)
     return (uint64_t)-1;
+  if (alignment < 4096)
+    alignment = 4096;
   GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-  size_t aligned_size = (size + 4095ULL) & ~4095ULL;
+  size_t aligned_size = (size + alignment - 1) & ~(alignment - 1);
+
+  printf("[ps4-vm] recomp_vm_alloc_named_aligned (%s): size=%zu (%.2f MB) align=%zu flags=0x%x\n",
+         name ? name : "null", size, (double)size / (1024.0 * 1024.0), alignment, flags);
+  fflush(stdout);
 
   pthread_mutex_lock(&proc->vm_mutex);
 
   GuestVMExtent *curr = proc->vm_extents;
   GuestVMExtent *best = NULL;
+  uint64_t best_aligned_addr = 0;
+
+  // Pass 1: search in preferred region
   while (curr) {
-    if (curr->is_free && curr->size >= aligned_size &&
-        (curr->addr < 0x800000000ULL || (flags & 0x80) ||
-         (name && strstr(name, "pool")))) {
-      if (!best || curr->size < best->size) {
-        best = curr;
-        if (best->size == aligned_size)
-          break;
+    if (curr->is_free) {
+      uint64_t cand_addr = (curr->addr + alignment - 1) & ~(alignment - 1);
+      if (cand_addr >= curr->addr &&
+          (cand_addr + aligned_size) <= (curr->addr + curr->size)) {
+        if (curr->addr < 0x800000000ULL || (flags & 0x80) ||
+            (name && strstr(name, "pool"))) {
+          if (!best || curr->size < best->size) {
+            best = curr;
+            best_aligned_addr = cand_addr;
+            if (curr->size == aligned_size && cand_addr == curr->addr)
+              break;
+          }
+        }
       }
     }
     curr = curr->next;
   }
 
+  // Pass 2: if preferred region is exhausted, allow any free extent in virtual space
   if (!best) {
+    curr = proc->vm_extents;
+    while (curr) {
+      if (curr->is_free) {
+        uint64_t cand_addr = (curr->addr + alignment - 1) & ~(alignment - 1);
+        if (cand_addr >= curr->addr &&
+            (cand_addr + aligned_size) <= (curr->addr + curr->size)) {
+          if (!best || curr->size < best->size) {
+            best = curr;
+            best_aligned_addr = cand_addr;
+            if (curr->size == aligned_size && cand_addr == curr->addr)
+              break;
+          }
+        }
+      }
+      curr = curr->next;
+    }
+  }
+
+  if (!best) {
+    fprintf(stderr, "[vmm] ERROR: recomp_vm_alloc_named_aligned failed to find extent for size=%zu (0x%zx), align=%zu, name=%s\n",
+            size, size, alignment, name ? name : "(null)");
+    curr = proc->vm_extents;
+    while (curr) {
+      if (curr->is_free) {
+        fprintf(stderr, "  [free extent] addr=0x%llx size=%zu (0x%zx)\n",
+                (unsigned long long)curr->addr, curr->size, curr->size);
+      }
+      curr = curr->next;
+    }
     pthread_mutex_unlock(&proc->vm_mutex);
     return (uint64_t)-1;
   }
 
+  // Split leading padding if best_aligned_addr > best->addr
+  if (best_aligned_addr > best->addr) {
+    GuestVMExtent *prefix = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
+    if (!prefix) {
+      pthread_mutex_unlock(&proc->vm_mutex);
+      return (uint64_t)-1;
+    }
+    prefix->addr = best->addr;
+    prefix->size = best_aligned_addr - best->addr;
+    prefix->is_free = true;
+    prefix->prev = best->prev;
+    prefix->next = best;
+    if (best->prev) {
+      best->prev->next = prefix;
+    } else {
+      proc->vm_extents = prefix;
+    }
+    best->prev = prefix;
+    best->addr = best_aligned_addr;
+    best->size -= prefix->size;
+  }
+
+  // Split trailing remainder
   if (best->size > aligned_size) {
     GuestVMExtent *split = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
     if (split) {
@@ -556,8 +625,15 @@ uint64_t recomp_vm_alloc_named(GuestContext *ctx, size_t size, int prot,
     best->name[0] = '\0';
   }
   uint64_t res = best->addr;
+  printf("[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x%llx\n", (unsigned long long)res);
+  fflush(stdout);
   pthread_mutex_unlock(&proc->vm_mutex);
   return res;
+}
+
+uint64_t recomp_vm_alloc_named(GuestContext *ctx, size_t size, int prot,
+                               int flags, const char *name) {
+  return recomp_vm_alloc_named_aligned(ctx, size, 4096, prot, flags, name);
 }
 
 uint64_t recomp_vm_alloc(GuestContext *ctx, size_t size) {
@@ -572,6 +648,10 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
   GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
   uint64_t aligned_addr = desired_addr & ~4095ULL;
   size_t aligned_size = (size + 4095ULL) & ~4095ULL;
+
+  printf("[ps4-vm] recomp_vm_alloc_fixed (%s): desired=0x%llx size=%zu (%.2f MB)\n",
+         name ? name : "null", (unsigned long long)desired_addr, size, (double)size / (1024.0 * 1024.0));
+  fflush(stdout);
   if (aligned_addr + aligned_size > proc->mem_size ||
       aligned_addr + aligned_size < aligned_addr) {
     return (uint64_t)-1;
@@ -581,7 +661,8 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
 
   GuestVMExtent *curr = proc->vm_extents;
   while (curr) {
-    if (curr->is_free && curr->addr <= aligned_addr &&
+    if ((curr->is_free || (curr->name[0] && strstr(curr->name, "reserved"))) &&
+        curr->addr <= aligned_addr &&
         (curr->addr + curr->size) >= (aligned_addr + aligned_size)) {
       break;
     }

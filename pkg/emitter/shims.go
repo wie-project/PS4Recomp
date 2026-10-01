@@ -33,7 +33,11 @@ var shimAliases = map[string]string{
 	// Direct Memory & VMM
 	"sceKernelMapDirectMemory2":       "shim_sceKernelMapDirectMemory",
 	"sceKernelMapNamedDirectMemory":   "shim_sceKernelMapDirectMemory",
-	"sceKernelMapNamedFlexibleMemory": "shim_sceKernelMapFlexibleMemory",
+	"sceKernelMapNamedFlexibleMemory": "shim_sceKernelMapNamedFlexibleMemory",
+	"sceKernelReserveVirtualRange":    "shim_sceKernelReserveVirtualRange",
+	"IWIBBdTHit4":                     "shim_sceKernelMapFlexibleMemory",
+	"mL8NDH86iQI":                     "shim_sceKernelMapNamedFlexibleMemory",
+	"7oxv3PPCumo":                     "shim_sceKernelReserveVirtualRange",
 	"959qrazPIrg":                     "shim_sceKernelGetProcParam",
 	// Libc aliases with leading underscore
 	"_exit":           "shim_exit",
@@ -261,6 +265,8 @@ var knownDirectShims = []string{
 	"sceKernelMapDirectMemory",
 	"sceKernelReleaseDirectMemory",
 	"sceKernelMapFlexibleMemory",
+	"sceKernelMapNamedFlexibleMemory",
+	"sceKernelReserveVirtualRange",
 	"sceKernelConfiguredFlexibleMemorySize",
 	"sceKernelAvailableFlexibleMemorySize",
 	"sceKernelVirtualQuery",

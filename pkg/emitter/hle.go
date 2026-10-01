@@ -25,6 +25,7 @@ var ImplementedSyscalls = map[int]string{
 	25:  "geteuid",
 	47:  "getgid",
 	73:  "munmap",
+	74:  "mprotect",
 	116: "gettimeofday",
 	118: "getrusage",
 	232: "clock_gettime",
