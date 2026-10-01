@@ -77,8 +77,8 @@ Recompile the extracted Orbis binaries and package them into a native standalone
 [ps4-mem] sceKernelMapDirectMemory: in=0x4000000000 len=67108864 (64.00 MB) prot=0x32 flags=0x90 phys=0x0 align=0
 [ps4-vm] recomp_vm_alloc_fixed (direct_mem): desired=0x4000000000 size=67108864 (64.00 MB)
 [ps4-mem] sceKernelMapDirectMemory SUCCESS: out=0x4000000000
-[ps4-mem] sceKernelMemoryPoolExpand: start=0x4000000 end=0x400000000 len=17112694784 (16319.94 MB) align=0
-[ps4-mem] sceKernelAllocateDirectMemory: start=0x4000000 end=0x400000000 len=17112694784 (16319.94 MB) align=65536 type=3
+[ps4-mem] sceKernelMemoryPoolExpand: start=0x4000000 end=0x800000000 len=34292563968 (32703.94 MB) align=0
+[ps4-mem] sceKernelAllocateDirectMemory: start=0x4000000 end=0x800000000 len=34292563968 (32703.94 MB) align=65536 type=3
 [ps4-mem] sceKernelMemoryPoolReserve: in=0x1000000000 len=8589934592 (8192.00 MB) align=0 flags=0x90
 [ps4-vm] recomp_vm_alloc_fixed (pool_reserved): desired=0x1000000000 size=8589934592 (8192.00 MB)
 [ps4-mem] sceKernelMemoryPoolReserve SUCCESS: out=0x1000000000
@@ -91,7 +91,7 @@ Recompile the extracted Orbis binaries and package them into a native standalone
 [ps4-recomp] Executing _start (0xf9a50)...
 GoodPGO
 File root is /app0/!
-[ps4-mem] sceKernelConfiguredFlexibleMemorySize (from proc_param): 536870912 (512.00 MB)
+[ps4-mem] sceKernelConfiguredFlexibleMemorySize: 4294967296 (4096.00 MB)
 Used memory before allocating anything was 0.00MB
 FIOS2: built with SDK version 0x09508001
 [ps4-vm] recomp_vm_alloc_named_aligned (anon): size=81920 (0.08 MB) align=4096 flags=0x0
@@ -102,7 +102,7 @@ FIOS2: built with SDK version 0x09508001
 [ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x12ab8000
 
 Failed to allocate virtual address space. (Original Type: CPU, Type: CPU, Size: 2943483904, Alignment: 65536)
-[ps4-mem] sceKernelConfiguredFlexibleMemorySize (from proc_param): 536870912 (512.00 MB)
+[ps4-mem] sceKernelConfiguredFlexibleMemorySize: 4294967296 (4096.00 MB)
 ^C
 ```
 
