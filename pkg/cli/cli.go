@@ -21,20 +21,19 @@ import (
 	"ps4-recomp/pkg/elfloader"
 	"ps4-recomp/pkg/emitter"
 	"ps4-recomp/pkg/lifter"
-	"ps4-recomp/pkg/ps4pkg"
 )
 
 // Config contains runtime configuration parameters parsed from CLI arguments.
 type Config struct {
-	ElfPath    string
-	OutDir     string
-	Compile    bool
-	Run        bool
-	TimeoutSec int
-	Jobs       int
-	OptLevel   string
-	AllSymbols bool
-	ChunkSize  int
+	ElfPath       string
+	OutDir        string
+	Compile       bool
+	Run           bool
+	TimeoutSec    int
+	Jobs          int
+	OptLevel      string
+	AllSymbols    bool
+	ChunkSize     int
 	Verbose       bool
 	AppDir        string
 	CopyResources bool
@@ -50,8 +49,6 @@ const usageText = `
 Usage:
   ps4-recomp [flags] <input.elf>
   ps4-recomp analyze <eboot.bin | input.elf | module.prx>
-  ps4-recomp pkg info <path.pkg | directory>
-  ps4-recomp pkg extract <path.pkg> [-o out_dir] [--resources]
 
 Options:
   -o, -out <dir>          Output directory for generated C code and binaries (default: "build")
@@ -157,8 +154,15 @@ func ParseArgs(args []string) (*Config, error) {
 	}
 
 	// Positional arguments override if -elf was not explicitly passed
-	if cfg.ElfPath == "" && len(posArgs) > 0 {
-		cfg.ElfPath = posArgs[0]
+	if len(posArgs) > 0 {
+		subcmd := posArgs[0]
+		if subcmd != "analyze" && !strings.HasSuffix(subcmd, ".elf") && !strings.HasSuffix(subcmd, ".bin") && !strings.HasSuffix(subcmd, ".prx") && !strings.HasSuffix(subcmd, ".sprx") {
+			return nil, fmt.Errorf("unknown command or invalid input file '%s'. Run 'ps4-recomp --help' for usage", subcmd)
+		}
+
+		if cfg.ElfPath == "" {
+			cfg.ElfPath = subcmd
+		}
 	}
 
 	if cfg.ElfPath == "" {
@@ -209,9 +213,6 @@ func ParseArgs(args []string) (*Config, error) {
 
 // Execute runs the complete recompilation and optional execution pipeline.
 func Execute(args []string) error {
-	if len(args) > 0 && args[0] == "pkg" {
-		return handlePkgCommand(args[1:])
-	}
 	if len(args) > 0 && args[0] == "analyze" {
 		if len(args) < 2 {
 			return errors.New("usage: ps4-recomp analyze <binary.elf | eboot.bin | module.prx>")
@@ -1031,223 +1032,4 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 	}
 
 	return bundleDir, nil
-}
-
-func handlePkgCommand(args []string) error {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
-		fmt.Println(`Usage: ps4-recomp pkg <subcommand> [args...]
-
-Subcommands:
-  info <file.pkg | directory>     Inspect single PKG or scan directory for multiple PKGs (Base, Patch, DLC)
-  extract <file.pkg> [options]    Extract inner PFS files (executables by default)
-  list <file.pkg>                 List files in the inner PFS without writing them
-
-Extract options:
-  -o, -out <dir>                  Output directory (default: <pkg>_extracted)
-  --passcode <32-char>            PKG passcode (fake packages are decrypted automatically)
-  --executables                   Extract eboot.bin, PRX/SPRX, sce_sys and sce_module (default)
-  --resources                     Also extract remaining PFS files (paks, movies, assets)
-  --all                           Extract every inner PFS file (same as --resources)
-  --meta                          Also dump unencrypted PKG table entries into sce_sys
-  --list                          List inner PFS files without extracting`)
-		return nil
-	}
-
-	subcmd := args[0]
-	switch subcmd {
-	case "info":
-		if len(args) < 2 {
-			return errors.New("usage: ps4-recomp pkg info <file.pkg | directory>")
-		}
-		target := args[1]
-		fi, err := os.Stat(target)
-		if err != nil {
-			return fmt.Errorf("failed to access '%s': %w", target, err)
-		}
-
-		if fi.IsDir() {
-			fmt.Printf("[ps4-recomp] Scanning directory for PS4 packages: %s\n", target)
-			mgr := ps4pkg.NewMultiPKGManager()
-			defer mgr.Close()
-
-			if err := mgr.ScanDirectory(target); err != nil {
-				return err
-			}
-
-			if len(mgr.Packages) == 0 {
-				fmt.Println("No PS4 PKG files found in directory.")
-				return nil
-			}
-
-			fmt.Println("\n===================================================================")
-			fmt.Println("  PS4 Multi-PKG Package Report")
-			fmt.Println("===================================================================")
-			fmt.Printf("Total PKG Files Scanned: %d | Games Detected: %d\n\n", len(mgr.Packages), len(mgr.GameSets))
-
-			idx := 1
-			for _, set := range mgr.GameSets {
-				fmt.Printf("[%d] %s\n", idx, set.SummaryString())
-				idx++
-			}
-			return nil
-		}
-
-		// Single PKG file
-		pkg, err := ps4pkg.Open(target)
-		if err != nil {
-			return fmt.Errorf("failed to open PKG: %w", err)
-		}
-		defer pkg.Close()
-
-		fmt.Println("\n===================================================================")
-		fmt.Println("  PS4 PKG Container Information")
-		fmt.Println("===================================================================")
-		fmt.Printf("File Path:       %s\n", pkg.FilePath)
-		fmt.Printf("File Size:       %s (%d bytes)\n", ps4pkg.FormatSize(pkg.FileSize), pkg.FileSize)
-		fmt.Printf("Content ID:      %s\n", pkg.ContentID)
-		fmt.Printf("Title ID:        %s\n", pkg.TitleID())
-		fmt.Printf("Title:           %s\n", pkg.Title())
-		fmt.Printf("App Version:     %s\n", pkg.AppVersion())
-		fmt.Printf("Category:        %s\n", pkg.Category())
-		fmt.Printf("DRM Type:        0x%x\n", pkg.DrmType)
-		fmt.Printf("Content Type:    0x%x\n", pkg.ContentType)
-		fmt.Printf("PFS Image:       offset 0x%x, size %s\n", pkg.PfsImageOffset, ps4pkg.FormatSize(int64(pkg.PfsImageSize)))
-		fmt.Printf("PFS Flags:       0x%x\n", pkg.PfsFlags)
-		fmt.Printf("Total Entries:   %d (Table offset: 0x%x, size: 0x%x)\n", len(pkg.Entries), pkg.RawHeader.TableOffset, pkg.RawHeader.TableSize)
-		if ekpfs, err := pkg.GetEkpfs(); err == nil {
-			fmt.Printf("EKPFS:           recovered from fake IMAGE_KEY (%d bytes)\n", len(ekpfs))
-		} else {
-			fmt.Printf("EKPFS:           %v\n", err)
-		}
-
-		if pkg.SFO != nil && len(pkg.SFO.Entries) > 0 {
-			fmt.Println("\n--- PARAM.SFO Metadata ---")
-			for _, k := range pkg.SFO.Keys {
-				v := pkg.SFO.Entries[k]
-				if v.Format == ps4pkg.SFOFormatString || v.Format == ps4pkg.SFOFormatStringAlt {
-					fmt.Printf("  %-24s: %s\n", k, v.StringVal)
-				} else if v.Format == ps4pkg.SFOFormatInteger {
-					fmt.Printf("  %-24s: 0x%08x (%d)\n", k, v.IntegerVal, v.IntegerVal)
-				} else {
-					fmt.Printf("  %-24s: [Binary: %d bytes]\n", k, len(v.BinaryVal))
-				}
-			}
-		}
-
-		fmt.Println("\n--- PKG Entry Table ---")
-		fmt.Printf("  %-10s %-30s %-12s %-10s %-10s\n", "Entry ID", "Name", "Offset", "Size", "Encrypted")
-		fmt.Println("  -------------------------------------------------------------------------")
-		for _, e := range pkg.Entries {
-			name := e.Name
-			if name == "" {
-				name = "(unnamed)"
-			}
-			encStr := "No"
-			if e.IsEncrypted {
-				encStr = fmt.Sprintf("Yes (Key %d)", e.KeyIndex)
-			}
-			fmt.Printf("  0x%08x %-30s 0x%-10x %-10s %-10s\n",
-				e.ID, name, e.DataOffset, ps4pkg.FormatSize(int64(e.DataSize)), encStr)
-		}
-		fmt.Println()
-		return nil
-
-	case "list":
-		if len(args) < 2 {
-			return errors.New("usage: ps4-recomp pkg list <file.pkg> [--passcode <code>]")
-		}
-		return runPkgExtract(args[1], args[2:], true)
-
-	case "extract":
-		if len(args) < 2 {
-			return errors.New("usage: ps4-recomp pkg extract <file.pkg> [-o out_dir] [--executables] [--resources] [--passcode <code>]")
-		}
-		return runPkgExtract(args[1], args[2:], false)
-
-	default:
-		return fmt.Errorf("unknown pkg subcommand '%s'. Run 'ps4-recomp pkg help' for usage", subcmd)
-	}
-}
-
-func runPkgExtract(target string, args []string, listOnly bool) error {
-	outDir := ""
-	passcode := ""
-	wantExecutables := false
-	wantResources := false
-	meta := false
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-o", "-out", "--out":
-			if i+1 >= len(args) {
-				return fmt.Errorf("%s requires a directory argument", args[i])
-			}
-			outDir = args[i+1]
-			i++
-		case "--passcode":
-			if i+1 >= len(args) {
-				return errors.New("--passcode requires a 32-character passcode")
-			}
-			passcode = args[i+1]
-			i++
-		case "--executables":
-			wantExecutables = true
-		case "--resources", "--all":
-			wantResources = true
-		case "--meta":
-			meta = true
-		case "--list":
-			listOnly = true
-		default:
-			return fmt.Errorf("unknown extract option %q", args[i])
-		}
-	}
-	// Extract defaults to executables so a 50+ GiB asset dump is opt-in.
-	// List defaults to the full inner PFS unless --executables is passed.
-	executables := false
-	resources := wantResources
-	if wantResources {
-		executables = false
-	} else if wantExecutables || !listOnly {
-		executables = true
-	}
-	if outDir == "" && !listOnly {
-		base := strings.TrimSuffix(filepath.Base(target), filepath.Ext(target))
-		outDir = base + "_extracted"
-	}
-
-	pkg, err := ps4pkg.Open(target)
-	if err != nil {
-		return fmt.Errorf("failed to open PKG: %w", err)
-	}
-	defer pkg.Close()
-
-	if !listOnly {
-		if err := os.MkdirAll(outDir, 0o755); err != nil {
-			return fmt.Errorf("failed to create output directory %s: %w", outDir, err)
-		}
-		fmt.Printf("[ps4-recomp] Extracting %s -> %s\n", filepath.Base(target), outDir)
-	} else {
-		fmt.Printf("[ps4-recomp] Listing files in %s\n", filepath.Base(target))
-	}
-
-	n, err := pkg.Extract(ps4pkg.ExtractOptions{
-		OutputDir:   outDir,
-		Passcode:    passcode,
-		ListOnly:    listOnly,
-		Executables: executables && !resources,
-		Resources:   resources,
-		MetaEntries: meta && !listOnly,
-		OnFile: func(path string, size int64) {
-			fmt.Printf("  %s (%s)\n", path, ps4pkg.FormatSize(size))
-		},
-	})
-	if err != nil {
-		return err
-	}
-	if listOnly {
-		fmt.Printf("[ps4-recomp] %d files in inner PFS\n", n)
-	} else {
-		fmt.Printf("[ps4-recomp] Extracted %d files.\n", n)
-	}
-	return nil
 }

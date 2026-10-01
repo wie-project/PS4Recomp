@@ -12,7 +12,7 @@ A macOS Apple Silicon ahead-of-time (AOT) recompiler that translates PlayStation
 - **Native Metal Graphics**: Direct `MTLPixelFormatBGRA8Unorm` rendering pipeline with hardware VSync via `CAMetalLayer`.
 - **Orbis & POSIX Subsystems**: Shims for memory (UMA), threads, sync, events, networking (`libSceNet`/BSD sockets), and VFS path virtualization (`/app0`).
 - **Media & Hardware**: Low-latency PCM audio (`AudioToolbox`), DualSense/DS4 support (`GameController.framework`), and Cocoa modal dialogs.
-- **Tooling & Bundling**: Integrated PKG extractor, static PRX module linking, and automatic macOS `.app` bundle generation.
+- **Tooling & Bundling**: Static PRX module linking, and automatic macOS `.app` bundle generation.
 
 ---
 
@@ -24,6 +24,12 @@ A macOS Apple Silicon ahead-of-time (AOT) recompiler that translates PlayStation
 - Go 1.22+
 - Xcode Command Line Tools (`clang`)
 - FreeType 2 (`brew install freetype`)
+
+### Prerequisites for Commercial Games
+
+PS4Recomp operates **exclusively on already decrypted and extracted game folders** containing the game's executable (`eboot.bin`) and assets. It does not parse or decrypt proprietary encrypted package containers directly.
+
+To dump and extract your legally purchased game backups on macOS, we officially recommend using the native, open-source community tool **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)** (supports both CLI and GUI interfaces).
 
 ### Building
 
@@ -38,30 +44,22 @@ cd PS4Recomp && go build -o ps4-recomp ./cmd/ps4-recomp
 
 ### 1. Analyze a Binary
 
-Scan CFGs, discover companion PRXs, and report instruction compatibility:
+Scan CFGs, discover companion PRXs, and report instruction compatibility for the decrypted executable:
 
 ```bash
-./ps4-recomp analyze path/to/eboot.bin
+./ps4-recomp analyze path/to/extracted_game/eboot.bin
 ```
 
 ### 2. Recompile to macOS `.app`
 
-Recompile an ELF/PRX and package it into a native standalone bundle:
+Recompile the extracted Orbis binaries and package them into a native standalone bundle:
 
 ```bash
-# Basic compilation to ARM64 binary
-./ps4-recomp game.elf -o output_dir -c
+# Basic compilation to native ARM64 binary
+./ps4-recomp path/to/extracted_game/eboot.bin -o output_dir -c
 
-# Full package with VFS assets and resources included
-./ps4-recomp game.elf --app-dir /path/to/extracted/game --copy-resources -o output_dir -c
-```
-
-### 3. Extract PS4 PKG Packages
-
-```bash
-./ps4-recomp pkg info game.pkg           # View metadata
-./ps4-recomp pkg extract game.pkg -o out # Extract eboot.bin & metadata
-./ps4-recomp pkg extract game.pkg -o out --all # Extract all assets
+# Full package with VFS assets and resources included into macOS app bundle
+./ps4-recomp path/to/extracted_game/eboot.bin --app-dir /path/to/extracted_game --copy-resources -o output_dir -c
 ```
 
 ---
@@ -95,7 +93,6 @@ zsh: abort
     ├── elfloader/       # ELF64 / PRX loader & relocations
     ├── lifter/          # AMD64 to C lifter (ALU, SIMD, AVX, FPU)
     ├── emitter/         # Partitioned C emitter & Clang driver
-    ├── ps4pkg/          # Sony PKG & SFO parser
     └── runtime/         # macOS host runtime & Orbis/POSIX kernel ABI
         ├── core/        # Guest context & register state
         └── modules/     # libSce (VideoOut, AudioOut, Net, Pad, etc.)
@@ -117,6 +114,12 @@ Special thanks to the open-source PlayStation emulation and research communities
 - **[OpenOrbis](https://github.com/OpenOrbis)** — Open-source PS4 toolchain and reverse engineering.
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4)** — HLE module architecture and system behavior documentation.
 - **[ps4libdoc](https://github.com/idc/ps4libdoc)** — Symbol dictionaries and NID-to-name mappings.
+
+---
+
+## Legal Notice
+
+PS4Recomp is an independent educational and research project into ahead-of-time binary translation. It does not distribute, bundle, or contain any copyrighted PlayStation 4 system libraries, firmware files, or proprietary encryption keys. "PlayStation", "PlayStation 4", "PS4", and "Orbis OS" are registered trademarks of Sony Interactive Entertainment Inc. All commercial game titles and assets belong to their respective owners.
 
 ---
 
