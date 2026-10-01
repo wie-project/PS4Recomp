@@ -45,6 +45,13 @@ func TestLookupShimByNID(t *testing.T) {
 		{"sceKernelConfiguredFlexibleMemorySize", "n1-v6FgU7MQ", "shim_sceKernelConfiguredFlexibleMemorySize"},
 		{"sceSystemServiceParamGetInt", "fZo48un7LK4", "shim_sceSystemServiceParamGetInt"},
 		{"sceSystemServiceHideSplashScreen", "Vo5V8KAwCmk", "shim_sceSystemServiceHideSplashScreen"},
+		{"sceAppContentInitialize", "R9lA82OraNs", "shim_sceAppContentInitialize"},
+		{"sceAppContentAppParamGetInt", "99b82IKXpH4", "shim_sceAppContentAppParamGetInt"},
+		{"sceAppContentTemporaryDataMount2", "buYbeLOGWmA", "shim_sceAppContentTemporaryDataMount2"},
+		{"sceAppContentDownloadDataGetAvailableSpaceKb", "Gl6w5i0JokY", "shim_sceAppContentDownloadDataGetAvailableSpaceKb"},
+		{"sceAppContentGetAddcontInfo", "m47juOmH0VE", "shim_sceAppContentGetAddcontInfo"},
+		{"sceAppContentGetAddcontInfoList", "xnd8BJzAxmk", "shim_sceAppContentGetAddcontInfoList"},
+		{"sceAppContentGetEntitlementKey", "XTWR0UXvcgs", "shim_sceAppContentGetEntitlementKey"},
 	}
 	for _, tc := range cases {
 		nid := elfloader.CalculateNID(tc.plain)

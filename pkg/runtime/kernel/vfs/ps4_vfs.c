@@ -71,6 +71,17 @@ static char *discover_app_root(const char *hint) {
     return strdup(".");
 }
 
+#define MAX_VFS_MOUNTS 32
+
+typedef struct {
+    char guest_prefix[64];
+    char host_path[1024];
+    int active;
+} VfsMount;
+
+static VfsMount g_mounts[MAX_VFS_MOUNTS];
+static int g_mount_count = 0;
+
 void ps4_vfs_init(const char *app_root) {
     pthread_mutex_lock(&g_vfs_mutex);
     if (g_app_root) {
@@ -88,7 +99,66 @@ void ps4_vfs_init(const char *app_root) {
             len--;
         }
     }
+
+    memset(g_mounts, 0, sizeof(g_mounts));
+    g_mount_count = 0;
     pthread_mutex_unlock(&g_vfs_mutex);
+}
+
+const char *ps4_vfs_get_app_root(void) {
+    pthread_mutex_lock(&g_vfs_mutex);
+    const char *root = g_app_root ? g_app_root : ".";
+    pthread_mutex_unlock(&g_vfs_mutex);
+    return root;
+}
+
+int ps4_vfs_mount(const char *guest_prefix, const char *host_path) {
+    if (!guest_prefix || !host_path || *guest_prefix == '\0' || *host_path == '\0') {
+        return -EINVAL;
+    }
+
+    pthread_mutex_lock(&g_vfs_mutex);
+    // If prefix already exists, update it
+    for (int i = 0; i < g_mount_count; i++) {
+        if (g_mounts[i].active && strcmp(g_mounts[i].guest_prefix, guest_prefix) == 0) {
+            strncpy(g_mounts[i].host_path, host_path, sizeof(g_mounts[i].host_path) - 1);
+            g_mounts[i].host_path[sizeof(g_mounts[i].host_path) - 1] = '\0';
+            pthread_mutex_unlock(&g_vfs_mutex);
+            return 0;
+        }
+    }
+
+    if (g_mount_count >= MAX_VFS_MOUNTS) {
+        pthread_mutex_unlock(&g_vfs_mutex);
+        return -ENOMEM;
+    }
+
+    VfsMount *m = &g_mounts[g_mount_count++];
+    strncpy(m->guest_prefix, guest_prefix, sizeof(m->guest_prefix) - 1);
+    m->guest_prefix[sizeof(m->guest_prefix) - 1] = '\0';
+    strncpy(m->host_path, host_path, sizeof(m->host_path) - 1);
+    m->host_path[sizeof(m->host_path) - 1] = '\0';
+    m->active = 1;
+
+    pthread_mutex_unlock(&g_vfs_mutex);
+    return 0;
+}
+
+int ps4_vfs_unmount(const char *guest_prefix) {
+    if (!guest_prefix) {
+        return -EINVAL;
+    }
+
+    pthread_mutex_lock(&g_vfs_mutex);
+    for (int i = 0; i < g_mount_count; i++) {
+        if (g_mounts[i].active && strcmp(g_mounts[i].guest_prefix, guest_prefix) == 0) {
+            g_mounts[i].active = 0;
+            pthread_mutex_unlock(&g_vfs_mutex);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&g_vfs_mutex);
+    return -ENOENT;
 }
 
 int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz) {
@@ -99,6 +169,31 @@ int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz
     pthread_mutex_lock(&g_vfs_mutex);
     const char *root = g_app_root ? g_app_root : ".";
 
+    // 1. Check custom registered mount points first
+    for (int i = 0; i < g_mount_count; i++) {
+        if (!g_mounts[i].active) continue;
+        size_t plen = strlen(g_mounts[i].guest_prefix);
+        if (strncmp(guest_path, g_mounts[i].guest_prefix, plen) == 0 &&
+            (guest_path[plen] == '/' || guest_path[plen] == '\0')) {
+            const char *subpath = guest_path + plen;
+            while (*subpath == '/') {
+                subpath++;
+            }
+            int written;
+            if (*subpath) {
+                written = snprintf(host_path, host_path_sz, "%s/%s", g_mounts[i].host_path, subpath);
+            } else {
+                written = snprintf(host_path, host_path_sz, "%s", g_mounts[i].host_path);
+            }
+            pthread_mutex_unlock(&g_vfs_mutex);
+            if (written < 0 || (size_t)written >= host_path_sz) {
+                return -ENAMETOOLONG;
+            }
+            return 0;
+        }
+    }
+
+    // 2. Default /app0 handling
     if (strncmp(guest_path, "/app0", 5) == 0 && (guest_path[5] == '/' || guest_path[5] == '\0')) {
         const char *subpath = guest_path + 5;
         while (*subpath == '/') {
@@ -119,6 +214,7 @@ int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz
         return 0;
     }
 
+    // 3. Default /data handling
     if (strncmp(guest_path, "/data", 5) == 0 && (guest_path[5] == '/' || guest_path[5] == '\0')) {
         const char *subpath = guest_path + 5;
         while (*subpath == '/') {
@@ -149,5 +245,7 @@ void ps4_vfs_destroy(void) {
         free(g_app_root);
         g_app_root = NULL;
     }
+    memset(g_mounts, 0, sizeof(g_mounts));
+    g_mount_count = 0;
     pthread_mutex_unlock(&g_vfs_mutex);
 }
