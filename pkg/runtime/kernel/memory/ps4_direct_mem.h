@@ -10,7 +10,7 @@
 extern "C" {
 #endif
 
-#define PS4_DIRECT_MEM_TOTAL_SIZE (16ULL * 1024ULL * 1024ULL * 1024ULL) // 16 GB unified Direct Memory
+#define PS4_DIRECT_MEM_TOTAL_SIZE (32ULL * 1024ULL * 1024ULL * 1024ULL) // 32 GB unified Direct Memory
 
 typedef struct OrbisKernelVirtualQueryInfo {
     void *start;

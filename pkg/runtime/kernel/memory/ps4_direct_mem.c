@@ -356,7 +356,8 @@ int sceKernelReserveVirtualRange(GuestContext *ctx, void **addrInOut, size_t len
 
 int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut) {
     if (!sizeOut) return -EINVAL;
-    uint64_t default_size = 512ULL * 1024 * 1024; // 512MB default
+    uint64_t min_fmem = 4ULL * 1024 * 1024 * 1024; // 4 GB minimum flexible memory budget for 64-bit recompiled titles
+    uint64_t from_param = 0;
     if (ctx && ctx->mem_base) {
         GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
         if (proc->proc_param_addr != 0 && proc->proc_param_addr + 0x48 <= proc->mem_size) {
@@ -369,18 +370,18 @@ int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut) 
                     uint64_t flex_extra = *(uint64_t *)(proc->mem_base + flex_ptr);
                     if (flex_extra > 0 && flex_extra < 32ULL * 1024 * 1024 * 1024) {
                         // Base flexible memory is 272MB (0x11000000)
-                        *sizeOut = flex_extra + (272ULL * 1024 * 1024);
-                        printf("[ps4-mem] sceKernelConfiguredFlexibleMemorySize (from proc_param): %llu (%.2f MB)\n",
-                               (unsigned long long)*sizeOut, (double)*sizeOut / (1024.0 * 1024.0));
-                        fflush(stdout);
-                        return 0;
+                        from_param = flex_extra + (272ULL * 1024 * 1024);
                     }
                 }
             }
         }
     }
-    *sizeOut = default_size;
-    printf("[ps4-mem] sceKernelConfiguredFlexibleMemorySize (default): %llu (%.2f MB)\n",
+    if (from_param > min_fmem) {
+        *sizeOut = from_param;
+    } else {
+        *sizeOut = min_fmem;
+    }
+    printf("[ps4-mem] sceKernelConfiguredFlexibleMemorySize: %llu (%.2f MB)\n",
            (unsigned long long)*sizeOut, (double)*sizeOut / (1024.0 * 1024.0));
     fflush(stdout);
     return 0;
@@ -389,7 +390,7 @@ int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut) 
 size_t sceKernelAvailableFlexibleMemorySize(GuestContext *ctx) {
     if (!ctx) return 0;
     GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-    uint64_t total_fmem = 512ULL * 1024 * 1024;
+    uint64_t total_fmem = 4ULL * 1024 * 1024 * 1024;
     sceKernelConfiguredFlexibleMemorySize(ctx, &total_fmem);
 
     pthread_mutex_lock(&proc->vm_mutex);
