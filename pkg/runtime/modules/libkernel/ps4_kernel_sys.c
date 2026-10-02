@@ -507,11 +507,29 @@ void shim_sceKernelGetModuleInfoFromAddr(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-static const char g_progname[] = "eboot.bin";
-const char *__progname = g_progname;
+void shim_getargv(GuestContext *ctx) {
+    if (ctx && ctx->args_addr && ctx->mem_base) {
+        ctx->rax = ctx->args_addr + 8ULL;
+    } else {
+        ctx->rax = 0;
+    }
+    SHIM_RETURN();
+}
 
 void shim___progname(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(uintptr_t)g_progname;
+    if (ctx && ctx->args_addr && ctx->mem_base) {
+        uint64_t argv0 = *(uint64_t *)(ctx->mem_base + ctx->args_addr + 8ULL);
+        if (argv0) {
+            ctx->rax = argv0;
+            SHIM_RETURN();
+        }
+    }
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_getpagesize(GuestContext *ctx) {
+    ctx->rax = 4096;
     SHIM_RETURN();
 }
 

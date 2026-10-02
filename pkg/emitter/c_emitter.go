@@ -433,9 +433,16 @@ func (e *CEmitter) emitSingleChunk(path string, chunkIdx int, chunkAddrs []uint6
 			}
 			continue
 		}
+		if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x);\n", addr, addr); err != nil {
+			return err
+		}
 		for _, blockAddr := range fn.BlockOrder {
-			if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x);\n", blockAddr, addr); err != nil {
-				return err
+			if blockAddr != addr {
+				if sym, ok := e.elf.SymbolByAddr[blockAddr]; ok && sym.Name != "" {
+					if _, err := fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x); // Alias %s\n", blockAddr, addr, sym.Name); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -541,15 +548,21 @@ func (e *CEmitter) emitFunction(w *bufio.Writer, fn *disasm.Function) error {
 		}
 	}
 
-	if len(fn.BlockOrder) > 1 {
+	var entryBlocks []uint64
+	for _, blockAddr := range fn.BlockOrder {
+		if blockAddr != addr {
+			if sym, ok := e.elf.SymbolByAddr[blockAddr]; ok && sym.Name != "" {
+				entryBlocks = append(entryBlocks, blockAddr)
+			}
+		}
+	}
+	if len(entryBlocks) > 0 {
 		if _, err := fmt.Fprintf(w, "    if (ctx->rip != 0x%xULL) {\n        switch (ctx->rip) {\n", addr); err != nil {
 			return err
 		}
-		for _, blockAddr := range fn.BlockOrder {
-			if blockAddr != addr {
-				if _, err := fmt.Fprintf(w, "            case 0x%xULL: goto loc_0x%x;\n", blockAddr, blockAddr); err != nil {
-					return err
-				}
+		for _, blockAddr := range entryBlocks {
+			if _, err := fmt.Fprintf(w, "            case 0x%xULL: goto loc_0x%x;\n", blockAddr, blockAddr); err != nil {
+				return err
 			}
 		}
 		if _, err := fmt.Fprintf(w, "            default: goto loc_0x%x;\n        }\n    }\n", addr); err != nil {
@@ -912,7 +925,7 @@ int main(int argc, char **argv) {
     ps4_vfs_init(%s);
     recomp_init_dispatch_table();
 
-    const char *prog_name = (argc > 0 && argv[0]) ? argv[0] : "ps4_app";
+    const char *prog_name = (argc > 0 && argv[0]) ? argv[0] : "/app0/eboot.bin";
     GuestContext *ctx = recomp_init_runtime_file("guest_image.bin", 0, prog_name);
     if (!ctx) {
         fprintf(stderr, "[ps4-recomp] Failed to allocate guest memory or load guest_image.bin\n");
@@ -936,6 +949,8 @@ int main(int argc, char **argv) {
         }
     }
 
+    recomp_setup_entry_args(ctx, argc, argv, 0x%xULL);
+
     printf("[ps4-recomp] Executing %s (0x%x)...\n");
     recomp_dispatch(ctx, 0x%xULL);
 
@@ -943,7 +958,7 @@ int main(int argc, char **argv) {
     recomp_free_runtime(ctx);
     return 0;
 }
-`, vfsInitArg, e.elf.ProcParamAddr, entryName, e.formatInitArray(), entryName, entryAddr, entryAddr)
+`, vfsInitArg, e.elf.ProcParamAddr, entryName, e.formatInitArray(), entryAddr, entryName, entryAddr, entryAddr)
 
 	return writeFileIfChanged(path, []byte(content))
 }

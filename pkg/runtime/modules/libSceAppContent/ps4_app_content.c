@@ -103,13 +103,13 @@ static void ensure_temp_dir(char *out_path, size_t out_sz) {
 
 int32_t sceAppContentInitialize(const OrbisAppContentInitParam *initParam, OrbisAppContentBootParam *bootParam) {
     (void)initParam;
-    if (s_initialized) {
-        return (int32_t)ORBIS_APP_CONTENT_ERROR_BUSY;
-    }
-
     if (bootParam) {
         memset(bootParam, 0, sizeof(OrbisAppContentBootParam));
         bootParam->attr = 0;
+    }
+
+    if (s_initialized) {
+        return (int32_t)ORBIS_APP_CONTENT_ERROR_BUSY;
     }
 
     // Try loading param.sfo

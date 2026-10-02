@@ -83,7 +83,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].f32[0] += src.f32[0];"},
+			contains: []string{"res_lo.f32[0] = s1_lo.f32[0] + s2_lo.f32[0];", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VMULPS",
@@ -95,7 +95,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].f32[0] *= src.f32[0];"},
+			contains: []string{"res_lo.f32[0] = s1_lo.f32[0] * s2_lo.f32[0];", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VMAXPS",
@@ -107,7 +107,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[3].f32[0] = src.f32[0];"},
+			contains: []string{"(s1_lo.f32[0] > s2_lo.f32[0]) ? s1_lo.f32[0] : s2_lo.f32[0];", "memset(&ctx->ymmh[3], 0, 16);"},
 		},
 		{
 			name: "VBROADCASTSS",
@@ -155,7 +155,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  5,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].u8[i] = (uint8_t)(((uint32_t)ctx->xmm[0].u8[i] + (uint32_t)src.u8[i] + 1) >> 1);"},
+			contains: []string{"(uint32_t)s1_lo.u8[0] + (uint32_t)s2_lo.u8[0]", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VPSRAD",
@@ -167,7 +167,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  5,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "for (int i = 0; i < 4; i++) ctx->xmm[0].s32[i] >>= shift;"},
+			contains: []string{"res_lo.s32[i] = s1_lo.s32[i] >> shift;", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VROUNDSS",
@@ -203,7 +203,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  5,
 				},
 			},
-			contains: []string{"ctx->xmm[0].f32[0] = s1.f32[0] + s1.f32[1];", "ctx->xmm[0].f32[2] = s2.f32[0] + s2.f32[1];"},
+			contains: []string{"res_lo.f32[0] = s1_lo.f32[0] + s1_lo.f32[1];", "res_lo.f32[2] = s2_lo.f32[0] + s2_lo.f32[1];", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VPUNPCKLDQ",
@@ -215,7 +215,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0].u32[0] = d[0];", "ctx->xmm[0].u32[1] = s[0];"},
+			contains: []string{"res_lo.u32[0] = s1_lo.u32[0];", "res_lo.u32[1] = s2_lo.u32[0];", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VPUNPCKHDQ",
@@ -227,7 +227,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0].u32[0] = d[0];", "ctx->xmm[0].u32[1] = s[0];"},
+			contains: []string{"res_lo.u32[0] = s1_lo.u32[2];", "res_lo.u32[1] = s2_lo.u32[2];", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "LEAVE",
@@ -335,7 +335,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].f32[0] = 1.0f / sqrtf(ctx->xmm[2].f32[0]);"},
+			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].f32[0] = 1.0f / sqrtf(s2);", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VRSQRTPS",
@@ -467,7 +467,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0].f64[0] = s1.f64[0] + s1.f64[1];", "ctx->xmm[0].f64[1] = s2.f64[0] + s2.f64[1];"},
+			contains: []string{"res_lo.f64[0] = s1_lo.f64[0] + s1_lo.f64[1];", "res_lo.f64[1] = s2_lo.f64[0] + s2_lo.f64[1];", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "PCMPGTQ",
@@ -491,7 +491,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].u64[0] = ((int64_t)ctx->xmm[0].u64[0] > (int64_t)(ctx->xmm[2].u64[0])) ? 0xFFFFFFFFFFFFFFFFULL : 0;"},
+			contains: []string{"(s1_lo.s64[0] > s2_lo.s64[0]) ? 0xFFFFFFFFFFFFFFFFULL : 0;", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "CVTPS2PD",
@@ -527,7 +527,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "if (s < ctx->xmm[0].f32[0]) ctx->xmm[0].f32[0] = s;"},
+			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "if (s2 < s1) ctx->xmm[0].f32[0] = s2;", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VMAXSS",
@@ -539,7 +539,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "if (s > ctx->xmm[0].f32[0]) ctx->xmm[0].f32[0] = s;"},
+			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "if (s2 > s1) ctx->xmm[0].f32[0] = s2;", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VORPS",
@@ -551,7 +551,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", " | "},
+			contains: []string{"s1_lo.u64[0] | s2_lo.u64[0]", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VMOVUPD",
@@ -599,7 +599,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  4,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].f64[0] += src.f64[0];"},
+			contains: []string{"s1_lo.f64[0] + s2_lo.f64[0]", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VPSHUFB",
@@ -715,7 +715,7 @@ func TestLiftNewInstructions(t *testing.T) {
 					Len:  5,
 				},
 			},
-			contains: []string{"ctx->xmm[0] = ctx->xmm[1];", "ctx->xmm[0].s32[0] *= src.s32[0];"},
+			contains: []string{"(int32_t)s1_lo.u32[0] * (int32_t)s2_lo.u32[0]", "memset(&ctx->ymmh[0], 0, 16);"},
 		},
 		{
 			name: "VSQRTPS",

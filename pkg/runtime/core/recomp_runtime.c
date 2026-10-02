@@ -272,8 +272,12 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
 
   // Set up process arguments at tcb_addr + 0x10000 for _start_ps4_c
   uint64_t args_addr = tcb_addr + 0x10000ULL;
+  ctx->args_addr = args_addr;
   uint64_t prog_name_addr = args_addr + 0x100ULL;
-  const char *pname = (prog_name && prog_name[0]) ? prog_name : "ps4_app";
+  const char *pname = "/app0/eboot.bin";
+  if (prog_name && strncmp(prog_name, "/app0/", 6) == 0) {
+    pname = prog_name;
+  }
   strncpy((char *)(ctx->mem_base + prog_name_addr), pname, 255);
 
   // argc = 1
@@ -480,6 +484,69 @@ void recomp_init_process_param(GuestContext *ctx, uint64_t proc_param_addr) {
       }
     }
   }
+}
+
+void recomp_setup_entry_args(GuestContext *ctx, int argc, char **argv, uint64_t entry_addr) {
+  if (!ctx || !ctx->mem_base) return;
+
+  uint64_t args_addr = ctx->args_addr;
+  if (!args_addr) {
+    args_addr = ctx->fs_base + 0x10000ULL;
+    ctx->args_addr = args_addr;
+    if (ctx->process_ctx) {
+      ctx->process_ctx->args_addr = args_addr;
+    }
+  }
+
+  int guest_argc = 0;
+  uint64_t str_buf = args_addr + 0x120ULL;
+
+  const char *p0 = "/app0/eboot.bin";
+  if (argc > 0 && argv && argv[0] && strncmp(argv[0], "/app0/", 6) == 0) {
+    p0 = argv[0];
+  }
+
+  uint64_t p0_addr = str_buf;
+  strncpy((char *)(ctx->mem_base + p0_addr), p0, 255);
+  *(char *)(ctx->mem_base + p0_addr + 255) = '\0';
+  str_buf += (strlen(p0) + 1 + 7) & ~7ULL;
+
+  MEM_U64(args_addr + 8ULL) = p0_addr;
+  guest_argc = 1;
+
+  for (int i = 1; i < argc && guest_argc < 32; i++) {
+    if (argv && argv[i]) {
+      uint64_t arg_addr = str_buf;
+      strncpy((char *)(ctx->mem_base + arg_addr), argv[i], 255);
+      *(char *)(ctx->mem_base + arg_addr + 255) = '\0';
+      str_buf += (strlen(argv[i]) + 1 + 7) & ~7ULL;
+      MEM_U64(args_addr + 8ULL + (uint64_t)guest_argc * 8ULL) = arg_addr;
+      guest_argc++;
+    }
+  }
+
+  MEM_U64(args_addr + 8ULL + (uint64_t)guest_argc * 8ULL) = 0;
+  *(int32_t *)(ctx->mem_base + args_addr) = guest_argc;
+  *(uint32_t *)(ctx->mem_base + args_addr + 4ULL) = 0;
+  MEM_U64(args_addr + 0x110ULL) = entry_addr;
+
+  // Set up RDI and RSI according to PS4 System V ABI:
+  ctx->rdi = args_addr;
+  ctx->rsi = 0;
+
+  // Prepare stack according to PS4 Orbis OS entry conventions:
+  // [rsp] = argc
+  // [rsp + 8] = argv[0]
+  uint64_t sp = ctx->rsp;
+  sp &= ~15ULL;
+  sp -= 8;
+  sp -= 8;
+  MEM_U64(sp) = p0_addr;
+  sp -= 8;
+  MEM_U64(sp) = (uint64_t)guest_argc;
+
+  ctx->rsp = sp;
+  ctx->rbp = 0;
 }
 
 void shim_sceKernelGetProcParam(GuestContext *ctx) {

@@ -187,6 +187,8 @@ func TestBatchKernelAndPthreadShims(t *testing.T) {
 		{"signal", "VADc3MNQ3cM", "shim_signal"},
 		{"_is_signal_return", "crb5j7mkk1c", "shim__is_signal_return"},
 		{"__progname", "djxxOmW6-aw", "shim___progname"},
+		{"getargv", "FJmglmTMdr4", "shim_getargv"},
+		{"getpagesize", "k+AXqu2-eBc", "shim_getpagesize"},
 		{"sceDiscMapIsRequestOnHDD", "lbQKqsERhtE", "shim_sceDiscMapIsRequestOnHDD"},
 		{"sceRtcGetTime_t", "BtqmpTRXHgk", "shim_sceRtcGetTime_t"},
 		{"sceRtcParseDateTime", "NxEI1KByvCI", "shim_sceRtcParseDateTime"},

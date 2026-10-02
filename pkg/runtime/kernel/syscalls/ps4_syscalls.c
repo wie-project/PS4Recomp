@@ -159,8 +159,10 @@ void shim_mmap(GuestContext *ctx) {
   size_t len = (size_t)ctx->rsi;
   int prot = (int)ctx->rdx;
   int flags = (int)ctx->rcx;
-  printf("[ps4-sys] mmap: addr=0x%llx len=%zu (%.2f MB) prot=0x%x flags=0x%x\n",
-         (unsigned long long)addr, len, (double)len / (1024.0 * 1024.0), prot, flags);
+  int fd = (int)ctx->r8;
+  off_t offset = (off_t)ctx->r9;
+  printf("[ps4-sys] mmap: addr=0x%llx len=%zu (%.2f MB) prot=0x%x flags=0x%x fd=%d offset=%lld\n",
+         (unsigned long long)addr, len, (double)len / (1024.0 * 1024.0), prot, flags, fd, (long long)offset);
   fflush(stdout);
 
   if (len == 0) {
@@ -185,6 +187,21 @@ void shim_mmap(GuestContext *ctx) {
     set_guest_errno(ctx, ENOMEM);
     ctx->rax = (uint64_t)-1;
   } else {
+    // If not anonymous and valid fd, read file data into the mapped memory
+    if (!(flags & 0x1000) && fd >= 0) {
+      ssize_t nread = pread(fd, ctx->mem_base + alloc_addr, len, offset);
+      if (nread < 0) {
+        fprintf(stderr, "[ps4-sys] mmap file read FAILED: fd=%d offset=%lld len=%zu errno=%d (%s)\n",
+                fd, (long long)offset, len, errno, strerror(errno));
+        set_guest_errno(ctx, errno);
+        recomp_vm_free(ctx, alloc_addr, aligned_len);
+        ctx->rax = (uint64_t)-1;
+        SHIM_RETURN();
+      }
+      printf("[ps4-sys] mmap file read SUCCESS: read=%zd bytes into 0x%llx\n",
+             nread, (unsigned long long)alloc_addr);
+      fflush(stdout);
+    }
     printf("[ps4-sys] mmap SUCCESS: out=0x%llx\n", (unsigned long long)alloc_addr);
     fflush(stdout);
     ctx->rax = alloc_addr;
@@ -333,13 +350,17 @@ void shim_open(GuestContext *ctx) {
   mode_t mode = (mode_t)ctx->rdx;
   const char *path = (const char *)(ctx->mem_base + path_addr);
   char resolved_path[1024];
+  const char *actual_path = path;
   if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
-    path = resolved_path;
+    actual_path = resolved_path;
   }
-  int ret = open(path, flags, mode);
+  int ret = open(actual_path, flags, mode);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
+  printf("[ps4-sys] open: '%s' (resolved='%s', flags=0x%x) -> fd=%d\n",
+         path ? path : "(null)", actual_path ? actual_path : "(null)", flags, ret);
+  fflush(stdout);
   ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
 }
@@ -368,38 +389,38 @@ void shim_lseek(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-// Exact 128-byte layout for OpenOrbis / PS4 FreeBSD struct stat
+// Exact 120-byte layout for PS4 Orbis OS / FreeBSD 9 64-bit struct stat
 struct ps4_stat {
-  uint32_t st_dev;
-  uint32_t st_ino;
-  uint32_t st_mode;
-  uint32_t st_nlink;
-  uint32_t st_uid;
-  uint32_t st_gid;
-  uint32_t st_rdev;
-  uint32_t __pad0;
-  int64_t  st_atime_sec;
-  int64_t  st_atime_nsec;
-  int64_t  st_mtime_sec;
-  int64_t  st_mtime_nsec;
-  int64_t  st_ctime_sec;
-  int64_t  st_ctime_nsec;
-  int64_t  st_size;
-  int64_t  st_blocks;
-  uint32_t st_blksize;
-  uint32_t st_flags;
-  uint32_t st_gen;
-  uint32_t __pad1;
-  int64_t  st_birthtim_sec;
-  int64_t  st_birthtim_nsec;
+  uint32_t st_dev;          // 0x00
+  uint32_t st_ino;          // 0x04
+  uint16_t st_mode;         // 0x08
+  uint16_t st_nlink;        // 0x0A
+  uint32_t st_uid;          // 0x0C
+  uint32_t st_gid;          // 0x10
+  uint32_t st_rdev;         // 0x14
+  int64_t  st_atime_sec;    // 0x18
+  int64_t  st_atime_nsec;   // 0x20
+  int64_t  st_mtime_sec;    // 0x28
+  int64_t  st_mtime_nsec;   // 0x30
+  int64_t  st_ctime_sec;    // 0x38
+  int64_t  st_ctime_nsec;   // 0x40
+  int64_t  st_size;         // 0x48
+  int64_t  st_blocks;       // 0x50
+  uint32_t st_blksize;      // 0x58
+  uint32_t st_flags;        // 0x5C
+  uint32_t st_gen;          // 0x60
+  int32_t  st_lspare;       // 0x64
+  int64_t  st_birthtim_sec; // 0x68
+  int64_t  st_birthtim_nsec;// 0x70
 };
+_Static_assert(sizeof(struct ps4_stat) == 120, "ps4_stat must be exactly 120 bytes");
 
 static void fill_ps4_stat(struct ps4_stat *gst, const struct stat *st) {
   memset(gst, 0, sizeof(struct ps4_stat));
   gst->st_dev = (uint32_t)st->st_dev;
   gst->st_ino = (uint32_t)st->st_ino;
-  gst->st_mode = (uint32_t)st->st_mode;
-  gst->st_nlink = (uint32_t)st->st_nlink;
+  gst->st_mode = (uint16_t)st->st_mode;
+  gst->st_nlink = (uint16_t)st->st_nlink;
   gst->st_uid = (uint32_t)st->st_uid;
   gst->st_gid = (uint32_t)st->st_gid;
   gst->st_rdev = (uint32_t)st->st_rdev;
@@ -425,6 +446,7 @@ static void fill_ps4_stat(struct ps4_stat *gst, const struct stat *st) {
   gst->st_blksize = (uint32_t)st->st_blksize;
   gst->st_flags = (uint32_t)st->st_flags;
   gst->st_gen = (uint32_t)st->st_gen;
+  gst->st_lspare = 0;
 }
 
 // stat
@@ -819,11 +841,15 @@ void shim_syscall(GuestContext *ctx) {
     mode_t mode = (mode_t)ctx->rcx;
     const char *path = (const char *)(ctx->mem_base + path_addr);
     char resolved_path[1024];
+    const char *actual_path = path;
     if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
-      path = resolved_path;
+      actual_path = resolved_path;
     }
-    int ret = open(path, flags, mode);
+    int ret = open(actual_path, flags, mode);
     if (ret < 0) set_guest_errno(ctx, errno);
+    printf("[ps4-sys] syscall 5 (SYS_open): '%s' (resolved='%s', flags=0x%x) -> fd=%d\n",
+           path ? path : "(null)", actual_path ? actual_path : "(null)", flags, ret);
+    fflush(stdout);
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();
   }
@@ -874,10 +900,13 @@ void shim_syscall(GuestContext *ctx) {
     int prot = (int)ctx->rcx;
     int flags = (int)ctx->r8;
     int fd = (int)ctx->r9;
-    (void)fd;
+    off_t offset = 0;
+    if (ctx->rsp && ctx->mem_base && ctx->rsp + 16 <= ctx->mem_size) {
+      offset = (off_t)*(uint64_t *)(ctx->mem_base + ctx->rsp + 8);
+    }
 
-    printf("[ps4-sys] syscall 477 (SYS_mmap): addr=0x%llx len=%zu (%.2f MB) prot=0x%x flags=0x%x\n",
-           (unsigned long long)addr, len, (double)len / (1024.0 * 1024.0), prot, flags);
+    printf("[ps4-sys] syscall 477 (SYS_mmap): addr=0x%llx len=%zu (%.2f MB) prot=0x%x flags=0x%x fd=%d offset=%lld\n",
+           (unsigned long long)addr, len, (double)len / (1024.0 * 1024.0), prot, flags, fd, (long long)offset);
     fflush(stdout);
 
     if (len == 0) {
@@ -903,6 +932,20 @@ void shim_syscall(GuestContext *ctx) {
       set_guest_errno(ctx, ENOMEM);
       ctx->rax = (uint64_t)-1;
     } else {
+      if (!(flags & 0x1000) && fd >= 0) {
+        ssize_t nread = pread(fd, ctx->mem_base + alloc_addr, len, offset);
+        if (nread < 0) {
+          fprintf(stderr, "[ps4-sys] syscall 477 file read FAILED: fd=%d offset=%lld len=%zu errno=%d (%s)\n",
+                  fd, (long long)offset, len, errno, strerror(errno));
+          set_guest_errno(ctx, errno);
+          recomp_vm_free(ctx, alloc_addr, aligned_len);
+          ctx->rax = (uint64_t)-1;
+          SHIM_RETURN();
+        }
+        printf("[ps4-sys] syscall 477 file read SUCCESS: read=%zd bytes into 0x%llx\n",
+               nread, (unsigned long long)alloc_addr);
+        fflush(stdout);
+      }
       printf("[ps4-sys] syscall 477 SUCCESS: out=0x%llx\n", (unsigned long long)alloc_addr);
       fflush(stdout);
       ctx->rax = alloc_addr;

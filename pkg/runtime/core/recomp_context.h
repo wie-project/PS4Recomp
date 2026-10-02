@@ -108,6 +108,9 @@ typedef struct GuestContext {
   // Process parameters address (SceKernelProcessParam)
   uint64_t proc_param_addr;
 
+  // Process arguments address (OrbisEntryParams)
+  uint64_t args_addr;
+
   // Active exception unwinding frame stack
   UnwindFrame *unwind_frame;
 } GuestContext;
