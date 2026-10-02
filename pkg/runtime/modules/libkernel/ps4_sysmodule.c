@@ -106,12 +106,16 @@ static int export_matches(const char *encoded, const char *symbol) {
     if (strcmp(encoded, symbol) == 0) {
         return 1;
     }
-    char nid[12];
-    sce_nid(symbol, nid);
     size_t n = 0;
     while (encoded[n] && encoded[n] != '#') {
         n++;
     }
+    // Match direct NID (e.g. "KNNNbyRieqQ" or "z8GPiQwaAEY")
+    if (n == strlen(symbol) && strncmp(encoded, symbol, n) == 0) {
+        return 1;
+    }
+    char nid[12];
+    sce_nid(symbol, nid);
     return n == 11 && strncmp(encoded, nid, 11) == 0;
 }
 
@@ -120,6 +124,30 @@ static int module_names_match(const char *path_or_name, const char *registered) 
     strip_module_ext(path_basename(path_or_name), a, sizeof(a));
     strip_module_ext(path_basename(registered), b, sizeof(b));
     return strcasecmp(a, b) == 0;
+}
+
+uint64_t recomp_resolve_symbol(const char *module_name, const char *symbol) {
+    if (!symbol) {
+        return 0;
+    }
+    pthread_mutex_lock(&g_sysmodule_mutex);
+    for (int i = 0; i < g_prx_count; i++) {
+        if (!g_prx[i].in_use || !g_prx[i].exports) {
+            continue;
+        }
+        if (module_name && !module_names_match(module_name, g_prx[i].filename)) {
+            continue;
+        }
+        for (const RecompModuleExport *exp = g_prx[i].exports; exp->name; exp++) {
+            if (export_matches(exp->name, symbol)) {
+                uint64_t addr = exp->addr;
+                pthread_mutex_unlock(&g_sysmodule_mutex);
+                return addr;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_sysmodule_mutex);
+    return 0;
 }
 
 void recomp_module_register(const char *filename, const RecompModuleExport *exports) {

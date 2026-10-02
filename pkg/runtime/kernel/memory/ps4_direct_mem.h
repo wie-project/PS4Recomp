@@ -26,6 +26,12 @@ typedef struct OrbisKernelVirtualQueryInfo {
     char name[32];
 } OrbisKernelVirtualQueryInfo;
 
+typedef struct OrbisDirectMemoryQueryInfo {
+    uint64_t start;
+    uint64_t end;
+    int32_t memoryType;
+} OrbisDirectMemoryQueryInfo;
+
 int ps4_direct_mem_init(void);
 void ps4_direct_mem_destroy(void);
 
@@ -36,11 +42,15 @@ size_t sceKernelGetDirectMemorySize(void);
 size_t sceKernelAvailableDirectMemorySize(void);
 int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, off_t physAddr, size_t alignment);
 int sceKernelReleaseDirectMemory(off_t physAddr, size_t length);
+int sceKernelCheckedReleaseDirectMemory(off_t physAddr, size_t length);
+int sceKernelDirectMemoryQuery(off_t offset, int flags, OrbisDirectMemoryQueryInfo *info, size_t infoSize);
 
 // Flexible Memory & VMM
 int sceKernelMapFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags);
 int sceKernelMapNamedFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, const char *name);
 int sceKernelReserveVirtualRange(GuestContext *ctx, void **addrInOut, size_t length, int flags, size_t alignment);
+int sceKernelSetVirtualRangeName(GuestContext *ctx, const void *addr, size_t len, const char *name);
+int sceKernelMprotect(GuestContext *ctx, const void *addr, size_t size, int prot);
 int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut);
 size_t sceKernelAvailableFlexibleMemorySize(GuestContext *ctx);
 int sceKernelVirtualQuery(GuestContext *ctx, const void *addr, int flags, OrbisKernelVirtualQueryInfo *info, size_t infoSize);
@@ -56,12 +66,16 @@ int sceKernelMemoryPoolDecommit(GuestContext *ctx, void *addr, size_t len, int f
 void shim_sceKernelAllocateDirectMemory(GuestContext *ctx);
 void shim_sceKernelAllocateMainDirectMemory(GuestContext *ctx);
 void shim_sceKernelReleaseDirectMemory(GuestContext *ctx);
+void shim_sceKernelCheckedReleaseDirectMemory(GuestContext *ctx);
+void shim_sceKernelDirectMemoryQuery(GuestContext *ctx);
 void shim_sceKernelMapDirectMemory(GuestContext *ctx);
 void shim_sceKernelGetDirectMemorySize(GuestContext *ctx);
 void shim_sceKernelAvailableDirectMemorySize(GuestContext *ctx);
 void shim_sceKernelMapFlexibleMemory(GuestContext *ctx);
 void shim_sceKernelMapNamedFlexibleMemory(GuestContext *ctx);
 void shim_sceKernelReserveVirtualRange(GuestContext *ctx);
+void shim_sceKernelSetVirtualRangeName(GuestContext *ctx);
+void shim_sceKernelMprotect(GuestContext *ctx);
 void shim_sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx);
 void shim_sceKernelAvailableFlexibleMemorySize(GuestContext *ctx);
 void shim_sceKernelVirtualQuery(GuestContext *ctx);

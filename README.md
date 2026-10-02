@@ -71,13 +71,49 @@ Recompile the extracted Orbis binaries and package them into a native standalone
 ```text
 [ps4-recomp] Initializing runtime...
 [ps4-recomp] Loading guest memory image (137105408 bytes), allocated dynamic address space (524288.0 MB)
+[ps4-mem] SceLibcParam at 0x2000000: size=0xa8 ver=14.1 malloc_replace=0x20000f8 new_replace=0x2000170
+[ps4-mem] SceLibcMallocReplace at 0x20000f8: size=0x78 init=0x14db270 malloc=0x14dba10
 [ps4-recomp] Initializing custom memory allocator via SceLibcParam at 0x14db270...
 [ps4-mem] sceKernelAllocateDirectMemory: start=0x0 end=0x800000000 len=268435456 (256.00 MB) align=2097152 type=0
 [ps4-mem] sceKernelMapDirectMemory: in=0x0 len=268435456 (256.00 MB) prot=0x33 flags=0x0 phys=0x0 align=2097152
 [ps4-vm] recomp_vm_alloc_named_aligned (direct_mem): size=268435456 (256.00 MB) align=2097152 flags=0x0
 [ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x8400000
 [ps4-mem] sceKernelMapDirectMemory SUCCESS: out=0x8400000
-[ps4-recomp] WARN: Called unimplemented function 'sceKernelSetVirtualRangeName' (NID: DGMG3JshrZU, Lib: libkernel) at RIP=0x1a26d60 (caller RIP=0x14d970c, RSP=0x7ffffef58)
+[ps4-mem] sceKernelSetVirtualRangeName: addr=0x8400000 len=268435456 name='dlmalloc_extra'
+[ps4-recomp] Initializing libc malloc subsystem via _malloc_init at 0x2ca7a00...
+[ps4-kernel] _sceKernelRtldSetApplicationHeapAPI: table at 0x2da4178
+[ps4-kernel] heap_malloc=0x14dba10, heap_free=0x14db9b0
+[ps4-vm] recomp_vm_alloc_named_aligned (heap_trace_info): size=4096 (0.00 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x82f0000
+[ps4-mem] sceKernelAllocateDirectMemory: start=0x0 end=0x800000000 len=268435456 (256.00 MB) align=2097152 type=0
+[ps4-mem] sceKernelMapDirectMemory: in=0x0 len=268435456 (256.00 MB) prot=0x33 flags=0x0 phys=0x10000000 align=2097152
+[ps4-vm] recomp_vm_alloc_named_aligned (direct_mem): size=268435456 (256.00 MB) align=2097152 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x18400000
+[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=0x18400000
+[ps4-mem] sceKernelSetVirtualRangeName: addr=0x18400000 len=268435456 name='dlmalloc_extra'
+[ps4-recomp] Executing _start (0x13550)...
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=1048576 (1.00 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=1048576 (1.00 MB) align=262144 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x8300000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x8300000
+FIOS2: built with SDK version 0x12508001
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=81920 (0.08 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x28400000
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=147456 (0.14 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x28414000
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=147456 (0.14 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x28438000
+Argument Count = 2Arg 0 = H?
+                            H;M?uH??([]??P
+                                          ??
+                                            ??????UH??AWAVAUATSH??
+Arg 1 =
+********** LAUNCHER CONTROL ************************************
+	File System Root = NONE SPECIFIED
+	Launcher Path = NONE SPECIFIED
+	Launcher Arguments NONE SPECIFIED
+**********/LAUNCHER CONTROL ************************************
+[ps4-recomp] WARN: Called unimplemented function NID 'fJgP+wqifno' (Lib: Il2cppUserAssemblies) at RIP=0x23f0108 (caller RIP=0x242411f, RSP=0x7ffffe468)
 zsh: abort
 ```
 

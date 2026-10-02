@@ -75,6 +75,58 @@ void shim_pthread_mutex_trylock(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+static int host_mutex_timedlock(pthread_mutex_t *m, uint64_t usec) {
+  if (pthread_mutex_trylock(m) == 0) {
+    return 0;
+  }
+  if (usec == 0) {
+    return EBUSY;
+  }
+  struct timespec start, now;
+  clock_gettime(CLOCK_MONOTONIC, &start);
+  while (1) {
+    sched_yield();
+    if (pthread_mutex_trylock(m) == 0) {
+      return 0;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t elapsed = (uint64_t)(now.tv_sec - start.tv_sec) * 1000000ULL +
+                       (uint64_t)(now.tv_nsec - start.tv_nsec) / 1000ULL;
+    if (elapsed >= usec) {
+      return ETIMEDOUT;
+    }
+    if (usec - elapsed > 1000) {
+      usleep(50);
+    }
+  }
+}
+
+void shim_pthread_mutex_timedlock(GuestContext *ctx) {
+  uint64_t mtx_addr = ctx->rdi;
+  uint64_t abstime_addr = ctx->rsi;
+  pthread_mutex_t *m = get_host_mutex(mtx_addr);
+  if (!abstime_addr) {
+    ctx->rax = (uint64_t)pthread_mutex_lock(m);
+    SHIM_RETURN();
+  }
+  struct timespec now;
+  clock_gettime(CLOCK_REALTIME, &now);
+  struct timespec *ts = (struct timespec *)(ctx->mem_base + abstime_addr);
+  int64_t diff_sec = (int64_t)ts->tv_sec - (int64_t)now.tv_sec;
+  int64_t diff_nsec = (int64_t)ts->tv_nsec - (int64_t)now.tv_nsec;
+  int64_t total_usec = diff_sec * 1000000LL + diff_nsec / 1000LL;
+  if (total_usec <= 0) {
+    if (pthread_mutex_trylock(m) == 0) {
+      ctx->rax = 0;
+    } else {
+      ctx->rax = (uint64_t)ETIMEDOUT;
+    }
+    SHIM_RETURN();
+  }
+  ctx->rax = (uint64_t)host_mutex_timedlock(m, (uint64_t)total_usec);
+  SHIM_RETURN();
+}
+
 void shim_pthread_mutex_unlock(GuestContext *ctx) {
   uint64_t mtx_addr = ctx->rdi;
   pthread_mutex_t *m = get_host_mutex(mtx_addr);
@@ -309,18 +361,22 @@ static pthread_cond_t g_once_cond = PTHREAD_COND_INITIALIZER;
 void shim_pthread_once(GuestContext *ctx) {
   uint64_t once_control_addr = ctx->rdi;
   uint64_t init_routine_addr = ctx->rsi;
+  if (!once_control_addr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
   int *ctrl = (int *)(ctx->mem_base + once_control_addr);
 
   pthread_mutex_lock(&g_once_mutex);
-  while (*ctrl == 1) {
+  while (*ctrl == 2) { // 2 = InProgress
     pthread_cond_wait(&g_once_cond, &g_once_mutex);
   }
-  if (*ctrl == 2) {
+  if (*ctrl == 1) { // 1 = Done
     pthread_mutex_unlock(&g_once_mutex);
     ctx->rax = 0;
     SHIM_RETURN();
   }
-  *ctrl = 1;
+  *ctrl = 2; // InProgress
   pthread_mutex_unlock(&g_once_mutex);
 
   ctx->rsp -= 8;
@@ -328,7 +384,7 @@ void shim_pthread_once(GuestContext *ctx) {
   recomp_dispatch(ctx, init_routine_addr);
 
   pthread_mutex_lock(&g_once_mutex);
-  *ctrl = 2;
+  *ctrl = 1; // Done
   pthread_cond_broadcast(&g_once_cond);
   pthread_mutex_unlock(&g_once_mutex);
 
@@ -390,6 +446,14 @@ void shim_scePthreadMutexTrylock(GuestContext *ctx) {
   shim_pthread_mutex_trylock(ctx);
 }
 
+void shim_scePthreadMutexTimedlock(GuestContext *ctx) {
+  uint64_t mtx_addr = ctx->rdi;
+  uint64_t usec = ctx->rsi;
+  pthread_mutex_t *m = get_host_mutex(mtx_addr);
+  ctx->rax = (uint64_t)host_mutex_timedlock(m, usec);
+  SHIM_RETURN();
+}
+
 void shim_scePthreadMutexUnlock(GuestContext *ctx) {
   shim_pthread_mutex_unlock(ctx);
 }
@@ -413,6 +477,15 @@ void shim_scePthreadMutexattrSettype(GuestContext *ctx) {
 void shim_scePthreadMutexattrSetprotocol(GuestContext *ctx) {
   ctx->rax = 0;
   SHIM_RETURN();
+}
+
+void shim_pthread_mutexattr_setprotocol(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadOnce(GuestContext *ctx) {
+  shim_pthread_once(ctx);
 }
 
 // scePthreadCond shims

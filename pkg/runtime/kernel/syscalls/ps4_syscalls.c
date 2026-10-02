@@ -532,6 +532,87 @@ void shim_unlink(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+// mkdir
+void shim_mkdir(GuestContext *ctx) {
+  uint64_t path_addr = ctx->rdi;
+  mode_t mode = (mode_t)ctx->rsi;
+  const char *path = (const char *)(ctx->mem_base + path_addr);
+  char resolved_path[1024];
+  if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
+    path = resolved_path;
+  }
+  int ret = mkdir(path, mode);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// rmdir
+void shim_rmdir(GuestContext *ctx) {
+  uint64_t path_addr = ctx->rdi;
+  const char *path = (const char *)(ctx->mem_base + path_addr);
+  char resolved_path[1024];
+  if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
+    path = resolved_path;
+  }
+  int ret = rmdir(path);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// rename
+void shim_rename(GuestContext *ctx) {
+  uint64_t old_addr = ctx->rdi;
+  uint64_t new_addr = ctx->rsi;
+  const char *oldpath = (const char *)(ctx->mem_base + old_addr);
+  const char *newpath = (const char *)(ctx->mem_base + new_addr);
+  char res_old[1024], res_new[1024];
+  if (ps4_vfs_resolve(oldpath, res_old, sizeof(res_old)) == 0) oldpath = res_old;
+  if (ps4_vfs_resolve(newpath, res_new, sizeof(res_new)) == 0) newpath = res_new;
+  int ret = rename(oldpath, newpath);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// truncate
+void shim_truncate(GuestContext *ctx) {
+  uint64_t path_addr = ctx->rdi;
+  off_t length = (off_t)ctx->rsi;
+  const char *path = (const char *)(ctx->mem_base + path_addr);
+  char resolved_path[1024];
+  if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
+    path = resolved_path;
+  }
+  int ret = truncate(path, length);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// mlock
+void shim_mlock(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
 // getdents
 void shim_getdents(GuestContext *ctx) {
   int fd = (int)ctx->rdi;

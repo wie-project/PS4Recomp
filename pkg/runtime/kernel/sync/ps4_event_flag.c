@@ -298,3 +298,29 @@ void shim_sceKernelWaitEventFlag(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
+
+int32_t sceKernelCancelEventFlag(OrbisKernelEventFlag id, uint64_t setPattern, int32_t *pNumWaitThreads) {
+    RecompInternalEventFlag *f = get_evf(id);
+    if (!f) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
+
+    pthread_mutex_lock(&f->mutex);
+    if (pNumWaitThreads) {
+        *pNumWaitThreads = 0;
+    }
+    f->pattern = setPattern;
+    pthread_cond_broadcast(&f->cond);
+    pthread_mutex_unlock(&f->mutex);
+    return 0;
+}
+
+void shim_sceKernelCancelEventFlag(GuestContext *ctx) {
+    OrbisKernelEventFlag id = (OrbisKernelEventFlag)ctx->rdi;
+    uint64_t setPattern = ctx->rsi;
+    uint64_t numWaitGuest = ctx->rdx;
+
+    int32_t *pNumWait = (numWaitGuest && ctx->mem_base) ? (int32_t *)(ctx->mem_base + numWaitGuest) : NULL;
+    int32_t rc = sceKernelCancelEventFlag(id, setPattern, pNumWait);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+

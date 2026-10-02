@@ -238,3 +238,75 @@ void shim_sceKernelWaitEqueue(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
+
+int sceKernelDeleteUserEvent(OrbisKernelEqueue id, int ident) {
+    pthread_mutex_lock(&g_eq_table_mutex);
+    KernelEqueueInternal *eq = find_equeue_locked(id);
+    if (!eq) {
+        pthread_mutex_unlock(&g_eq_table_mutex);
+        return 0x80020009; // ORBIS_KERNEL_ERROR_EBADF
+    }
+
+    pthread_mutex_lock(&eq->mutex);
+    pthread_mutex_unlock(&g_eq_table_mutex);
+
+    int write_idx = 0;
+    int original_count = eq->count;
+    for (int i = 0; i < original_count; i++) {
+        int idx = (eq->head + i) % EQUEUE_CAPACITY;
+        if (eq->events[idx].filter == ORBIS_KERNEL_EVFILT_USER && (int)eq->events[idx].ident == ident) {
+            continue;
+        }
+        if (write_idx != i) {
+            int target_idx = (eq->head + write_idx) % EQUEUE_CAPACITY;
+            eq->events[target_idx] = eq->events[idx];
+        }
+        write_idx++;
+    }
+    eq->count = write_idx;
+    eq->tail = (eq->head + write_idx) % EQUEUE_CAPACITY;
+
+    pthread_mutex_unlock(&eq->mutex);
+    return 0;
+}
+
+uint64_t sceKernelGetEventId(const OrbisKernelEvent *ev) {
+    if (!ev) return 0;
+    return ev->ident;
+}
+
+int sceKernelGetEventFilter(const OrbisKernelEvent *ev) {
+    if (!ev) return 0;
+    return (int)ev->filter;
+}
+
+void shim_sceKernelDeleteUserEvent(GuestContext *ctx) {
+    OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
+    int id = (int)ctx->rsi;
+    int rc = sceKernelDeleteUserEvent(eq, id);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelGetEventId(GuestContext *ctx) {
+    uint64_t ev_addr = ctx->rdi;
+    if (!ev_addr || !ctx->mem_base) {
+        ctx->rax = 0;
+        SHIM_RETURN();
+    }
+    const OrbisKernelEvent *ev = (const OrbisKernelEvent *)(ctx->mem_base + ev_addr);
+    ctx->rax = sceKernelGetEventId(ev);
+    SHIM_RETURN();
+}
+
+void shim_sceKernelGetEventFilter(GuestContext *ctx) {
+    uint64_t ev_addr = ctx->rdi;
+    if (!ev_addr || !ctx->mem_base) {
+        ctx->rax = 0;
+        SHIM_RETURN();
+    }
+    const OrbisKernelEvent *ev = (const OrbisKernelEvent *)(ctx->mem_base + ev_addr);
+    ctx->rax = (uint64_t)(int64_t)sceKernelGetEventFilter(ev);
+    SHIM_RETURN();
+}
+

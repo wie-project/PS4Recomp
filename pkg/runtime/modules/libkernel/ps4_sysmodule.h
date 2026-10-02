@@ -31,6 +31,7 @@ void recomp_module_register_init(const char *filename, const uint64_t *inits,
                                  size_t count);
 void recomp_register_guest_modules(void);
 void recomp_module_start(GuestContext *ctx, int32_t handle);
+uint64_t recomp_resolve_symbol(const char *module_name, const char *symbol);
 
 int32_t sceKernelLoadStartModule(const char *name, size_t argc,
                                  const void *argv, uint32_t flags, void *opt,

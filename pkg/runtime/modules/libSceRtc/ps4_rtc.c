@@ -157,3 +157,77 @@ void shim_sceRtcIsLeapYear(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)ret;
     SHIM_RETURN();
 }
+
+int32_t sceRtcGetTime_t(const OrbisDateTime *pTime, time_t *llTime) {
+    if (!pTime || !llTime) return -EINVAL;
+    OrbisRtcTick tick;
+    int32_t rc = sceRtcGetTick(pTime, &tick);
+    if (rc != 0) return rc;
+    *llTime = (time_t)(tick.tick / 1000000ULL);
+    return 0;
+}
+
+int32_t sceRtcParseDateTime(OrbisRtcTick *pTickUtc, const char *pszDateTime) {
+    if (!pTickUtc || !pszDateTime) return -EINVAL;
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+    char *res = strptime(pszDateTime, "%Y-%m-%dT%H:%M:%S", &tm);
+    if (!res) {
+        res = strptime(pszDateTime, "%Y-%m-%d %H:%M:%S", &tm);
+    }
+    if (!res) {
+        res = strptime(pszDateTime, "%Y/%m/%d %H:%M:%S", &tm);
+    }
+    if (!res) {
+        return -EINVAL;
+    }
+    time_t t = timegm(&tm);
+    if (t == (time_t)-1) {
+        t = mktime(&tm);
+    }
+    pTickUtc->tick = (uint64_t)t * 1000000ULL;
+    return 0;
+}
+
+int32_t sceRtcGetCurrentNetworkTick(OrbisRtcTick *tick) {
+    return sceRtcGetCurrentTick(tick);
+}
+
+void shim_sceRtcGetTime_t(GuestContext *ctx) {
+    uint64_t timeIn = ctx->rdi;
+    uint64_t timeOut = ctx->rsi;
+    if (!timeIn || !timeOut) {
+        ctx->rax = (uint64_t)-EINVAL;
+        SHIM_RETURN();
+    }
+    OrbisDateTime dt;
+    memcpy(&dt, ctx->mem_base + timeIn, sizeof(dt));
+    time_t t = 0;
+    int32_t rc = sceRtcGetTime_t(&dt, &t);
+    if (rc == 0) {
+        *(int64_t *)(ctx->mem_base + timeOut) = (int64_t)t;
+    }
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceRtcParseDateTime(GuestContext *ctx) {
+    uint64_t tickOut = ctx->rdi;
+    uint64_t strIn = ctx->rsi;
+    if (!tickOut || !strIn) {
+        ctx->rax = (uint64_t)-EINVAL;
+        SHIM_RETURN();
+    }
+    const char *str = (const char *)(ctx->mem_base + strIn);
+    OrbisRtcTick tick;
+    int32_t rc = sceRtcParseDateTime(&tick, str);
+    if (rc == 0) {
+        memcpy(ctx->mem_base + tickOut, &tick, sizeof(tick));
+    }
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceRtcGetCurrentNetworkTick(GuestContext *ctx) {
+    shim_sceRtcGetCurrentTick(ctx);
+}

@@ -35,10 +35,16 @@ int sceKernelCreateEqueue(OrbisKernelEqueue *eqOut, const char *name);
 int sceKernelDeleteEqueue(OrbisKernelEqueue eq);
 int sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent *eventsOut, int numEvents, int *outCount, const SceKernelTimeval *timeout);
 int ps4_equeue_post_event(OrbisKernelEqueue eq, uint64_t ident, int16_t filter, int64_t data, void *udata);
+int sceKernelDeleteUserEvent(OrbisKernelEqueue eq, int id);
+uint64_t sceKernelGetEventId(const OrbisKernelEvent *ev);
+int sceKernelGetEventFilter(const OrbisKernelEvent *ev);
 
 void shim_sceKernelCreateEqueue(GuestContext *ctx);
 void shim_sceKernelDeleteEqueue(GuestContext *ctx);
 void shim_sceKernelWaitEqueue(GuestContext *ctx);
+void shim_sceKernelDeleteUserEvent(GuestContext *ctx);
+void shim_sceKernelGetEventId(GuestContext *ctx);
+void shim_sceKernelGetEventFilter(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

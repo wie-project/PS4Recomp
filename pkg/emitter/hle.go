@@ -150,6 +150,14 @@ func NewHLEReport(loaded *elfloader.LoadedELF, modules []GuestModule) *HLEReport
 			if ent.Class == ImportUnresolved {
 				if _, hit := defined[rel.SymName]; hit {
 					ent.Class = ImportDefined
+				} else {
+					canon, _ := elfloader.ResolveNID(rel.SymName)
+					if nid := elfloader.NIDPrefix(rel.SymName); nid != "" && canon == "" {
+						canon, _ = elfloader.ResolveNID(nid)
+					}
+					if rel.SymName == "__stack_chk_guard" || canon == "__stack_chk_guard" {
+						ent.Class = ImportDefined
+					}
 				}
 			}
 			byName[rel.SymName] = ent

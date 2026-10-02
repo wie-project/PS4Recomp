@@ -818,3 +818,154 @@ void shim_sceKernelMemoryPoolDecommit(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
+
+int sceKernelSetVirtualRangeName(GuestContext *ctx, const void *addr, size_t len, const char *name) {
+    if (!name) return 0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
+    if (strlen(name) >= 32) return 0x8002003f; // ORBIS_KERNEL_ERROR_ENAMETOOLONG
+    if (!ctx) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    uint64_t vaddr = (uint64_t)addr;
+    uint64_t vend = vaddr + len;
+
+    pthread_mutex_lock(&proc->vm_mutex);
+    GuestVMExtent *curr = proc->vm_extents;
+    while (curr) {
+        uint64_t cstart = curr->addr;
+        uint64_t cend = curr->addr + curr->size;
+        if (!curr->is_free && cstart < vend && cend > vaddr) {
+            strncpy(curr->name, name, sizeof(curr->name) - 1);
+            curr->name[sizeof(curr->name) - 1] = '\0';
+        }
+        curr = curr->next;
+    }
+    pthread_mutex_unlock(&proc->vm_mutex);
+
+    printf("[ps4-mem] sceKernelSetVirtualRangeName: addr=%p len=%zu name='%s'\n", addr, len, name);
+    fflush(stdout);
+    return 0;
+}
+
+void shim_sceKernelSetVirtualRangeName(GuestContext *ctx) {
+    void *addr = (void *)ctx->rdi;
+    size_t len = (size_t)ctx->rsi;
+    uint64_t nameGuest = ctx->rdx;
+    const char *name = (nameGuest && ctx->mem_base) ? (const char *)(ctx->mem_base + nameGuest) : NULL;
+    int rc = sceKernelSetVirtualRangeName(ctx, addr, len, name);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+int sceKernelDirectMemoryQuery(off_t offset, int flags, OrbisDirectMemoryQueryInfo *info, size_t infoSize) {
+    if (!info || infoSize < sizeof(OrbisDirectMemoryQueryInfo)) {
+        return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    }
+    ps4_direct_mem_init();
+
+    pthread_mutex_lock(&g_direct_mutex);
+    DirectMemBlock *curr = g_direct_blocks;
+    DirectMemBlock *target = NULL;
+
+    while (curr) {
+        off_t bstart = curr->phys_offset;
+        off_t bend = curr->phys_offset + curr->size;
+        if (flags == 1) { // find_next allocated region
+            if (!curr->is_free && bend > offset) {
+                target = curr;
+                break;
+            }
+        } else {
+            if (offset >= bstart && offset < bend) {
+                target = curr;
+                break;
+            }
+        }
+        curr = curr->next;
+    }
+
+    if (!target || target->is_free) {
+        pthread_mutex_unlock(&g_direct_mutex);
+        return 0x8002000d; // ORBIS_KERNEL_ERROR_EACCES
+    }
+
+    info->start = (uint64_t)target->phys_offset;
+    info->end = (uint64_t)(target->phys_offset + target->size);
+    info->memoryType = 0; // Standard direct memory
+    pthread_mutex_unlock(&g_direct_mutex);
+
+    return 0;
+}
+
+void shim_sceKernelDirectMemoryQuery(GuestContext *ctx) {
+    off_t offset = (off_t)ctx->rdi;
+    int flags = (int)ctx->rsi;
+    uint64_t infoGuest = ctx->rdx;
+    size_t infoSize = (size_t)ctx->rcx;
+
+    if (!infoGuest) {
+        ctx->rax = (uint64_t)0x80020016;
+        SHIM_RETURN();
+    }
+
+    OrbisDirectMemoryQueryInfo info = {0};
+    int rc = sceKernelDirectMemoryQuery(offset, flags, &info, sizeof(info));
+    if (rc == 0) {
+        size_t copy_sz = infoSize < sizeof(info) ? infoSize : sizeof(info);
+        memcpy(ctx->mem_base + infoGuest, &info, copy_sz);
+    }
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+int sceKernelCheckedReleaseDirectMemory(off_t physAddr, size_t length) {
+    printf("[ps4-mem] sceKernelCheckedReleaseDirectMemory: phys=0x%llx len=%zu\n",
+           (unsigned long long)physAddr, length);
+    fflush(stdout);
+    if ((physAddr & 0x3fff) != 0 || (length & 0x3fff) != 0) {
+        return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    }
+    if (length == 0) return 0;
+    return sceKernelReleaseDirectMemory(physAddr, length);
+}
+
+void shim_sceKernelCheckedReleaseDirectMemory(GuestContext *ctx) {
+    off_t physAddr = (off_t)ctx->rdi;
+    size_t length = (size_t)ctx->rsi;
+    int rc = sceKernelCheckedReleaseDirectMemory(physAddr, length);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+int sceKernelMprotect(GuestContext *ctx, const void *addr, size_t size, int prot) {
+    if (!ctx) return 0x80020016;
+    if (size == 0) return 0;
+
+    uint64_t vaddr = (uint64_t)addr;
+    uint64_t aligned_addr = vaddr & ~0x3fffULL; // 16KB align down
+    size_t aligned_size = ((size + (vaddr - aligned_addr)) + 0x3fffULL) & ~0x3fffULL;
+
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    pthread_mutex_lock(&proc->vm_mutex);
+    GuestVMExtent *curr = proc->vm_extents;
+    while (curr) {
+        uint64_t cstart = curr->addr;
+        uint64_t cend = curr->addr + curr->size;
+        if (!curr->is_free && cstart < (aligned_addr + aligned_size) && cend > aligned_addr) {
+            curr->prot = prot;
+        }
+        curr = curr->next;
+    }
+    pthread_mutex_unlock(&proc->vm_mutex);
+
+    return 0;
+}
+
+void shim_sceKernelMprotect(GuestContext *ctx) {
+    const void *addr = (const void *)ctx->rdi;
+    size_t size = (size_t)ctx->rsi;
+    int prot = (int)ctx->rdx;
+    int rc = sceKernelMprotect(ctx, addr, size, prot);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+

@@ -29,18 +29,22 @@ void shim_pthread_rwlock_wrlock(GuestContext *ctx);
 void shim_pthread_rwlock_unlock(GuestContext *ctx);
 void shim_pthread_rwlock_init(GuestContext *ctx);
 void shim_pthread_rwlock_destroy(GuestContext *ctx);
+void shim_pthread_mutex_timedlock(GuestContext *ctx);
+void shim_pthread_mutexattr_setprotocol(GuestContext *ctx);
 void shim_pthread_once(GuestContext *ctx);
 
 // Orbis Mutex & Cond shims
 void shim_scePthreadMutexInit(GuestContext *ctx);
 void shim_scePthreadMutexLock(GuestContext *ctx);
 void shim_scePthreadMutexTrylock(GuestContext *ctx);
+void shim_scePthreadMutexTimedlock(GuestContext *ctx);
 void shim_scePthreadMutexUnlock(GuestContext *ctx);
 void shim_scePthreadMutexDestroy(GuestContext *ctx);
 void shim_scePthreadMutexattrInit(GuestContext *ctx);
 void shim_scePthreadMutexattrDestroy(GuestContext *ctx);
 void shim_scePthreadMutexattrSettype(GuestContext *ctx);
 void shim_scePthreadMutexattrSetprotocol(GuestContext *ctx);
+void shim_scePthreadOnce(GuestContext *ctx);
 void shim_scePthreadCondInit(GuestContext *ctx);
 void shim_scePthreadCondDestroy(GuestContext *ctx);
 void shim_scePthreadCondSignal(GuestContext *ctx);

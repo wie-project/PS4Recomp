@@ -54,11 +54,23 @@ void shim_scePthreadAttrSetschedparam(GuestContext *ctx);
 void shim_scePthreadAttrGetschedparam(GuestContext *ctx);
 void shim_scePthreadAttrSetinheritsched(GuestContext *ctx);
 void shim_scePthreadAttrSetaffinity(GuestContext *ctx);
+void shim_scePthreadAttrGetstacksize(GuestContext *ctx);
+void shim_scePthreadAttrSetstack(GuestContext *ctx);
+void shim_scePthreadRename(GuestContext *ctx);
+void shim_scePthreadGetschedparam(GuestContext *ctx);
+void shim_scePthreadSetschedparam(GuestContext *ctx);
 void shim_scePthreadKeyCreate(GuestContext *ctx);
 void shim_scePthreadKeyDelete(GuestContext *ctx);
 void shim_scePthreadSetspecific(GuestContext *ctx);
 void shim_scePthreadGetspecific(GuestContext *ctx);
 void shim___tls_get_addr(GuestContext *ctx);
+void shim_pthread_once(GuestContext *ctx);
+void shim_pthread_cancel(GuestContext *ctx);
+void shim_scePthreadOnce(GuestContext *ctx);
+void shim_scePthreadAttrGetaffinity(GuestContext *ctx);
+void shim_scePthreadAttrGetdetachstate(GuestContext *ctx);
+void shim_scePthreadAttrGet(GuestContext *ctx);
+void shim_scePthreadGetname(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

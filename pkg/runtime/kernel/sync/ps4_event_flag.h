@@ -35,6 +35,7 @@ int32_t sceKernelSetEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern);
 int32_t sceKernelClearEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern);
 int32_t sceKernelWaitEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uint32_t waitMode, uint64_t *resultPattern, OrbisKernelUseconds *timeout);
 int32_t sceKernelPollEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uint32_t waitMode, uint64_t *resultPattern);
+int32_t sceKernelCancelEventFlag(OrbisKernelEventFlag id, uint64_t setPattern, int32_t *pNumWaitThreads);
 
 // Guest execution shims
 void shim_sceKernelCreateEventFlag(GuestContext *ctx);
@@ -43,6 +44,7 @@ void shim_sceKernelSetEventFlag(GuestContext *ctx);
 void shim_sceKernelClearEventFlag(GuestContext *ctx);
 void shim_sceKernelWaitEventFlag(GuestContext *ctx);
 void shim_sceKernelPollEventFlag(GuestContext *ctx);
+void shim_sceKernelCancelEventFlag(GuestContext *ctx);
 
 #ifdef __cplusplus
 }
