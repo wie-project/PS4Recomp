@@ -214,6 +214,10 @@ var shimAliases = map[string]string{
 	"crb5j7mkk1c": "shim__is_signal_return",
 	"djxxOmW6-aw": "shim___progname",
 	"lbQKqsERhtE": "shim_sceDiscMapIsRequestOnHDD",
+	"fJgP+wqifno": "shim_Func_7C980FFB0AA27E7A",
+	"fl1eoDnwQ4s": "shim_sceDiscMapGetPackageSize",
+	"ioKMruft1ek": "shim_Func_8A828CAEE7EDD5E9",
+	"5+vOlukvkfg": "shim_Func_E7EBCE96E92F91F8",
 	// Libc Heap Trace Info
 	"NWtTN10cJzE": "shim_sceLibcHeapGetTraceInfo",
 	// libSceRtc NIDs
@@ -387,6 +391,10 @@ var knownDirectShims = []string{
 	"_is_signal_return",
 	"__progname",
 	"sceDiscMapIsRequestOnHDD",
+	"Func_7C980FFB0AA27E7A",
+	"sceDiscMapGetPackageSize",
+	"Func_8A828CAEE7EDD5E9",
+	"Func_E7EBCE96E92F91F8",
 	"sceKernelGetSanitizerNewReplaceExternal",
 	"sceKernelGetSanitizerMallocReplaceExternal",
 	"sceKernelIsAddressSanitizerEnabled",

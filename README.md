@@ -113,7 +113,64 @@ Arg 1 =
 	Launcher Path = NONE SPECIFIED
 	Launcher Arguments NONE SPECIFIED
 **********/LAUNCHER CONTROL ************************************
-[ps4-recomp] WARN: Called unimplemented function NID 'fJgP+wqifno' (Lib: Il2cppUserAssemblies) at RIP=0x23f0108 (caller RIP=0x242411f, RSP=0x7ffffe468)
+[ps4-recomp] sceKernelLoadStartModule: /app0/Media/Modules/PS4Util.prx
+[ps4-recomp] sceKernelLoadStartModule: /app0/Media/Modules/Il2CppUserAssemblies.prx
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=4194304 (4.00 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=4194304 (4.00 MB) align=262144 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x28480000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x28480000
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=16777216 (16.00 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=16777216 (16.00 MB) align=262144 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x28880000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x28880000
+[ps4-mem] sceKernelAllocateDirectMemory: start=0x0 end=0x800000000 len=2684354560 (2560.00 MB) align=2097152 type=3
+[ps4-mem] sceKernelMapDirectMemory: in=0x0 len=2684354560 (2560.00 MB) prot=0x33 flags=0x0 phys=0x20000000 align=2097152
+[ps4-vm] recomp_vm_alloc_named_aligned (direct_mem): size=2684354560 (2560.00 MB) align=2097152 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x29a00000
+[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=0x29a00000
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=8388608 (8.00 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=8388608 (8.00 MB) align=262144 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xc9a00000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xc9a00000
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=16777216 (16.00 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=16777216 (16.00 MB) align=262144 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xca200000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xca200000
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x29880000
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=1048576 (1.00 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=1048576 (1.00 MB) align=262144 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x298c0000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x298c0000
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=262144 (0.25 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=262144 (0.25 MB) align=262144 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x299c0000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x299c0000
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb200000
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb230000
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=262144 (0.25 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=262144 (0.25 MB) align=262144 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb280000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xcb280000
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb2c0000
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb2f0000
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=262144 (0.25 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=262144 (0.25 MB) align=262144 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb340000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xcb340000
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb380000
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=81920 (0.08 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb260000
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=81920 (0.08 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb320000
+[libil2cpp] sceAppContentInitialize returned 0x80d90003
+
+*** stack smashing detected ***: terminated (caller=0x32a3710, rsp=0x7ffffa7c0, rbp=0x7ffffa888, r14=0x7ffffa8b8, *r14=0x2271e80, [rbp-0x30]=0x30ab256, rax=0x595e9fbd94fda766)
 zsh: abort
 ```
 

@@ -32,8 +32,12 @@ const (
 	DT_SCE_SYMENT        int64 = 0x6100003b
 	DT_SCE_SYMTABSZ      int64 = 0x6100003f
 
-	DT_INIT = 12
-	DT_FINI = 13
+	DT_INIT            = 12
+	DT_FINI            = 13
+	DT_INIT_ARRAY      = 25
+	DT_INIT_ARRAYSZ    = 27
+	DT_PREINIT_ARRAY   = 32
+	DT_PREINIT_ARRAYSZ = 33
 )
 
 // AddrRange is a half-open [Start, End) guest virtual address interval.
@@ -83,6 +87,7 @@ type LoadedELF struct {
 	DynSymbols   []Symbol
 	Relocations  []Relocation
 	InitArray    []uint64
+	DynamicTags  map[int64]uint64
 	NeededLibs   []string
 	// ImportLibs maps the 16-bit SCE library ID (DT_SCE_IMPORT_LIB LID)
 	// onto the plaintext library name in the SCE string table.
@@ -471,6 +476,7 @@ func applyStackCanary(loaded *LoadedELF, gotOffset uint64) {
 }
 
 func parseInitArray(loaded *LoadedELF) {
+	// 1. Check .init_array section from ELF section headers
 	if initSec, ok := loaded.Sections[".init_array"]; ok && initSec.Size > 0 {
 		for i := uint64(0); i+8 <= initSec.Size; i += 8 {
 			addr := initSec.Addr + i
@@ -481,9 +487,79 @@ func parseInitArray(loaded *LoadedELF) {
 				}
 			}
 		}
-		return
 	}
-	// Fall back to scanning mapped pointers later in SeedEntryPoints.
+
+	// 2. Check .ctors section from ELF section headers
+	if ctorsSec, ok := loaded.Sections[".ctors"]; ok && ctorsSec.Size > 0 {
+		for i := ctorsSec.Size; i >= 8; i -= 8 {
+			addr := ctorsSec.Addr + i - 8
+			if addr+8 <= uint64(len(loaded.MemoryImage)) {
+				fn := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
+				if fn != 0 && fn != ^uint64(0) && loaded.InExecutable(fn) {
+					loaded.InitArray = append(loaded.InitArray, fn)
+				}
+			}
+		}
+	}
+
+	// 3. Check DT_INIT_ARRAY from dynamic tags (used when ELF section headers are stripped, e.g. PS4 PRX/SELF)
+	if loaded.DynamicTags != nil {
+		if initArrayAddr, ok := loaded.DynamicTags[DT_INIT_ARRAY]; ok && initArrayAddr != 0 {
+			sz := loaded.DynamicTags[DT_INIT_ARRAYSZ]
+			if sz > 0 {
+				for i := uint64(0); i+8 <= sz; i += 8 {
+					addr := initArrayAddr + i
+					if addr+8 <= uint64(len(loaded.MemoryImage)) {
+						fn := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
+						if fn != 0 {
+							loaded.InitArray = append(loaded.InitArray, fn)
+						}
+					}
+				}
+			} else {
+				// DT_INIT_ARRAYSZ is 0: check for preceding .ctors table in GNU/Clang/Sony PRX
+				curr := initArrayAddr
+				for curr >= 8 && curr <= uint64(len(loaded.MemoryImage)) {
+					val := binary.LittleEndian.Uint64(loaded.MemoryImage[curr-8 : curr])
+					if val != 0 && val != ^uint64(0) {
+						break
+					}
+					curr -= 8
+				}
+				end := curr
+				start := end
+				for start >= 8 && start <= uint64(len(loaded.MemoryImage)) {
+					val := binary.LittleEndian.Uint64(loaded.MemoryImage[start-8 : start])
+					if val == ^uint64(0) || !loaded.InExecutable(val) {
+						break
+					}
+					start -= 8
+				}
+				if end > start {
+					// In .ctors, constructors are called in reverse order (from end down to start)
+					for addr := end - 8; addr >= start && addr < end; addr -= 8 {
+						fn := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
+						if fn != 0 && fn != ^uint64(0) && loaded.InExecutable(fn) {
+							loaded.InitArray = append(loaded.InitArray, fn)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Deduplicate entries while preserving execution order
+	if len(loaded.InitArray) > 1 {
+		seen := make(map[uint64]struct{}, len(loaded.InitArray))
+		var uniqueInits []uint64
+		for _, fn := range loaded.InitArray {
+			if _, ok := seen[fn]; !ok {
+				seen[fn] = struct{}{}
+				uniqueInits = append(uniqueInits, fn)
+			}
+		}
+		loaded.InitArray = uniqueInits
+	}
 }
 
 func parseSCEDynamic(loaded *LoadedELF, data []byte, file *elf.File) {
@@ -509,6 +585,7 @@ func parseSCEDynamic(loaded *LoadedELF, data []byte, file *elf.File) {
 		}
 		tags[tag] = val
 	}
+	loaded.DynamicTags = tags
 
 	base := loaded.DynlibData
 	if len(base) == 0 {
