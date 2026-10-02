@@ -21,6 +21,34 @@ func TestMapGuestPath(t *testing.T) {
 	if got := MapGuestPath("sce_module/libExample.prx", app); got != filepath.Join(app, "sce_module", "libExample.prx") {
 		t.Fatalf("got %q", got)
 	}
+	if got := MapGuestPath("%s/Modules/Il2CppUserAssemblies.prx", app); got != filepath.Join(app, "Modules", "Il2CppUserAssemblies.prx") {
+		t.Fatalf("got %q", got)
+	}
+	if got := MapGuestPath("/app0/%s/Modules/PS4Util.prx", app); got != filepath.Join(app, "Modules", "PS4Util.prx") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestDiscoverModulesDirectory(t *testing.T) {
+	dir := t.TempDir()
+	modDir := filepath.Join(dir, "Modules")
+	if err := os.Mkdir(modDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prxPath := filepath.Join(modDir, "Il2CppUserAssemblies.prx")
+	if err := os.WriteFile(prxPath, []byte("fake-elf-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	img := append([]byte{0, 0, 0, 0}, []byte("%s/Modules/Il2CppUserAssemblies.prx\x00")...)
+	// Discover with empty appDir, but elfPath pointing to eboot.bin in dir
+	refs := DiscoverCompanionModules(filepath.Join(dir, "eboot.bin"), "", img)
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 module, got %+v", refs)
+	}
+	if filepath.Base(refs[0].Path) != "Il2CppUserAssemblies.prx" {
+		t.Fatalf("unexpected path: %s", refs[0].Path)
+	}
 }
 
 func TestReferencedModuleNames(t *testing.T) {

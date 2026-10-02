@@ -66,6 +66,21 @@ Recompile the extracted Orbis binaries and package them into a native standalone
 
 ## Commercial Game Milestones
 
+### Hollow Knight: Silksong (Unity 6)
+
+```text
+[ps4-recomp] Initializing runtime...
+[ps4-recomp] Loading guest memory image (137105408 bytes), allocated dynamic address space (524288.0 MB)
+[ps4-recomp] Initializing custom memory allocator via SceLibcParam at 0x14db270...
+[ps4-mem] sceKernelAllocateDirectMemory: start=0x0 end=0x800000000 len=268435456 (256.00 MB) align=2097152 type=0
+[ps4-mem] sceKernelMapDirectMemory: in=0x0 len=268435456 (256.00 MB) prot=0x33 flags=0x0 phys=0x0 align=2097152
+[ps4-vm] recomp_vm_alloc_named_aligned (direct_mem): size=268435456 (256.00 MB) align=2097152 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x8400000
+[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=0x8400000
+[ps4-recomp] WARN: Called unimplemented function 'sceKernelSetVirtualRangeName' (NID: DGMG3JshrZU, Lib: libkernel) at RIP=0x1a26d60 (caller RIP=0x14d970c, RSP=0x7ffffef58)
+zsh: abort
+```
+
 ### Hogwarts Legacy (Unreal Engine 4)
 
 ```text

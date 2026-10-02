@@ -2389,6 +2389,10 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		return l.liftRoundps(args[0], args[1], args[2], nextPC)
 	case x86asm.VPTEST:
 		return l.liftPtest(args[0], args[1], nextPC)
+	case x86asm.VTESTPS:
+		return l.liftVtestp(false, args[0], args[1], nextPC)
+	case x86asm.VTESTPD:
+		return l.liftVtestp(true, args[0], args[1], nextPC)
 	case x86asm.VMOVHPD, x86asm.VMOVHPS:
 		if args[2] == nil {
 			return l.liftMovhpd(args[0], args[1], nextPC)
@@ -2520,6 +2524,10 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		return l.liftUcomis(false, args[0], args[1], nextPC)
 	case x86asm.VUCOMISD:
 		return l.liftUcomis(true, args[0], args[1], nextPC)
+	case x86asm.VCOMISS:
+		return l.liftComis(false, args[0], args[1], nextPC)
+	case x86asm.VCOMISD:
+		return l.liftComis(true, args[0], args[1], nextPC)
 	case x86asm.VCVTTSS2SI:
 		return l.liftCvtFloatToInt(true, false, args[0], args[1], defMemSz, nextPC)
 	case x86asm.VCVTTSD2SI:
@@ -2610,7 +2618,7 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		return l.liftVpackusdw(args[0], args[1], args[2], nextPC)
 	case x86asm.VPSADBW:
 		return l.liftVpsadbw(args[0], args[1], args[2], nextPC)
-	case x86asm.VPABSD, x86asm.VPABSW:
+	case x86asm.VPABSD, x86asm.VPABSW, x86asm.VPABSB:
 		return l.liftVpabs(op, args[0], args[1], nextPC)
 	case x86asm.VPHMINPOSUW:
 		return l.liftVphminposuw(args[0], args[1], nextPC)
@@ -2628,6 +2636,20 @@ func (l *Lifter) liftVexOp(op x86asm.Op, args x86asm.Args, defMemSz int, nextPC 
 		return l.liftVcvtph2ps(args[0], args[1], nextPC)
 	case x86asm.VCVTPS2PH:
 		return l.liftVcvtps2ph(args[0], args[1], args[2], nextPC)
+	case x86asm.VAESENC:
+		return l.liftVaesRound("recomp_vaesenc", args[0], args[1], args[2], nextPC)
+	case x86asm.VAESENCLAST:
+		return l.liftVaesRound("recomp_vaesenclast", args[0], args[1], args[2], nextPC)
+	case x86asm.VAESDEC:
+		return l.liftVaesRound("recomp_vaesdec", args[0], args[1], args[2], nextPC)
+	case x86asm.VAESDECLAST:
+		return l.liftVaesRound("recomp_vaesdeclast", args[0], args[1], args[2], nextPC)
+	case x86asm.VAESIMC:
+		return l.liftVaesImc(args[0], args[1], nextPC)
+	case x86asm.VAESKEYGENASSIST:
+		return l.liftVaesKeyGenAssist(args[0], args[1], args[2], nextPC)
+	case x86asm.VPCLMULQDQ:
+		return l.liftVpclmulqdq(args[0], args[1], args[2], args[3], nextPC)
 	case x86asm.VSTMXCSR, x86asm.STMXCSR:
 		return l.liftVmxcsr(true, args[0], nextPC)
 	case x86asm.VLDMXCSR, x86asm.LDMXCSR:

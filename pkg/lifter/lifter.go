@@ -56,6 +56,8 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.PCMPEQD, x86asm.PCMPEQB, x86asm.PCMPEQW,
 		x86asm.PADDD, x86asm.PADDB, x86asm.PADDW, x86asm.PADDQ,
 		x86asm.PSUBB, x86asm.PSUBW, x86asm.PSUBD, x86asm.PSUBQ,
+		x86asm.PSUBUSB, x86asm.PADDSW, x86asm.PADDSB, x86asm.PMAXUB, x86asm.PSUBSB,
+		x86asm.PMADDUBSW, x86asm.PADDUSB, x86asm.PCMPGTB, x86asm.VPABSB,
 		x86asm.PMULLW, x86asm.PMULHW, x86asm.PMADDWD,
 		x86asm.PACKSSDW, x86asm.PACKUSWB, x86asm.PACKSSWB,
 		x86asm.PINSRB, x86asm.PINSRW, x86asm.PINSRD, x86asm.PINSRQ,
@@ -91,7 +93,7 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.VCVTDQ2PS, x86asm.VCVTPS2DQ, x86asm.VCVTTPS2DQ,
 		x86asm.VPANDN, x86asm.VPMULLD, x86asm.VPMOVZXWD, x86asm.VPMOVSXWD,
 		x86asm.VCVTSI2SS, x86asm.VCVTSI2SD, x86asm.VCVTTSS2SI, x86asm.VCVTTSD2SI, x86asm.VCVTSS2SD, x86asm.VCVTSD2SS,
-		x86asm.VUCOMISS, x86asm.VUCOMISD, x86asm.VPSHUFHW, x86asm.VPSHUFLW, x86asm.VROUNDSD, x86asm.VROUNDSS,
+		x86asm.VUCOMISS, x86asm.VUCOMISD, x86asm.VCOMISS, x86asm.VCOMISD, x86asm.VPSHUFHW, x86asm.VPSHUFLW, x86asm.VROUNDSD, x86asm.VROUNDSS,
 		x86asm.VSQRTSS, x86asm.VSQRTSD, x86asm.VRSQRTSS, x86asm.VRSQRTPS, x86asm.VMOVDDUP, x86asm.VCVTSS2SI, x86asm.VCVTSD2SI,
 		x86asm.VCVTPS2PD, x86asm.VCVTPD2PS, x86asm.VEXTRACTF128, x86asm.VEXTRACTI128, x86asm.VINSERTF128, x86asm.VINSERTI128,
 		x86asm.VPERMILPS, x86asm.VPERMILPD, x86asm.VCMPPS, x86asm.VSHUFPS,
@@ -107,7 +109,7 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.VPINSRQ, x86asm.VPEXTRB, x86asm.VPEXTRW, x86asm.VPEXTRD, x86asm.VPEXTRQ,
 		x86asm.VPMINSD, x86asm.VPMAXSD, x86asm.VPMINUD, x86asm.VPMAXUD, x86asm.VPMINSB, x86asm.VPMAXSB,
 		x86asm.VSQRTPS, x86asm.VSQRTPD, x86asm.VMOVLHPS, x86asm.VMOVHLPS, x86asm.VMOVHPD, x86asm.VMOVHPS,
-		x86asm.VROUNDPS, x86asm.VPTEST,
+		x86asm.VROUNDPS, x86asm.VPTEST, x86asm.VTESTPS, x86asm.VTESTPD,
 		x86asm.PSHUFB, x86asm.PALIGNR, x86asm.PEXTRB, x86asm.PEXTRW, x86asm.PEXTRD, x86asm.PEXTRQ,
 		x86asm.PMINSD, x86asm.PMAXSD, x86asm.PMINUD, x86asm.PMAXUD, x86asm.PMINSB, x86asm.PMAXSB,
 		x86asm.MOVLHPS, x86asm.MOVHLPS, x86asm.ANDNPS, x86asm.ANDNPD, x86asm.ROUNDPS, x86asm.PTEST,
@@ -136,13 +138,13 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.FCMOVNE, x86asm.FCMOVBE, x86asm.FCMOVNBE, x86asm.FCMOVNU,
 		x86asm.FIDIVR, x86asm.FDIVRP, x86asm.FSUBR, x86asm.FISUBR, x86asm.FLDL2T, x86asm.FBSTP,
 		x86asm.FNOP, x86asm.FNSTENV, x86asm.FLDENV, x86asm.FNSTSW, x86asm.FYL2XP1,
-		x86asm.FNCLEX, x86asm.FFREEP, x86asm.FSQRT, x86asm.FRNDINT, x86asm.FXTRACT,
+		x86asm.FNCLEX, x86asm.FFREEP, x86asm.FSQRT, x86asm.FCOS, x86asm.FRNDINT, x86asm.FXTRACT,
 		x86asm.FSCALE, x86asm.FPREM1, x86asm.FRSTOR, x86asm.FXSAVE, x86asm.FXRSTOR,
 		x86asm.STMXCSR, x86asm.LDMXCSR,
 		// Control flow, ALU, system
 		x86asm.LOOP, x86asm.LOOPE, x86asm.LOOPNE, x86asm.LRET, x86asm.LCALL, x86asm.LJMP,
 		x86asm.RCL, x86asm.RCR, x86asm.CMC, x86asm.XLATB, x86asm.RDTSC,
-		x86asm.UD0, x86asm.ICEBP, x86asm.XABORT, x86asm.SLDT, x86asm.LAR,
+		x86asm.UD0, x86asm.ICEBP, x86asm.XABORT, x86asm.SLDT, x86asm.LAR, x86asm.SGDT, x86asm.STR,
 		// AVX / SIMD additions
 		x86asm.VMOVLPD, x86asm.VPBLENDW, x86asm.VBLENDPD, x86asm.VBLENDVPD,
 		x86asm.VMASKMOVPS, x86asm.VMASKMOVPD, x86asm.VBROADCASTSD, x86asm.VBROADCASTF128,
@@ -162,6 +164,8 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.VPMOVSXDQ, x86asm.VPMOVZXDQ, x86asm.VPMOVSXBD, x86asm.VPMOVZXBD,
 		x86asm.VPMOVSXBW, x86asm.VPMOVZXBW, x86asm.VPMOVSXWQ, x86asm.VPMOVZXWQ,
 		x86asm.VPMOVSXBQ, x86asm.VPMOVZXBQ,
+		x86asm.VAESENC, x86asm.VAESENCLAST, x86asm.VAESDEC, x86asm.VAESDECLAST,
+		x86asm.VAESIMC, x86asm.VAESKEYGENASSIST, x86asm.VPCLMULQDQ,
 		// BMI1 / BMI2 opcodes
 		x86asm.ANDN, x86asm.BEXTR, x86asm.BLSI, x86asm.BLSMSK, x86asm.BLSR, x86asm.BZHI,
 		x86asm.MULX, x86asm.RORX, x86asm.SARX, x86asm.SHLX, x86asm.SHRX,
@@ -564,6 +568,20 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		}
 		lines = append(lines, code...)
 
+	case x86asm.STR:
+		code, err := l.liftStr(args[0], defMemSz, nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.SGDT:
+		code, err := l.liftSgdt(args[0], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
 	case x86asm.UD0, x86asm.UD2, x86asm.ICEBP, x86asm.XABORT:
 		lines = append(
 			lines,
@@ -654,6 +672,34 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 
 	case x86asm.PADDQ:
 		code, err := l.liftPadd(8, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PADDUSB, x86asm.PADDSB, x86asm.PADDSW, x86asm.PSUBUSB, x86asm.PSUBSB:
+		code, err := l.liftPaddsubSat2Op(op, args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PMAXUB:
+		code, err := l.liftPmaxub2Op(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PCMPGTB:
+		code, err := l.liftPcmpgtb2Op(args[0], args[1], nextPC)
+		if err != nil {
+			return nil, fmt.Errorf("0x%x: %w", pc, err)
+		}
+		lines = append(lines, code...)
+
+	case x86asm.PMADDUBSW:
+		code, err := l.liftPmaddubsw2Op(args[0], args[1], nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
 		}
@@ -1566,7 +1612,7 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		x86asm.VPANDN, x86asm.VPMULLD, x86asm.VPMOVZXWD, x86asm.VPMOVSXWD,
 		x86asm.VCVTSI2SS, x86asm.VCVTSI2SD, x86asm.VCVTTSS2SI, x86asm.VCVTTSD2SI,
 		x86asm.VCVTSS2SD, x86asm.VCVTSD2SS,
-		x86asm.VUCOMISS, x86asm.VUCOMISD, x86asm.VPSHUFHW, x86asm.VPSHUFLW,
+		x86asm.VUCOMISS, x86asm.VUCOMISD, x86asm.VCOMISS, x86asm.VCOMISD, x86asm.VPSHUFHW, x86asm.VPSHUFLW,
 		x86asm.VROUNDSD, x86asm.VROUNDSS, x86asm.VSQRTSS, x86asm.VSQRTSD,
 		x86asm.VRSQRTSS, x86asm.VRSQRTPS, x86asm.VMOVDDUP, x86asm.VCVTSS2SI, x86asm.VCVTSD2SI,
 		x86asm.VCVTPS2PD, x86asm.VCVTPD2PS, x86asm.VEXTRACTF128, x86asm.VEXTRACTI128, x86asm.VINSERTF128, x86asm.VINSERTI128,
@@ -1582,7 +1628,7 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		x86asm.VPINSRQ, x86asm.VPEXTRB, x86asm.VPEXTRW, x86asm.VPEXTRD, x86asm.VPEXTRQ,
 		x86asm.VPMINSD, x86asm.VPMAXSD, x86asm.VPMINUD, x86asm.VPMAXUD, x86asm.VPMINSB, x86asm.VPMAXSB,
 		x86asm.VSQRTPS, x86asm.VSQRTPD, x86asm.VMOVLHPS, x86asm.VMOVHLPS, x86asm.VMOVHPD, x86asm.VMOVHPS,
-		x86asm.VROUNDPS, x86asm.VPTEST,
+		x86asm.VROUNDPS, x86asm.VPTEST, x86asm.VTESTPS, x86asm.VTESTPD,
 		x86asm.VMOVLPD, x86asm.VPBLENDW, x86asm.VBLENDPD, x86asm.VBLENDVPD,
 		x86asm.VMASKMOVPS, x86asm.VMASKMOVPD, x86asm.VBROADCASTSD, x86asm.VBROADCASTF128,
 		x86asm.VMOVMSKPD, x86asm.VPERM2F128, x86asm.VROUNDPD, x86asm.VDPPS,
@@ -1592,7 +1638,7 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		x86asm.VPMADDWD, x86asm.VPMADDUBSW, x86asm.VPMOVMSKB,
 		x86asm.VPCMPEQQ, x86asm.VPCMPGTB, x86asm.VPCMPGTW,
 		x86asm.VPMULUDQ, x86asm.VPMULDQ, x86asm.VPMULHW, x86asm.VPMULHUW,
-		x86asm.VPACKUSDW, x86asm.VPSADBW, x86asm.VPABSD, x86asm.VPABSW,
+		x86asm.VPACKUSDW, x86asm.VPSADBW, x86asm.VPABSD, x86asm.VPABSW, x86asm.VPABSB,
 		x86asm.VPHMINPOSUW, x86asm.VPADDUSB, x86asm.VPADDSW,
 		x86asm.VPSUBSW, x86asm.VPSUBUSB, x86asm.VPSUBUSW,
 		x86asm.VADDSUBPS, x86asm.VADDSUBPD, x86asm.VCMPPD,
@@ -1600,7 +1646,9 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 		x86asm.VSTMXCSR, x86asm.VLDMXCSR, x86asm.STMXCSR, x86asm.LDMXCSR,
 		x86asm.VPMOVSXDQ, x86asm.VPMOVZXDQ, x86asm.VPMOVSXBD, x86asm.VPMOVZXBD,
 		x86asm.VPMOVSXBW, x86asm.VPMOVZXBW, x86asm.VPMOVSXWQ, x86asm.VPMOVZXWQ,
-		x86asm.VPMOVSXBQ, x86asm.VPMOVZXBQ:
+		x86asm.VPMOVSXBQ, x86asm.VPMOVZXBQ,
+		x86asm.VAESENC, x86asm.VAESENCLAST, x86asm.VAESDEC, x86asm.VAESDECLAST,
+		x86asm.VAESIMC, x86asm.VAESKEYGENASSIST, x86asm.VPCLMULQDQ:
 		code, err := l.liftVexOp(op, args, defMemSz, nextPC)
 		if err != nil {
 			return nil, fmt.Errorf("0x%x: %w", pc, err)
@@ -1874,6 +1922,9 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 
 	case x86asm.FSQRT:
 		lines = append(lines, l.liftFsqrt()...)
+
+	case x86asm.FCOS:
+		lines = append(lines, l.liftFcos()...)
 
 	case x86asm.FRNDINT:
 		lines = append(lines, l.liftFrndint()...)

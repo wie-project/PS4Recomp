@@ -1372,6 +1372,42 @@ func (l *Lifter) liftSldt(dst x86asm.Arg, defMemSz int, nextPC uint64) ([]string
 	return lines, nil
 }
 
+func (l *Lifter) liftStr(dst x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
+	sz := defMemSz
+	if reg, ok := dst.(x86asm.Reg); ok {
+		if info, ok := regMap[reg]; ok && info.Size > 0 {
+			sz = info.Size
+		}
+	}
+	writes, err := l.getOperandWrite(dst, sz, "0x40", nextPC)
+	if err != nil {
+		return nil, err
+	}
+	lines := make([]string, 0, len(writes))
+	for _, w := range writes {
+		lines = append(lines, "    "+w)
+	}
+	return lines, nil
+}
+
+func (l *Lifter) liftSgdt(dst x86asm.Arg, nextPC uint64) ([]string, error) {
+	mem, ok := dst.(x86asm.Mem)
+	if !ok {
+		return nil, fmt.Errorf("sgdt operand must be memory")
+	}
+	addr, err := MemAddrExpr(mem, nextPC)
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"    {",
+		fmt.Sprintf("      uint8_t *p = ctx->mem_base + (%s);", addr),
+		"      *(uint16_t *)(p) = 0x007F;",
+		"      *(uint64_t *)(p + 2) = 0;",
+		"    }",
+	}, nil
+}
+
 func (l *Lifter) liftLar(dst, src x86asm.Arg, defMemSz int, nextPC uint64) ([]string, error) {
 	writes, err := l.getOperandWrite(dst, defMemSz, "0x00F20000", nextPC)
 	if err != nil {

@@ -1386,6 +1386,67 @@ func (l *Lifter) liftPtest(dst, src x86asm.Arg, nextPC uint64) ([]string, error)
 	return lines, nil
 }
 
+func (l *Lifter) liftVtestp(isDouble bool, dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok1 := dst.(x86asm.Reg)
+	if !ok1 || (!isXmm(dstReg) && !isYmm(dstReg)) {
+		return nil, fmt.Errorf("vtestp requires XMM or YMM destination")
+	}
+
+	var maskStr string
+	if isDouble {
+		maskStr = "0x8000000000000000ULL"
+	} else {
+		maskStr = "0x8000000080000000ULL"
+	}
+
+	lines := []string{"    {"}
+	if isYmm(dstReg) {
+		s1, err := l.loadYmmArg(dst, nextPC, "s1")
+		if err != nil {
+			return nil, err
+		}
+		s2, err := l.loadYmmArg(src, nextPC, "s2")
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, s1...)
+		lines = append(lines, s2...)
+		lines = append(lines,
+			fmt.Sprintf("      const uint64_t mask = %s;", maskStr),
+			"      uint64_t zf_bits = (s1_lo.u64[0] & s2_lo.u64[0] & mask) | (s1_lo.u64[1] & s2_lo.u64[1] & mask) |",
+			"                         (s1_hi.u64[0] & s2_hi.u64[0] & mask) | (s1_hi.u64[1] & s2_hi.u64[1] & mask);",
+			"      uint64_t cf_bits = ((~s1_lo.u64[0]) & s2_lo.u64[0] & mask) | ((~s1_lo.u64[1]) & s2_lo.u64[1] & mask) |",
+			"                         ((~s1_hi.u64[0]) & s2_hi.u64[0] & mask) | ((~s1_hi.u64[1]) & s2_hi.u64[1] & mask);",
+			"      ctx->zf = (zf_bits == 0);",
+			"      ctx->cf = (cf_bits == 0);",
+			"      ctx->of = 0; ctx->sf = 0; ctx->af = 0; ctx->pf = 0;",
+			"    }",
+		)
+		return lines, nil
+	}
+
+	s1, err := l.loadXmmArg(dst, nextPC, "s1")
+	if err != nil {
+		return nil, err
+	}
+	s2, err := l.loadXmmArg(src, nextPC, "s2")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, s1...)
+	lines = append(lines, s2...)
+	lines = append(lines,
+		fmt.Sprintf("      const uint64_t mask = %s;", maskStr),
+		"      uint64_t zf_bits = (s1.u64[0] & s2.u64[0] & mask) | (s1.u64[1] & s2.u64[1] & mask);",
+		"      uint64_t cf_bits = ((~s1.u64[0]) & s2.u64[0] & mask) | ((~s1.u64[1]) & s2.u64[1] & mask);",
+		"      ctx->zf = (zf_bits == 0);",
+		"      ctx->cf = (cf_bits == 0);",
+		"      ctx->of = 0; ctx->sf = 0; ctx->af = 0; ctx->pf = 0;",
+		"    }",
+	)
+	return lines, nil
+}
+
 func (l *Lifter) liftRoundps(dst, src, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
 	dstReg, ok1 := dst.(x86asm.Reg)
 	imm, ok2 := immArg.(x86asm.Imm)

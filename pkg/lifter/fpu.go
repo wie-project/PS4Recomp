@@ -525,6 +525,13 @@ func (l *Lifter) liftFfreep() []string {
 	return []string{"    fpu_pop(ctx);"}
 }
 
+func (l *Lifter) liftFcos() []string {
+	return []string{
+		"    FPU_ST(0) = cos(FPU_ST(0));",
+		"    ctx->fpu_sw &= ~0x0400;",
+	}
+}
+
 func (l *Lifter) liftFsqrt() []string {
 	return []string{"    FPU_ST(0) = sqrt(FPU_ST(0));"}
 }

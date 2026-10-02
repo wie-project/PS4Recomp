@@ -488,6 +488,293 @@ func TestMissingOpsLifting(t *testing.T) {
 			},
 			contains: "ctx->mxcsr",
 		},
+		{
+			name: "PSUBUSB_reg",
+			inst: disasm.Instruction{
+				Address: 0x2000,
+				Inst: x86asm.Inst{
+					Op:   x86asm.PSUBUSB,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: "diff < 0",
+		},
+		{
+			name: "PADDSW_reg",
+			inst: disasm.Instruction{
+				Address: 0x2004,
+				Inst: x86asm.Inst{
+					Op:   x86asm.PADDSW,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: "sum > 32767",
+		},
+		{
+			name: "PADDSB_reg",
+			inst: disasm.Instruction{
+				Address: 0x2008,
+				Inst: x86asm.Inst{
+					Op:   x86asm.PADDSB,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: "sum > 127",
+		},
+		{
+			name: "PMAXUB_reg",
+			inst: disasm.Instruction{
+				Address: 0x200c,
+				Inst: x86asm.Inst{
+					Op:   x86asm.PMAXUB,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: "s.u8[i] > d->u8[i]",
+		},
+		{
+			name: "PSUBSB_reg",
+			inst: disasm.Instruction{
+				Address: 0x2010,
+				Inst: x86asm.Inst{
+					Op:   x86asm.PSUBSB,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: "diff > 127",
+		},
+		{
+			name: "PMADDUBSW_reg",
+			inst: disasm.Instruction{
+				Address: 0x2014,
+				Inst: x86asm.Inst{
+					Op:   x86asm.PMADDUBSW,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: "(int32_t)d->u8[2*i] * (int32_t)s.s8[2*i]",
+		},
+		{
+			name: "PADDUSB_reg",
+			inst: disasm.Instruction{
+				Address: 0x2018,
+				Inst: x86asm.Inst{
+					Op:   x86asm.PADDUSB,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: "sum > 255",
+		},
+		{
+			name: "PCMPGTB_reg",
+			inst: disasm.Instruction{
+				Address: 0x201c,
+				Inst: x86asm.Inst{
+					Op:   x86asm.PCMPGTB,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  4,
+				},
+			},
+			contains: "d->s8[i] > s.s8[i]",
+		},
+		{
+			name: "VPABSB_reg",
+			inst: disasm.Instruction{
+				Address: 0x2020,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VPABSB,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  5,
+				},
+			},
+			contains: "s.s8[0] < 0",
+		},
+		{
+			name: "VCOMISS_reg",
+			inst: disasm.Instruction{
+				Address: 0x2025,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VCOMISS,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  5,
+				},
+			},
+			contains: "isnan",
+		},
+		{
+			name: "VTESTPS_xmm",
+			inst: disasm.Instruction{
+				Address: 0x202a,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VTESTPS,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  5,
+				},
+			},
+			contains: "0x8000000080000000ULL",
+		},
+		{
+			name: "VTESTPS_ymm",
+			inst: disasm.Instruction{
+				Address: 0x202f,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VTESTPS,
+					Args: x86asm.Args{x86asm.Y0, x86asm.Y1},
+					Len:  5,
+				},
+			},
+			contains: "s1_hi.u64[0]",
+		},
+		{
+			name: "VTESTPD_xmm",
+			inst: disasm.Instruction{
+				Address: 0x2034,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VTESTPD,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  5,
+				},
+			},
+			contains: "0x8000000000000000ULL",
+		},
+		{
+			name: "VTESTPD_ymm",
+			inst: disasm.Instruction{
+				Address: 0x2039,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VTESTPD,
+					Args: x86asm.Args{x86asm.Y0, x86asm.Y1},
+					Len:  5,
+				},
+			},
+			contains: "s1_hi.u64[0]",
+		},
+		{
+			name: "VAESENC_reg",
+			inst: disasm.Instruction{
+				Address: 0x2040,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VAESENC,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1, x86asm.X2},
+					Len:  5,
+				},
+			},
+			contains: "recomp_vaesenc",
+		},
+		{
+			name: "VAESENCLAST_reg",
+			inst: disasm.Instruction{
+				Address: 0x2045,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VAESENCLAST,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1, x86asm.X2},
+					Len:  5,
+				},
+			},
+			contains: "recomp_vaesenclast",
+		},
+		{
+			name: "VAESDEC_reg",
+			inst: disasm.Instruction{
+				Address: 0x204a,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VAESDEC,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1, x86asm.X2},
+					Len:  5,
+				},
+			},
+			contains: "recomp_vaesdec",
+		},
+		{
+			name: "VAESDECLAST_reg",
+			inst: disasm.Instruction{
+				Address: 0x204f,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VAESDECLAST,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1, x86asm.X2},
+					Len:  5,
+				},
+			},
+			contains: "recomp_vaesdeclast",
+		},
+		{
+			name: "VAESIMC_reg",
+			inst: disasm.Instruction{
+				Address: 0x2054,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VAESIMC,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1},
+					Len:  5,
+				},
+			},
+			contains: "recomp_vaesimc",
+		},
+		{
+			name: "VAESKEYGENASSIST_reg",
+			inst: disasm.Instruction{
+				Address: 0x2059,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VAESKEYGENASSIST,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1, x86asm.Imm(0xab)},
+					Len:  6,
+				},
+			},
+			contains: "recomp_vaeskeygenassist(s, 0xab)",
+		},
+		{
+			name: "VPCLMULQDQ_reg",
+			inst: disasm.Instruction{
+				Address: 0x205f,
+				Inst: x86asm.Inst{
+					Op:   x86asm.VPCLMULQDQ,
+					Args: x86asm.Args{x86asm.X0, x86asm.X1, x86asm.X2, x86asm.Imm(0x10)},
+					Len:  6,
+				},
+			},
+			contains: "recomp_pclmulqdq(s1.u64[0], s2.u64[1])",
+		},
+		{
+			name: "FCOS",
+			inst: disasm.Instruction{
+				Address: 0x2065,
+				Inst: x86asm.Inst{
+					Op:  x86asm.FCOS,
+					Len: 2,
+				},
+			},
+			contains: "FPU_ST(0) = cos(FPU_ST(0))",
+		},
+		{
+			name: "STR_reg",
+			inst: disasm.Instruction{
+				Address: 0x2067,
+				Inst: x86asm.Inst{
+					Op:   x86asm.STR,
+					Args: x86asm.Args{x86asm.AX},
+					Len:  3,
+				},
+			},
+			contains: "0x40",
+		},
+		{
+			name: "SGDT_mem",
+			inst: disasm.Instruction{
+				Address: 0x206a,
+				Inst: x86asm.Inst{
+					Op:   x86asm.SGDT,
+					Args: x86asm.Args{x86asm.Mem{Base: x86asm.RSP, Disp: 8}},
+					Len:  5,
+				},
+			},
+			contains: "0x007F",
+		},
 	}
 
 	for _, tc := range testCases {

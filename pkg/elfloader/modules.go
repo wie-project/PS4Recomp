@@ -79,21 +79,25 @@ func isGuestModulePath(s string) bool {
 
 // MapGuestPath translates a PS4 guest path onto the host app directory.
 // /app0/sce_module/foo.prx → <appDir>/sce_module/foo.prx
+// %s/Modules/foo.prx → <appDir>/Modules/foo.prx
 func MapGuestPath(guestPath, appDir string) string {
 	if appDir == "" || guestPath == "" {
 		return ""
 	}
 	p := strings.ReplaceAll(guestPath, "\\", "/")
-	switch {
-	case p == "/app0":
+	if strings.HasPrefix(p, "/app0/") {
+		p = p[len("/app0/"):]
+	} else if p == "/app0" {
 		return appDir
-	case strings.HasPrefix(p, "/app0/"):
-		return filepath.Join(appDir, p[len("/app0/"):])
-	case strings.HasPrefix(p, "/"):
+	} else if strings.HasPrefix(p, "/") {
 		return ""
-	default:
-		return filepath.Join(appDir, p)
 	}
+	if strings.HasPrefix(p, "%s/") {
+		p = strings.TrimPrefix(p, "%s/")
+	} else if p == "%s" {
+		return appDir
+	}
+	return filepath.Join(appDir, p)
 }
 
 func fileExists(path string) bool {
@@ -111,15 +115,19 @@ func addModuleRef(out *[]ModuleRef, seen map[string]struct{}, path string, alias
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs
 	}
-	if _, ok := seen[path]; ok {
+	if realPath, err := filepath.EvalSymlinks(path); err == nil {
+		path = realPath
+	}
+	key := strings.ToLower(path)
+	if _, ok := seen[key]; ok {
 		for i := range *out {
-			if (*out)[i].Path == path {
+			if strings.ToLower((*out)[i].Path) == key {
 				(*out)[i].Aliases = uniqueNonEmpty(append((*out)[i].Aliases, aliases...))
 			}
 		}
 		return
 	}
-	seen[path] = struct{}{}
+	seen[key] = struct{}{}
 	*out = append(*out, ModuleRef{Path: path, Aliases: uniqueNonEmpty(aliases)})
 }
 
@@ -151,25 +159,42 @@ func thisAppModuleDirs(elfPath, appDir string) []string {
 		if abs, err := filepath.Abs(dir); err == nil {
 			dir = abs
 		}
+		if realPath, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = realPath
+		}
 		if _, err := os.Stat(dir); err != nil {
 			return
 		}
-		if _, ok := seen[dir]; ok {
+		key := strings.ToLower(dir)
+		if _, ok := seen[key]; ok {
 			return
 		}
-		seen[dir] = struct{}{}
+		seen[key] = struct{}{}
 		dirs = append(dirs, dir)
 	}
+
+	checkDir := func(base string) {
+		if base == "" {
+			return
+		}
+		add(base)
+		add(filepath.Join(base, "sce_module"))
+		add(filepath.Join(base, "prx"))
+		add(filepath.Join(base, "Modules"))
+		add(filepath.Join(base, "modules"))
+		add(filepath.Join(base, "Media", "Modules"))
+		add(filepath.Join(base, "Media", "modules"))
+		add(filepath.Join(base, "Plugins"))
+		add(filepath.Join(base, "plugins"))
+	}
+
 	if appDir != "" {
-		add(appDir)
-		add(filepath.Join(appDir, "sce_module"))
-		add(filepath.Join(appDir, "prx"))
+		checkDir(appDir)
 	}
 	if elfPath != "" {
 		dir := filepath.Dir(elfPath)
 		for range 5 {
-			add(filepath.Join(dir, "sce_module"))
-			add(filepath.Join(dir, "prx"))
+			checkDir(dir)
 			parent := filepath.Dir(dir)
 			if parent == dir {
 				break
@@ -184,6 +209,9 @@ func thisAppModuleDirs(elfPath, appDir string) []string {
 // files in <appDir>/sce_module, and guest paths such as /app0/sce_module/foo.prx
 // resolved through MapGuestPath. It does not search sibling projects.
 func DiscoverCompanionModules(elfPath, appDir string, image []byte) []ModuleRef {
+	if appDir == "" && elfPath != "" {
+		appDir = filepath.Dir(elfPath)
+	}
 	seen := make(map[string]struct{})
 	var out []ModuleRef
 
@@ -209,8 +237,18 @@ func DiscoverCompanionModules(elfPath, appDir string, image []byte) []ModuleRef 
 		if mapped != "" {
 			addModuleRef(&out, seen, mapped, filepath.Base(ref))
 		}
+		cleanRef := strings.TrimPrefix(strings.ReplaceAll(ref, "\\", "/"), "%s/")
+		if cleanRef != ref {
+			mappedClean := MapGuestPath(cleanRef, appDir)
+			if mappedClean != "" {
+				addModuleRef(&out, seen, mappedClean, filepath.Base(cleanRef))
+			}
+		}
 		for _, dir := range thisAppModuleDirs(elfPath, appDir) {
 			addModuleRef(&out, seen, filepath.Join(dir, filepath.Base(ref)), filepath.Base(ref))
+			if cleanRef != ref {
+				addModuleRef(&out, seen, filepath.Join(dir, filepath.Base(cleanRef)), filepath.Base(cleanRef))
+			}
 		}
 	}
 	return out

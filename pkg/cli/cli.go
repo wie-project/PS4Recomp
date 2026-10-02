@@ -711,7 +711,11 @@ func loadCompanionModules(cfg *Config, main *elfloader.LoadedELF) ([]emitter.Gue
 		}
 	}
 	for _, name := range referenced {
+		cleanName := strings.TrimPrefix(strings.ReplaceAll(name, "\\", "/"), "%s/")
 		if _, ok := found[strings.ToLower(filepath.Base(name))]; ok {
+			continue
+		}
+		if _, ok := found[strings.ToLower(filepath.Base(cleanName))]; ok {
 			continue
 		}
 		fmt.Printf("             Referenced module %s was not found for AOT linking\n", name)

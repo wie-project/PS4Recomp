@@ -1113,6 +1113,10 @@ func (l *Lifter) liftVpabs(op x86asm.Op, dst, src x86asm.Arg, nextPC uint64) ([]
 		for i := 0; i < 8; i++ {
 			lines = append(lines, fmt.Sprintf("      res.u16[%d] = (s.s16[%d] < 0) ? (uint16_t)(-s.s16[%d]) : (uint16_t)s.s16[%d];", i, i, i, i))
 		}
+	case x86asm.VPABSB:
+		for i := 0; i < 16; i++ {
+			lines = append(lines, fmt.Sprintf("      res.u8[%d] = (s.s8[%d] < 0) ? (uint8_t)(-s.s8[%d]) : (uint8_t)s.s8[%d];", i, i, i, i))
+		}
 	}
 
 	lines = append(lines,
@@ -1567,4 +1571,348 @@ func (l *Lifter) liftVmxcsr(isStore bool, arg x86asm.Arg, nextPC uint64) ([]stri
 	return []string{
 		fmt.Sprintf("    ctx->mxcsr = MEM_U32(%s);", addr),
 	}, nil
+}
+
+// liftPaddsubSat2Op handles PSUBUSB, PADDUSB, PADDSW, PADDSB, PSUBSB (SSE2/MMX 2-operand)
+func (l *Lifter) liftPaddsubSat2Op(op x86asm.Op, dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || (!isXmm(dstReg) && !isMmx(dstReg)) {
+		return nil, fmt.Errorf("saturating add/sub dst must be XMM or MMX register")
+	}
+
+	if isMmx(dstReg) {
+		mIdx := mmxIdx(dstReg)
+		sRead, _, err := l.getOperandRead(src, 8, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines := make([]string, 0, 8)
+		lines = append(lines,
+			"    {",
+			fmt.Sprintf("      uint64_t s = (uint64_t)(%s);", sRead),
+			fmt.Sprintf("      uint64_t d = ctx->mmx[%d];", mIdx),
+		)
+		switch op {
+		case x86asm.PADDUSB:
+			lines = append(lines,
+				"      uint8_t *pd = (uint8_t *)&d; uint8_t *ps = (uint8_t *)&s;",
+				"      for (int i = 0; i < 8; i++) { uint32_t sum = (uint32_t)pd[i] + (uint32_t)ps[i]; pd[i] = (sum > 255) ? 255 : (uint8_t)sum; }",
+			)
+		case x86asm.PADDSB:
+			lines = append(lines,
+				"      int8_t *pd = (int8_t *)&d; int8_t *ps = (int8_t *)&s;",
+				"      for (int i = 0; i < 8; i++) { int16_t sum = (int16_t)pd[i] + (int16_t)ps[i]; pd[i] = (sum > 127) ? 127 : ((sum < -128) ? -128 : (int8_t)sum); }",
+			)
+		case x86asm.PADDSW:
+			lines = append(lines,
+				"      int16_t *pd = (int16_t *)&d; int16_t *ps = (int16_t *)&s;",
+				"      for (int i = 0; i < 4; i++) { int32_t sum = (int32_t)pd[i] + (int32_t)ps[i]; pd[i] = (sum > 32767) ? 32767 : ((sum < -32768) ? -32768 : (int16_t)sum); }",
+			)
+		case x86asm.PSUBUSB:
+			lines = append(lines,
+				"      uint8_t *pd = (uint8_t *)&d; uint8_t *ps = (uint8_t *)&s;",
+				"      for (int i = 0; i < 8; i++) { int32_t diff = (int32_t)pd[i] - (int32_t)ps[i]; pd[i] = (diff < 0) ? 0 : (uint8_t)diff; }",
+			)
+		case x86asm.PSUBSB:
+			lines = append(lines,
+				"      int8_t *pd = (int8_t *)&d; int8_t *ps = (int8_t *)&s;",
+				"      for (int i = 0; i < 8; i++) { int16_t diff = (int16_t)pd[i] - (int16_t)ps[i]; pd[i] = (diff > 127) ? 127 : ((diff < -128) ? -128 : (int8_t)diff); }",
+			)
+		}
+		lines = append(lines,
+			fmt.Sprintf("      ctx->mmx[%d] = d;", mIdx),
+			"    }",
+		)
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	lines := make([]string, 0, 8)
+	lines = append(lines, "    {")
+	sCode, err := l.loadXmmArg(src, nextPC, "s")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, sCode...)
+	lines = append(lines, fmt.Sprintf("      xmm_reg_t *d = &ctx->%s;", infoDst.BaseReg))
+
+	switch op {
+	case x86asm.PADDUSB:
+		lines = append(lines,
+			"      for (int i = 0; i < 16; i++) { uint32_t sum = (uint32_t)d->u8[i] + (uint32_t)s.u8[i]; d->u8[i] = (sum > 255) ? 255 : (uint8_t)sum; }",
+		)
+	case x86asm.PADDSB:
+		lines = append(lines,
+			"      for (int i = 0; i < 16; i++) { int16_t sum = (int16_t)d->s8[i] + (int16_t)s.s8[i]; d->s8[i] = (sum > 127) ? 127 : ((sum < -128) ? -128 : (int8_t)sum); }",
+		)
+	case x86asm.PADDSW:
+		lines = append(lines,
+			"      for (int i = 0; i < 8; i++) { int32_t sum = (int32_t)d->s16[i] + (int32_t)s.s16[i]; d->s16[i] = (sum > 32767) ? 32767 : ((sum < -32768) ? -32768 : (int16_t)sum); }",
+		)
+	case x86asm.PSUBUSB:
+		lines = append(lines,
+			"      for (int i = 0; i < 16; i++) { int32_t diff = (int32_t)d->u8[i] - (int32_t)s.u8[i]; d->u8[i] = (diff < 0) ? 0 : (uint8_t)diff; }",
+		)
+	case x86asm.PSUBSB:
+		lines = append(lines,
+			"      for (int i = 0; i < 16; i++) { int16_t diff = (int16_t)d->s8[i] - (int16_t)s.s8[i]; d->s8[i] = (diff > 127) ? 127 : ((diff < -128) ? -128 : (int8_t)diff); }",
+		)
+	}
+
+	lines = append(lines, "    }")
+	return lines, nil
+}
+
+// liftPmaxub2Op handles PMAXUB dst, src (SSE2/MMX)
+func (l *Lifter) liftPmaxub2Op(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || (!isXmm(dstReg) && !isMmx(dstReg)) {
+		return nil, fmt.Errorf("pmaxub dst must be XMM or MMX register")
+	}
+
+	if isMmx(dstReg) {
+		mIdx := mmxIdx(dstReg)
+		sRead, _, err := l.getOperandRead(src, 8, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines := make([]string, 0, 8)
+		lines = append(lines,
+			"    {",
+			fmt.Sprintf("      uint64_t s = (uint64_t)(%s);", sRead),
+			fmt.Sprintf("      uint64_t d = ctx->mmx[%d];", mIdx),
+			"      uint8_t *pd = (uint8_t *)&d; uint8_t *ps = (uint8_t *)&s;",
+			"      for (int i = 0; i < 8; i++) { if (ps[i] > pd[i]) pd[i] = ps[i]; }",
+			fmt.Sprintf("      ctx->mmx[%d] = d;", mIdx),
+			"    }",
+		)
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	lines := make([]string, 0, 8)
+	lines = append(lines, "    {")
+	sCode, err := l.loadXmmArg(src, nextPC, "s")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, sCode...)
+	lines = append(lines,
+		fmt.Sprintf("      xmm_reg_t *d = &ctx->%s;", infoDst.BaseReg),
+		"      for (int i = 0; i < 16; i++) { if (s.u8[i] > d->u8[i]) d->u8[i] = s.u8[i]; }",
+		"    }",
+	)
+	return lines, nil
+}
+
+// liftPcmpgtb2Op handles PCMPGTB dst, src (SSE2/MMX)
+func (l *Lifter) liftPcmpgtb2Op(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || (!isXmm(dstReg) && !isMmx(dstReg)) {
+		return nil, fmt.Errorf("pcmpgtb dst must be XMM or MMX register")
+	}
+
+	if isMmx(dstReg) {
+		mIdx := mmxIdx(dstReg)
+		sRead, _, err := l.getOperandRead(src, 8, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines := make([]string, 0, 8)
+		lines = append(lines,
+			"    {",
+			fmt.Sprintf("      uint64_t s = (uint64_t)(%s);", sRead),
+			fmt.Sprintf("      uint64_t d = ctx->mmx[%d];", mIdx),
+			"      int8_t *pd = (int8_t *)&d; int8_t *ps = (int8_t *)&s;",
+			"      for (int i = 0; i < 8; i++) { pd[i] = (pd[i] > ps[i]) ? (int8_t)0xFF : 0; }",
+			fmt.Sprintf("      ctx->mmx[%d] = d;", mIdx),
+			"    }",
+		)
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	lines := make([]string, 0, 8)
+	lines = append(lines, "    {")
+	sCode, err := l.loadXmmArg(src, nextPC, "s")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, sCode...)
+	lines = append(lines,
+		fmt.Sprintf("      xmm_reg_t *d = &ctx->%s;", infoDst.BaseReg),
+		"      for (int i = 0; i < 16; i++) { d->u8[i] = (d->s8[i] > s.s8[i]) ? 0xFF : 0x00; }",
+		"    }",
+	)
+	return lines, nil
+}
+
+// liftPmaddubsw2Op handles PMADDUBSW dst, src (SSSE3/MMX)
+func (l *Lifter) liftPmaddubsw2Op(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok := dst.(x86asm.Reg)
+	if !ok || (!isXmm(dstReg) && !isMmx(dstReg)) {
+		return nil, fmt.Errorf("pmaddubsw dst must be XMM or MMX register")
+	}
+
+	if isMmx(dstReg) {
+		mIdx := mmxIdx(dstReg)
+		sRead, _, err := l.getOperandRead(src, 8, nextPC)
+		if err != nil {
+			return nil, err
+		}
+		lines := make([]string, 0, 10)
+		lines = append(lines,
+			"    {",
+			fmt.Sprintf("      uint64_t s = (uint64_t)(%s);", sRead),
+			fmt.Sprintf("      uint64_t d = ctx->mmx[%d];", mIdx),
+			"      uint8_t *pd = (uint8_t *)&d; int8_t *ps = (int8_t *)&s;",
+			"      int16_t res[4];",
+			"      for (int i = 0; i < 4; i++) {",
+			"        int32_t prod = (int32_t)pd[2*i] * (int32_t)ps[2*i] + (int32_t)pd[2*i+1] * (int32_t)ps[2*i+1];",
+			"        res[i] = (prod > 32767) ? 32767 : ((prod < -32768) ? -32768 : (int16_t)prod);",
+			"      }",
+			fmt.Sprintf("      memcpy(&ctx->mmx[%d], res, 8);", mIdx),
+			"    }",
+		)
+		return lines, nil
+	}
+
+	infoDst := regMap[dstReg]
+	lines := make([]string, 0, 10)
+	lines = append(lines, "    {")
+	sCode, err := l.loadXmmArg(src, nextPC, "s")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, sCode...)
+	lines = append(lines,
+		fmt.Sprintf("      xmm_reg_t *d = &ctx->%s;", infoDst.BaseReg),
+		"      xmm_reg_t res = {0};",
+		"      for (int i = 0; i < 8; i++) {",
+		"        int32_t prod = (int32_t)d->u8[2*i] * (int32_t)s.s8[2*i] + (int32_t)d->u8[2*i+1] * (int32_t)s.s8[2*i+1];",
+		"        res.s16[i] = (prod > 32767) ? 32767 : ((prod < -32768) ? -32768 : (int16_t)prod);",
+		"      }",
+		"      *d = res;",
+		"    }",
+	)
+	return lines, nil
+}
+
+// liftVaesRound handles VAESENC, VAESENCLAST, VAESDEC, VAESDECLAST
+func (l *Lifter) liftVaesRound(funcName string, dst, src1, src2 x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok1 := dst.(x86asm.Reg)
+	if !ok1 || !isXmm(dstReg) {
+		return nil, fmt.Errorf("%s destination must be XMM register", funcName)
+	}
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
+
+	lines := make([]string, 0, 8)
+	lines = append(lines, "    {")
+	s1Code, err := l.loadXmmArg(src1, nextPC, "s1")
+	if err != nil {
+		return nil, err
+	}
+	s2Code, err := l.loadXmmArg(src2, nextPC, "s2")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, s1Code...)
+	lines = append(lines, s2Code...)
+	lines = append(lines,
+		fmt.Sprintf("      ctx->%s = %s(s1, s2);", infoDst.BaseReg, funcName),
+		fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx),
+		"    }",
+	)
+	return lines, nil
+}
+
+// liftVaesImc handles VAESIMC
+func (l *Lifter) liftVaesImc(dst, src x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok1 := dst.(x86asm.Reg)
+	if !ok1 || !isXmm(dstReg) {
+		return nil, fmt.Errorf("vaesimc destination must be XMM register")
+	}
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
+
+	lines := make([]string, 0, 6)
+	lines = append(lines, "    {")
+	sCode, err := l.loadXmmArg(src, nextPC, "s")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, sCode...)
+	lines = append(lines,
+		fmt.Sprintf("      ctx->%s = recomp_vaesimc(s);", infoDst.BaseReg),
+		fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx),
+		"    }",
+	)
+	return lines, nil
+}
+
+// liftVaesKeyGenAssist handles VAESKEYGENASSIST
+func (l *Lifter) liftVaesKeyGenAssist(dst, src, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok1 := dst.(x86asm.Reg)
+	if !ok1 || !isXmm(dstReg) {
+		return nil, fmt.Errorf("vaeskeygenassist destination must be XMM register")
+	}
+	imm, ok2 := immArg.(x86asm.Imm)
+	if !ok2 {
+		return nil, fmt.Errorf("vaeskeygenassist requires immediate operand")
+	}
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
+
+	lines := make([]string, 0, 6)
+	lines = append(lines, "    {")
+	sCode, err := l.loadXmmArg(src, nextPC, "s")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, sCode...)
+	lines = append(lines,
+		fmt.Sprintf("      ctx->%s = recomp_vaeskeygenassist(s, 0x%02x);", infoDst.BaseReg, uint8(imm)),
+		fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx),
+		"    }",
+	)
+	return lines, nil
+}
+
+// liftVpclmulqdq handles VPCLMULQDQ
+func (l *Lifter) liftVpclmulqdq(dst, src1, src2, immArg x86asm.Arg, nextPC uint64) ([]string, error) {
+	dstReg, ok1 := dst.(x86asm.Reg)
+	if !ok1 || !isXmm(dstReg) {
+		return nil, fmt.Errorf("vpclmulqdq destination must be XMM register")
+	}
+	imm, ok2 := immArg.(x86asm.Imm)
+	if !ok2 {
+		return nil, fmt.Errorf("vpclmulqdq requires immediate operand")
+	}
+	infoDst := regMap[dstReg]
+	dIdx := int(dstReg - x86asm.X0)
+	imm8 := uint8(imm)
+
+	lines := make([]string, 0, 8)
+	lines = append(lines, "    {")
+	s1Code, err := l.loadXmmArg(src1, nextPC, "s1")
+	if err != nil {
+		return nil, err
+	}
+	s2Code, err := l.loadXmmArg(src2, nextPC, "s2")
+	if err != nil {
+		return nil, err
+	}
+	lines = append(lines, s1Code...)
+	lines = append(lines, s2Code...)
+
+	s1Idx := imm8 & 0x01
+	s2Idx := (imm8 >> 4) & 0x01
+
+	lines = append(lines,
+		fmt.Sprintf("      ctx->%s = recomp_pclmulqdq(s1.u64[%d], s2.u64[%d]);", infoDst.BaseReg, s1Idx, s2Idx),
+		fmt.Sprintf("      memset(&ctx->ymmh[%d], 0, 16);", dIdx),
+		"    }",
+	)
+	return lines, nil
 }
