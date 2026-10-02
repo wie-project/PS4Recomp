@@ -219,114 +219,142 @@ int32_t sceNpUnregisterStateCallbackA(int32_t callback_id) {
 // GuestContext shims for NpManager
 void shim_sceNpCheckNpAvailability(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCheckNpAvailability((int32_t)ctx->rdi, (OrbisNpOnlineId*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpCheckNpAvailabilityA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCheckNpAvailabilityA((int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpCheckPlus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCheckPlus((int32_t)ctx->rdi, (const OrbisNpCheckPlusParameter*)ctx->rsi, (OrbisNpCheckPlusResult*)ctx->rdx);
+    SHIM_RETURN();
 }
 
 void shim_sceNpCreateAsyncRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCreateAsyncRequest((const OrbisNpCreateAsyncRequestParameter*)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpCreateRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCreateRequest();
+    SHIM_RETURN();
 }
 
 void shim_sceNpDeleteRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpDeleteRequest((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountCountry(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetAccountCountry((OrbisNpOnlineId*)ctx->rdi, (OrbisNpCountryCode*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountCountryA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetAccountCountryA((int32_t)ctx->rdi, (OrbisNpCountryCode*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountDateOfBirth(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetAccountDateOfBirth((OrbisNpOnlineId*)ctx->rdi, (OrbisNpDate*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountDateOfBirthA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetAccountDateOfBirthA((int32_t)ctx->rdi, (OrbisNpDate*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountId(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetAccountId((OrbisNpOnlineId*)ctx->rdi, (uint64_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountIdA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetAccountIdA((int32_t)ctx->rdi, (uint64_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountLanguage(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetAccountLanguage((OrbisNpOnlineId*)ctx->rdi, (OrbisNpLanguageCode*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountLanguageA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetAccountLanguageA((int32_t)ctx->rdi, (OrbisNpLanguageCode*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetGamePresenceStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetGamePresenceStatus((OrbisNpOnlineId*)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetGamePresenceStatusA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetGamePresenceStatusA((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetNpId(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetNpId((int32_t)ctx->rdi, (OrbisNpId*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetNpReachabilityState(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetNpReachabilityState((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetOnlineId(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetOnlineId((int32_t)ctx->rdi, (OrbisNpOnlineId*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpGetState(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGetState((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpHasSignedUp(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpHasSignedUp((int32_t)ctx->rdi, (bool*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpIsPlusMember(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpIsPlusMember((int32_t)ctx->rdi, (bool*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpPollAsync(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpPollAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpWaitAsync(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWaitAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpRegisterStateCallback(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpRegisterStateCallback((void*)ctx->rdi, (void*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpRegisterStateCallbackA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpRegisterStateCallbackA((void*)ctx->rdi, (void*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpUnregisterStateCallback(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpUnregisterStateCallback((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpUnregisterStateCallbackA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpUnregisterStateCallbackA((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 //=============================================================================
@@ -383,30 +411,37 @@ int32_t sceNpAuthWaitAsync(int32_t req_id, int32_t* result) {
 
 void shim_sceNpAuthCreateRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpAuthCreateRequest();
+    SHIM_RETURN();
 }
 
 void shim_sceNpAuthCreateAsyncRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpAuthCreateAsyncRequest((const OrbisNpAuthCreateAsyncRequestParameter*)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpAuthDeleteRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpAuthDeleteRequest((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpAuthGetAuthorizationCode(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpAuthGetAuthorizationCode((int32_t)ctx->rdi, (const void*)ctx->rsi, (OrbisNpAuthorizationCode*)ctx->rdx, (int32_t*)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceNpAuthGetAuthorizationCodeA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpAuthGetAuthorizationCodeA((int32_t)ctx->rdi, (const OrbisNpAuthGetAuthorizationCodeParameterA*)ctx->rsi, (OrbisNpAuthorizationCode*)ctx->rdx, (int32_t*)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceNpAuthPollAsync(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpAuthPollAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpAuthWaitAsync(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpAuthWaitAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 //=============================================================================
@@ -442,18 +477,22 @@ int32_t sceNpMatching2CreateContextA(const void* param, uint16_t* ctxId) {
 
 void shim_sceNpMatching2Initialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpMatching2Initialize((void*)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpMatching2Terminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpMatching2Terminate();
+    SHIM_RETURN();
 }
 
 void shim_sceNpMatching2CreateContext(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpMatching2CreateContext((const void*)ctx->rdi, (uint16_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpMatching2CreateContextA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpMatching2CreateContextA((const void*)ctx->rdi, (uint16_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 //=============================================================================
@@ -496,18 +535,22 @@ int32_t sceNpSignalingCreateContextA(int32_t userId, void* callback, void* callb
 
 void shim_sceNpSignalingInitialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpSignalingInitialize((int64_t)ctx->rdi, (int32_t)ctx->rsi, (int32_t)ctx->rdx, (int64_t)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceNpSignalingTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpSignalingTerminate();
+    SHIM_RETURN();
 }
 
 void shim_sceNpSignalingCreateContext(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpSignalingCreateContext((const void*)ctx->rdi, (void*)ctx->rsi, (void*)ctx->rdx, (uint32_t*)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceNpSignalingCreateContextA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpSignalingCreateContextA((int32_t)ctx->rdi, (void*)ctx->rsi, (void*)ctx->rdx, (uint32_t*)ctx->rcx);
+    SHIM_RETURN();
 }
 
 //=============================================================================
@@ -575,39 +618,48 @@ int32_t sceNpWebApiDeleteRequest(int64_t requestId) {
 
 void shim_sceNpWebApiInitialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWebApiInitialize((int32_t)ctx->rdi, (uint64_t)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpWebApiTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWebApiTerminate((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpWebApiCreateContext(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWebApiCreateContext((int32_t)ctx->rdi, (OrbisNpOnlineId*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpWebApiCreateContextA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWebApiCreateContextA((int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpWebApiDeleteContext(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWebApiDeleteContext((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpWebApiCreateRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWebApiCreateRequest(
         (int32_t)ctx->rdi, (const char*)ctx->rsi, (const char*)ctx->rdx, (int32_t)ctx->rcx, (const void*)ctx->r8, (int64_t*)ctx->r9);
+    SHIM_RETURN();
 }
 
 void shim_sceNpWebApiSendRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWebApiSendRequest((int64_t)ctx->rdi, (const void*)ctx->rsi, (uint64_t)ctx->rdx);
+    SHIM_RETURN();
 }
 
 void shim_sceNpWebApiSendRequest2(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWebApiSendRequest2((int64_t)ctx->rdi, (const void*)ctx->rsi, (uint64_t)ctx->rdx, (void*)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceNpWebApiDeleteRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWebApiDeleteRequest((int64_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 //=============================================================================
@@ -661,30 +713,37 @@ int32_t sceNpScoreWaitAsync(int32_t reqId, int32_t* result) {
 
 void shim_sceNpScoreCreateNpTitleCtx(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpScoreCreateNpTitleCtx((OrbisNpServiceLabel)ctx->rdi, (const OrbisNpId*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpScoreCreateNpTitleCtxA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpScoreCreateNpTitleCtxA((OrbisNpServiceLabel)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpScoreDeleteNpTitleCtx(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpScoreDeleteNpTitleCtx((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpScoreCreateRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpScoreCreateRequest((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpScoreDeleteRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpScoreDeleteRequest((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpScorePollAsync(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpScorePollAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpScoreWaitAsync(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpScoreWaitAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 //=============================================================================
@@ -738,30 +797,37 @@ int32_t sceNpTusWaitAsync(int32_t reqId, int32_t* result) {
 
 void shim_sceNpTusCreateNpTitleCtx(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpTusCreateNpTitleCtx((OrbisNpServiceLabel)ctx->rdi, (OrbisNpId*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpTusCreateNpTitleCtxA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpTusCreateNpTitleCtxA((OrbisNpServiceLabel)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpTusDeleteNpTitleCtx(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpTusDeleteNpTitleCtx((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpTusCreateRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpTusCreateRequest((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpTusDeleteRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpTusDeleteRequest((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpTusPollAsync(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpTusPollAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpTusWaitAsync(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpTusWaitAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    SHIM_RETURN();
 }
 
 //=============================================================================
@@ -806,26 +872,32 @@ int32_t sceNpCommerceDialogOpen(const void* param) {
 
 void shim_sceNpCommerceDialogInitialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCommerceDialogInitialize();
+    SHIM_RETURN();
 }
 
 void shim_sceNpCommerceDialogTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCommerceDialogTerminate();
+    SHIM_RETURN();
 }
 
 void shim_sceNpCommerceDialogClose(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCommerceDialogClose();
+    SHIM_RETURN();
 }
 
 void shim_sceNpCommerceDialogGetStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCommerceDialogGetStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceNpCommerceDialogGetResult(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCommerceDialogGetResult((OrbisNpCommerceDialogResult*)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceNpCommerceDialogOpen(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCommerceDialogOpen((const void*)ctx->rdi);
+    SHIM_RETURN();
 }
 
 //=============================================================================
@@ -854,16 +926,20 @@ int32_t sceNpGameIntentTerminate(void) {
 
 void shim_sceNpUtilityInit(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpUtilityInit();
+    SHIM_RETURN();
 }
 
 void shim_sceNpUtilityTerm(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpUtilityTerm();
+    SHIM_RETURN();
 }
 
 void shim_sceNpGameIntentInitialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGameIntentInitialize();
+    SHIM_RETURN();
 }
 
 void shim_sceNpGameIntentTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGameIntentTerminate();
+    SHIM_RETURN();
 }

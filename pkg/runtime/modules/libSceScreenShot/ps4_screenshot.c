@@ -16,8 +16,10 @@ int32_t sceScreenShotDisable(void) {
 // Shims
 void shim_sceScreenShotEnable(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceScreenShotEnable();
+    SHIM_RETURN();
 }
 
 void shim_sceScreenShotDisable(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceScreenShotDisable();
+    SHIM_RETURN();
 }

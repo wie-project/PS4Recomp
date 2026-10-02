@@ -39,24 +39,30 @@ int32_t sceVoiceQoSGetStatus(void) {
 
 void shim_sceVoiceQoSInit(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVoiceQoSInit();
+    SHIM_RETURN();
 }
 
 void shim_sceVoiceQoSInitHQ(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVoiceQoSInitHQ();
+    SHIM_RETURN();
 }
 
 void shim_sceVoiceQoSEnd(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVoiceQoSEnd();
+    SHIM_RETURN();
 }
 
 void shim_sceVoiceQoSConnect(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVoiceQoSConnect();
+    SHIM_RETURN();
 }
 
 void shim_sceVoiceQoSDisconnect(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVoiceQoSDisconnect();
+    SHIM_RETURN();
 }
 
 void shim_sceVoiceQoSGetStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVoiceQoSGetStatus();
+    SHIM_RETURN();
 }

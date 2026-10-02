@@ -22,12 +22,15 @@ int32_t sceSharePlaySetProhibition(int32_t prohibited) {
 // Shims
 void shim_sceSharePlayInitialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSharePlayInitialize();
+    SHIM_RETURN();
 }
 
 void shim_sceSharePlayTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSharePlayTerminate();
+    SHIM_RETURN();
 }
 
 void shim_sceSharePlaySetProhibition(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSharePlaySetProhibition((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }

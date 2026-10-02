@@ -96,24 +96,34 @@ int32_t sceInvitationDialogTerminate(void) {
 // Shims
 void shim_sceInvitationDialogInitialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceInvitationDialogInitialize();
+    SHIM_RETURN();
 }
 
 void shim_sceInvitationDialogOpenA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceInvitationDialogOpenA((const OrbisInvitationDialogParamA *)ctx->rdi);
+    ctx->rax = (uint64_t)sceInvitationDialogOpenA(
+        ctx->rdi ? (const OrbisInvitationDialogParamA *)(ctx->mem_base + ctx->rdi) : NULL
+    );
+    SHIM_RETURN();
 }
 
 void shim_sceInvitationDialogUpdateStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceInvitationDialogUpdateStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceInvitationDialogGetStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceInvitationDialogGetStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceInvitationDialogGetResultA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceInvitationDialogGetResultA((OrbisInvitationDialogResultA *)ctx->rdi);
+    ctx->rax = (uint64_t)sceInvitationDialogGetResultA(
+        ctx->rdi ? (OrbisInvitationDialogResultA *)(ctx->mem_base + ctx->rdi) : NULL
+    );
+    SHIM_RETURN();
 }
 
 void shim_sceInvitationDialogTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceInvitationDialogTerminate();
+    SHIM_RETURN();
 }

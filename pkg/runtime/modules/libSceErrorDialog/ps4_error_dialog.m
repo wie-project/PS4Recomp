@@ -110,20 +110,27 @@ int32_t sceErrorDialogTerminate(void) {
 // Shims
 void shim_sceErrorDialogInitialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceErrorDialogInitialize();
+    SHIM_RETURN();
 }
 
 void shim_sceErrorDialogOpen(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceErrorDialogOpen((const OrbisErrorDialogParam *)ctx->rdi);
+    ctx->rax = (uint64_t)sceErrorDialogOpen(
+        ctx->rdi ? (const OrbisErrorDialogParam *)(ctx->mem_base + ctx->rdi) : NULL
+    );
+    SHIM_RETURN();
 }
 
 void shim_sceErrorDialogUpdateStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceErrorDialogUpdateStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceErrorDialogGetStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceErrorDialogGetStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceErrorDialogTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceErrorDialogTerminate();
+    SHIM_RETURN();
 }

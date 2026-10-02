@@ -90,38 +90,45 @@ int32_t sceVideoRecordingSetInfo(OrbisVideoRecordingInfo set_info, const void *i
 // Shims
 void shim_sceVideoRecordingQueryMemSize2(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVideoRecordingQueryMemSize2(
-        (const OrbisVideoRecordingParam2 *)ctx->rdi,
-        (size_t *)ctx->rsi
+        ctx->rdi ? (const OrbisVideoRecordingParam2 *)(ctx->mem_base + ctx->rdi) : NULL,
+        ctx->rsi ? (size_t *)(ctx->mem_base + ctx->rsi) : NULL
     );
+    SHIM_RETURN();
 }
 
 void shim_sceVideoRecordingOpen2(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVideoRecordingOpen2(
-        (const OrbisVideoRecordingParam2 *)ctx->rdi,
-        (void *)ctx->rsi
+        ctx->rdi ? (const OrbisVideoRecordingParam2 *)(ctx->mem_base + ctx->rdi) : NULL,
+        ctx->rsi ? (void *)(ctx->mem_base + ctx->rsi) : NULL
     );
+    SHIM_RETURN();
 }
 
 void shim_sceVideoRecordingClose(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVideoRecordingClose();
+    SHIM_RETURN();
 }
 
 void shim_sceVideoRecordingStart(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVideoRecordingStart();
+    SHIM_RETURN();
 }
 
 void shim_sceVideoRecordingStop(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVideoRecordingStop();
+    SHIM_RETURN();
 }
 
 void shim_sceVideoRecordingGetStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVideoRecordingGetStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceVideoRecordingSetInfo(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVideoRecordingSetInfo(
         (OrbisVideoRecordingInfo)ctx->rdi,
-        (const void *)ctx->rsi,
+        ctx->rsi ? (const void *)(ctx->mem_base + ctx->rsi) : NULL,
         (uint64_t)ctx->rdx
     );
+    SHIM_RETURN();
 }

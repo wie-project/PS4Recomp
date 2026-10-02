@@ -147,24 +147,34 @@ int32_t sceSaveDataDialogTerminate(void) {
 // Shims
 void shim_sceSaveDataDialogInitialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSaveDataDialogInitialize();
+    SHIM_RETURN();
 }
 
 void shim_sceSaveDataDialogOpen(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceSaveDataDialogOpen((const OrbisSaveDataDialogParam *)ctx->rdi);
+    ctx->rax = (uint64_t)sceSaveDataDialogOpen(
+        ctx->rdi ? (const OrbisSaveDataDialogParam *)(ctx->mem_base + ctx->rdi) : NULL
+    );
+    SHIM_RETURN();
 }
 
 void shim_sceSaveDataDialogUpdateStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSaveDataDialogUpdateStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceSaveDataDialogGetStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSaveDataDialogGetStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceSaveDataDialogGetResult(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceSaveDataDialogGetResult((OrbisSaveDataDialogResult *)ctx->rdi);
+    ctx->rax = (uint64_t)sceSaveDataDialogGetResult(
+        ctx->rdi ? (OrbisSaveDataDialogResult *)(ctx->mem_base + ctx->rdi) : NULL
+    );
+    SHIM_RETURN();
 }
 
 void shim_sceSaveDataDialogTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSaveDataDialogTerminate();
+    SHIM_RETURN();
 }

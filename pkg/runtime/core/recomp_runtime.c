@@ -41,6 +41,15 @@ static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
             (unsigned long long)g_current_ctx->r13,
             (unsigned long long)g_current_ctx->r14,
             (unsigned long long)g_current_ctx->r15);
+    if (g_current_ctx->mem_base && g_current_ctx->rsp < g_current_ctx->mem_size) {
+      fprintf(stderr, "Guest Stack at RSP=0x%llx (96 words):\n", (unsigned long long)g_current_ctx->rsp);
+      uint64_t *sp = (uint64_t *)(g_current_ctx->mem_base + g_current_ctx->rsp);
+      for (int i = 0; i < 96; i++) {
+        if ((uint64_t)(g_current_ctx->rsp + i * 8 + 8) <= g_current_ctx->mem_size) {
+          fprintf(stderr, "  [RSP+0x%03x] = 0x%016llx\n", i * 8, (unsigned long long)sp[i]);
+        }
+      }
+    }
 #if defined(__APPLE__) && defined(__arm64__)
     uint64_t host_pc = ((ucontext_t *)ucontext)->uc_mcontext->__ss.__pc;
     fprintf(stderr, "Host PC: 0x%llx\n", (unsigned long long)host_pc);

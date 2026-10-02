@@ -31,12 +31,15 @@ int32_t sceSslGetCaCerts(int32_t sslCtxId, OrbisSslCaCerts *certs) {
 // Shims
 void shim_sceSslInit(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSslInit((size_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceSslTerm(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSslTerm((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceSslGetCaCerts(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSslGetCaCerts((int32_t)ctx->rdi, (OrbisSslCaCerts *)ctx->rsi);
+    SHIM_RETURN();
 }

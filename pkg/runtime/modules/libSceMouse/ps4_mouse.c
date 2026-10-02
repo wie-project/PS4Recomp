@@ -77,6 +77,7 @@ int32_t sceMouseRead(int32_t handle, OrbisMouseData *pData, int32_t num) {
 // Shims
 void shim_sceMouseInit(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceMouseInit();
+    SHIM_RETURN();
 }
 
 void shim_sceMouseOpen(GuestContext *ctx) {
@@ -84,18 +85,22 @@ void shim_sceMouseOpen(GuestContext *ctx) {
         (int32_t)ctx->rdi,
         (int32_t)ctx->rsi,
         (int32_t)ctx->rdx,
-        (const void *)ctx->rcx
+        ctx->rcx ? (const void *)(ctx->mem_base + ctx->rcx) : NULL
     );
+    SHIM_RETURN();
 }
 
 void shim_sceMouseClose(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceMouseClose((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceMouseRead(GuestContext *ctx) {
+    OrbisMouseData *pData = ctx->rsi ? (OrbisMouseData *)(ctx->mem_base + ctx->rsi) : NULL;
     ctx->rax = (uint64_t)sceMouseRead(
         (int32_t)ctx->rdi,
-        (OrbisMouseData *)ctx->rsi,
+        pData,
         (int32_t)ctx->rdx
     );
+    SHIM_RETURN();
 }

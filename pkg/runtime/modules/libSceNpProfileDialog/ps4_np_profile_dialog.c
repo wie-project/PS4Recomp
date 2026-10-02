@@ -93,24 +93,34 @@ int32_t sceNpProfileDialogTerminate(void) {
 // Shims
 void shim_sceNpProfileDialogInitialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpProfileDialogInitialize();
+    SHIM_RETURN();
 }
 
 void shim_sceNpProfileDialogOpenA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpProfileDialogOpenA((const OrbisNpProfileDialogParamA *)ctx->rdi);
+    ctx->rax = (uint64_t)sceNpProfileDialogOpenA(
+        ctx->rdi ? (const OrbisNpProfileDialogParamA *)(ctx->mem_base + ctx->rdi) : NULL
+    );
+    SHIM_RETURN();
 }
 
 void shim_sceNpProfileDialogUpdateStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpProfileDialogUpdateStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceNpProfileDialogGetStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpProfileDialogGetStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceNpProfileDialogGetResult(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpProfileDialogGetResult((OrbisNpProfileDialogResult *)ctx->rdi);
+    ctx->rax = (uint64_t)sceNpProfileDialogGetResult(
+        ctx->rdi ? (OrbisNpProfileDialogResult *)(ctx->mem_base + ctx->rdi) : NULL
+    );
+    SHIM_RETURN();
 }
 
 void shim_sceNpProfileDialogTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpProfileDialogTerminate();
+    SHIM_RETURN();
 }

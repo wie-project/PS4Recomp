@@ -214,113 +214,164 @@ int32_t sceHttp2Term(int32_t ctx_id) {
 // Shims
 void shim_sceHttpInit(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpInit((int32_t)ctx->rdi, (int32_t)ctx->rsi, (uint64_t)ctx->rdx);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpTerm(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpTerm((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpCreateTemplate(GuestContext *ctx) {
+    const char *ua = ctx->rsi ? (const char *)(ctx->mem_base + ctx->rsi) : NULL;
     ctx->rax = (uint64_t)sceHttpCreateTemplate(
-        (int32_t)ctx->rdi, (const char *)ctx->rsi, (int32_t)ctx->rdx, (int32_t)ctx->rcx);
+        (int32_t)ctx->rdi, ua, (int32_t)ctx->rdx, (int32_t)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpDeleteTemplate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpDeleteTemplate((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpCreateConnectionWithURL(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceHttpCreateConnectionWithURL((int32_t)ctx->rdi, (const char *)ctx->rsi, (bool)ctx->rdx);
+    const char *url = ctx->rsi ? (const char *)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)sceHttpCreateConnectionWithURL((int32_t)ctx->rdi, url, (bool)ctx->rdx);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpDeleteConnection(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpDeleteConnection((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpCreateRequestWithURL(GuestContext *ctx) {
+    const char *url = ctx->rdx ? (const char *)(ctx->mem_base + ctx->rdx) : NULL;
     ctx->rax = (uint64_t)sceHttpCreateRequestWithURL(
-        (int32_t)ctx->rdi, (int32_t)ctx->rsi, (const char *)ctx->rdx, (uint64_t)ctx->rcx);
+        (int32_t)ctx->rdi, (int32_t)ctx->rsi, url, (uint64_t)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpCreateRequestWithURL2(GuestContext *ctx) {
+    const char *method = ctx->rsi ? (const char *)(ctx->mem_base + ctx->rsi) : NULL;
+    const char *url = ctx->rdx ? (const char *)(ctx->mem_base + ctx->rdx) : NULL;
     ctx->rax = (uint64_t)sceHttpCreateRequestWithURL2(
-        (int32_t)ctx->rdi, (const char *)ctx->rsi, (const char *)ctx->rdx, (uint64_t)ctx->rcx);
+        (int32_t)ctx->rdi, method, url, (uint64_t)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpDeleteRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpDeleteRequest((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpSendRequest(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceHttpSendRequest((int32_t)ctx->rdi, (const void *)ctx->rsi, (uint64_t)ctx->rdx);
+    const void *data = ctx->rsi ? (const void *)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)sceHttpSendRequest((int32_t)ctx->rdi, data, (uint64_t)ctx->rdx);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpAbortRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpAbortRequest((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpWaitRequest(GuestContext *ctx) {
+    OrbisHttpNBEvent *ev = ctx->rsi ? (OrbisHttpNBEvent *)(ctx->mem_base + ctx->rsi) : NULL;
     ctx->rax = (uint64_t)sceHttpWaitRequest(
-        (OrbisHttpEpollHandle)ctx->rdi, (OrbisHttpNBEvent *)ctx->rsi, (int32_t)ctx->rdx, (int32_t)ctx->rcx);
+        (OrbisHttpEpollHandle)ctx->rdi, ev, (int32_t)ctx->rdx, (int32_t)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpReadData(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceHttpReadData((int32_t)ctx->rdi, (void *)ctx->rsi, (uint64_t)ctx->rdx);
+    void *buf = ctx->rsi ? (void *)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)sceHttpReadData((int32_t)ctx->rdi, buf, (uint64_t)ctx->rdx);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpGetStatusCode(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceHttpGetStatusCode((int32_t)ctx->rdi, (int32_t *)ctx->rsi);
+    int32_t *sc = ctx->rsi ? (int32_t *)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)sceHttpGetStatusCode((int32_t)ctx->rdi, sc);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpGetResponseContentLength(GuestContext *ctx) {
+    int32_t *rc = ctx->rsi ? (int32_t *)(ctx->mem_base + ctx->rsi) : NULL;
+    uint64_t *len = ctx->rdx ? (uint64_t *)(ctx->mem_base + ctx->rdx) : NULL;
     ctx->rax = (uint64_t)sceHttpGetResponseContentLength(
-        (int32_t)ctx->rdi, (int32_t *)ctx->rsi, (uint64_t *)ctx->rdx);
+        (int32_t)ctx->rdi, rc, len);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpGetAllResponseHeaders(GuestContext *ctx) {
+    char **headers = ctx->rsi ? (char **)(ctx->mem_base + ctx->rsi) : NULL;
+    uint64_t *len = ctx->rdx ? (uint64_t *)(ctx->mem_base + ctx->rdx) : NULL;
     ctx->rax = (uint64_t)sceHttpGetAllResponseHeaders(
-        (int32_t)ctx->rdi, (char **)ctx->rsi, (uint64_t *)ctx->rdx);
+        (int32_t)ctx->rdi, headers, len);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpAddRequestHeader(GuestContext *ctx) {
+    const char *name = ctx->rsi ? (const char *)(ctx->mem_base + ctx->rsi) : NULL;
+    const char *value = ctx->rdx ? (const char *)(ctx->mem_base + ctx->rdx) : NULL;
     ctx->rax = (uint64_t)sceHttpAddRequestHeader(
-        (int32_t)ctx->rdi, (const char *)ctx->rsi, (const char *)ctx->rdx, (int32_t)ctx->rcx);
+        (int32_t)ctx->rdi, name, value, (int32_t)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpSetNonblock(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpSetNonblock((int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpGetLastErrno(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceHttpGetLastErrno((int32_t)ctx->rdi, (int32_t *)ctx->rsi);
+    int32_t *err = ctx->rsi ? (int32_t *)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)sceHttpGetLastErrno((int32_t)ctx->rdi, err);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpUriParse(GuestContext *ctx) {
+    OrbisHttpUriElement *el = ctx->rdi ? (OrbisHttpUriElement *)(ctx->mem_base + ctx->rdi) : NULL;
+    const char *uri = ctx->rsi ? (const char *)(ctx->mem_base + ctx->rsi) : NULL;
+    void *pool = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+    uint64_t *psize = ctx->rcx ? (uint64_t *)(ctx->mem_base + ctx->rcx) : NULL;
     ctx->rax = (uint64_t)sceHttpUriParse(
-        (OrbisHttpUriElement *)ctx->rdi, (const char *)ctx->rsi, (void *)ctx->rdx, (uint64_t *)ctx->rcx, (uint64_t)ctx->r8);
+        el, uri, pool, psize, (uint64_t)ctx->r8);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpUriBuild(GuestContext *ctx) {
+    char *buf = ctx->rdi ? (char *)(ctx->mem_base + ctx->rdi) : NULL;
+    uint64_t *req = ctx->rsi ? (uint64_t *)(ctx->mem_base + ctx->rsi) : NULL;
+    const OrbisHttpUriElement *el = ctx->rcx ? (const OrbisHttpUriElement *)(ctx->mem_base + ctx->rcx) : NULL;
     ctx->rax = (uint64_t)sceHttpUriBuild(
-        (char *)ctx->rdi, (uint64_t *)ctx->rsi, (uint64_t)ctx->rdx, (const OrbisHttpUriElement *)ctx->rcx, (uint32_t)ctx->r8);
+        buf, req, (uint64_t)ctx->rdx, el, (uint32_t)ctx->r8);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpCreateEpoll(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceHttpCreateEpoll((int32_t)ctx->rdi, (OrbisHttpEpollHandle *)ctx->rsi);
+    OrbisHttpEpollHandle *eh = ctx->rsi ? (OrbisHttpEpollHandle *)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)sceHttpCreateEpoll((int32_t)ctx->rdi, eh);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpSetEpoll(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceHttpSetEpoll((int32_t)ctx->rdi, (OrbisHttpEpollHandle)ctx->rsi, (void *)ctx->rdx);
+    void *uarg = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+    ctx->rax = (uint64_t)sceHttpSetEpoll((int32_t)ctx->rdi, (OrbisHttpEpollHandle)ctx->rsi, uarg);
+    SHIM_RETURN();
 }
 
 void shim_sceHttpDestroyEpoll(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpDestroyEpoll((int32_t)ctx->rdi, (OrbisHttpEpollHandle)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceHttp2Init(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttp2Init((int32_t)ctx->rdi, (int32_t)ctx->rsi, (uint64_t)ctx->rdx, (int32_t)ctx->rcx);
+    SHIM_RETURN();
 }
 
 void shim_sceHttp2Term(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttp2Term((int32_t)ctx->rdi);
+    SHIM_RETURN();
 }

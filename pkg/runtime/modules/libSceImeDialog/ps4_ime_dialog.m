@@ -217,30 +217,41 @@ int32_t sceImeDialogGetPanelSizeExtended(const OrbisImeDialogParam *param,
 
 // Shims
 void shim_sceImeDialogInit(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceImeDialogInit((OrbisImeDialogParam *)ctx->rdi, (OrbisImeParamExtended *)ctx->rsi);
+    ctx->rax = (uint64_t)sceImeDialogInit(
+        ctx->rdi ? (OrbisImeDialogParam *)(ctx->mem_base + ctx->rdi) : NULL,
+        ctx->rsi ? (OrbisImeParamExtended *)(ctx->mem_base + ctx->rsi) : NULL
+    );
+    SHIM_RETURN();
 }
 
 void shim_sceImeDialogGetStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceImeDialogGetStatus();
+    SHIM_RETURN();
 }
 
 void shim_sceImeDialogGetResult(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceImeDialogGetResult((OrbisImeDialogResult *)ctx->rdi);
+    ctx->rax = (uint64_t)sceImeDialogGetResult(
+        ctx->rdi ? (OrbisImeDialogResult *)(ctx->mem_base + ctx->rdi) : NULL
+    );
+    SHIM_RETURN();
 }
 
 void shim_sceImeDialogAbort(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceImeDialogAbort();
+    SHIM_RETURN();
 }
 
 void shim_sceImeDialogTerm(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceImeDialogTerm();
+    SHIM_RETURN();
 }
 
 void shim_sceImeDialogGetPanelSizeExtended(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceImeDialogGetPanelSizeExtended(
-        (const OrbisImeDialogParam *)ctx->rdi,
-        (const OrbisImeParamExtended *)ctx->rsi,
-        (uint32_t *)ctx->rdx,
-        (uint32_t *)ctx->rcx
+        ctx->rdi ? (const OrbisImeDialogParam *)(ctx->mem_base + ctx->rdi) : NULL,
+        ctx->rsi ? (const OrbisImeParamExtended *)(ctx->mem_base + ctx->rsi) : NULL,
+        ctx->rdx ? (uint32_t *)(ctx->mem_base + ctx->rdx) : NULL,
+        ctx->rcx ? (uint32_t *)(ctx->mem_base + ctx->rcx) : NULL
     );
+    SHIM_RETURN();
 }
