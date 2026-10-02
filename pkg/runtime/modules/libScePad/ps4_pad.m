@@ -490,8 +490,72 @@ void shim_scePadGetHandle(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+int32_t scePadSetMotionSensorState(int32_t handle, int32_t bEnable) {
+  (void)handle;
+  (void)bEnable;
+  return 0;
+}
+
+int32_t scePadSetTiltCorrectionState(int32_t handle, int32_t bEnable) {
+  (void)handle;
+  (void)bEnable;
+  return 0;
+}
+
+int32_t scePadSetAngularVelocityDeadbandState(int32_t handle, int32_t bEnable) {
+  (void)handle;
+  (void)bEnable;
+  return 0;
+}
+
+int32_t scePadResetLightBar(int32_t handle) {
+  (void)handle;
+  return 0;
+}
+
+int32_t scePadResetOrientation(int32_t handle) {
+  (void)handle;
+  return 0;
+}
+
+int32_t scePadSetLightBar(int32_t handle, const OrbisPadColor *pParam) {
+  (void)handle;
+  (void)pParam;
+  return 0;
+}
+
+int32_t scePadSetVibration(int32_t handle, const OrbisPadVibrationParam *pParam) {
+  (void)handle;
+  (void)pParam;
+  return 0;
+}
+
+int32_t scePadDeviceClassGetExtendedInformation(int32_t handle, void *pExtInfo) {
+  (void)handle;
+  if (pExtInfo) {
+    memset(pExtInfo, 0, 64);
+  }
+  return 0;
+}
+
+int32_t scePadDeviceClassParseData(int32_t handle, const OrbisPadData *pData, void *pDeviceClassData) {
+  (void)handle;
+  (void)pData;
+  if (pDeviceClassData) {
+    memset(pDeviceClassData, 0, 64);
+  }
+  return 0;
+}
+
+int32_t scePadEnableSpecificDeviceClass(int32_t deviceClass) {
+  (void)deviceClass;
+  return 0;
+}
+
 void shim_scePadSetVibration(GuestContext *ctx) {
-  ctx->rax = 0;
+  int32_t handle = (int32_t)ctx->rdi;
+  const OrbisPadVibrationParam *pParam = ctx->rsi ? (const OrbisPadVibrationParam *)(ctx->mem_base + ctx->rsi) : NULL;
+  ctx->rax = (uint64_t)(int64_t)scePadSetVibration(handle, pParam);
   SHIM_RETURN();
 }
 
@@ -507,16 +571,63 @@ void shim_scePadGetControllerInformation(GuestContext *ctx) {
 }
 
 void shim_scePadSetLightBar(GuestContext *ctx) {
-  ctx->rax = 0;
+  int32_t handle = (int32_t)ctx->rdi;
+  const OrbisPadColor *pParam = ctx->rsi ? (const OrbisPadColor *)(ctx->mem_base + ctx->rsi) : NULL;
+  ctx->rax = (uint64_t)(int64_t)scePadSetLightBar(handle, pParam);
   SHIM_RETURN();
 }
 
 void shim_scePadResetOrientation(GuestContext *ctx) {
-  ctx->rax = 0;
+  int32_t handle = (int32_t)ctx->rdi;
+  ctx->rax = (uint64_t)(int64_t)scePadResetOrientation(handle);
   SHIM_RETURN();
 }
 
 void shim_scePadResetLightBar(GuestContext *ctx) {
-  ctx->rax = 0;
+  int32_t handle = (int32_t)ctx->rdi;
+  ctx->rax = (uint64_t)(int64_t)scePadResetLightBar(handle);
+  SHIM_RETURN();
+}
+
+void shim_scePadSetMotionSensorState(GuestContext *ctx) {
+  int32_t handle = (int32_t)ctx->rdi;
+  int32_t bEnable = (int32_t)ctx->rsi;
+  ctx->rax = (uint64_t)(int64_t)scePadSetMotionSensorState(handle, bEnable);
+  SHIM_RETURN();
+}
+
+void shim_scePadSetTiltCorrectionState(GuestContext *ctx) {
+  int32_t handle = (int32_t)ctx->rdi;
+  int32_t bEnable = (int32_t)ctx->rsi;
+  ctx->rax = (uint64_t)(int64_t)scePadSetTiltCorrectionState(handle, bEnable);
+  SHIM_RETURN();
+}
+
+void shim_scePadSetAngularVelocityDeadbandState(GuestContext *ctx) {
+  int32_t handle = (int32_t)ctx->rdi;
+  int32_t bEnable = (int32_t)ctx->rsi;
+  ctx->rax = (uint64_t)(int64_t)scePadSetAngularVelocityDeadbandState(handle, bEnable);
+  SHIM_RETURN();
+}
+
+void shim_scePadDeviceClassGetExtendedInformation(GuestContext *ctx) {
+  int32_t handle = (int32_t)ctx->rdi;
+  uint64_t info_addr = ctx->rsi;
+  void *info = info_addr ? (void *)(ctx->mem_base + info_addr) : NULL;
+  ctx->rax = (uint64_t)(int64_t)scePadDeviceClassGetExtendedInformation(handle, info);
+  SHIM_RETURN();
+}
+
+void shim_scePadDeviceClassParseData(GuestContext *ctx) {
+  int32_t handle = (int32_t)ctx->rdi;
+  const OrbisPadData *pData = ctx->rsi ? (const OrbisPadData *)(ctx->mem_base + ctx->rsi) : NULL;
+  void *outData = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+  ctx->rax = (uint64_t)(int64_t)scePadDeviceClassParseData(handle, pData, outData);
+  SHIM_RETURN();
+}
+
+void shim_scePadEnableSpecificDeviceClass(GuestContext *ctx) {
+  int32_t deviceClass = (int32_t)ctx->rdi;
+  ctx->rax = (uint64_t)(int64_t)scePadEnableSpecificDeviceClass(deviceClass);
   SHIM_RETURN();
 }

@@ -93,10 +93,11 @@ Recompile the extracted Orbis binaries and package them into a native standalone
 [ps4-mem] sceKernelSetVirtualRangeName: addr=0x18400000 len=268435456 name='dlmalloc_extra'
 [ps4-recomp] Executing _start (0x13550)...
 ........
-[ps4-sys] open: '/app0/Media/RuntimeInitializeOnLoads.json' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/game/Media/RuntimeInitializeOnLoads.json', flags=0x0) -> fd=4
 [ps4-sys] open: '/archive/mount/point/Media/ScriptingAssemblies.json' (resolved='/archive/mount/point/Media/ScriptingAssemblies.json', flags=0x0) -> fd=-1
 [ps4-sys] open: '/app0/Media/ScriptingAssemblies.json' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/game/Media/ScriptingAssemblies.json', flags=0x0) -> fd=4
-[ps4-recomp] WARN: Called unimplemented function 'sceVideoOutConfigureOutputMode_' (NID: N1bEoJ4SRw4, Lib: libSceVideoOut) at RIP=0x1a273f0 (caller RIP=0x154902b, RSP=0x7ffffa668)
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=1114112 (1.06 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd06f0000
+[ps4-recomp] WARN: Called unimplemented function 'sceMoveInit' (NID: j1ITE-EoJmE, Lib: libSceMove) at RIP=0x1a26e60 (caller RIP=0xa4af23, RSP=0x7ffffa888)
 zsh: abort
 ```
 

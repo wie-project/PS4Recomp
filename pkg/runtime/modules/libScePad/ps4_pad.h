@@ -81,12 +81,34 @@ typedef struct OrbisPadData {
 extern "C" {
 #endif
 
+typedef struct OrbisPadColor {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t a;
+} OrbisPadColor;
+
+typedef struct OrbisPadVibrationParam {
+    uint8_t largeMotor;
+    uint8_t smallMotor;
+} OrbisPadVibrationParam;
+
 int32_t scePadInit(void);
 int32_t scePadOpen(int32_t userID, int32_t type, int32_t index, void *param);
 int32_t scePadClose(int32_t handle);
 int32_t scePadReadState(int32_t handle, OrbisPadData *data);
 int32_t scePadRead(int32_t handle, OrbisPadData *data, int32_t count);
 int32_t scePadGetHandle(int32_t userID, int32_t type, int32_t index);
+int32_t scePadSetMotionSensorState(int32_t handle, int32_t bEnable);
+int32_t scePadSetTiltCorrectionState(int32_t handle, int32_t bEnable);
+int32_t scePadSetAngularVelocityDeadbandState(int32_t handle, int32_t bEnable);
+int32_t scePadResetLightBar(int32_t handle);
+int32_t scePadResetOrientation(int32_t handle);
+int32_t scePadSetLightBar(int32_t handle, const OrbisPadColor *pParam);
+int32_t scePadSetVibration(int32_t handle, const OrbisPadVibrationParam *pParam);
+int32_t scePadDeviceClassGetExtendedInformation(int32_t handle, void *pExtInfo);
+int32_t scePadDeviceClassParseData(int32_t handle, const OrbisPadData *pData, void *pDeviceClassData);
+int32_t scePadEnableSpecificDeviceClass(int32_t deviceClass);
 
 // Host input helper (called by window event pump)
 void ps4_pad_handle_key(unsigned short keyCode, int isDown);
@@ -98,6 +120,16 @@ void shim_scePadClose(GuestContext *ctx);
 void shim_scePadReadState(GuestContext *ctx);
 void shim_scePadRead(GuestContext *ctx);
 void shim_scePadGetHandle(GuestContext *ctx);
+void shim_scePadSetMotionSensorState(GuestContext *ctx);
+void shim_scePadSetTiltCorrectionState(GuestContext *ctx);
+void shim_scePadSetAngularVelocityDeadbandState(GuestContext *ctx);
+void shim_scePadResetLightBar(GuestContext *ctx);
+void shim_scePadResetOrientation(GuestContext *ctx);
+void shim_scePadSetLightBar(GuestContext *ctx);
+void shim_scePadSetVibration(GuestContext *ctx);
+void shim_scePadDeviceClassGetExtendedInformation(GuestContext *ctx);
+void shim_scePadDeviceClassParseData(GuestContext *ctx);
+void shim_scePadEnableSpecificDeviceClass(GuestContext *ctx);
 
 #ifdef __cplusplus
 }
