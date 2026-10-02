@@ -46,6 +46,9 @@ int32_t sceUserServiceGetLoginUserIdList(OrbisUserServiceLoginUserIdList *list);
 int32_t sceUserServiceGetUserName(int32_t userId, char *userName, const size_t size);
 int32_t sceUserServiceGetEvent(OrbisUserServiceEvent *event);
 int32_t sceUserServiceTerminate(void);
+int32_t sceUserServiceRegisterEventCallback(void *callback, void *udata);
+int32_t sceUserServiceUnregisterEventCallback(int32_t callbackId);
+int32_t sceUserServiceGetUserColor(int32_t userId, int32_t *color);
 
 // Guest ABI shims
 void shim_sceUserServiceInitialize(GuestContext *ctx);
@@ -54,6 +57,9 @@ void shim_sceUserServiceGetLoginUserIdList(GuestContext *ctx);
 void shim_sceUserServiceGetUserName(GuestContext *ctx);
 void shim_sceUserServiceGetEvent(GuestContext *ctx);
 void shim_sceUserServiceTerminate(GuestContext *ctx);
+void shim_sceUserServiceRegisterEventCallback(GuestContext *ctx);
+void shim_sceUserServiceUnregisterEventCallback(GuestContext *ctx);
+void shim_sceUserServiceGetUserColor(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

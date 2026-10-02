@@ -92,93 +92,11 @@ Recompile the extracted Orbis binaries and package them into a native standalone
 [ps4-mem] sceKernelMapDirectMemory SUCCESS: out=0x18400000
 [ps4-mem] sceKernelSetVirtualRangeName: addr=0x18400000 len=268435456 name='dlmalloc_extra'
 [ps4-recomp] Executing _start (0x13550)...
-[ps4-sys] open: '/dev/urandom' (resolved='/dev/urandom', flags=0x0) -> fd=3
-[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=1048576 (1.00 MB) flags=0x0 align=262144
-[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=1048576 (1.00 MB) align=262144 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x8300000
-[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x8300000
-FIOS2: built with SDK version 0x12508001
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=81920 (0.08 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x28400000
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=147456 (0.14 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x28414000
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=147456 (0.14 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x28438000
-Argument Count = 1Arg 0 = /app0/eboot.bin
-********** LAUNCHER CONTROL ************************************
-	File System Root = NONE SPECIFIED
-	Launcher Path = NONE SPECIFIED
-	Launcher Arguments NONE SPECIFIED
-**********/LAUNCHER CONTROL ************************************
-[ps4-sys] open: '/app0/media/boot.config' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/game/media/boot.config', flags=0x0) -> fd=3
-[ps4-recomp] sceKernelLoadStartModule: /app0/Media/Modules/PS4Util.prx
-[ps4-recomp] sceKernelLoadStartModule: /app0/Media/Modules/Il2CppUserAssemblies.prx
-[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=4194304 (4.00 MB) flags=0x0 align=262144
-[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=4194304 (4.00 MB) align=262144 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x28480000
-[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x28480000
-[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=16777216 (16.00 MB) flags=0x0 align=262144
-[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=16777216 (16.00 MB) align=262144 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x28880000
-[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x28880000
-[ps4-mem] sceKernelAllocateDirectMemory: start=0x0 end=0x800000000 len=2684354560 (2560.00 MB) align=2097152 type=3
-[ps4-mem] sceKernelMapDirectMemory: in=0x0 len=2684354560 (2560.00 MB) prot=0x33 flags=0x0 phys=0x20000000 align=2097152
-[ps4-vm] recomp_vm_alloc_named_aligned (direct_mem): size=2684354560 (2560.00 MB) align=2097152 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x29a00000
-[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=0x29a00000
-[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=8388608 (8.00 MB) flags=0x0 align=262144
-[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=8388608 (8.00 MB) align=262144 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xc9a00000
-[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xc9a00000
-[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=16777216 (16.00 MB) flags=0x0 align=262144
-[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=16777216 (16.00 MB) align=262144 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xca200000
-[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xca200000
-[ps4-sys] open: '/dev/urandom' (resolved='/dev/urandom', flags=0x0) -> fd=3
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x29880000
-[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=1048576 (1.00 MB) flags=0x0 align=262144
-[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=1048576 (1.00 MB) align=262144 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x298c0000
-[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x298c0000
-[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=262144 (0.25 MB) flags=0x0 align=262144
-[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=262144 (0.25 MB) align=262144 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x299c0000
-[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x299c0000
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb200000
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb230000
-[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=262144 (0.25 MB) flags=0x0 align=262144
-[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=262144 (0.25 MB) align=262144 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb280000
-[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xcb280000
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb2c0000
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb2f0000
-[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=262144 (0.25 MB) flags=0x0 align=262144
-[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=262144 (0.25 MB) align=262144 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb340000
-[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xcb340000
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb380000
-[ps4-sys] open: '/app0/debug.log' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/game/debug.log', flags=0x602) -> fd=3
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=81920 (0.08 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb260000
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=81920 (0.08 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb320000
-[ps4-sys] open: '/app0/archive.psarc' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/game/archive.psarc', flags=0x0) -> fd=-1
-[ps4-sys] open: '/app0/archive_patch.psarc' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/game/archive_patch.psarc', flags=0x0) -> fd=-1
-[libil2cpp] sceAppContentInitialize returned 0x80d90003
-
-[ps4-sys] open: '/app0/Media/Metadata/global-metadata.dat' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/game/Media/Metadata/global-metadata.dat', flags=0x0) -> fd=4
-[ps4-sys] mmap: addr=0x0 len=16785408 (16.01 MB) prot=0x1 flags=0x1 fd=4 offset=0
-[ps4-vm] recomp_vm_alloc_named_aligned (mmap): size=16842752 (16.06 MB) align=65536 flags=0x1
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcb3b0000
-[ps4-sys] mmap file read SUCCESS: read=16783516 bytes into 0xcb3b0000
-[ps4-sys] mmap SUCCESS: out=0xcb3b0000
-[ps4-recomp] WARN: Called unimplemented function 'pthread_setcancelstate' (NID: lZzFeSxPl08, Lib: libSceAudioIn) at RIP=0x2db10c8 (caller RIP=0x332e242, RSP=0x7ffffa9c8)
+........
+[ps4-sys] open: '/app0/Media/RuntimeInitializeOnLoads.json' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/game/Media/RuntimeInitializeOnLoads.json', flags=0x0) -> fd=4
+[ps4-sys] open: '/archive/mount/point/Media/ScriptingAssemblies.json' (resolved='/archive/mount/point/Media/ScriptingAssemblies.json', flags=0x0) -> fd=-1
+[ps4-sys] open: '/app0/Media/ScriptingAssemblies.json' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/game/Media/ScriptingAssemblies.json', flags=0x0) -> fd=4
+[ps4-recomp] WARN: Called unimplemented function 'sceVideoOutConfigureOutputMode_' (NID: N1bEoJ4SRw4, Lib: libSceVideoOut) at RIP=0x1a273f0 (caller RIP=0x154902b, RSP=0x7ffffa668)
 zsh: abort
 ```
 

@@ -29,6 +29,17 @@ int32_t sceSystemServiceHideSplashScreen(void);
 int32_t sceSystemServiceGetStatus(void);
 int32_t sceSystemServiceGetDisplaySafeAreaInfo(void *info);
 int32_t sceSystemServiceReceiveEvent(void *event);
+int32_t sceSystemServicePowerTick(void);
+int32_t sceSystemServiceGetHdrToneMapLuminance(void *luminance);
+int32_t sceSystemServiceDisableMusicPlayer(void);
+int32_t sceSystemServiceReenableMusicPlayer(void);
+int32_t sceSystemServiceDisableSuspendConfirmationDialog(void);
+int32_t sceSystemServiceEnableSuspendConfirmationDialog(void);
+int32_t sceSystemServiceShowControllerSettings(void *param);
+int32_t sceSystemServiceReportAbnormalTermination(int32_t reason, void *data);
+int32_t sceSystemServiceLoadExec(const char *path, const char *argv[]);
+int32_t sceSystemServiceDisablePersonalEyeToEyeDistanceSetting(void);
+int32_t sceSystemServiceEnablePersonalEyeToEyeDistanceSetting(void);
 
 // Shims
 void shim_sceSystemServiceParamGetInt(GuestContext *ctx);
@@ -37,6 +48,17 @@ void shim_sceSystemServiceHideSplashScreen(GuestContext *ctx);
 void shim_sceSystemServiceGetStatus(GuestContext *ctx);
 void shim_sceSystemServiceGetDisplaySafeAreaInfo(GuestContext *ctx);
 void shim_sceSystemServiceReceiveEvent(GuestContext *ctx);
+void shim_sceSystemServicePowerTick(GuestContext *ctx);
+void shim_sceSystemServiceGetHdrToneMapLuminance(GuestContext *ctx);
+void shim_sceSystemServiceDisableMusicPlayer(GuestContext *ctx);
+void shim_sceSystemServiceReenableMusicPlayer(GuestContext *ctx);
+void shim_sceSystemServiceDisableSuspendConfirmationDialog(GuestContext *ctx);
+void shim_sceSystemServiceEnableSuspendConfirmationDialog(GuestContext *ctx);
+void shim_sceSystemServiceShowControllerSettings(GuestContext *ctx);
+void shim_sceSystemServiceReportAbnormalTermination(GuestContext *ctx);
+void shim_sceSystemServiceLoadExec(GuestContext *ctx);
+void shim_sceSystemServiceDisablePersonalEyeToEyeDistanceSetting(GuestContext *ctx);
+void shim_sceSystemServiceEnablePersonalEyeToEyeDistanceSetting(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

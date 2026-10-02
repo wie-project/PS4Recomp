@@ -56,6 +56,12 @@ int32_t sceVideoOutGetResolutionStatus(int32_t handle, OrbisVideoOutResolutionSt
 int32_t sceVideoOutIsFlipPending(int32_t handle);
 int32_t sceVideoOutUnregisterBuffers(int32_t handle, int32_t setIndex);
 
+int32_t sceVideoOutConfigureOutputMode_(int32_t handle, uint32_t reserved, const void *mode, const void *options, uint32_t size_mode, uint32_t size_options);
+void sceVideoOutConfigureOptionsInitialize_(void *options, uint32_t size);
+int32_t sceVideoOutDeleteFlipEvent(OrbisKernelEqueue eq, int32_t handle);
+int32_t sceVideoOutGetEventData(const OrbisKernelEvent *ev, int64_t *data);
+void sceVideoOutModeSetAny_(void *mode, uint32_t size);
+
 void shim_sceVideoOutOpen(GuestContext *ctx);
 void shim_sceVideoOutClose(GuestContext *ctx);
 void shim_sceVideoOutSetBufferAttribute(GuestContext *ctx);
@@ -67,6 +73,11 @@ void shim_sceVideoOutGetFlipStatus(GuestContext *ctx);
 void shim_sceVideoOutGetResolutionStatus(GuestContext *ctx);
 void shim_sceVideoOutIsFlipPending(GuestContext *ctx);
 void shim_sceVideoOutUnregisterBuffers(GuestContext *ctx);
+void shim_sceVideoOutConfigureOutputMode_(GuestContext *ctx);
+void shim_sceVideoOutConfigureOptionsInitialize_(GuestContext *ctx);
+void shim_sceVideoOutDeleteFlipEvent(GuestContext *ctx);
+void shim_sceVideoOutGetEventData(GuestContext *ctx);
+void shim_sceVideoOutModeSetAny_(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

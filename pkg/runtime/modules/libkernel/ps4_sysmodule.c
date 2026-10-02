@@ -375,9 +375,27 @@ int32_t sceKernelDlsym(int32_t handle, const char *symbol, void **addr) {
     if (!symbol || !addr) {
         return -EINVAL;
     }
-    *addr = NULL;
 
     pthread_mutex_lock(&g_sysmodule_mutex);
+    if (handle <= 0) {
+        // Global search across all loaded modules
+        for (int i = 0; i < g_prx_count; i++) {
+            if (!g_prx[i].in_use || !g_prx[i].exports) {
+                continue;
+            }
+            for (const RecompModuleExport *exp = g_prx[i].exports; exp->name; exp++) {
+                if (export_matches(exp->name, symbol)) {
+                    *addr = (void *)(uintptr_t)exp->addr;
+                    pthread_mutex_unlock(&g_sysmodule_mutex);
+                    return 0;
+                }
+            }
+        }
+        pthread_mutex_unlock(&g_sysmodule_mutex);
+        printf("[ps4-recomp] sceKernelDlsym: global symbol '%s' not found\n", symbol);
+        return -ESRCH;
+    }
+
     RegisteredModule *mod = NULL;
     for (int i = 0; i < g_prx_count; i++) {
         if (g_prx[i].in_use && g_prx[i].handle == handle) {
@@ -397,7 +415,7 @@ int32_t sceKernelDlsym(int32_t handle, const char *symbol, void **addr) {
         }
     }
     pthread_mutex_unlock(&g_sysmodule_mutex);
-    printf("[ps4-recomp] sceKernelDlsym: handle %d symbol %s not found\n", handle, symbol);
+    printf("[ps4-recomp] sceKernelDlsym: handle %d symbol '%s' not found\n", handle, symbol);
     return -ESRCH;
 }
 

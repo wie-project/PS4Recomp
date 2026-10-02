@@ -129,3 +129,41 @@ void shim_sceUserServiceTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)ret;
     SHIM_RETURN();
 }
+
+int32_t sceUserServiceRegisterEventCallback(void *callback, void *udata) {
+    (void)callback;
+    (void)udata;
+    return 0;
+}
+
+int32_t sceUserServiceUnregisterEventCallback(int32_t callbackId) {
+    (void)callbackId;
+    return 0;
+}
+
+int32_t sceUserServiceGetUserColor(int32_t userId, int32_t *color) {
+    (void)userId;
+    if (!color) {
+        return (int32_t)0x80960001; // ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT
+    }
+    *color = 0; // Blue (default)
+    return 0;
+}
+
+void shim_sceUserServiceRegisterEventCallback(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceUserServiceUnregisterEventCallback(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceUserServiceGetUserColor(GuestContext *ctx) {
+    int32_t userId = (int32_t)ctx->rdi;
+    uint64_t colorGuest = ctx->rsi;
+    int32_t *color = colorGuest ? (int32_t *)(ctx->mem_base + colorGuest) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceUserServiceGetUserColor(userId, color);
+    SHIM_RETURN();
+}

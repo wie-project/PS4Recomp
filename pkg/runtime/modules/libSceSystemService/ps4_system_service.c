@@ -135,3 +135,123 @@ void shim_sceSystemServiceReceiveEvent(GuestContext *ctx) {
     }
     SHIM_RETURN();
 }
+
+int32_t sceSystemServicePowerTick(void) {
+    return 0;
+}
+
+int32_t sceSystemServiceGetHdrToneMapLuminance(void *luminance) {
+    if (luminance) {
+        memset(luminance, 0, 32);
+    }
+    return 0;
+}
+
+int32_t sceSystemServiceDisableMusicPlayer(void) {
+    return 0;
+}
+
+int32_t sceSystemServiceReenableMusicPlayer(void) {
+    return 0;
+}
+
+int32_t sceSystemServiceDisableSuspendConfirmationDialog(void) {
+    return 0;
+}
+
+int32_t sceSystemServiceEnableSuspendConfirmationDialog(void) {
+    return 0;
+}
+
+int32_t sceSystemServiceShowControllerSettings(void *param) {
+    (void)param;
+    return 0;
+}
+
+int32_t sceSystemServiceReportAbnormalTermination(int32_t reason, void *data) {
+    (void)reason;
+    (void)data;
+    fprintf(stderr, "[ps4-recomp] sceSystemServiceReportAbnormalTermination: reason=%d\n", reason);
+    return 0;
+}
+
+int32_t sceSystemServiceLoadExec(const char *path, const char *argv[]) {
+    (void)path;
+    (void)argv;
+    fprintf(stderr, "[ps4-recomp] sceSystemServiceLoadExec called for path: %s\n", path ? path : "(null)");
+    return 0;
+}
+
+int32_t sceSystemServiceDisablePersonalEyeToEyeDistanceSetting(void) {
+    return 0;
+}
+
+int32_t sceSystemServiceEnablePersonalEyeToEyeDistanceSetting(void) {
+    return 0;
+}
+
+void shim_sceSystemServicePowerTick(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSystemServicePowerTick();
+    SHIM_RETURN();
+}
+
+void shim_sceSystemServiceGetHdrToneMapLuminance(GuestContext *ctx) {
+    uint64_t lumGuest = ctx->rdi;
+    void *luminance = lumGuest ? (void *)(ctx->mem_base + lumGuest) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceGetHdrToneMapLuminance(luminance);
+    SHIM_RETURN();
+}
+
+void shim_sceSystemServiceDisableMusicPlayer(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceDisableMusicPlayer();
+    SHIM_RETURN();
+}
+
+void shim_sceSystemServiceReenableMusicPlayer(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceReenableMusicPlayer();
+    SHIM_RETURN();
+}
+
+void shim_sceSystemServiceDisableSuspendConfirmationDialog(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceDisableSuspendConfirmationDialog();
+    SHIM_RETURN();
+}
+
+void shim_sceSystemServiceEnableSuspendConfirmationDialog(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceEnableSuspendConfirmationDialog();
+    SHIM_RETURN();
+}
+
+void shim_sceSystemServiceShowControllerSettings(GuestContext *ctx) {
+    uint64_t paramGuest = ctx->rdi;
+    void *param = paramGuest ? (void *)(ctx->mem_base + paramGuest) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceShowControllerSettings(param);
+    SHIM_RETURN();
+}
+
+void shim_sceSystemServiceReportAbnormalTermination(GuestContext *ctx) {
+    int32_t reason = (int32_t)ctx->rdi;
+    uint64_t dataGuest = ctx->rsi;
+    void *data = dataGuest ? (void *)(ctx->mem_base + dataGuest) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceReportAbnormalTermination(reason, data);
+    SHIM_RETURN();
+}
+
+void shim_sceSystemServiceLoadExec(GuestContext *ctx) {
+    uint64_t pathGuest = ctx->rdi;
+    uint64_t argvGuest = ctx->rsi;
+    const char *path = pathGuest ? (const char *)(ctx->mem_base + pathGuest) : NULL;
+    const char **argv = argvGuest ? (const char **)(ctx->mem_base + argvGuest) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceLoadExec(path, argv);
+    SHIM_RETURN();
+}
+
+void shim_sceSystemServiceDisablePersonalEyeToEyeDistanceSetting(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceDisablePersonalEyeToEyeDistanceSetting();
+    SHIM_RETURN();
+}
+
+void shim_sceSystemServiceEnablePersonalEyeToEyeDistanceSetting(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceEnablePersonalEyeToEyeDistanceSetting();
+    SHIM_RETURN();
+}
