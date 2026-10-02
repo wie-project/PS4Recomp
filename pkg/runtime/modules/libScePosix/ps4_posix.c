@@ -149,6 +149,120 @@ void shim_recvfrom(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+struct guest_msghdr {
+    uint64_t msg_name;
+    uint32_t msg_namelen;
+    uint32_t _pad1;
+    uint64_t msg_iov;
+    int32_t  msg_iovlen;
+    uint32_t _pad2;
+    uint64_t msg_control;
+    uint32_t msg_controllen;
+    int32_t  msg_flags;
+};
+
+struct guest_iovec {
+    uint64_t iov_base;
+    uint64_t iov_len;
+};
+
+void shim_sendmsg(GuestContext *ctx) {
+    int sockfd = (int)ctx->rdi;
+    uint64_t msg_addr = ctx->rsi;
+    int flags = (int)ctx->rdx;
+    if (!msg_addr || !ctx->mem_base) {
+        set_guest_errno(ctx, EFAULT);
+        ctx->rax = (uint64_t)-1;
+        SHIM_RETURN();
+    }
+    const struct guest_msghdr *gmsg = (const struct guest_msghdr *)(ctx->mem_base + msg_addr);
+    struct msghdr hmsg;
+    memset(&hmsg, 0, sizeof(hmsg));
+    hmsg.msg_name = gmsg->msg_name ? (void *)(ctx->mem_base + gmsg->msg_name) : NULL;
+    hmsg.msg_namelen = gmsg->msg_namelen;
+    hmsg.msg_iovlen = gmsg->msg_iovlen;
+    hmsg.msg_control = gmsg->msg_control ? (void *)(ctx->mem_base + gmsg->msg_control) : NULL;
+    hmsg.msg_controllen = gmsg->msg_controllen;
+    hmsg.msg_flags = gmsg->msg_flags;
+
+    struct iovec stack_iov[16];
+    struct iovec *hiov = stack_iov;
+    if (gmsg->msg_iovlen > 16) {
+        hiov = (struct iovec *)malloc(sizeof(struct iovec) * gmsg->msg_iovlen);
+    }
+    if (gmsg->msg_iov && gmsg->msg_iovlen > 0) {
+        const struct guest_iovec *giov = (const struct guest_iovec *)(ctx->mem_base + gmsg->msg_iov);
+        for (int i = 0; i < gmsg->msg_iovlen; i++) {
+            hiov[i].iov_base = giov[i].iov_base ? (void *)(ctx->mem_base + giov[i].iov_base) : NULL;
+            hiov[i].iov_len = (size_t)giov[i].iov_len;
+        }
+        hmsg.msg_iov = hiov;
+    }
+
+    ssize_t ret = sendmsg(sockfd, &hmsg, flags);
+    if (hiov != stack_iov) {
+        free(hiov);
+    }
+    if (ret < 0) {
+        set_guest_errno(ctx, errno);
+        ctx->rax = (uint64_t)-1;
+    } else {
+        ctx->rax = (uint64_t)ret;
+    }
+    SHIM_RETURN();
+}
+
+void shim_recvmsg(GuestContext *ctx) {
+    int sockfd = (int)ctx->rdi;
+    uint64_t msg_addr = ctx->rsi;
+    int flags = (int)ctx->rdx;
+    if (!msg_addr || !ctx->mem_base) {
+        set_guest_errno(ctx, EFAULT);
+        ctx->rax = (uint64_t)-1;
+        SHIM_RETURN();
+    }
+    struct guest_msghdr *gmsg = (struct guest_msghdr *)(ctx->mem_base + msg_addr);
+    struct msghdr hmsg;
+    memset(&hmsg, 0, sizeof(hmsg));
+    hmsg.msg_name = gmsg->msg_name ? (void *)(ctx->mem_base + gmsg->msg_name) : NULL;
+    hmsg.msg_namelen = gmsg->msg_namelen;
+    hmsg.msg_iovlen = gmsg->msg_iovlen;
+    hmsg.msg_control = gmsg->msg_control ? (void *)(ctx->mem_base + gmsg->msg_control) : NULL;
+    hmsg.msg_controllen = gmsg->msg_controllen;
+    hmsg.msg_flags = gmsg->msg_flags;
+
+    struct iovec stack_iov[16];
+    struct iovec *hiov = stack_iov;
+    if (gmsg->msg_iovlen > 16) {
+        hiov = (struct iovec *)malloc(sizeof(struct iovec) * gmsg->msg_iovlen);
+    }
+    if (gmsg->msg_iov && gmsg->msg_iovlen > 0) {
+        const struct guest_iovec *giov = (const struct guest_iovec *)(ctx->mem_base + gmsg->msg_iov);
+        for (int i = 0; i < gmsg->msg_iovlen; i++) {
+            hiov[i].iov_base = giov[i].iov_base ? (void *)(ctx->mem_base + giov[i].iov_base) : NULL;
+            hiov[i].iov_len = (size_t)giov[i].iov_len;
+        }
+        hmsg.msg_iov = hiov;
+    }
+
+    ssize_t ret = recvmsg(sockfd, &hmsg, flags);
+    if (ret >= 0) {
+        gmsg->msg_namelen = hmsg.msg_namelen;
+        gmsg->msg_controllen = hmsg.msg_controllen;
+        gmsg->msg_flags = hmsg.msg_flags;
+    }
+    if (hiov != stack_iov) {
+        free(hiov);
+    }
+    if (ret < 0) {
+        set_guest_errno(ctx, errno);
+        ctx->rax = (uint64_t)-1;
+    } else {
+        ctx->rax = (uint64_t)ret;
+    }
+    SHIM_RETURN();
+}
+
 void shim_setsockopt(GuestContext *ctx) {
     int sockfd = (int)ctx->rdi;
     int level = (int)ctx->rsi;

@@ -507,6 +507,20 @@ void shim_chmod(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+// fchmod
+void shim_fchmod(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  mode_t mode = (mode_t)ctx->rsi;
+  int ret = fchmod(fd, mode);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
 // utimes
 void shim_utimes(GuestContext *ctx) {
   uint64_t path_addr = ctx->rdi;
@@ -518,7 +532,7 @@ void shim_utimes(GuestContext *ctx) {
   }
   const struct timeval *host_times = NULL;
   struct timeval tv[2];
-  if (times_addr) {
+  if (times_addr && ctx->mem_base) {
     const int64_t *guest_tv = (const int64_t *)(ctx->mem_base + times_addr);
     tv[0].tv_sec = (time_t)guest_tv[0];
     tv[0].tv_usec = (suseconds_t)guest_tv[1];
@@ -532,6 +546,128 @@ void shim_utimes(GuestContext *ctx) {
     ctx->rax = (uint64_t)-1;
   } else {
     ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// futimes
+void shim_futimes(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t times_addr = ctx->rsi;
+  const struct timeval *host_times = NULL;
+  struct timeval tv[2];
+  if (times_addr && ctx->mem_base) {
+    const int64_t *guest_tv = (const int64_t *)(ctx->mem_base + times_addr);
+    tv[0].tv_sec = (time_t)guest_tv[0];
+    tv[0].tv_usec = (suseconds_t)guest_tv[1];
+    tv[1].tv_sec = (time_t)guest_tv[2];
+    tv[1].tv_usec = (suseconds_t)guest_tv[3];
+    host_times = tv;
+  }
+  int ret = futimes(fd, host_times);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// fsync
+void shim_fsync(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  int ret = fsync(fd);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+void shim_sceKernelFsync(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  int ret = fsync(fd);
+  if (ret < 0) {
+    ctx->rax = 0x80020000 | (uint32_t)errno;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// ftruncate
+void shim_ftruncate(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  off_t length = (off_t)ctx->rsi;
+  int ret = ftruncate(fd, length);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+void shim_sceKernelFtruncate(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  off_t length = (off_t)ctx->rsi;
+  int ret = ftruncate(fd, length);
+  if (ret < 0) {
+    ctx->rax = 0x80020000 | (uint32_t)errno;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// msync
+void shim_msync(GuestContext *ctx) {
+  uint64_t addr = ctx->rdi;
+  size_t len = (size_t)ctx->rsi;
+  int flags = (int)ctx->rdx;
+  void *host_addr = (addr && ctx->mem_base) ? (void *)(ctx->mem_base + addr) : NULL;
+  int ret = msync(host_addr, len, flags);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// pwrite
+void shim_pwrite(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t buf_addr = ctx->rsi;
+  size_t nbyte = (size_t)ctx->rdx;
+  off_t offset = (off_t)ctx->rcx;
+  const void *buf = (buf_addr && ctx->mem_base) ? (const void *)(ctx->mem_base + buf_addr) : NULL;
+  ssize_t ret = pwrite(fd, buf, nbyte, offset);
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = (uint64_t)ret;
+  }
+  SHIM_RETURN();
+}
+
+void shim_sceKernelPwrite(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t buf_addr = ctx->rsi;
+  size_t nbyte = (size_t)ctx->rdx;
+  off_t offset = (off_t)ctx->rcx;
+  const void *buf = (buf_addr && ctx->mem_base) ? (const void *)(ctx->mem_base + buf_addr) : NULL;
+  ssize_t ret = pwrite(fd, buf, nbyte, offset);
+  if (ret < 0) {
+    ctx->rax = 0x80020000 | (uint32_t)errno;
+  } else {
+    ctx->rax = (uint64_t)ret;
   }
   SHIM_RETURN();
 }
@@ -585,6 +721,22 @@ void shim_rmdir(GuestContext *ctx) {
   if (ret < 0) {
     set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+void shim_sceKernelRmdir(GuestContext *ctx) {
+  uint64_t path_addr = ctx->rdi;
+  const char *path = (const char *)(ctx->mem_base + path_addr);
+  char resolved_path[1024];
+  if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
+    path = resolved_path;
+  }
+  int ret = rmdir(path);
+  if (ret < 0) {
+    ctx->rax = 0x80020000 | (uint32_t)errno;
   } else {
     ctx->rax = 0;
   }
@@ -652,6 +804,81 @@ void shim_getdents(GuestContext *ctx) {
   } else {
     ctx->rax = (uint64_t)ret;
   }
+  SHIM_RETURN();
+}
+
+// getdirentries
+void shim_getdirentries(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t buf_addr = ctx->rsi;
+  size_t nbytes = (size_t)ctx->rdx;
+  uint64_t basep_addr = ctx->rcx;
+  char *buf = (buf_addr && ctx->mem_base) ? (char *)(ctx->mem_base + buf_addr) : NULL;
+#if defined(__APPLE__)
+  __darwin_off_t basep = 0;
+  if (basep_addr && ctx->mem_base) {
+    basep = *(__darwin_off_t *)(ctx->mem_base + basep_addr);
+  }
+  int ret = (int)syscall(344 /* SYS_getdirentries64 */, fd, buf, nbytes, &basep);
+  if (ret >= 0 && basep_addr && ctx->mem_base) {
+    *(__darwin_off_t *)(ctx->mem_base + basep_addr) = basep;
+  }
+#else
+  long basep = 0;
+  if (basep_addr && ctx->mem_base) {
+    basep = *(long *)(ctx->mem_base + basep_addr);
+  }
+  int ret = getdirentries(fd, buf, nbytes, &basep);
+  if (ret >= 0 && basep_addr && ctx->mem_base) {
+    *(long *)(ctx->mem_base + basep_addr) = basep;
+  }
+#endif
+  if (ret < 0) {
+    set_guest_errno(ctx, errno);
+    ctx->rax = (uint64_t)-1;
+  } else {
+    ctx->rax = (uint64_t)ret;
+  }
+  SHIM_RETURN();
+}
+
+void shim_sceKernelGetdirentries(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t buf_addr = ctx->rsi;
+  size_t nbytes = (size_t)ctx->rdx;
+  uint64_t basep_addr = ctx->rcx;
+  char *buf = (buf_addr && ctx->mem_base) ? (char *)(ctx->mem_base + buf_addr) : NULL;
+#if defined(__APPLE__)
+  __darwin_off_t basep = 0;
+  if (basep_addr && ctx->mem_base) {
+    basep = *(__darwin_off_t *)(ctx->mem_base + basep_addr);
+  }
+  int ret = (int)syscall(344 /* SYS_getdirentries64 */, fd, buf, nbytes, &basep);
+  if (ret >= 0 && basep_addr && ctx->mem_base) {
+    *(__darwin_off_t *)(ctx->mem_base + basep_addr) = basep;
+  }
+#else
+  long basep = 0;
+  if (basep_addr && ctx->mem_base) {
+    basep = *(long *)(ctx->mem_base + basep_addr);
+  }
+  int ret = getdirentries(fd, buf, nbytes, &basep);
+  if (ret >= 0 && basep_addr && ctx->mem_base) {
+    *(long *)(ctx->mem_base + basep_addr) = basep;
+  }
+#endif
+  if (ret < 0) {
+    ctx->rax = 0x80020000 | (uint32_t)errno;
+  } else {
+    ctx->rax = (uint64_t)ret;
+  }
+  SHIM_RETURN();
+}
+
+void shim_sceKernelSleep(GuestContext *ctx) {
+  unsigned int seconds = (unsigned int)ctx->rdi;
+  sleep(seconds);
+  ctx->rax = 0;
   SHIM_RETURN();
 }
 

@@ -25,6 +25,13 @@ static RecompPthreadAttr *get_pthread_attr(GuestContext *ctx, uint64_t attr_addr
   return (RecompPthreadAttr *)ptr;
 }
 
+typedef struct PthreadCleanupEntry {
+  uint64_t routine;
+  uint64_t arg;
+  bool onheap;
+  struct PthreadCleanupEntry *next;
+} PthreadCleanupEntry;
+
 typedef struct RecompThread {
   pthread_t host_thread;
   uint64_t thread_id;
@@ -35,6 +42,8 @@ typedef struct RecompThread {
   bool finished;
   bool joined;
   bool detached;
+  int cancel_state;
+  PthreadCleanupEntry *cleanup_stack;
   struct RecompThread *next;
 } RecompThread;
 
@@ -401,6 +410,90 @@ void shim_pthread_setcanceltype(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+void shim_pthread_setcancelstate(GuestContext *ctx) {
+  int state = (int)ctx->rdi;
+  uint64_t old_addr = ctx->rsi;
+  if (state != 0 && state != 1) { // 0: PTHREAD_CANCEL_ENABLE, 1: PTHREAD_CANCEL_DISABLE
+    ctx->rax = EINVAL;
+    SHIM_RETURN();
+  }
+  RecompThread *t = g_current_thread;
+  int old = t ? t->cancel_state : 0;
+  if (old_addr && ctx->mem_base) {
+    *(int *)(ctx->mem_base + old_addr) = old;
+  }
+  if (t) {
+    t->cancel_state = state;
+  }
+  pthread_setcancelstate(state == 0 ? PTHREAD_CANCEL_ENABLE : PTHREAD_CANCEL_DISABLE, NULL);
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim___pthread_cleanup_push_imp(GuestContext *ctx) {
+  uint64_t routine = ctx->rdi;
+  uint64_t arg = ctx->rsi;
+  uint64_t newbuf = ctx->rdx;
+  if (newbuf && ctx->mem_base) {
+    *(uint64_t *)(ctx->mem_base + newbuf) = routine;
+    *(uint64_t *)(ctx->mem_base + newbuf + 8) = arg;
+    *(int32_t *)(ctx->mem_base + newbuf + 16) = 0;
+  }
+  RecompThread *t = g_current_thread;
+  if (t) {
+    PthreadCleanupEntry *e = (PthreadCleanupEntry *)calloc(1, sizeof(PthreadCleanupEntry));
+    if (e) {
+      e->routine = routine;
+      e->arg = arg;
+      e->onheap = false;
+      e->next = t->cleanup_stack;
+      t->cleanup_stack = e;
+    }
+  }
+  SHIM_RETURN();
+}
+
+void shim_pthread_cleanup_push(GuestContext *ctx) {
+  uint64_t routine = ctx->rdi;
+  uint64_t arg = ctx->rsi;
+  RecompThread *t = g_current_thread;
+  if (t) {
+    PthreadCleanupEntry *e = (PthreadCleanupEntry *)calloc(1, sizeof(PthreadCleanupEntry));
+    if (e) {
+      e->routine = routine;
+      e->arg = arg;
+      e->onheap = true;
+      e->next = t->cleanup_stack;
+      t->cleanup_stack = e;
+    }
+  }
+  SHIM_RETURN();
+}
+
+void shim___pthread_cleanup_pop_imp(GuestContext *ctx) {
+  int execute = (int)ctx->rdi;
+  RecompThread *t = g_current_thread;
+  if (t && t->cleanup_stack) {
+    PthreadCleanupEntry *top = t->cleanup_stack;
+    t->cleanup_stack = top->next;
+    uint64_t routine = top->routine;
+    uint64_t arg = top->arg;
+    free(top);
+    if (execute && routine) {
+      ctx->rdi = arg;
+      ctx->rsp -= 8;
+      MEM_U64(ctx->rsp) = 0xdeadbeefULL;
+      ctx->rip = routine;
+      recomp_dispatch(ctx, routine);
+    }
+  }
+  SHIM_RETURN();
+}
+
+void shim_pthread_cleanup_pop(GuestContext *ctx) {
+  shim___pthread_cleanup_pop_imp(ctx);
+}
+
 void shim_sched_get_priority_max(GuestContext *ctx) {
   int policy = (int)ctx->rdi;
   int ret = sched_get_priority_max(policy);
@@ -728,15 +821,63 @@ void shim_pthread_cancel(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+void shim_scePthreadSetcancelstate(GuestContext *ctx) {
+  int state = (int)ctx->rdi;
+  uint64_t old_addr = ctx->rsi;
+  if (state != 0 && state != 1) { // 0: PTHREAD_CANCEL_ENABLE, 1: PTHREAD_CANCEL_DISABLE
+    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    SHIM_RETURN();
+  }
+  RecompThread *t = g_current_thread;
+  int old = t ? t->cancel_state : 0;
+  if (old_addr && ctx->mem_base) {
+    *(int *)(ctx->mem_base + old_addr) = old;
+  }
+  if (t) {
+    t->cancel_state = state;
+  }
+  pthread_setcancelstate(state == 0 ? PTHREAD_CANCEL_ENABLE : PTHREAD_CANCEL_DISABLE, NULL);
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
 void shim_scePthreadAttrGetstacksize(GuestContext *ctx) {
   uint64_t attr_addr = ctx->rdi;
   uint64_t stacksize_ptr = ctx->rsi;
   RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (!pattr || !stacksize_ptr) {
+  if (!pattr || !stacksize_ptr || !ctx->mem_base) {
     ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     SHIM_RETURN();
   }
-  *(uint64_t *)(ctx->mem_base + stacksize_ptr) = pattr->stacksize_attr;
+  *(uint64_t *)(ctx->mem_base + stacksize_ptr) = pattr->stacksize_attr ? pattr->stacksize_attr : 2097152ULL;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrGetstack(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t stackaddr_ptr = ctx->rsi;
+  uint64_t stacksize_ptr = ctx->rdx;
+  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
+  if (!pattr || !stackaddr_ptr || !stacksize_ptr || !ctx->mem_base) {
+    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    SHIM_RETURN();
+  }
+  *(uint64_t *)(ctx->mem_base + stackaddr_ptr) = pattr->stackaddr_attr;
+  *(uint64_t *)(ctx->mem_base + stacksize_ptr) = pattr->stacksize_attr ? pattr->stacksize_attr : 2097152ULL;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrGetstackaddr(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t stackaddr_ptr = ctx->rsi;
+  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
+  if (!pattr || !stackaddr_ptr || !ctx->mem_base) {
+    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    SHIM_RETURN();
+  }
+  *(uint64_t *)(ctx->mem_base + stackaddr_ptr) = pattr->stackaddr_attr;
   ctx->rax = 0;
   SHIM_RETURN();
 }

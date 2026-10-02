@@ -88,6 +88,7 @@ void shim___progname(GuestContext *ctx);
 void shim_getargv(GuestContext *ctx);
 void shim_getpagesize(GuestContext *ctx);
 void shim_sceLibcHeapGetTraceInfo(GuestContext *ctx);
+void shim_Need_sceLibcInternal(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

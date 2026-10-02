@@ -557,3 +557,9 @@ void shim_sceLibcHeapGetTraceInfo(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_Need_sceLibcInternal(GuestContext *ctx) {
+    (void)ctx;
+    if (ctx) ctx->rax = 0;
+    SHIM_RETURN();
+}
+

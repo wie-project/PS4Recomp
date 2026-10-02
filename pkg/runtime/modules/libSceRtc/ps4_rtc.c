@@ -231,3 +231,100 @@ void shim_sceRtcParseDateTime(GuestContext *ctx) {
 void shim_sceRtcGetCurrentNetworkTick(GuestContext *ctx) {
     shim_sceRtcGetCurrentTick(ctx);
 }
+
+int32_t sceRtcFormatRFC3339(char *pszDateTime, const OrbisRtcTick *pTickUtc, int iTimeZoneMinutes) {
+    if (!pszDateTime) {
+        return -EINVAL;
+    }
+    OrbisRtcTick tick;
+    if (!pTickUtc) {
+        sceRtcGetCurrentTick(&tick);
+    } else {
+        tick = *pTickUtc;
+    }
+    if (iTimeZoneMinutes != 0) {
+        tick.tick += (int64_t)iTimeZoneMinutes * 60ULL * 1000000ULL;
+    }
+    OrbisDateTime dt;
+    sceRtcSetTick(&dt, &tick);
+    if (iTimeZoneMinutes == 0) {
+        snprintf(pszDateTime, 64, "%04u-%02u-%02uT%02u:%02u:%02uZ",
+                 dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
+    } else {
+        int tz = iTimeZoneMinutes;
+        char sign = '+';
+        if (tz < 0) {
+            sign = '-';
+            tz = -tz;
+        }
+        snprintf(pszDateTime, 64, "%04u-%02u-%02uT%02u:%02u:%02u%c%02d:%02d",
+                 dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, sign, tz / 60, tz % 60);
+    }
+    return 0;
+}
+
+int32_t sceRtcParseRFC3339(OrbisRtcTick *pTickUtc, const char *pszDateTime) {
+    if (!pTickUtc || !pszDateTime) {
+        return -EINVAL;
+    }
+    int year = 0, month = 0, day = 0, hour = 0, min = 0, sec = 0;
+    int tz_hour = 0, tz_min = 0;
+    char tz_sign = 'Z';
+    int matched = sscanf(pszDateTime, "%d-%d-%dT%d:%d:%d%c", &year, &month, &day, &hour, &min, &sec, &tz_sign);
+    if (matched < 6) {
+        return -EINVAL;
+    }
+    OrbisDateTime dt;
+    memset(&dt, 0, sizeof(dt));
+    dt.year = (uint16_t)year;
+    dt.month = (uint16_t)month;
+    dt.day = (uint16_t)day;
+    dt.hour = (uint16_t)hour;
+    dt.minute = (uint16_t)min;
+    dt.second = (uint16_t)sec;
+    int32_t rc = sceRtcGetTick(&dt, pTickUtc);
+    if (rc != 0) return rc;
+
+    const char *tz_part = strpbrk(pszDateTime + 10, "Z+-");
+    if (tz_part && (*tz_part == '+' || *tz_part == '-')) {
+        tz_sign = *tz_part;
+        if (sscanf(tz_part + 1, "%d:%d", &tz_hour, &tz_min) >= 1) {
+            int offset_sec = (tz_hour * 60 + tz_min) * 60;
+            if (tz_sign == '+') {
+                pTickUtc->tick -= (uint64_t)offset_sec * 1000000ULL;
+            } else {
+                pTickUtc->tick += (uint64_t)offset_sec * 1000000ULL;
+            }
+        }
+    }
+    return 0;
+}
+
+void shim_sceRtcFormatRFC3339(GuestContext *ctx) {
+    uint64_t strOut = ctx->rdi;
+    uint64_t tickIn = ctx->rsi;
+    int minutes = (int)ctx->rdx;
+    if (!strOut || !ctx->mem_base) {
+        ctx->rax = (uint64_t)-EINVAL;
+        SHIM_RETURN();
+    }
+    char *out = (char *)(ctx->mem_base + strOut);
+    const OrbisRtcTick *ptick = tickIn ? (const OrbisRtcTick *)(ctx->mem_base + tickIn) : NULL;
+    int32_t rc = sceRtcFormatRFC3339(out, ptick, minutes);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceRtcParseRFC3339(GuestContext *ctx) {
+    uint64_t tickOut = ctx->rdi;
+    uint64_t strIn = ctx->rsi;
+    if (!tickOut || !strIn || !ctx->mem_base) {
+        ctx->rax = (uint64_t)-EINVAL;
+        SHIM_RETURN();
+    }
+    OrbisRtcTick *ptick = (OrbisRtcTick *)(ctx->mem_base + tickOut);
+    const char *str = (const char *)(ctx->mem_base + strIn);
+    int32_t rc = sceRtcParseRFC3339(ptick, str);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}

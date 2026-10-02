@@ -17,6 +17,8 @@ void shim_send(GuestContext *ctx);
 void shim_recv(GuestContext *ctx);
 void shim_sendto(GuestContext *ctx);
 void shim_recvfrom(GuestContext *ctx);
+void shim_sendmsg(GuestContext *ctx);
+void shim_recvmsg(GuestContext *ctx);
 void shim_setsockopt(GuestContext *ctx);
 void shim_getsockopt(GuestContext *ctx);
 void shim_getsockname(GuestContext *ctx);

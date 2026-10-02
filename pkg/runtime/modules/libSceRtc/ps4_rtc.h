@@ -32,6 +32,8 @@ int32_t sceRtcGetDayOfWeek(int32_t year, int32_t month, int32_t day);
 int32_t sceRtcIsLeapYear(int32_t year);
 int32_t sceRtcGetTime_t(const OrbisDateTime *time, time_t *llTime);
 int32_t sceRtcParseDateTime(OrbisRtcTick *pTickUtc, const char *pszDateTime);
+int32_t sceRtcFormatRFC3339(char *pszDateTime, const OrbisRtcTick *pTickUtc, int iTimeZoneMinutes);
+int32_t sceRtcParseRFC3339(OrbisRtcTick *pTickUtc, const char *pszDateTime);
 int32_t sceRtcGetCurrentNetworkTick(OrbisRtcTick *tick);
 
 // Guest ABI shims
@@ -44,6 +46,8 @@ void shim_sceRtcGetDayOfWeek(GuestContext *ctx);
 void shim_sceRtcIsLeapYear(GuestContext *ctx);
 void shim_sceRtcGetTime_t(GuestContext *ctx);
 void shim_sceRtcParseDateTime(GuestContext *ctx);
+void shim_sceRtcFormatRFC3339(GuestContext *ctx);
+void shim_sceRtcParseRFC3339(GuestContext *ctx);
 void shim_sceRtcGetCurrentNetworkTick(GuestContext *ctx);
 
 #ifdef __cplusplus

@@ -321,6 +321,44 @@ void shim_pthread_rwlock_wrlock(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+void shim_pthread_rwlock_tryrdlock(GuestContext *ctx) {
+  uint64_t rw_addr = ctx->rdi;
+  pthread_rwlock_t *rw = get_host_rwlock(rw_addr);
+  ctx->rax = (uint64_t)pthread_rwlock_tryrdlock(rw);
+  SHIM_RETURN();
+}
+
+void shim_pthread_rwlock_trywrlock(GuestContext *ctx) {
+  uint64_t rw_addr = ctx->rdi;
+  pthread_rwlock_t *rw = get_host_rwlock(rw_addr);
+  ctx->rax = (uint64_t)pthread_rwlock_trywrlock(rw);
+  SHIM_RETURN();
+}
+
+void shim_scePthreadRwlockTryrdlock(GuestContext *ctx) {
+  uint64_t rw_addr = ctx->rdi;
+  pthread_rwlock_t *rw = get_host_rwlock(rw_addr);
+  int ret = pthread_rwlock_tryrdlock(rw);
+  if (ret != 0) {
+    ctx->rax = (ret == EBUSY) ? 0x80020010 : (0x80020000 | (uint32_t)ret);
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+void shim_scePthreadRwlockTrywrlock(GuestContext *ctx) {
+  uint64_t rw_addr = ctx->rdi;
+  pthread_rwlock_t *rw = get_host_rwlock(rw_addr);
+  int ret = pthread_rwlock_trywrlock(rw);
+  if (ret != 0) {
+    ctx->rax = (ret == EBUSY) ? 0x80020010 : (0x80020000 | (uint32_t)ret);
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
 void shim_pthread_rwlock_unlock(GuestContext *ctx) {
   uint64_t rw_addr = ctx->rdi;
   pthread_rwlock_t *rw = get_host_rwlock(rw_addr);
