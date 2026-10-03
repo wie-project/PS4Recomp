@@ -236,6 +236,26 @@ void ps4_metal_screen_pump_events(void) {
     }
 }
 
+void *ps4_metal_screen_get_device(void) {
+    if (!g_inited) ps4_metal_screen_init(1920, 1080, "PS4Recomp - Native Metal Display");
+    return (__bridge void *)g_device;
+}
+
+void *ps4_metal_screen_get_command_queue(void) {
+    if (!g_inited) ps4_metal_screen_init(1920, 1080, "PS4Recomp - Native Metal Display");
+    return (__bridge void *)g_commandQueue;
+}
+
+void *ps4_metal_screen_get_layer(void) {
+    if (!g_inited) ps4_metal_screen_init(1920, 1080, "PS4Recomp - Native Metal Display");
+    return (__bridge void *)g_metalLayer;
+}
+
+void *ps4_metal_screen_get_texture(void) {
+    if (!g_inited) ps4_metal_screen_init(1920, 1080, "PS4Recomp - Native Metal Display");
+    return (__bridge void *)g_screenTexture;
+}
+
 void ps4_metal_screen_destroy(void) {
     @autoreleasepool {
         if (g_window) {

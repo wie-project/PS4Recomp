@@ -577,6 +577,7 @@ void recomp_free_runtime(GuestContext *ctx) {
   ps4_sync_destroy();
   ps4_vfs_destroy();
   ps4_aio_destroy();
+  ps4_gnmdriver_destroy();
 
   if (ctx->mem_base) {
     munmap(ctx->mem_base, ctx->mem_size);

@@ -8,7 +8,7 @@ A macOS Apple Silicon ahead-of-time (AOT) recompiler that translates PlayStation
 ## Features
 
 - **AOT C Compiler**: Recovers functions, CFG, and jump tables, translating AMD64 instructions into partitioned C for parallel Apple Clang compilation.
-- **Native Metal Graphics**: Direct `MTLPixelFormatBGRA8Unorm` rendering pipeline with hardware VSync via `CAMetalLayer`.
+- **Native Metal Graphics & GNM Driver**: Direct Apple Metal PM4 Command Processor, hardware context tracking, tessellation ring buffers, zero-copy UMA buffer mapping, and SPIRV-Cross shader translation to MSL with hardware VSync via `CAMetalLayer`.
 - **Orbis & POSIX Subsystems**: Shims for memory (UMA), threads, sync, events, networking (`libSceNet`/BSD sockets), and VFS path virtualization (`/app0`).
 - **Media & Hardware**: Low-latency PCM audio (`AudioToolbox`), DualSense/DS4 support (`GameController.framework`), and Cocoa modal dialogs.
 - **Tooling & Bundling**: Static PRX module linking, and automatic macOS `.app` bundle generation.
@@ -19,9 +19,9 @@ A macOS Apple Silicon ahead-of-time (AOT) recompiler that translates PlayStation
 
 ### Prerequisites
 
-- macOS (Apple Silicon)
+- macOS (Apple Silicon: M1 / M2 / M3 / M4)
 - Go 1.22+
-- Xcode Command Line Tools (`clang`)
+- Xcode Command Line Tools (`clang`, `clang++`)
 - FreeType 2 (`brew install freetype`)
 
 ### Prerequisites for Commercial Games
@@ -30,11 +30,30 @@ PS4Recomp operates **exclusively on already decrypted and extracted game folders
 
 To dump and extract your legally purchased game backups on macOS, we officially recommend using the native, open-source community tool **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)** (supports both CLI and GUI interfaces).
 
-### Building
+### Cloning & Dependencies (SPIRV-Cross)
+
+PS4Recomp uses `spirv-cross` as a submodule for translating GPU shaders directly to Metal Shading Language (MSL):
 
 ```bash
-git clone https://github.com/vladislavkalinkin/PS4Recomp.git
-cd PS4Recomp && go build -o ps4-recomp ./cmd/ps4-recomp
+# Clone repository with submodules:
+git clone --recursive https://github.com/vladislavkalinkin/PS4Recomp.git
+cd PS4Recomp
+
+# Or if cloned without --recursive:
+git submodule update --init --recursive
+```
+
+### Building SPIRV-Cross Library & PS4Recomp
+
+```bash
+# 1. Build SPIRV-Cross static library
+cd 3rdparty/spirv-cross
+clang++ -O3 -std=c++17 -c spirv_cross.cpp spirv_cross_parsed_ir.cpp spirv_parser.cpp spirv_glsl.cpp spirv_msl.cpp spirv_cfg.cpp spirv_cross_c.cpp
+ar rcs libspirv-cross.a *.o && rm -f *.o
+cd ../..
+
+# 2. Build ps4-recomp binary
+go build -o ps4-recomp ./cmd/ps4-recomp
 ```
 
 ---

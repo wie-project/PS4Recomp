@@ -333,13 +333,18 @@ func Execute(args []string) error {
 			return nil
 		}
 		ext := filepath.Ext(path)
-		if ext == ".c" || ext == ".m" {
+		if ext == ".c" || ext == ".m" || ext == ".mm" || ext == ".cpp" {
 			runtimeCFiles = append(runtimeCFiles, path)
 		}
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("failed scanning runtime files: %w", err)
+	}
+	spirvInc, _ := findSpirvCross()
+	if spirvInc != "" && !seenInc[spirvInc] {
+		seenInc[spirvInc] = true
+		runtimeIncludeDirs = append(runtimeIncludeDirs, spirvInc)
 	}
 	slices.Sort(runtimeCFiles)
 	slices.Sort(runtimeIncludeDirs)
@@ -479,6 +484,18 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	sb.WriteString("  deps = gcc\n")
 	sb.WriteString("  description = OBJC $in\n\n")
 
+	sb.WriteString("rule compile_mm\n")
+	sb.WriteString("  command = clang++ -MD -MF $out.d $cflags -fobjc-arc -std=c++17 -c $in -o $out\n")
+	sb.WriteString("  depfile = $out.d\n")
+	sb.WriteString("  deps = gcc\n")
+	sb.WriteString("  description = OBJCXX $in\n\n")
+
+	sb.WriteString("rule compile_cpp\n")
+	sb.WriteString("  command = clang++ -MD -MF $out.d $cflags -std=c++17 -c $in -o $out\n")
+	sb.WriteString("  depfile = $out.d\n")
+	sb.WriteString("  deps = gcc\n")
+	sb.WriteString("  description = CXX $in\n\n")
+
 	var ldflags []string
 	if asan {
 		ldflags = append(ldflags, "-fsanitize=address,undefined")
@@ -488,6 +505,10 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox")
 	} else {
 		ldflags = append(ldflags, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
+	}
+	_, spirvLib := findSpirvCross()
+	if spirvLib != "" {
+		ldflags = append(ldflags, spirvLib, "-lc++")
 	}
 	ldflags = append(ldflags, ftLibs...)
 	ldflagsStr := strings.Join(ldflags, " ")
@@ -509,6 +530,10 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		rule := "compile_c"
 		if ext == ".m" {
 			rule = "compile_m"
+		} else if ext == ".mm" {
+			rule = "compile_mm"
+		} else if ext == ".cpp" {
+			rule = "compile_cpp"
 		}
 		fmt.Fprintf(&sb, "build %s: %s %s\n", objFile, rule, relCFile)
 	}
@@ -616,15 +641,22 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 				if asan {
 					clangArgs = append(clangArgs, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
 				}
+				compilerBin := "clang"
 				if ext == ".m" {
 					clangArgs = append(clangArgs, "-fobjc-arc")
+				} else if ext == ".mm" {
+					clangArgs = append(clangArgs, "-fobjc-arc", "-std=c++17")
+					compilerBin = "clang++"
+				} else if ext == ".cpp" {
+					clangArgs = append(clangArgs, "-std=c++17")
+					compilerBin = "clang++"
 				}
 				clangArgs = append(clangArgs, "-c", cFile, "-o", objFile)
 				if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 					clangArgs = append([]string{"-target", "arm64-apple-darwin", "-mcpu=apple-m1"}, clangArgs...)
 				}
 
-				cmd := exec.Command("clang", clangArgs...)
+				cmd := exec.Command(compilerBin, clangArgs...)
 				if out, err := cmd.CombinedOutput(); err != nil {
 					errChan <- fmt.Errorf("error compiling %s: %w\n%s", filepath.Base(cFile), err, string(out))
 					return
@@ -659,6 +691,10 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox")
 	} else {
 		linkArgs = append(linkArgs, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
+	}
+	_, spirvLib := findSpirvCross()
+	if spirvLib != "" {
+		linkArgs = append(linkArgs, spirvLib, "-lc++")
 	}
 	linkArgs = append(linkArgs, ftLibs...)
 	linkArgs = append(linkArgs, objFiles...)
@@ -1040,3 +1076,26 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 
 	return bundleDir, nil
 }
+
+func findSpirvCross() (string, string) {
+	candidates := []string{
+		"3rdparty/spirv-cross",
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "3rdparty", "spirv-cross"),
+			filepath.Join(exeDir, "..", "3rdparty", "spirv-cross"),
+		)
+	}
+	for _, dir := range candidates {
+		libPath := filepath.Join(dir, "libspirv-cross.a")
+		if _, err := os.Stat(libPath); err == nil {
+			absDir, _ := filepath.Abs(dir)
+			absLib, _ := filepath.Abs(libPath)
+			return absDir, absLib
+		}
+	}
+	return "", ""
+}
+

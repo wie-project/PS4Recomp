@@ -51,6 +51,7 @@ void ps4_metal_screen_destroy(void);
 void ps4_keyboard_destroy(void);
 void ps4_vfs_destroy(void);
 void ps4_aio_destroy(void);
+void ps4_gnmdriver_destroy(void);
 
 // SIMD String helpers
 void recomp_vpcmpistri(GuestContext *ctx, const void *src2_ptr, const void *src1_ptr, uint8_t imm8);
