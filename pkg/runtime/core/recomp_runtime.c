@@ -1,5 +1,6 @@
 #include "recomp_runtime.h"
 #include "ps4_sysmodule.h"
+#include "ps4_vfs.h"
 
 #include <signal.h>
 #if defined(__APPLE__)
@@ -366,28 +367,46 @@ GuestContext *recomp_init_runtime_file(const char *image_filename,
   char path[1024] = {0};
   FILE *fp = NULL;
 
-  // 1. Try directly (e.g. current working directory or full path)
-  if (image_filename && access(image_filename, R_OK) == 0) {
-    strncpy(path, image_filename, sizeof(path) - 1);
-    fp = fopen(path, "rb");
+  // 1. Try relative to app_root (e.g. from VFS discovery)
+  const char *app_root = ps4_vfs_get_app_root();
+  if (app_root && *app_root && image_filename && image_filename[0] != '/') {
+    snprintf(path, sizeof(path), "%s/%s", app_root, image_filename);
+    if (access(path, R_OK) == 0) {
+      fp = fopen(path, "rb");
+    }
   }
 
-  // 2. If not found, try adjacent to executable
+  // 2. Try macOS .app bundle Resources directory directly
   if (!fp && image_filename) {
 #if defined(__APPLE__)
     char exec_path[1024] = {0};
     uint32_t size = sizeof(exec_path);
     if (_NSGetExecutablePath(exec_path, &size) == 0) {
-      char *dir = dirname(exec_path);
-      snprintf(path, sizeof(path), "%s/%s", dir, image_filename);
-      fp = fopen(path, "rb");
-      if (!fp) {
-        // Check inside macOS .app bundle Resources directory
+      char canonical_exec[1024];
+      if (realpath(exec_path, canonical_exec) != NULL) {
+        char dir_buf[1024];
+        strncpy(dir_buf, canonical_exec, sizeof(dir_buf) - 1);
+        dir_buf[sizeof(dir_buf) - 1] = '\0';
+        char *dir = dirname(dir_buf);
         snprintf(path, sizeof(path), "%s/../Resources/%s", dir, image_filename);
-        fp = fopen(path, "rb");
+        if (access(path, R_OK) == 0) {
+          fp = fopen(path, "rb");
+        }
+        if (!fp) {
+          snprintf(path, sizeof(path), "%s/%s", dir, image_filename);
+          if (access(path, R_OK) == 0) {
+            fp = fopen(path, "rb");
+          }
+        }
       }
     }
 #endif
+  }
+
+  // 3. Try directly (e.g. current working directory or full path)
+  if (!fp && image_filename && access(image_filename, R_OK) == 0) {
+    strncpy(path, image_filename, sizeof(path) - 1);
+    fp = fopen(path, "rb");
   }
 
   if (!fp) {

@@ -111,7 +111,14 @@ Recompile the extracted Orbis binaries and package them into a native standalone
 [ps4-mem] sceKernelSetVirtualRangeName: addr=0x18400000 len=268435456 name='dlmalloc_extra'
 [ps4-recomp] Executing _start (0x13550)...
 ........
-[ps4-recomp] WARN: Called unimplemented function 'sceGnmGetTheTessellationFactorRingBufferBaseAddress' (NID: ln33zjBrfjk, Lib: libSceGnmDriver) at RIP=0x1a284d0 (caller RIP=0x153ecd7, RSP=0x7ffffa938)
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd4300000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xd4300000
+[ps4-sys] open: '/archive/mount/point/Media/globalgamemanagers.assets' (resolved='/archive/mount/point/Media/globalgamemanagers.assets', flags=0x0) -> fd=-1
+[ps4-sys] open: '/app0/Media/globalgamemanagers.assets' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/build/eboot.app/Contents/Resources/Media/globalgamemanagers.assets', flags=0x0) -> fd=5
+[ps4-sys] open: '/archive/mount/point/Media/Resources/unity default resources' (resolved='/archive/mount/point/Media/Resources/unity default resources', flags=0x0) -> fd=-1
+[ps4-sys] open: '/app0/Media/Resources/unity default resources' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/build/eboot.app/Contents/Resources/Media/Resources/unity default resources', flags=0x0) -> fd=10
+[ps4-recomp] WARN: Called unimplemented function 'sceAjmInitialize' (NID: dl+4eHSzUu4, Lib: libSceAjm) at RIP=0x1a27f20 (caller RIP=0x19db2c7, RSP=0x7ffff8fd8)
+zsh: abort
 ```
 
 ### Hogwarts Legacy (Unreal Engine 4)

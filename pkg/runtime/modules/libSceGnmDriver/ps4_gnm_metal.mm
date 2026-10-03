@@ -152,7 +152,7 @@ kernel void gcn_detile_kernel(device const uint32_t *src_tiled [[buffer(0)]],
 namespace {
 
 struct GnmMetalState {
-    std::mutex mutex;
+    std::recursive_mutex mutex;
     bool initialized = false;
 
     id<MTLDevice> device = nil;

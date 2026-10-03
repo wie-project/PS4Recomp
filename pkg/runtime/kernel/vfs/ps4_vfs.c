@@ -15,56 +15,102 @@ static char *g_app_root = NULL;
 static pthread_mutex_t g_vfs_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static char *discover_app_root(const char *hint) {
+    // 1. Environment variable override
     const char *env = getenv("PS4_APP_DIR");
     if (env && *env && access(env, F_OK) == 0) {
+        char resolved[1024];
+        if (realpath(env, resolved) != NULL) {
+            return strdup(resolved);
+        }
         return strdup(env);
     }
 
-    // Check hint if provided and exists
-    if (hint && *hint && access(hint, F_OK) == 0) {
-        return strdup(hint);
-    }
-
-    // Check relative to executable
 #if defined(__APPLE__)
+    // 2. Check if running inside macOS .app bundle: <exe_dir>/../Resources
+    // In a standard macOS .app bundle: <Bundle>.app/Contents/MacOS/<exec>
+    // Resources are placed in: <Bundle>.app/Contents/Resources
     char exec_path[1024] = {0};
     uint32_t size = sizeof(exec_path);
     if (_NSGetExecutablePath(exec_path, &size) == 0) {
-        char *dir = dirname(exec_path);
-        char test_path[1024];
+        char canonical_exec[1024];
+        if (realpath(exec_path, canonical_exec) != NULL) {
+            char dir_buf[1024];
+            strncpy(dir_buf, canonical_exec, sizeof(dir_buf) - 1);
+            dir_buf[sizeof(dir_buf) - 1] = '\0';
+            char *dir = dirname(dir_buf);
 
-        // Check inside macOS .app bundle: <exe_dir>/../Resources
-        snprintf(test_path, sizeof(test_path), "%s/../Resources", dir);
-        if (access(test_path, F_OK) == 0) {
-            return strdup(test_path);
-        }
-
-        // Check <exe_dir>/assets
-        snprintf(test_path, sizeof(test_path), "%s/assets", dir);
-        if (access(test_path, F_OK) == 0) {
-            return strdup(dir);
-        }
-
-        // Check parent directory hierarchy up to 4 levels for assets/
-        char cur[1024];
-        strncpy(cur, dir, sizeof(cur) - 1);
-        for (int i = 0; i < 4; i++) {
-            char *parent = dirname(cur);
-            snprintf(test_path, sizeof(test_path), "%s/assets", parent);
-            if (access(test_path, F_OK) == 0) {
-                return strdup(parent);
+            // Check inside macOS .app bundle: <exe_dir>/../Resources
+            char test_path[1024];
+            snprintf(test_path, sizeof(test_path), "%s/../Resources", dir);
+            char canonical_res[1024];
+            if (realpath(test_path, canonical_res) != NULL && access(canonical_res, F_OK) == 0) {
+                return strdup(canonical_res);
             }
-            strncpy(cur, parent, sizeof(cur) - 1);
+
+            // Check <exe_dir>/assets
+            snprintf(test_path, sizeof(test_path), "%s/assets", dir);
+            if (access(test_path, F_OK) == 0) {
+                if (realpath(dir, canonical_res) != NULL) {
+                    return strdup(canonical_res);
+                }
+                return strdup(dir);
+            }
+
+            // Check parent directory hierarchy up to 4 levels for assets/
+            char cur[1024];
+            strncpy(cur, dir, sizeof(cur) - 1);
+            cur[sizeof(cur) - 1] = '\0';
+            for (int i = 0; i < 4; i++) {
+                char *parent = dirname(cur);
+                snprintf(test_path, sizeof(test_path), "%s/assets", parent);
+                if (access(test_path, F_OK) == 0) {
+                    if (realpath(parent, canonical_res) != NULL) {
+                        return strdup(canonical_res);
+                    }
+                    return strdup(parent);
+                }
+                strncpy(cur, parent, sizeof(cur) - 1);
+                cur[sizeof(cur) - 1] = '\0';
+            }
         }
     }
 #endif
 
-    // Check current working directory ./assets
-    if (access("assets", F_OK) == 0) {
+    // 3. Check compile-time hint if provided and contains valid assets
+    if (hint && *hint && access(hint, F_OK) == 0) {
+        // Verify hint actually contains game assets (not an empty leftover folder)
+        char check_path[1024];
+        snprintf(check_path, sizeof(check_path), "%s/Media", hint);
+        int has_media = (access(check_path, F_OK) == 0);
+        snprintf(check_path, sizeof(check_path), "%s/sce_sys", hint);
+        int has_sce_sys = (access(check_path, F_OK) == 0);
+        snprintf(check_path, sizeof(check_path), "%s/param.sfo", hint);
+        int has_sfo = (access(check_path, F_OK) == 0);
+
+        if (has_media || has_sce_sys || has_sfo) {
+            char canonical_hint[1024];
+            if (realpath(hint, canonical_hint) != NULL) {
+                return strdup(canonical_hint);
+            }
+            return strdup(hint);
+        }
+    }
+
+    // 4. Check current working directory ./assets or ./Media
+    if (access("assets", F_OK) == 0 || access("Media", F_OK) == 0) {
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            return strdup(cwd);
+        }
         return strdup(".");
     }
 
-    if (hint && *hint) {
+    // 5. Fallback to hint if provided, otherwise "."
+    if (hint && *hint && access(hint, F_OK) == 0) {
+        char canonical_hint[1024];
+        if (realpath(hint, canonical_hint) != NULL) {
+            return strdup(canonical_hint);
+        }
         return strdup(hint);
     }
 
@@ -99,6 +145,8 @@ void ps4_vfs_init(const char *app_root) {
             len--;
         }
     }
+
+    printf("[ps4-vfs] Application root: %s\n", g_app_root ? g_app_root : "(null)");
 
     memset(g_mounts, 0, sizeof(g_mounts));
     g_mount_count = 0;
