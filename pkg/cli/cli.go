@@ -346,6 +346,19 @@ func Execute(args []string) error {
 		seenInc[spirvInc] = true
 		runtimeIncludeDirs = append(runtimeIncludeDirs, spirvInc)
 	}
+	atracInc, atracSrcs := findLibAtrac9()
+	if atracInc != "" {
+		if !seenInc[atracInc] {
+			seenInc[atracInc] = true
+			runtimeIncludeDirs = append(runtimeIncludeDirs, atracInc)
+		}
+		runtimeCFiles = append(runtimeCFiles, atracSrcs...)
+	}
+	minimp3Inc := findMinimp3()
+	if minimp3Inc != "" && !seenInc[minimp3Inc] {
+		seenInc[minimp3Inc] = true
+		runtimeIncludeDirs = append(runtimeIncludeDirs, minimp3Inc)
+	}
 	slices.Sort(runtimeCFiles)
 	slices.Sort(runtimeIncludeDirs)
 
@@ -1097,5 +1110,48 @@ func findSpirvCross() (string, string) {
 		}
 	}
 	return "", ""
+}
+
+func findLibAtrac9() (string, []string) {
+	candidates := []string{
+		"3rdparty/libatrac9/C/src",
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "3rdparty", "libatrac9", "C", "src"),
+			filepath.Join(exeDir, "..", "3rdparty", "libatrac9", "C", "src"),
+		)
+	}
+	for _, dir := range candidates {
+		hdr := filepath.Join(dir, "libatrac9.h")
+		if _, err := os.Stat(hdr); err == nil {
+			absDir, _ := filepath.Abs(dir)
+			matches, _ := filepath.Glob(filepath.Join(absDir, "*.c"))
+			return absDir, matches
+		}
+	}
+	return "", nil
+}
+
+func findMinimp3() string {
+	candidates := []string{
+		"3rdparty/minimp3",
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "3rdparty", "minimp3"),
+			filepath.Join(exeDir, "..", "3rdparty", "minimp3"),
+		)
+	}
+	for _, dir := range candidates {
+		hdr := filepath.Join(dir, "minimp3.h")
+		if _, err := os.Stat(hdr); err == nil {
+			absDir, _ := filepath.Abs(dir)
+			return absDir
+		}
+	}
+	return ""
 }
 

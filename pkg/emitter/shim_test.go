@@ -133,6 +133,20 @@ func TestLookupShimByNID(t *testing.T) {
 		{"sceSslGetPem", "kLB5aGoUJXg", "shim_sceSslGetPem"},
 		{"sceSslFreeCaCerts", "qIvLs0gYxi0", "shim_sceSslFreeCaCerts"},
 		{"_ZNK3sce4Json5Value10getBooleanEv", "zTwZdI8AZ5Y", "shim__ZNK3sce4Json5Value10getBooleanEv"},
+		{"sceAjmInitialize", "dl+4eHSzUu4", "shim_sceAjmInitialize"},
+		{"sceAjmFinalize", "MHur6qCsUus", "shim_sceAjmFinalize"},
+		{"sceAjmModuleRegister", "Q3dyFuwGn64", "shim_sceAjmModuleRegister"},
+		{"sceAjmModuleUnregister", "Wi7DtlLV+KI", "shim_sceAjmModuleUnregister"},
+		{"sceAjmInstanceCreate", "AxoDrINp4J8", "shim_sceAjmInstanceCreate"},
+		{"sceAjmInstanceDestroy", "RbLbuKv8zho", "shim_sceAjmInstanceDestroy"},
+		{"sceAjmBatchStartBuffer", "fFFkk0xfGWs", "shim_sceAjmBatchStartBuffer"},
+		{"sceAjmBatchWait", "-qLsfDAywIY", "shim_sceAjmBatchWait"},
+		{"sceAudioInOpen", "5NE8Sjc7VC8", "shim_sceAudioInOpen"},
+		{"sceAudioInClose", "Jh6WbHhnI68", "shim_sceAudioInClose"},
+		{"sceAudioOutGetPortState", "GrQ9s4IrNaQ", "shim_sceAudioOutGetPortState"},
+		{"sceAudioOutSetVolume", "b+uAV89IlxE", "shim_sceAudioOutSetVolume"},
+		{"_sceUlobjmgrRegisterObject", "BG26hBGiNlw", "shim__sceUlobjmgrRegisterObject"},
+		{"_sceUlobjmgrUnregisterObject", "Smf+fUNblPc", "shim__sceUlobjmgrUnregisterObject"},
 	}
 	for _, tc := range cases {
 		nid := elfloader.CalculateNID(tc.plain)
@@ -287,6 +301,48 @@ func TestBatchKernelAndPthreadShims(t *testing.T) {
 		shimNid, okNid := LookupShim(encoded)
 		if !okNid || shimNid != tc.shim {
 			t.Errorf("LookupShim(%s)=%q, ok=%v, want %s", encoded, shimNid, okNid, tc.shim)
+		}
+	}
+}
+
+func TestPack1AudioAndUlobjmgrShims(t *testing.T) {
+	pack1 := []struct {
+		name string
+		nid  string
+		shim string
+	}{
+		{"sceAjmInitialize", "dl+4eHSzUu4", "shim_sceAjmInitialize"},
+		{"sceAjmFinalize", "MHur6qCsUus", "shim_sceAjmFinalize"},
+		{"sceAjmModuleRegister", "Q3dyFuwGn64", "shim_sceAjmModuleRegister"},
+		{"sceAjmModuleUnregister", "Wi7DtlLV+KI", "shim_sceAjmModuleUnregister"},
+		{"sceAjmInstanceCreate", "AxoDrINp4J8", "shim_sceAjmInstanceCreate"},
+		{"sceAjmInstanceDestroy", "RbLbuKv8zho", "shim_sceAjmInstanceDestroy"},
+		{"sceAjmBatchJobRunBufferRa", "ElslOCpOIns", "shim_sceAjmBatchJobRunBufferRa"},
+		{"sceAjmBatchJobControlBufferRa", "dmDybN--Fn8", "shim_sceAjmBatchJobControlBufferRa"},
+		{"sceAjmBatchStartBuffer", "fFFkk0xfGWs", "shim_sceAjmBatchStartBuffer"},
+		{"sceAjmBatchWait", "-qLsfDAywIY", "shim_sceAjmBatchWait"},
+		{"sceAjmBatchCancel", "NVDXiUesSbA", "shim_sceAjmBatchCancel"},
+		{"sceAjmBatchErrorDump", "WfAiBW8Wcek", "shim_sceAjmBatchErrorDump"},
+		{"sceAudioOutGetPortState", "GrQ9s4IrNaQ", "shim_sceAudioOutGetPortState"},
+		{"sceAudioOutSetVolume", "b+uAV89IlxE", "shim_sceAudioOutSetVolume"},
+		{"sceAudioOutSetMixLevelPadSpk", "wVwPU50pS1c", "shim_sceAudioOutSetMixLevelPadSpk"},
+		{"sceAudioInOpen", "5NE8Sjc7VC8", "shim_sceAudioInOpen"},
+		{"sceAudioInClose", "Jh6WbHhnI68", "shim_sceAudioInClose"},
+		{"sceAudioInInput", "LozEOU8+anM", "shim_sceAudioInInput"},
+		{"sceAudioInGetSilentState", "BohEAQ7DlUE", "shim_sceAudioInGetSilentState"},
+		{"_sceUlobjmgrRegisterObject", "BG26hBGiNlw", "shim__sceUlobjmgrRegisterObject"},
+		{"_sceUlobjmgrUnregisterObject", "Smf+fUNblPc", "shim__sceUlobjmgrUnregisterObject"},
+	}
+
+	for _, tc := range pack1 {
+		shim, ok := LookupShim(tc.name)
+		if !ok || shim != tc.shim {
+			t.Errorf("LookupShim(%s)=%q ok=%v, want %s", tc.name, shim, ok, tc.shim)
+		}
+		encoded := tc.nid + "#lib#mod"
+		shimByNid, okByNid := LookupShim(encoded)
+		if !okByNid || shimByNid != tc.shim {
+			t.Errorf("LookupShim(%s)=%q ok=%v, want %s", encoded, shimByNid, okByNid, tc.shim)
 		}
 	}
 }

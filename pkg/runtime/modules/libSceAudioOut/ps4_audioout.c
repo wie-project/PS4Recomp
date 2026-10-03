@@ -205,3 +205,55 @@ void shim_sceAudioOutClose(GuestContext *ctx) {
   ctx->rax = 0;
   SHIM_RETURN();
 }
+
+typedef struct {
+  uint8_t output;
+  uint8_t channel;
+  int8_t volume;
+  uint8_t reserved;
+  uint32_t rerouteCounter;
+  uint64_t flag;
+} OrbisAudioOutPortState;
+
+void shim_sceAudioOutGetPortState(GuestContext *ctx) {
+  int32_t handle = (int32_t)ctx->rdi;
+  uint64_t state_gaddr = ctx->rsi;
+
+  if (handle <= 0 || handle >= MAX_AUDIO_PORTS || state_gaddr == 0) {
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+
+  pthread_mutex_lock(&g_audio_lock);
+  Ps4AudioPort *port = &g_audio_ports[handle];
+  if (!port->in_use) {
+    pthread_mutex_unlock(&g_audio_lock);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+
+  OrbisAudioOutPortState *state = (OrbisAudioOutPortState *)(ctx->mem_base + state_gaddr);
+  memset(state, 0, sizeof(*state));
+  state->output = 1; // ORBIS_AUDIO_OUT_STATE_OUTPUT_CONNECTED_PRIMARY
+  state->channel = 2;
+  state->volume = -1;
+  pthread_mutex_unlock(&g_audio_lock);
+
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_sceAudioOutSetVolume(GuestContext *ctx) {
+  int32_t handle = (int32_t)ctx->rdi;
+  if (handle <= 0 || handle >= MAX_AUDIO_PORTS) {
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_sceAudioOutSetMixLevelPadSpk(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}

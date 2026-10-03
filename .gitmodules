@@ -1,3 +1,12 @@
 [submodule "3rdparty/spirv-cross"]
 	path = 3rdparty/spirv-cross
 	url = https://github.com/khronosgroup/spirv-cross
+[submodule "3rdparty/minimp3"]
+	path = 3rdparty/minimp3
+	url = https://github.com/lieff/minimp3
+[submodule "3rdparty/ffmpeg-core"]
+	path = 3rdparty/ffmpeg-core
+	url = https://github.com/shadps4-emu/ext-ffmpeg-core
+[submodule "3rdparty/libatrac9"]
+	path = 3rdparty/libatrac9
+	url = https://github.com/shadps4-emu/ext-LibAtrac9
