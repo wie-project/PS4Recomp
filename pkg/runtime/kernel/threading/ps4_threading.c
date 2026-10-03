@@ -39,6 +39,7 @@ typedef struct RecompThread {
   uint64_t start_routine;
   uint64_t arg;
   uint64_t ret_val;
+  char name[64];
   bool finished;
   bool joined;
   bool detached;
@@ -102,6 +103,17 @@ static void *recomp_host_thread_runner(void *arg) {
   g_current_ctx = ctx;
   g_current_thread = t;
 
+  if (t->name[0] != '\0') {
+#if defined(__APPLE__)
+    pthread_setname_np(t->name);
+#elif defined(__linux__)
+    pthread_setname_np(t->host_thread, t->name);
+#endif
+  }
+
+  fprintf(stderr, "[ps4-thread] Thread started: id=%d, name='%s', entry=0x%llx, arg=0x%llx\n",
+          ctx->thread_id, t->name[0] ? t->name : "unnamed", (unsigned long long)t->start_routine, (unsigned long long)t->arg);
+
   // Push dummy return address on guest stack
   ctx->rsp -= 8;
   MEM_U64(ctx->rsp) = 0xdeadbeefULL;
@@ -113,6 +125,8 @@ static void *recomp_host_thread_runner(void *arg) {
   recomp_dispatch(ctx, t->start_routine);
 
   t->ret_val = ctx->rax;
+  fprintf(stderr, "[ps4-thread] Thread exited: id=%d, name='%s', ret=0x%llx\n",
+          ctx->thread_id, t->name[0] ? t->name : "unnamed", (unsigned long long)t->ret_val);
 
   // Run registered pthread TLS key destructors
   GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
@@ -586,8 +600,18 @@ void shim_scePthreadCreate(GuestContext *ctx) {
   t->finished = false;
   t->joined = false;
   t->detached = false;
+  if (name_addr != 0) {
+    const char *name = (const char *)(ctx->mem_base + name_addr);
+    if (name) {
+      strncpy(t->name, name, sizeof(t->name) - 1);
+      t->name[sizeof(t->name) - 1] = '\0';
+    }
+  }
 
   register_thread(t);
+
+  fprintf(stderr, "[ps4-thread] Thread created: id=%d, name='%s', entry=0x%llx, arg=0x%llx\n",
+          (int)t->thread_id, t->name[0] ? t->name : "unnamed", (unsigned long long)start_routine, (unsigned long long)arg);
 
   if (thread_ptr_addr != 0) {
     *(uint64_t *)(ctx->mem_base + thread_ptr_addr) = (uint64_t)t;
@@ -601,15 +625,6 @@ void shim_scePthreadCreate(GuestContext *ctx) {
     set_guest_errno(ctx, ret);
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();
-  }
-
-  if (name_addr != 0) {
-    const char *name = (const char *)(ctx->mem_base + name_addr);
-#if defined(__APPLE__)
-    pthread_setname_np(name);
-#elif defined(__linux__)
-    pthread_setname_np(t->host_thread, name);
-#endif
   }
 
   ctx->rax = 0;

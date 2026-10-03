@@ -882,21 +882,6 @@ void shim_sceKernelSleep(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-void shim_sceKernelTriggerUserEvent(GuestContext *ctx) {
-  int eq = (int)ctx->rdi;
-  int id = (int)ctx->rsi;
-  extern int ps4_equeue_post_event(int eq, uint64_t ident, int16_t filter, int64_t data, void *udata);
-  int ret = ps4_equeue_post_event(eq, (uint64_t)id, -4 /* ORBIS_KERNEL_EVFILT_USER */, 0, NULL);
-  ctx->rax = (uint64_t)ret;
-  SHIM_RETURN();
-}
-
-void shim_sceKernelAddUserEventEdge(GuestContext *ctx) {
-  (void)ctx;
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
 void shim_sceKernelStopUnloadModule(GuestContext *ctx) {
   (void)ctx;
   ctx->rax = 0;

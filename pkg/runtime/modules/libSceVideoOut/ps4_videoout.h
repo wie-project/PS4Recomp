@@ -44,6 +44,19 @@ typedef struct OrbisVideoOutResolutionStatus {
     uint32_t reserved1[3];
 } OrbisVideoOutResolutionStatus;
 
+typedef struct SceVideoOutVblankStatus {
+    uint64_t count;
+    uint64_t process_time;
+    uint64_t tsc;
+    uint64_t reserved[1];
+    uint8_t flags;
+    uint8_t pad1[7];
+} SceVideoOutVblankStatus;
+
+typedef struct SceVideoOutDeviceCapabilityInfo {
+    uint64_t capability;
+} SceVideoOutDeviceCapabilityInfo;
+
 int32_t sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index, const void *param);
 int32_t sceVideoOutClose(int32_t handle);
 void sceVideoOutSetBufferAttribute(OrbisVideoOutBufferAttribute *attr, uint32_t pixelFormat, uint32_t tilingMode, uint32_t aspectRatio, uint32_t width, uint32_t height, uint32_t pitch);
@@ -55,6 +68,14 @@ int32_t sceVideoOutGetFlipStatus(int32_t handle, OrbisVideoOutFlipStatus *status
 int32_t sceVideoOutGetResolutionStatus(int32_t handle, OrbisVideoOutResolutionStatus *status);
 int32_t sceVideoOutIsFlipPending(int32_t handle);
 int32_t sceVideoOutUnregisterBuffers(int32_t handle, int32_t setIndex);
+
+int32_t sceVideoOutAddVblankEvent(OrbisKernelEqueue eq, int32_t handle, void *udata);
+int32_t sceVideoOutDeleteVblankEvent(OrbisKernelEqueue eq, int32_t handle);
+int32_t sceVideoOutWaitVblank(int32_t handle);
+int32_t sceVideoOutGetVblankStatus(int32_t handle, SceVideoOutVblankStatus *status);
+int32_t sceVideoOutGetDeviceCapabilityInfo(int32_t handle, SceVideoOutDeviceCapabilityInfo *info);
+int32_t sceVideoOutGetEventCount(const OrbisKernelEvent *ev);
+int32_t sceVideoOutGetEventId(const OrbisKernelEvent *ev);
 
 int32_t sceVideoOutConfigureOutputMode_(int32_t handle, uint32_t reserved, const void *mode, const void *options, uint32_t size_mode, uint32_t size_options);
 void sceVideoOutConfigureOptionsInitialize_(void *options, uint32_t size);
@@ -73,6 +94,14 @@ void shim_sceVideoOutGetFlipStatus(GuestContext *ctx);
 void shim_sceVideoOutGetResolutionStatus(GuestContext *ctx);
 void shim_sceVideoOutIsFlipPending(GuestContext *ctx);
 void shim_sceVideoOutUnregisterBuffers(GuestContext *ctx);
+void shim_sceVideoOutAddVblankEvent(GuestContext *ctx);
+void shim_sceVideoOutDeleteVblankEvent(GuestContext *ctx);
+void shim_sceVideoOutWaitVblank(GuestContext *ctx);
+void shim_sceVideoOutGetVblankStatus(GuestContext *ctx);
+void shim_sceVideoOutGetDeviceCapabilityInfo(GuestContext *ctx);
+void shim_sceVideoOutGetDeviceCapabilityInfo_(GuestContext *ctx);
+void shim_sceVideoOutGetEventCount(GuestContext *ctx);
+void shim_sceVideoOutGetEventId(GuestContext *ctx);
 void shim_sceVideoOutConfigureOutputMode_(GuestContext *ctx);
 void shim_sceVideoOutConfigureOptionsInitialize_(GuestContext *ctx);
 void shim_sceVideoOutDeleteFlipEvent(GuestContext *ctx);

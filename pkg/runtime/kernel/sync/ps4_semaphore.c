@@ -542,7 +542,7 @@ int sceKernelWaitSema(OrbisKernelSema sem, int32_t needCount, uint32_t *pTimeout
 
   if (pTimeout && *pTimeout == 0) {
     pthread_mutex_unlock(&s->mutex);
-    return 0x80020017; // ORBIS_KERNEL_ERROR_ETIMEDOUT
+    return 0x8002003c; // ORBIS_KERNEL_ERROR_ETIMEDOUT
   }
 
   struct timespec ts;
@@ -566,8 +566,11 @@ int sceKernelWaitSema(OrbisKernelSema sem, int32_t needCount, uint32_t *pTimeout
       int rc = pthread_cond_timedwait(&s->cond, &s->mutex, &ts);
       if (rc == ETIMEDOUT) {
         s->num_waiters--;
+        if (pTimeout) {
+          *pTimeout = 0;
+        }
         pthread_mutex_unlock(&s->mutex);
-        return 0x80020017; // ORBIS_KERNEL_ERROR_ETIMEDOUT
+        return 0x8002003c; // ORBIS_KERNEL_ERROR_ETIMEDOUT
       }
     } else {
       pthread_cond_wait(&s->cond, &s->mutex);

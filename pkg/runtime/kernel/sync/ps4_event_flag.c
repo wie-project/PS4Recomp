@@ -173,6 +173,26 @@ int32_t sceKernelWaitEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uin
 
     pthread_mutex_lock(&f->mutex);
 
+    if (timeout && *timeout == 0) {
+        if (check_evf_condition(f->pattern, bitPattern, waitMode)) {
+            if (resultPattern) {
+                *resultPattern = f->pattern;
+            }
+            if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_ALL) {
+                f->pattern = 0;
+            } else if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT) {
+                f->pattern &= ~bitPattern;
+            }
+            pthread_mutex_unlock(&f->mutex);
+            return 0;
+        }
+        if (resultPattern) {
+            *resultPattern = f->pattern;
+        }
+        pthread_mutex_unlock(&f->mutex);
+        return (int32_t)SCE_KERNEL_ERROR_ETIMEDOUT;
+    }
+
     struct timespec ts;
     int has_timeout = 0;
     if (timeout) {
@@ -194,6 +214,9 @@ int32_t sceKernelWaitEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uin
             if (ret == ETIMEDOUT) {
                 if (resultPattern) {
                     *resultPattern = f->pattern;
+                }
+                if (timeout) {
+                    *timeout = 0;
                 }
                 pthread_mutex_unlock(&f->mutex);
                 return (int32_t)SCE_KERNEL_ERROR_ETIMEDOUT;
@@ -294,6 +317,9 @@ void shim_sceKernelWaitEventFlag(GuestContext *ctx) {
     int32_t rc = sceKernelWaitEventFlag(id, bitPattern, waitMode, &resultPattern, pTimeout);
     if (resGuest) {
         *(uint64_t *)(ctx->mem_base + resGuest) = resultPattern;
+    }
+    if (timeoutGuest && pTimeout) {
+        *(uint32_t *)(ctx->mem_base + timeoutGuest) = *pTimeout;
     }
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();

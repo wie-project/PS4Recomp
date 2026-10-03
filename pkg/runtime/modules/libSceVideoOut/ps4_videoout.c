@@ -5,9 +5,13 @@
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
+#include <unistd.h>
+#include <sys/time.h>
+#include <time.h>
 
 #define MAX_VIDEO_HANDLES 8
 #define MAX_FRAME_BUFFERS 16
+#define MAX_EQUEUES_PER_PORT 16
 
 typedef struct {
     int in_use;
@@ -16,15 +20,75 @@ typedef struct {
     int bufferCount;
     uint64_t buffers[MAX_FRAME_BUFFERS];
     OrbisKernelEqueue flipQueue;
+    void *flipQueueUdata;
     int flipQueueRegistered;
     int32_t flipRate;
     OrbisVideoOutFlipStatus flipStatus;
     pthread_mutex_t mutex;
+
+    pthread_cond_t vblankCond;
+    SceVideoOutVblankStatus vblankStatus;
+    OrbisKernelEqueue vblankQueues[MAX_EQUEUES_PER_PORT];
+    void *vblankUdatas[MAX_EQUEUES_PER_PORT];
+    int vblankQueueCount;
 } VideoOutHandle;
 
 static VideoOutHandle g_video_handles[MAX_VIDEO_HANDLES];
 static pthread_mutex_t g_video_table_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int32_t g_next_video_handle = 1;
+
+static pthread_t g_vblank_thread;
+static int g_vblank_thread_started = 0;
+static volatile int g_vblank_thread_running = 1;
+
+static uint64_t get_time_usec(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
+}
+
+static uint64_t get_fake_tsc(void) {
+#if defined(__aarch64__)
+    uint64_t val;
+    asm volatile("mrs %0, cntvct_el0" : "=r"(val));
+    return val;
+#else
+    return get_time_usec() * 2000ULL;
+#endif
+}
+
+static void *vblank_thread_func(void *arg) {
+    (void)arg;
+    struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = 16666666L; // ~60 Hz (16.666 ms)
+
+    while (g_vblank_thread_running) {
+        nanosleep(&ts, NULL);
+
+        pthread_mutex_lock(&g_video_table_mutex);
+        for (int i = 0; i < MAX_VIDEO_HANDLES; i++) {
+            VideoOutHandle *vh = &g_video_handles[i];
+            if (!vh->in_use) continue;
+
+            pthread_mutex_lock(&vh->mutex);
+            vh->vblankStatus.count++;
+            vh->vblankStatus.process_time = get_time_usec();
+            vh->vblankStatus.tsc = get_fake_tsc();
+
+            pthread_cond_broadcast(&vh->vblankCond);
+
+            for (int q = 0; q < vh->vblankQueueCount; q++) {
+                if (vh->vblankQueues[q] > 0) {
+                    ps4_equeue_post_event(vh->vblankQueues[q], 0x7 /* Vblank */, ORBIS_KERNEL_EVFILT_VIDEO_OUT, (int64_t)(vh->vblankStatus.count << 16), vh->vblankUdatas[q]);
+                }
+            }
+            pthread_mutex_unlock(&vh->mutex);
+        }
+        pthread_mutex_unlock(&g_video_table_mutex);
+    }
+    return NULL;
+}
 
 static VideoOutHandle *find_video_handle_locked(int32_t handle) {
     if (handle <= 0) return NULL;
@@ -54,11 +118,24 @@ int32_t sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index, const vo
     vh->handle = g_next_video_handle++;
     vh->in_use = 1;
     vh->bufferCount = 0;
+    vh->flipQueue = 0;
+    vh->flipQueueUdata = NULL;
     vh->flipQueueRegistered = 0;
     vh->flipRate = 0;
+    vh->vblankQueueCount = 0;
     memset(&vh->attr, 0, sizeof(vh->attr));
     memset(&vh->flipStatus, 0, sizeof(vh->flipStatus));
+    memset(&vh->vblankStatus, 0, sizeof(vh->vblankStatus));
+    memset(vh->vblankQueues, 0, sizeof(vh->vblankQueues));
+    memset(vh->vblankUdatas, 0, sizeof(vh->vblankUdatas));
     pthread_mutex_init(&vh->mutex, NULL);
+    pthread_cond_init(&vh->vblankCond, NULL);
+
+    if (!g_vblank_thread_started) {
+        g_vblank_thread_running = 1;
+        pthread_create(&g_vblank_thread, NULL, vblank_thread_func, NULL);
+        g_vblank_thread_started = 1;
+    }
 
     int32_t ret = vh->handle;
     pthread_mutex_unlock(&g_video_table_mutex);
@@ -79,18 +156,26 @@ int32_t sceVideoOutClose(int32_t handle) {
 
     pthread_mutex_lock(&vh->mutex);
     vh->in_use = 0;
+    pthread_cond_broadcast(&vh->vblankCond);
     pthread_mutex_unlock(&vh->mutex);
     pthread_mutex_destroy(&vh->mutex);
+    pthread_cond_destroy(&vh->vblankCond);
 
     pthread_mutex_unlock(&g_video_table_mutex);
     return 0;
 }
 
 void ps4_videoout_destroy(void) {
+    if (g_vblank_thread_started) {
+        g_vblank_thread_running = 0;
+        pthread_join(g_vblank_thread, NULL);
+        g_vblank_thread_started = 0;
+    }
     pthread_mutex_lock(&g_video_table_mutex);
     for (int i = 0; i < MAX_VIDEO_HANDLES; i++) {
         if (g_video_handles[i].in_use) {
             pthread_mutex_destroy(&g_video_handles[i].mutex);
+            pthread_cond_destroy(&g_video_handles[i].vblankCond);
             g_video_handles[i].in_use = 0;
         }
     }
@@ -163,6 +248,7 @@ int32_t sceVideoOutAddFlipEvent(OrbisKernelEqueue eq, int32_t handle, void *flip
 
     pthread_mutex_lock(&vh->mutex);
     vh->flipQueue = eq;
+    vh->flipQueueUdata = flipArg;
     vh->flipQueueRegistered = 1;
     pthread_mutex_unlock(&vh->mutex);
 
@@ -202,7 +288,7 @@ int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferI
     vh->flipStatus.currentBuffer = bufferIndex;
 
     if (vh->flipQueueRegistered) {
-        ps4_equeue_post_event(vh->flipQueue, 0x6, ORBIS_KERNEL_EVFILT_VIDEO_OUT, (flipArg << 16) | ((uint64_t)handle & 0xffff), NULL);
+        ps4_equeue_post_event(vh->flipQueue, 0x6, ORBIS_KERNEL_EVFILT_VIDEO_OUT, (flipArg << 16) | ((uint64_t)handle & 0xffff), vh->flipQueueUdata);
     }
 
     pthread_mutex_unlock(&vh->mutex);
@@ -435,13 +521,169 @@ void sceVideoOutModeSetAny_(void *mode, uint32_t size) {
     }
 }
 
+int32_t sceVideoOutAddVblankEvent(OrbisKernelEqueue eq, int32_t handle, void *udata) {
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return -EINVAL;
+    }
+
+    pthread_mutex_lock(&vh->mutex);
+    for (int i = 0; i < vh->vblankQueueCount; i++) {
+        if (vh->vblankQueues[i] == eq) {
+            vh->vblankUdatas[i] = udata;
+            pthread_mutex_unlock(&vh->mutex);
+            pthread_mutex_unlock(&g_video_table_mutex);
+            return 0;
+        }
+    }
+    if (vh->vblankQueueCount < MAX_EQUEUES_PER_PORT) {
+        vh->vblankQueues[vh->vblankQueueCount] = eq;
+        vh->vblankUdatas[vh->vblankQueueCount] = udata;
+        vh->vblankQueueCount++;
+    }
+    pthread_mutex_unlock(&vh->mutex);
+    pthread_mutex_unlock(&g_video_table_mutex);
+    return 0;
+}
+
+int32_t sceVideoOutDeleteVblankEvent(OrbisKernelEqueue eq, int32_t handle) {
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return -EINVAL;
+    }
+
+    pthread_mutex_lock(&vh->mutex);
+    for (int i = 0; i < vh->vblankQueueCount; i++) {
+        if (vh->vblankQueues[i] == eq) {
+            for (int j = i; j < vh->vblankQueueCount - 1; j++) {
+                vh->vblankQueues[j] = vh->vblankQueues[j + 1];
+                vh->vblankUdatas[j] = vh->vblankUdatas[j + 1];
+            }
+            vh->vblankQueueCount--;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&vh->mutex);
+    pthread_mutex_unlock(&g_video_table_mutex);
+    return 0;
+}
+
+int32_t sceVideoOutWaitVblank(int32_t handle) {
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return -EINVAL;
+    }
+
+    pthread_mutex_lock(&vh->mutex);
+    pthread_mutex_unlock(&g_video_table_mutex);
+
+    uint64_t cur_count = vh->vblankStatus.count;
+    while (vh->in_use && vh->vblankStatus.count == cur_count) {
+        pthread_cond_wait(&vh->vblankCond, &vh->mutex);
+    }
+    pthread_mutex_unlock(&vh->mutex);
+    return 0;
+}
+
+int32_t sceVideoOutGetVblankStatus(int32_t handle, SceVideoOutVblankStatus *status) {
+    if (!status) return -EINVAL;
+
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return -EINVAL;
+    }
+
+    pthread_mutex_lock(&vh->mutex);
+    *status = vh->vblankStatus;
+    pthread_mutex_unlock(&vh->mutex);
+    pthread_mutex_unlock(&g_video_table_mutex);
+    return 0;
+}
+
+int32_t sceVideoOutGetDeviceCapabilityInfo(int32_t handle, SceVideoOutDeviceCapabilityInfo *info) {
+    (void)handle;
+    if (!info) return -EINVAL;
+    info->capability = 0;
+    return 0;
+}
+
+int32_t sceVideoOutGetEventCount(const OrbisKernelEvent *ev) {
+    if (!ev || ev->filter != ORBIS_KERNEL_EVFILT_VIDEO_OUT) return -EINVAL;
+    return (int32_t)(ev->data & 0xffff);
+}
+
+int32_t sceVideoOutGetEventId(const OrbisKernelEvent *ev) {
+    if (!ev) return -EINVAL;
+    return (int32_t)ev->ident;
+}
+
+void shim_sceVideoOutAddVblankEvent(GuestContext *ctx) {
+    OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
+    int32_t handle = (int32_t)ctx->rsi;
+    void *udata = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+    int32_t rc = sceVideoOutAddVblankEvent(eq, handle, udata);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutDeleteVblankEvent(GuestContext *ctx) {
+    OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
+    int32_t handle = (int32_t)ctx->rsi;
+    int32_t rc = sceVideoOutDeleteVblankEvent(eq, handle);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutWaitVblank(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    int32_t rc = sceVideoOutWaitVblank(handle);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
 void shim_sceVideoOutGetVblankStatus(GuestContext *ctx) {
-    ctx->rax = 0;
+    int32_t handle = (int32_t)ctx->rdi;
+    uint64_t statusGuest = ctx->rsi;
+    SceVideoOutVblankStatus *status = statusGuest ? (SceVideoOutVblankStatus *)(ctx->mem_base + statusGuest) : NULL;
+    int32_t rc = sceVideoOutGetVblankStatus(handle, status);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutGetDeviceCapabilityInfo(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    uint64_t infoGuest = ctx->rsi;
+    SceVideoOutDeviceCapabilityInfo *info = infoGuest ? (SceVideoOutDeviceCapabilityInfo *)(ctx->mem_base + infoGuest) : NULL;
+    int32_t rc = sceVideoOutGetDeviceCapabilityInfo(handle, info);
+    ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 
 void shim_sceVideoOutGetDeviceCapabilityInfo_(GuestContext *ctx) {
-    ctx->rax = 0;
+    shim_sceVideoOutGetDeviceCapabilityInfo(ctx);
+}
+
+void shim_sceVideoOutGetEventCount(GuestContext *ctx) {
+    uint64_t evGuest = ctx->rdi;
+    const OrbisKernelEvent *ev = evGuest ? (const OrbisKernelEvent *)(ctx->mem_base + evGuest) : NULL;
+    int32_t rc = sceVideoOutGetEventCount(ev);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutGetEventId(GuestContext *ctx) {
+    uint64_t evGuest = ctx->rdi;
+    const OrbisKernelEvent *ev = evGuest ? (const OrbisKernelEvent *)(ctx->mem_base + evGuest) : NULL;
+    int32_t rc = sceVideoOutGetEventId(ev);
+    ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 

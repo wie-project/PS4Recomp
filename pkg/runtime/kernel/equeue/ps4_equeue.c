@@ -143,25 +143,58 @@ int ps4_equeue_post_event(OrbisKernelEqueue id, uint64_t ident, int16_t filter, 
     return 0;
 }
 
-int sceKernelWaitEqueue(OrbisKernelEqueue id, OrbisKernelEvent *eventsOut, int numEvents, int *outCount, const SceKernelTimeval *timeout) {
-    if (numEvents <= 0) return -EINVAL;
+int sceKernelWaitEqueue(OrbisKernelEqueue id, OrbisKernelEvent *eventsOut, int numEvents, int *outCount, const uint32_t *timeout) {
+    if (outCount) {
+        *outCount = 0;
+    }
+    if (numEvents <= 0) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+    if (!eventsOut) {
+        return ORBIS_KERNEL_ERROR_EFAULT;
+    }
 
     pthread_mutex_lock(&g_eq_table_mutex);
     KernelEqueueInternal *eq = find_equeue_locked(id);
     if (!eq) {
         pthread_mutex_unlock(&g_eq_table_mutex);
-        return -EINVAL;
+        return ORBIS_KERNEL_ERROR_EBADF;
     }
 
     pthread_mutex_lock(&eq->mutex);
     pthread_mutex_unlock(&g_eq_table_mutex);
 
+    if (eq->is_deleted) {
+        pthread_mutex_unlock(&eq->mutex);
+        return ORBIS_KERNEL_ERROR_EBADF;
+    }
+
+    if (timeout && *timeout == 0) {
+        // Poll mode: retrieve only events already present
+        int n = 0;
+        while (eq->count > 0 && n < numEvents) {
+            eventsOut[n] = eq->events[eq->head];
+            eq->head = (eq->head + 1) % EQUEUE_CAPACITY;
+            eq->count--;
+            n++;
+        }
+        if (outCount) {
+            *outCount = n;
+        }
+        pthread_mutex_unlock(&eq->mutex);
+        if (n == 0) {
+            return ORBIS_KERNEL_ERROR_ETIMEDOUT;
+        }
+        return 0;
+    }
+
     struct timespec deadline = {0};
     if (timeout) {
-        struct timeval now;
-        gettimeofday(&now, NULL);
-        deadline.tv_sec = now.tv_sec + timeout->tv_sec;
-        deadline.tv_nsec = (now.tv_usec + timeout->tv_usec) * 1000;
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        uint64_t usec = (uint64_t)*timeout;
+        deadline.tv_sec = now.tv_sec + (time_t)(usec / 1000000ULL);
+        deadline.tv_nsec = now.tv_nsec + (long)((usec % 1000000ULL) * 1000ULL);
         if (deadline.tv_nsec >= 1000000000L) {
             deadline.tv_sec += deadline.tv_nsec / 1000000000L;
             deadline.tv_nsec %= 1000000000L;
@@ -181,14 +214,12 @@ int sceKernelWaitEqueue(OrbisKernelEqueue id, OrbisKernelEvent *eventsOut, int n
 
     if (eq->is_deleted) {
         pthread_mutex_unlock(&eq->mutex);
-        return -EINVAL;
+        return ORBIS_KERNEL_ERROR_EBADF;
     }
 
     int n = 0;
     while (eq->count > 0 && n < numEvents) {
-        if (eventsOut) {
-            eventsOut[n] = eq->events[eq->head];
-        }
+        eventsOut[n] = eq->events[eq->head];
         eq->head = (eq->head + 1) % EQUEUE_CAPACITY;
         eq->count--;
         n++;
@@ -199,6 +230,10 @@ int sceKernelWaitEqueue(OrbisKernelEqueue id, OrbisKernelEvent *eventsOut, int n
     }
 
     pthread_mutex_unlock(&eq->mutex);
+
+    if (n == 0) {
+        return ORBIS_KERNEL_ERROR_ETIMEDOUT;
+    }
     return 0;
 }
 
@@ -232,7 +267,7 @@ void shim_sceKernelWaitEqueue(GuestContext *ctx) {
 
     OrbisKernelEvent *eventsOut = eventsOutGuest ? (OrbisKernelEvent *)(ctx->mem_base + eventsOutGuest) : NULL;
     int *outCount = outCountGuest ? (int *)(ctx->mem_base + outCountGuest) : NULL;
-    const SceKernelTimeval *timeout = timeoutGuest ? (const SceKernelTimeval *)(ctx->mem_base + timeoutGuest) : NULL;
+    const uint32_t *timeout = timeoutGuest ? (const uint32_t *)(ctx->mem_base + timeoutGuest) : NULL;
 
     int rc = sceKernelWaitEqueue(eq, eventsOut, numEvents, outCount, timeout);
     ctx->rax = (uint64_t)(int64_t)rc;
@@ -309,4 +344,76 @@ void shim_sceKernelGetEventFilter(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceKernelGetEventFilter(ev);
     SHIM_RETURN();
 }
+
+int sceKernelAddUserEvent(OrbisKernelEqueue id, int ident) {
+    pthread_mutex_lock(&g_eq_table_mutex);
+    KernelEqueueInternal *eq = find_equeue_locked(id);
+    if (!eq) {
+        pthread_mutex_unlock(&g_eq_table_mutex);
+        return ORBIS_KERNEL_ERROR_EBADF;
+    }
+    pthread_mutex_unlock(&g_eq_table_mutex);
+    return 0;
+}
+
+int sceKernelAddUserEventEdge(OrbisKernelEqueue id, int ident) {
+    return sceKernelAddUserEvent(id, ident);
+}
+
+int sceKernelTriggerUserEvent(OrbisKernelEqueue id, int ident, void *udata) {
+    return ps4_equeue_post_event(id, (uint64_t)ident, ORBIS_KERNEL_EVFILT_USER, 0, udata);
+}
+
+void *sceKernelGetEventUserData(const OrbisKernelEvent *ev) {
+    return ev ? ev->udata : NULL;
+}
+
+int64_t sceKernelGetEventData(const OrbisKernelEvent *ev) {
+    return ev ? ev->data : 0;
+}
+
+void shim_sceKernelAddUserEvent(GuestContext *ctx) {
+    OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
+    int id = (int)ctx->rsi;
+    ctx->rax = (uint64_t)(int64_t)sceKernelAddUserEvent(eq, id);
+    SHIM_RETURN();
+}
+
+void shim_sceKernelAddUserEventEdge(GuestContext *ctx) {
+    OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
+    int id = (int)ctx->rsi;
+    ctx->rax = (uint64_t)(int64_t)sceKernelAddUserEventEdge(eq, id);
+    SHIM_RETURN();
+}
+
+void shim_sceKernelTriggerUserEvent(GuestContext *ctx) {
+    OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
+    int id = (int)ctx->rsi;
+    void *udata = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceKernelTriggerUserEvent(eq, id, udata);
+    SHIM_RETURN();
+}
+
+void shim_sceKernelGetEventUserData(GuestContext *ctx) {
+    uint64_t ev_addr = ctx->rdi;
+    if (!ev_addr || !ctx->mem_base) {
+        ctx->rax = 0;
+        SHIM_RETURN();
+    }
+    const OrbisKernelEvent *ev = (const OrbisKernelEvent *)(ctx->mem_base + ev_addr);
+    ctx->rax = (uint64_t)(uintptr_t)sceKernelGetEventUserData(ev);
+    SHIM_RETURN();
+}
+
+void shim_sceKernelGetEventData(GuestContext *ctx) {
+    uint64_t ev_addr = ctx->rdi;
+    if (!ev_addr || !ctx->mem_base) {
+        ctx->rax = 0;
+        SHIM_RETURN();
+    }
+    const OrbisKernelEvent *ev = (const OrbisKernelEvent *)(ctx->mem_base + ev_addr);
+    ctx->rax = (uint64_t)sceKernelGetEventData(ev);
+    SHIM_RETURN();
+}
+
 

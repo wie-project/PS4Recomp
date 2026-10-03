@@ -16,11 +16,11 @@ extern "C" {
 #define SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT   0x20
 
 #define SCE_KERNEL_ERROR_EBUSY              0x80020010
-#define SCE_KERNEL_ERROR_ETIMEDOUT          0x8002000A
+#define SCE_KERNEL_ERROR_ETIMEDOUT          0x8002003c
 #define SCE_KERNEL_ERROR_EINVAL             0x80020016
 
 typedef int32_t OrbisKernelEventFlag;
-typedef uint64_t OrbisKernelUseconds;
+typedef uint32_t OrbisKernelUseconds;
 
 typedef struct OrbisKernelEventFlagOptParam {
     size_t size;

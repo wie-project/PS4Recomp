@@ -346,3 +346,41 @@ func TestPack1AudioAndUlobjmgrShims(t *testing.T) {
 		}
 	}
 }
+
+func TestVideoOutAndEqueueShims(t *testing.T) {
+	cases := []struct {
+		name string
+		nid  string
+		shim string
+	}{
+		{"sceVideoOutOpen", "Up36PTk687E", "shim_sceVideoOutOpen"},
+		{"sceVideoOutClose", "uquVH4-Du78", "shim_sceVideoOutClose"},
+		{"sceVideoOutSubmitFlip", "U46NwOiJpys", "shim_sceVideoOutSubmitFlip"},
+		{"sceVideoOutAddFlipEvent", "HXzjK9yI30k", "shim_sceVideoOutAddFlipEvent"},
+		{"sceVideoOutAddVblankEvent", "Xru92wHJRmg", "shim_sceVideoOutAddVblankEvent"},
+		{"sceVideoOutDeleteVblankEvent", "oNOQn3knW6s", "shim_sceVideoOutDeleteVblankEvent"},
+		{"sceVideoOutWaitVblank", "j6RaAUlaLv0", "shim_sceVideoOutWaitVblank"},
+		{"sceVideoOutGetVblankStatus", "1FZBKy8HeNU", "shim_sceVideoOutGetVblankStatus"},
+		{"sceVideoOutGetEventCount", "Mt4QHHkxkOc", "shim_sceVideoOutGetEventCount"},
+		{"sceVideoOutGetEventId", "U2JJtSqNKZI", "shim_sceVideoOutGetEventId"},
+		{"sceKernelWaitEqueue", "fzyMKs9kim0", "shim_sceKernelWaitEqueue"},
+		{"sceKernelAddUserEvent", "4R6-OvI2cEA", "shim_sceKernelAddUserEvent"},
+		{"sceKernelAddUserEventEdge", "WDszmSbWuDk", "shim_sceKernelAddUserEventEdge"},
+		{"sceKernelTriggerUserEvent", "F6e0kwo4cnk", "shim_sceKernelTriggerUserEvent"},
+		{"sceKernelGetEventUserData", "vz+pg2zdopI", "shim_sceKernelGetEventUserData"},
+		{"sceKernelGetEventData", "kwGyyjohI50", "shim_sceKernelGetEventData"},
+	}
+
+	for _, tc := range cases {
+		shim, ok := LookupShim(tc.name)
+		if !ok || shim != tc.shim {
+			t.Errorf("LookupShim(%s)=%q ok=%v, want %s", tc.name, shim, ok, tc.shim)
+		}
+		encoded := tc.nid + "#lib#mod"
+		shimByNid, okByNid := LookupShim(encoded)
+		if !okByNid || shimByNid != tc.shim {
+			t.Errorf("LookupShim(%s)=%q ok=%v, want %s", encoded, shimByNid, okByNid, tc.shim)
+		}
+	}
+}
+
