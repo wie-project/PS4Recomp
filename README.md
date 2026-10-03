@@ -2,8 +2,7 @@
 
 A macOS Apple Silicon ahead-of-time (AOT) recompiler that translates PlayStation 4 (x86-64 ELF) binaries into native executables. No JIT, virtual machines, or MoltenVK required.
 
-![PS4Recomp Native Metal Output](images/graphics_test_02.png)
-
+![First Silksong screen](images/silk_test_01.png)
 ---
 
 ## Features
