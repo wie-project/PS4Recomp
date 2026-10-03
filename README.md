@@ -23,6 +23,7 @@ A macOS Apple Silicon ahead-of-time (AOT) recompiler that translates PlayStation
 - Go 1.22+
 - Xcode Command Line Tools (`clang`, `clang++`)
 - FreeType 2 (`brew install freetype`)
+- Ninja (`brew install ninja`, recommended for fast parallel builds)
 
 ### Prerequisites for Commercial Games
 
@@ -30,29 +31,51 @@ PS4Recomp operates **exclusively on already decrypted and extracted game folders
 
 To dump and extract your legally purchased game backups on macOS, we officially recommend using the native, open-source community tool **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)** (supports both CLI and GUI interfaces).
 
-### Cloning & Dependencies (SPIRV-Cross)
+### Cloning & 3rd-Party Dependencies
 
-PS4Recomp uses `spirv-cross` as a submodule for translating GPU shaders directly to Metal Shading Language (MSL):
+PS4Recomp relies on several 3rd-party submodules located in `3rdparty/`:
+
+| Submodule                                | Purpose                                                                            | Integration / Output                                  |
+| ---------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| **SPIRV-Cross** (`3rdparty/spirv-cross`) | Translates SPIR-V GPU shaders to Apple Metal Shading Language (MSL)                | Pre-built static library (`libspirv-cross.a`)         |
+| **LibAtrac9** (`3rdparty/libatrac9`)     | ATRAC9 hardware/software audio decoder for PS4 AJM (`libSceAjm`)                   | Pre-built static library (`libatrac9.a`) or C sources |
+| **minimp3** (`3rdparty/minimp3`)         | Lightweight MP3 audio decoding header for sound playback                           | Header-only (`minimp3.h`), auto-included              |
+| **ffmpeg-core** (`3rdparty/ffmpeg-core`) | Multimedia decoding backend (H.264/AVC & HEVC) for video playback (`libSceAvcdec`) | Headers & libraries                                   |
 
 ```bash
-# Clone repository with submodules:
+# Clone repository with all submodules:
 git clone --recursive https://github.com/vladislavkalinkin/PS4Recomp.git
 cd PS4Recomp
 
-# Or if cloned without --recursive:
+# Or if already cloned without --recursive:
 git submodule update --init --recursive
 ```
 
-### Building SPIRV-Cross Library & PS4Recomp
+### Building 3rd-Party Static Libraries & PS4Recomp
+
+Before compiling games, build the static libraries for the 3rd-party dependencies:
+
+#### 1. Build SPIRV-Cross
 
 ```bash
-# 1. Build SPIRV-Cross static library
 cd 3rdparty/spirv-cross
 clang++ -O3 -std=c++17 -c spirv_cross.cpp spirv_cross_parsed_ir.cpp spirv_parser.cpp spirv_glsl.cpp spirv_msl.cpp spirv_cfg.cpp spirv_cross_c.cpp
 ar rcs libspirv-cross.a *.o && rm -f *.o
 cd ../..
+```
 
-# 2. Build ps4-recomp binary
+#### 2. Build LibAtrac9
+
+```bash
+cd 3rdparty/libatrac9
+clang -O3 -c C/src/*.c
+ar rcs libatrac9.a *.o && rm -f *.o
+cd ../..
+```
+
+#### 3. Build ps4-recomp binary
+
+```bash
 go build -o ps4-recomp ./cmd/ps4-recomp
 ```
 
@@ -68,15 +91,15 @@ Scan CFGs, discover companion PRXs, and report instruction compatibility for the
 ./ps4-recomp analyze path/to/extracted_game/eboot.bin
 ```
 
-### 2. Recompile to macOS `.app`
+### 2. Recompile to macOS `.app` Bundle
 
-Recompile the extracted Orbis binaries and package them into a native standalone bundle:
+Recompile the extracted Orbis binary and package it into a native standalone application bundle:
 
 ```bash
 # Basic compilation to native ARM64 binary
 ./ps4-recomp path/to/extracted_game/eboot.bin -o output_dir -c
 
-# Full package with VFS assets and resources included into macOS app bundle
+# Full standalone package with VFS assets and resources included into macOS app bundle
 ./ps4-recomp path/to/extracted_game/eboot.bin --app-dir /path/to/extracted_game --copy-resources -o output_dir -c
 ```
 

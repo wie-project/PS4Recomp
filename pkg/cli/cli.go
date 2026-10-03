@@ -346,13 +346,15 @@ func Execute(args []string) error {
 		seenInc[spirvInc] = true
 		runtimeIncludeDirs = append(runtimeIncludeDirs, spirvInc)
 	}
-	atracInc, atracSrcs := findLibAtrac9()
+	atracInc, atracLib, atracSrcs := findLibAtrac9()
 	if atracInc != "" {
 		if !seenInc[atracInc] {
 			seenInc[atracInc] = true
 			runtimeIncludeDirs = append(runtimeIncludeDirs, atracInc)
 		}
-		runtimeCFiles = append(runtimeCFiles, atracSrcs...)
+		if atracLib == "" {
+			runtimeCFiles = append(runtimeCFiles, atracSrcs...)
+		}
 	}
 	minimp3Inc := findMinimp3()
 	if minimp3Inc != "" && !seenInc[minimp3Inc] {
@@ -522,6 +524,10 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	_, spirvLib := findSpirvCross()
 	if spirvLib != "" {
 		ldflags = append(ldflags, spirvLib, "-lc++")
+	}
+	_, atracLib, _ := findLibAtrac9()
+	if atracLib != "" {
+		ldflags = append(ldflags, atracLib)
 	}
 	ldflags = append(ldflags, ftLibs...)
 	ldflagsStr := strings.Join(ldflags, " ")
@@ -708,6 +714,10 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 	_, spirvLib := findSpirvCross()
 	if spirvLib != "" {
 		linkArgs = append(linkArgs, spirvLib, "-lc++")
+	}
+	_, atracLib, _ := findLibAtrac9()
+	if atracLib != "" {
+		linkArgs = append(linkArgs, atracLib)
 	}
 	linkArgs = append(linkArgs, ftLibs...)
 	linkArgs = append(linkArgs, objFiles...)
@@ -1112,26 +1122,38 @@ func findSpirvCross() (string, string) {
 	return "", ""
 }
 
-func findLibAtrac9() (string, []string) {
+func findLibAtrac9() (string, string, []string) {
 	candidates := []string{
-		"3rdparty/libatrac9/C/src",
+		"3rdparty/libatrac9",
 	}
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
 		candidates = append(candidates,
-			filepath.Join(exeDir, "3rdparty", "libatrac9", "C", "src"),
-			filepath.Join(exeDir, "..", "3rdparty", "libatrac9", "C", "src"),
+			filepath.Join(exeDir, "3rdparty", "libatrac9"),
+			filepath.Join(exeDir, "..", "3rdparty", "libatrac9"),
 		)
 	}
 	for _, dir := range candidates {
-		hdr := filepath.Join(dir, "libatrac9.h")
+		hdrDir := filepath.Join(dir, "C", "src")
+		hdr := filepath.Join(hdrDir, "libatrac9.h")
 		if _, err := os.Stat(hdr); err == nil {
-			absDir, _ := filepath.Abs(dir)
-			matches, _ := filepath.Glob(filepath.Join(absDir, "*.c"))
-			return absDir, matches
+			absInc, _ := filepath.Abs(hdrDir)
+			// Check for pre-built static library
+			for _, libCandidate := range []string{
+				filepath.Join(dir, "libatrac9.a"),
+				filepath.Join(dir, "C", "bin", "libatrac9.a"),
+				filepath.Join(hdrDir, "libatrac9.a"),
+			} {
+				if _, err := os.Stat(libCandidate); err == nil {
+					absLib, _ := filepath.Abs(libCandidate)
+					return absInc, absLib, nil
+				}
+			}
+			matches, _ := filepath.Glob(filepath.Join(absInc, "*.c"))
+			return absInc, "", matches
 		}
 	}
-	return "", nil
+	return "", "", nil
 }
 
 func findMinimp3() string {

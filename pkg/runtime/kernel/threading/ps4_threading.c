@@ -25,29 +25,6 @@ static RecompPthreadAttr *get_pthread_attr(GuestContext *ctx, uint64_t attr_addr
   return (RecompPthreadAttr *)ptr;
 }
 
-typedef struct PthreadCleanupEntry {
-  uint64_t routine;
-  uint64_t arg;
-  bool onheap;
-  struct PthreadCleanupEntry *next;
-} PthreadCleanupEntry;
-
-typedef struct RecompThread {
-  pthread_t host_thread;
-  uint64_t thread_id;
-  GuestContext *ctx;
-  uint64_t start_routine;
-  uint64_t arg;
-  uint64_t ret_val;
-  char name[64];
-  bool finished;
-  bool joined;
-  bool detached;
-  int cancel_state;
-  PthreadCleanupEntry *cleanup_stack;
-  struct RecompThread *next;
-} RecompThread;
-
 static RecompThread *g_threads = NULL;
 static pthread_mutex_t g_threads_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_thread_counter = 1000;
@@ -60,7 +37,8 @@ static void register_thread(RecompThread *t) {
   pthread_mutex_unlock(&g_threads_mutex);
 }
 
-static RecompThread *find_thread(uint64_t handle) {
+RecompThread *recomp_find_thread(uint64_t handle) {
+  if (handle == 0) return NULL;
   pthread_mutex_lock(&g_threads_mutex);
   RecompThread *curr = g_threads;
   while (curr) {
@@ -68,10 +46,28 @@ static RecompThread *find_thread(uint64_t handle) {
       pthread_mutex_unlock(&g_threads_mutex);
       return curr;
     }
+    if (curr->ctx) {
+      if (curr->ctx->fs_base == handle) {
+        pthread_mutex_unlock(&g_threads_mutex);
+        return curr;
+      }
+      if (curr->ctx->fs_base && curr->ctx->mem_base &&
+          curr->ctx->fs_base + 0x18ULL <= curr->ctx->mem_size) {
+        uint64_t t = *(uint64_t *)(curr->ctx->mem_base + curr->ctx->fs_base + 0x10ULL);
+        if (t != 0 && t == handle) {
+          pthread_mutex_unlock(&g_threads_mutex);
+          return curr;
+        }
+      }
+    }
     curr = curr->next;
   }
   pthread_mutex_unlock(&g_threads_mutex);
   return NULL;
+}
+
+static inline RecompThread *find_thread(uint64_t handle) {
+  return recomp_find_thread(handle);
 }
 
 static void unregister_thread(RecompThread *t) {

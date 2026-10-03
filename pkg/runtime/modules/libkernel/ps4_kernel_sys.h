@@ -76,7 +76,12 @@ void shim_Func_E7EBCE96E92F91F8(GuestContext *ctx);
 void shim_sceKernelGetSanitizerNewReplaceExternal(GuestContext *ctx);
 void shim_sceKernelGetSanitizerMallocReplaceExternal(GuestContext *ctx);
 void shim_sceKernelIsAddressSanitizerEnabled(GuestContext *ctx);
+int32_t sceKernelInstallExceptionHandler(int32_t signum, uint64_t handler);
+int32_t sceKernelRemoveExceptionHandler(int32_t signum);
+int32_t sceKernelRaiseException(uint64_t thread, int32_t signum);
+
 void shim_sceKernelInstallExceptionHandler(GuestContext *ctx);
+void shim_sceKernelRemoveExceptionHandler(GuestContext *ctx);
 void shim_sceKernelRaiseException(GuestContext *ctx);
 void shim_sceKernelDebugRaiseException(GuestContext *ctx);
 void shim_sceKernelDebugRaiseExceptionOnReleaseMode(GuestContext *ctx);

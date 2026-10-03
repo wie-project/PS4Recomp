@@ -415,13 +415,161 @@ void shim_sceKernelIsAddressSanitizerEnabled(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+#include <signal.h>
+#include <pthread.h>
+#include "ps4_threading.h"
+
+#define ORBIS_KERNEL_ERROR_ESRCH  0x80020003
+#define ORBIS_KERNEL_ERROR_EINVAL 0x80020016
+#define ORBIS_KERNEL_ERROR_EAGAIN 0x80020023
+#define ORBIS_KERNEL_ERROR_EFAULT 0x8002000e
+
+static uint64_t g_exception_handlers[64] = {0};
+static pthread_mutex_t g_exception_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool g_sigusr1_installed = false;
+
+static void host_sigusr1_handler(int sig, siginfo_t *si, void *ucontext_raw) {
+    (void)si;
+    (void)ucontext_raw;
+    if (sig != 30) return;
+
+    uint64_t handler = __atomic_load_n(&g_exception_handlers[sig], __ATOMIC_ACQUIRE);
+    if (!handler) return;
+
+    GuestContext *ctx = g_current_ctx;
+    if (!ctx || !ctx->mem_base) return;
+
+    // Save full guest state to restore after exception handler returns
+    GuestContext saved_ctx = *ctx;
+
+    // Allocate Orbis ucontext structure on the guest stack
+    uint64_t ucontext_guest_addr = (ctx->rsp - 0x200ULL) & ~0xfULL;
+    if (ucontext_guest_addr + 0x200ULL <= ctx->mem_size) {
+        memset(ctx->mem_base + ucontext_guest_addr, 0, 0x200);
+        // In FreeBSD/Orbis x86_64 ucontext_t:
+        // mc_rdi=0x48, mc_rsi=0x50, mc_rdx=0x58, mc_rcx=0x60, mc_r8=0x68, mc_r9=0x70
+        // mc_rax=0x78, mc_rbx=0x80, mc_rbp=0x88, mc_r10=0x90, mc_r11=0x98, mc_r12=0xa0
+        // mc_r13=0xa8, mc_r14=0xb0, mc_r15=0xb8, mc_rip=0xe0, mc_rsp=0xf8
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x48ULL) = saved_ctx.rdi;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x50ULL) = saved_ctx.rsi;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x58ULL) = saved_ctx.rdx;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x60ULL) = saved_ctx.rcx;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x68ULL) = saved_ctx.r8;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x70ULL) = saved_ctx.r9;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x78ULL) = saved_ctx.rax;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x80ULL) = saved_ctx.rbx;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x88ULL) = saved_ctx.rbp;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x90ULL) = saved_ctx.r10;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x98ULL) = saved_ctx.r11;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xa0ULL) = saved_ctx.r12;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xa8ULL) = saved_ctx.r13;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xb0ULL) = saved_ctx.r14;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xb8ULL) = saved_ctx.r15;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xe0ULL) = saved_ctx.rip;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xf8ULL) = saved_ctx.rsp;
+    }
+
+    // Set arguments for Orbis exception handler:
+    // void handler(int signum, void *context)
+    ctx->rdi = (uint64_t)sig;
+    ctx->rsi = ucontext_guest_addr;
+
+    // Push dummy return address to simulate call frame
+    ctx->rsp = ucontext_guest_addr - 8ULL;
+    *(uint64_t *)(ctx->mem_base + ctx->rsp) = 0xdeadbeefULL;
+    ctx->rip = handler;
+
+    // Execute the guest exception handler (which signals SuspendSemaphore and waits on event flag)
+    recomp_dispatch(ctx, handler);
+
+    // Restore guest registers exactly as before signal interruption
+    *ctx = saved_ctx;
+}
+
+int32_t sceKernelInstallExceptionHandler(int32_t signum, uint64_t handler) {
+    if (signum != 1 && signum != 4 && signum != 8 && signum != 10 && signum != 11 && signum != 30) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+    if (signum <= 0 || signum >= 64) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+
+    pthread_mutex_lock(&g_exception_mutex);
+    __atomic_store_n(&g_exception_handlers[signum], handler, __ATOMIC_RELEASE);
+
+    if (signum == 30 && !g_sigusr1_installed) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_sigaction = host_sigusr1_handler;
+        sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGUSR1, &sa, NULL);
+        g_sigusr1_installed = true;
+    }
+    pthread_mutex_unlock(&g_exception_mutex);
+
+    return 0;
+}
+
+int32_t sceKernelRemoveExceptionHandler(int32_t signum) {
+    if (signum <= 0 || signum >= 64) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+    pthread_mutex_lock(&g_exception_mutex);
+    __atomic_store_n(&g_exception_handlers[signum], 0, __ATOMIC_RELEASE);
+    if (signum == 30 && g_sigusr1_installed) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = SIG_DFL;
+        sigaction(SIGUSR1, &sa, NULL);
+        g_sigusr1_installed = false;
+    }
+    pthread_mutex_unlock(&g_exception_mutex);
+    return 0;
+}
+
+int32_t sceKernelRaiseException(uint64_t thread, int32_t signum) {
+    if (signum != 30) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+
+    RecompThread *t = recomp_find_thread(thread);
+    if (!t) {
+        return ORBIS_KERNEL_ERROR_ESRCH;
+    }
+    if (t->finished || !t->host_thread) {
+        return ORBIS_KERNEL_ERROR_ESRCH;
+    }
+    if (pthread_equal(t->host_thread, pthread_self())) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+
+    int rc = pthread_kill(t->host_thread, SIGUSR1);
+    if (rc != 0) {
+        if (rc == ESRCH) return ORBIS_KERNEL_ERROR_ESRCH;
+        if (rc == EINVAL) return ORBIS_KERNEL_ERROR_EINVAL;
+        return ORBIS_KERNEL_ERROR_ESRCH;
+    }
+    return 0;
+}
+
 void shim_sceKernelInstallExceptionHandler(GuestContext *ctx) {
-    ctx->rax = 0;
+    int32_t signum = (int32_t)ctx->rdi;
+    uint64_t handler = ctx->rsi;
+    ctx->rax = (uint64_t)(int64_t)sceKernelInstallExceptionHandler(signum, handler);
+    SHIM_RETURN();
+}
+
+void shim_sceKernelRemoveExceptionHandler(GuestContext *ctx) {
+    int32_t signum = (int32_t)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)sceKernelRemoveExceptionHandler(signum);
     SHIM_RETURN();
 }
 
 void shim_sceKernelRaiseException(GuestContext *ctx) {
-    ctx->rax = 0;
+    uint64_t thread = ctx->rdi;
+    int32_t signum = (int32_t)ctx->rsi;
+    ctx->rax = (uint64_t)(int64_t)sceKernelRaiseException(thread, signum);
     SHIM_RETURN();
 }
 

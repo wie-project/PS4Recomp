@@ -9,7 +9,31 @@
 extern "C" {
 #endif
 
+typedef struct PthreadCleanupEntry {
+  uint64_t routine;
+  uint64_t arg;
+  bool onheap;
+  struct PthreadCleanupEntry *next;
+} PthreadCleanupEntry;
+
+typedef struct RecompThread {
+  pthread_t host_thread;
+  uint64_t thread_id;
+  GuestContext *ctx;
+  uint64_t start_routine;
+  uint64_t arg;
+  uint64_t ret_val;
+  char name[64];
+  bool finished;
+  bool joined;
+  bool detached;
+  int cancel_state;
+  PthreadCleanupEntry *cleanup_stack;
+  struct RecompThread *next;
+} RecompThread;
+
 void recomp_init_main_thread(GuestContext *ctx);
+RecompThread *recomp_find_thread(uint64_t handle);
 
 // POSIX Pthread shims
 void shim_pthread_create(GuestContext *ctx);
