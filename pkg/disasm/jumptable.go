@@ -419,12 +419,70 @@ func matchPICSwitch(
 	}, true
 }
 
-// switchTableCount discovers table length from bounds checks (cmp/sub/and).
+// switchTableCount discovers table length from bounds checks (cmp/sub/and/bextr/bzhi).
 func switchTableCount(window []Instruction, idxReg x86asm.Reg) int {
-	for i := len(window) - 1; i >= 1; i-- {
-		op := window[i].Inst.Op
-		switch op {
-		case x86asm.JA, x86asm.JAE:
+	for i := len(window) - 1; i >= 0; i-- {
+		inst := window[i].Inst
+
+		// 1. Bitwise extraction: BEXTR dst, src, ctrl (BMI1)
+		// ctrl[7:0] = start, ctrl[15:8] = length L. Maximum value is (1<<L)-1, count is (1<<L).
+		if inst.Op == x86asm.BEXTR {
+			if dst, ok := inst.Args[0].(x86asm.Reg); ok && sameGPR(dst, idxReg) {
+				if ctrlReg, ok := inst.Args[2].(x86asm.Reg); ok {
+					for j := i - 1; j >= 0; j-- {
+						prev := window[j].Inst
+						if prev.Op == x86asm.MOV {
+							if pDst, ok := prev.Args[0].(x86asm.Reg); ok && sameGPR(pDst, ctrlReg) {
+								if imm, ok := instImm(prev.Args[1]); ok {
+									length := (uint64(imm) >> 8) & 0xff
+									if length > 0 && length <= 12 {
+										return 1 << length
+									}
+								}
+								break
+							}
+						}
+					}
+				}
+				break
+			}
+		}
+
+		// 2. Zero high bits: BZHI dst, src, index (BMI2)
+		// Clears bits from index to 31/63. If index <= 12, count is (1<<index).
+		if inst.Op == x86asm.BZHI {
+			if dst, ok := inst.Args[0].(x86asm.Reg); ok && sameGPR(dst, idxReg) {
+				if idxR, ok := inst.Args[2].(x86asm.Reg); ok {
+					for j := i - 1; j >= 0; j-- {
+						prev := window[j].Inst
+						if prev.Op == x86asm.MOV {
+							if pDst, ok := prev.Args[0].(x86asm.Reg); ok && sameGPR(pDst, idxR) {
+								if imm, ok := instImm(prev.Args[1]); ok && imm > 0 && imm <= 12 {
+									return 1 << imm
+								}
+								break
+							}
+						}
+					}
+				}
+				break
+			}
+		}
+
+		// 3. Bitwise mask: AND dst, imm
+		if inst.Op == x86asm.AND {
+			if dst, ok := inst.Args[0].(x86asm.Reg); ok && sameGPR(dst, idxReg) {
+				if imm, ok := instImm(inst.Args[1]); ok && imm > 0 && imm < maxJumpTableEntries {
+					if (imm & (imm + 1)) == 0 {
+						return int(imm + 1)
+					}
+				}
+				break
+			}
+		}
+
+		// 4. Conditional jump bounds checks (CMP/SUB + JA/JAE/JB/JBE)
+		if inst.Op == x86asm.JA || inst.Op == x86asm.JAE {
 			for j := i - 1; j >= 0; j-- {
 				prev := window[j].Inst
 				if prev.Op == x86asm.MOV || prev.Op == x86asm.LEA || prev.Op == x86asm.NOP ||
@@ -435,58 +493,52 @@ func switchTableCount(window []Instruction, idxReg x86asm.Reg) int {
 					break
 				}
 				if dst, ok := prev.Args[0].(x86asm.Reg); ok && sameGPR(dst, idxReg) {
-					imm, ok := instImm(prev.Args[1])
-					if !ok || imm < 0 || imm >= maxJumpTableEntries {
-						break
-					}
-					n := int(imm)
-					if op == x86asm.JA {
-						n++
-					}
-					if n > 0 && n <= maxJumpTableEntries {
-						return n
+					if imm, ok := instImm(prev.Args[1]); ok && imm >= 0 && imm < maxJumpTableEntries {
+						n := int(imm)
+						if inst.Op == x86asm.JA {
+							n++
+						}
+						if n > 0 && n <= maxJumpTableEntries {
+							return n
+						}
 					}
 				}
 			}
-		case x86asm.JB, x86asm.JBE:
-			// cmp imm, reg; jb/jbe
+		} else if inst.Op == x86asm.JB || inst.Op == x86asm.JBE {
 			for j := i - 1; j >= 0; j-- {
 				prev := window[j].Inst
-				if prev.Op == x86asm.MOV || prev.Op == x86asm.LEA || prev.Op == x86asm.NOP {
+				if prev.Op == x86asm.MOV || prev.Op == x86asm.LEA || prev.Op == x86asm.NOP ||
+					prev.Op == x86asm.MOVZX || prev.Op == x86asm.MOVSX {
 					continue
 				}
 				if prev.Op != x86asm.CMP {
 					break
 				}
 				if src, ok := prev.Args[1].(x86asm.Reg); ok && sameGPR(src, idxReg) {
-					imm, ok := instImm(prev.Args[0])
-					if !ok || imm < 0 || imm >= maxJumpTableEntries {
-						break
-					}
-					n := int(imm)
-					if op == x86asm.JB {
-						n++
-					}
-					if n > 0 && n <= maxJumpTableEntries {
-						return n
+					if imm, ok := instImm(prev.Args[0]); ok && imm >= 0 && imm < maxJumpTableEntries {
+						n := int(imm)
+						if inst.Op == x86asm.JB {
+							n++
+						}
+						if n > 0 && n <= maxJumpTableEntries {
+							return n
+						}
 					}
 				}
 			}
 		}
-	}
 
-	// Also check for index bitmasks: e.g. and idxReg, 0x1f -> count = 32
-	for i := len(window) - 1; i >= 0 && i >= len(window)-8; i-- {
-		inst := window[i].Inst
-		if inst.Op == x86asm.AND {
-			if dst, ok := inst.Args[0].(x86asm.Reg); ok && sameGPR(dst, idxReg) {
-				if imm, ok := instImm(inst.Args[1]); ok && imm > 0 && imm < maxJumpTableEntries {
-					// Check if mask is of the form 2^k - 1
-					if (imm & (imm + 1)) == 0 {
-						return int(imm + 1)
-					}
+		// 5. If this instruction modifies idxReg, we must not look past it,
+		// because any earlier CMP/AND was checking an obsolete value.
+		if modifiesReg(inst, idxReg) {
+			// Transparent register transfer: mov idxReg, otherReg
+			if inst.Op == x86asm.MOV || inst.Op == x86asm.MOVSXD || inst.Op == x86asm.MOVZX || inst.Op == x86asm.MOVSX {
+				if srcReg, ok := inst.Args[1].(x86asm.Reg); ok && gprFamily(srcReg) != 0 {
+					idxReg = srcReg
+					continue
 				}
 			}
+			break
 		}
 	}
 

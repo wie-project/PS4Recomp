@@ -494,3 +494,75 @@ func TestMatchAbs64DirectMemJump(t *testing.T) {
 	}
 }
 
+func TestBEXTRJumpTable(t *testing.T) {
+	img := make([]byte, 0x1000)
+	entry := uint64(0x100)
+	pc := entry
+	put := func(b ...byte) {
+		copy(img[pc:], b)
+		pc += uint64(len(b))
+	}
+
+	// Earlier obsolete AND EAX, 1 that must NOT confuse BEXTR:
+	put(0x83, 0xe0, 0x01) // and eax, 1
+
+	// BEXTR sequence:
+	// mov ecx, 0x201 (start=1, len=2 -> 4 cases)
+	put(0xb9, 0x01, 0x02, 0x00, 0x00)
+	// bextr eax, r13d, ecx: c4 c2 70 f7 c5
+	put(0xc4, 0xc2, 0x70, 0xf7, 0xc5)
+
+	leaPC := pc
+	put(0x48, 0x8d, 0x0d, 0, 0, 0, 0) // lea rcx, [rip+table]
+	put(0x48, 0x63, 0x04, 0x81)       // movsxd rax, [rcx+rax*4]
+	put(0x48, 0x01, 0xc8)             // add rax, rcx
+	put(0xff, 0xe0)                   // jmp rax
+
+	cases := make([]uint64, 4)
+	for i := range cases {
+		cases[i] = pc
+		put(0xc3)
+	}
+
+	table := uint64(0x300)
+	leaNext := leaPC + 7
+	disp := int32(int64(table) - int64(leaNext))
+	binary.LittleEndian.PutUint32(img[leaPC+3:], uint32(disp))
+	for i, c := range cases {
+		binary.LittleEndian.PutUint32(img[table+uint64(i*4):], uint32(int32(int64(c)-int64(table))))
+	}
+
+	loaded := switchTestELF(img)
+	d, err := NewDisassembler(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var window []Instruction
+	p := entry
+	for p < cases[0] {
+		inst, err := x86asm.Decode(img[p:], 64)
+		if err != nil {
+			t.Fatalf("decode at 0x%x: %v", p, err)
+		}
+		window = append(window, Instruction{Address: p, Inst: inst})
+		p += uint64(inst.Len)
+	}
+
+	res, ok := d.ResolveJumpTable(window, nil, nil, entry, 0x800)
+	if !ok {
+		t.Fatal("expected BEXTR jump table resolution")
+	}
+	if res.Count != 4 {
+		t.Fatalf("got count %d, want 4", res.Count)
+	}
+	if len(res.Targets) != 4 {
+		t.Fatalf("got %d targets, want 4", len(res.Targets))
+	}
+	for i, c := range cases {
+		if res.Targets[i] != c {
+			t.Errorf("target[%d] = 0x%x, want 0x%x", i, res.Targets[i], c)
+		}
+	}
+}
+
