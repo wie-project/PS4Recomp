@@ -111,10 +111,27 @@ Recompile the extracted Orbis binaries and package them into a native standalone
 [ps4-mem] sceKernelSetVirtualRangeName: addr=0x18400000 len=268435456 name='dlmalloc_extra'
 [ps4-recomp] Executing _start (0x13550)...
 ........
+[ps4-sys] open: '/archive/mount/point/Media/Resources/unity default resources' (resolved='/archive/mount/point/Media/Resources/unity default resources', flags=0x0) -> fd=-1
+[ps4-sys] open: '/app0/Media/Resources/unity default resources' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/build/eboot.app/Contents/Resources/Media/Resources/unity default resources', flags=0x0) -> fd=10
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=327680 (0.31 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd4340000
+[ps4-thread] Thread created: id=1042, name='FMOD mixer thread', entry=0x19aef40, arg=0xcfdecb18
+[ps4-thread] Thread started: id=1042, name='FMOD mixer thread', entry=0x19aef40, arg=0xcfdecb18
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=81920 (0.08 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xcef60000
+[ps4-thread] Thread created: id=1043, name='FMOD AudioOut thread', entry=0x19aef40, arg=0xcfdec9c0
+[ps4-thread] Thread started: id=1043, name='FMOD AudioOut thread', entry=0x19aef40, arg=0xcfdec9c0
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=196608 (0.19 MB) align=4096 flags=0x0
 [ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd4390000
+[ps4-thread] Thread created: id=1044, name='FMOD stream thread', entry=0x19aef40, arg=0xcfde8828
+[ps4-thread] Thread started: id=1044, name='FMOD stream thread', entry=0x19aef40, arg=0xcfde8828
 Forcing submitDone to avoid TRC R4089 breach
 Forcing submitDone to avoid TRC R4089 breach
 Forcing submitDone to avoid TRC R4089 breach
+Forcing submitDone to avoid TRC R4089 breach
+Forcing submitDone to avoid TRC R4089 breach
+Forcing submitDone to avoid TRC R4089 breach
+^C
 ```
 
 ### Hogwarts Legacy (Unreal Engine 4)
