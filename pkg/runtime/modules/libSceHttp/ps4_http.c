@@ -7,6 +7,14 @@
 static pthread_mutex_t g_http_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int32_t g_http_next_id = 1;
 
+static inline void *guest_to_host(const GuestContext *ctx, uint64_t addr) {
+    if (!addr) return NULL;
+    if (ctx && ctx->mem_base && addr < (1ULL << 39)) {
+        return (void *)(ctx->mem_base + addr);
+    }
+    return (void *)addr;
+}
+
 static int32_t alloc_http_id(void) {
     pthread_mutex_lock(&g_http_mutex);
     int32_t id = g_http_next_id++;
@@ -197,6 +205,149 @@ int32_t sceHttpDestroyEpoll(int32_t libhttpCtxId, OrbisHttpEpollHandle eh) {
     return 0;
 }
 
+static inline bool is_http_unreserved(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
+}
+
+int32_t sceHttpUriEscape(char *out, uint64_t *require, uint64_t prepare, const char *in) {
+    if (!in) {
+        return (int32_t)0x80431102; // ORBIS_HTTP_ERROR_INVALID_VALUE
+    }
+
+    uint64_t needed = 0;
+    const char *src = in;
+    while (*src) {
+        unsigned char c = (unsigned char)(*src);
+        if (is_http_unreserved(c)) {
+            needed++;
+        } else {
+            needed += 3; // %XX
+        }
+        src++;
+    }
+    needed++; // null terminator
+
+    if (require) {
+        *require = needed;
+    }
+
+    if (!out) {
+        return 0; // ORBIS_OK
+    }
+
+    if (prepare < needed) {
+        return (int32_t)0x80431001; // ORBIS_HTTP_ERROR_OUT_OF_MEMORY
+    }
+
+    static const char hex_chars[] = "0123456789ABCDEF";
+    src = in;
+    char *dst = out;
+    while (*src) {
+        unsigned char c = (unsigned char)(*src);
+        if (is_http_unreserved(c)) {
+            *dst++ = *src;
+        } else {
+            *dst++ = '%';
+            *dst++ = hex_chars[(c >> 4) & 0x0F];
+            *dst++ = hex_chars[c & 0x0F];
+        }
+        src++;
+    }
+    *dst = '\0';
+    return 0;
+}
+
+int32_t sceHttpCreateConnection(int32_t tmplId, const char *serverName, const char *scheme, uint16_t port, int32_t isEnableKeepalive) {
+    (void)tmplId;
+    (void)serverName;
+    (void)scheme;
+    (void)port;
+    (void)isEnableKeepalive;
+    return alloc_http_id();
+}
+
+int32_t sceHttpCreateRequest2(int32_t connId, const char *method, const char *path, uint64_t contentLength) {
+    (void)connId;
+    (void)method;
+    (void)path;
+    (void)contentLength;
+    return alloc_http_id();
+}
+
+int32_t sceHttpSetConnectTimeOut(int32_t id, uint32_t usec) {
+    (void)id;
+    (void)usec;
+    return 0;
+}
+
+int32_t sceHttpSetSendTimeOut(int32_t id, uint32_t usec) {
+    (void)id;
+    (void)usec;
+    return 0;
+}
+
+int32_t sceHttpSetRecvTimeOut(int32_t id, uint32_t usec) {
+    (void)id;
+    (void)usec;
+    return 0;
+}
+
+int32_t sceHttpSetRequestContentLength(int32_t id, uint64_t contentLength) {
+    (void)id;
+    (void)contentLength;
+    return 0;
+}
+
+int32_t sceHttpSetChunkedTransferEnabled(int32_t id, int32_t isEnable) {
+    (void)id;
+    (void)isEnable;
+    return 0;
+}
+
+int32_t sceHttpSetAuthEnabled(int32_t id, int32_t isEnable) {
+    (void)id;
+    (void)isEnable;
+    return 0;
+}
+
+int32_t sceHttpCookieFlush(int32_t libhttpCtxId) {
+    (void)libhttpCtxId;
+    return 0;
+}
+
+int32_t sceHttpSetRedirectCallback(int32_t id, void *cbfunc, void *userArg) {
+    (void)id;
+    (void)cbfunc;
+    (void)userArg;
+    return 0;
+}
+
+int32_t sceHttpGetMemoryPoolStats(int32_t libhttpCtxId, void *currentStat) {
+    (void)libhttpCtxId;
+    (void)currentStat;
+    return 0;
+}
+
+int32_t sceHttpsEnableOption(int32_t id, uint32_t sslFlags) {
+    (void)id;
+    (void)sslFlags;
+    return 0;
+}
+
+int32_t sceHttpsDisableOption(int32_t id, uint32_t sslFlags) {
+    (void)id;
+    (void)sslFlags;
+    return 0;
+}
+
+int32_t sceHttpsSetSslCallback(int32_t id, void *cbfunc, void *userArg) {
+    (void)id;
+    (void)cbfunc;
+    (void)userArg;
+    return 0;
+}
+
 // libSceHttp2
 int32_t sceHttp2Init(int32_t net_id, int32_t ssl_id, uint64_t pool_size, int32_t max_requests) {
     (void)net_id;
@@ -373,5 +524,98 @@ void shim_sceHttp2Init(GuestContext *ctx) {
 
 void shim_sceHttp2Term(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttp2Term((int32_t)ctx->rdi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpUriEscape(GuestContext *ctx) {
+    char *out = (char *)guest_to_host(ctx, ctx->rdi);
+    uint64_t *require = (uint64_t *)guest_to_host(ctx, ctx->rsi);
+    uint64_t prepare = ctx->rdx;
+    const char *in = (const char *)guest_to_host(ctx, ctx->rcx);
+    ctx->rax = (uint64_t)sceHttpUriEscape(out, require, prepare, in);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpCreateConnection(GuestContext *ctx) {
+    int32_t tmplId = (int32_t)ctx->rdi;
+    const char *serverName = (const char *)guest_to_host(ctx, ctx->rsi);
+    const char *scheme = (const char *)guest_to_host(ctx, ctx->rdx);
+    uint16_t port = (uint16_t)ctx->rcx;
+    int32_t isEnableKeepalive = (int32_t)ctx->r8;
+    ctx->rax = (uint64_t)sceHttpCreateConnection(tmplId, serverName, scheme, port, isEnableKeepalive);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpCreateRequest2(GuestContext *ctx) {
+    int32_t connId = (int32_t)ctx->rdi;
+    const char *method = (const char *)guest_to_host(ctx, ctx->rsi);
+    const char *path = (const char *)guest_to_host(ctx, ctx->rdx);
+    uint64_t contentLength = ctx->rcx;
+    ctx->rax = (uint64_t)sceHttpCreateRequest2(connId, method, path, contentLength);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetConnectTimeOut(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpSetConnectTimeOut((int32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetSendTimeOut(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpSetSendTimeOut((int32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetRecvTimeOut(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpSetRecvTimeOut((int32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetRequestContentLength(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpSetRequestContentLength((int32_t)ctx->rdi, (uint64_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetChunkedTransferEnabled(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpSetChunkedTransferEnabled((int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetAuthEnabled(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpSetAuthEnabled((int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpCookieFlush(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpCookieFlush((int32_t)ctx->rdi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetRedirectCallback(GuestContext *ctx) {
+    void *cbfunc = (void *)guest_to_host(ctx, ctx->rsi);
+    void *userArg = (void *)guest_to_host(ctx, ctx->rdx);
+    ctx->rax = (uint64_t)sceHttpSetRedirectCallback((int32_t)ctx->rdi, cbfunc, userArg);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpGetMemoryPoolStats(GuestContext *ctx) {
+    void *currentStat = (void *)guest_to_host(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)sceHttpGetMemoryPoolStats((int32_t)ctx->rdi, currentStat);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpsEnableOption(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpsEnableOption((int32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpsDisableOption(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpsDisableOption((int32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpsSetSslCallback(GuestContext *ctx) {
+    void *cbfunc = (void *)guest_to_host(ctx, ctx->rsi);
+    void *userArg = (void *)guest_to_host(ctx, ctx->rdx);
+    ctx->rax = (uint64_t)sceHttpsSetSslCallback((int32_t)ctx->rdi, cbfunc, userArg);
     SHIM_RETURN();
 }

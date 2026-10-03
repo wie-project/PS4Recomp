@@ -50,6 +50,10 @@ void shim_sceNetEpollCreate(GuestContext *ctx);
 void shim_sceNetEpollDestroy(GuestContext *ctx);
 void shim_sceNetEpollControl(GuestContext *ctx);
 void shim_sceNetEpollWait(GuestContext *ctx);
+void shim_sceNetEpollAbort(GuestContext *ctx);
+
+void shim_sceNetResolverGetError(GuestContext *ctx);
+void shim_sceNetGetMemoryPoolStats(GuestContext *ctx);
 
 void shim_sceNetGetMacAddress(GuestContext *ctx);
 void shim_sceNetGetSockInfo(GuestContext *ctx);

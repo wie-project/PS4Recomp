@@ -216,6 +216,28 @@ int32_t sceNpUnregisterStateCallbackA(int32_t callback_id) {
     return 0;
 }
 
+int32_t sceNpRegisterStateCallbackForToolkit(void* callback, void* userdata) {
+    (void)callback;
+    (void)userdata;
+    NP_LOG("sceNpRegisterStateCallbackForToolkit");
+    return 0;
+}
+
+int32_t sceNpUnregisterStateCallbackForToolkit(void) {
+    NP_LOG("sceNpUnregisterStateCallbackForToolkit");
+    return 0;
+}
+
+int32_t sceNpCheckCallbackForLib(void) {
+    NP_LOG("sceNpCheckCallbackForLib");
+    return 0;
+}
+
+int32_t sceNpCheckCallback(void) {
+    NP_LOG("sceNpCheckCallback");
+    return 0;
+}
+
 // GuestContext shims for NpManager
 void shim_sceNpCheckNpAvailability(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCheckNpAvailability((int32_t)ctx->rdi, (OrbisNpOnlineId*)ctx->rsi);
@@ -354,6 +376,26 @@ void shim_sceNpUnregisterStateCallback(GuestContext *ctx) {
 
 void shim_sceNpUnregisterStateCallbackA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpUnregisterStateCallbackA((int32_t)ctx->rdi);
+    SHIM_RETURN();
+}
+
+void shim_sceNpRegisterStateCallbackForToolkit(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceNpRegisterStateCallbackForToolkit((void*)ctx->rdi, (void*)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceNpUnregisterStateCallbackForToolkit(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceNpUnregisterStateCallbackForToolkit();
+    SHIM_RETURN();
+}
+
+void shim_sceNpCheckCallbackForLib(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceNpCheckCallbackForLib();
+    SHIM_RETURN();
+}
+
+void shim_sceNpCheckCallback(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceNpCheckCallback();
     SHIM_RETURN();
 }
 

@@ -181,6 +181,10 @@ int32_t sceNpRegisterStateCallback(void* callback, void* userdata);
 int32_t sceNpRegisterStateCallbackA(void* callback, void* userdata);
 int32_t sceNpUnregisterStateCallback(int32_t callback_id);
 int32_t sceNpUnregisterStateCallbackA(int32_t callback_id);
+int32_t sceNpRegisterStateCallbackForToolkit(void* callback, void* userdata);
+int32_t sceNpUnregisterStateCallbackForToolkit(void);
+int32_t sceNpCheckCallbackForLib(void);
+int32_t sceNpCheckCallback(void);
 
 int32_t sceNpAuthCreateRequest(void);
 int32_t sceNpAuthCreateAsyncRequest(const OrbisNpAuthCreateAsyncRequestParameter* param);
@@ -267,6 +271,10 @@ void shim_sceNpRegisterStateCallback(GuestContext *ctx);
 void shim_sceNpRegisterStateCallbackA(GuestContext *ctx);
 void shim_sceNpUnregisterStateCallback(GuestContext *ctx);
 void shim_sceNpUnregisterStateCallbackA(GuestContext *ctx);
+void shim_sceNpRegisterStateCallbackForToolkit(GuestContext *ctx);
+void shim_sceNpUnregisterStateCallbackForToolkit(GuestContext *ctx);
+void shim_sceNpCheckCallbackForLib(GuestContext *ctx);
+void shim_sceNpCheckCallback(GuestContext *ctx);
 
 void shim_sceNpAuthCreateRequest(GuestContext *ctx);
 void shim_sceNpAuthCreateAsyncRequest(GuestContext *ctx);

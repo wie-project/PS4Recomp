@@ -468,6 +468,37 @@ void shim_sceNetEpollWait(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_sceNetEpollAbort(GuestContext *ctx) {
+    int epfd = (int)ctx->rdi;
+    int flags = (int)ctx->rsi;
+    (void)epfd;
+    (void)flags;
+    ctx->rax = ORBIS_OK;
+    SHIM_RETURN();
+}
+
+void shim_sceNetResolverGetError(GuestContext *ctx) {
+    int resolverid = (int)ctx->rdi;
+    int32_t *status = (int32_t *)guest_to_host(ctx, ctx->rsi);
+    (void)resolverid;
+    if (!status) {
+        set_net_errno(ctx, EINVAL);
+        ctx->rax = (uint64_t)-1;
+        SHIM_RETURN();
+    }
+    *status = 0; // No error
+    ctx->rax = ORBIS_OK;
+    SHIM_RETURN();
+}
+
+void shim_sceNetGetMemoryPoolStats(GuestContext *ctx) {
+    // Current memory pool stats
+    void *currentStat = guest_to_host(ctx, ctx->rdi);
+    (void)currentStat;
+    ctx->rax = ORBIS_OK;
+    SHIM_RETURN();
+}
+
 void shim_sceNetGetMacAddress(GuestContext *ctx) {
     unsigned char *mac = (unsigned char *)guest_to_host(ctx, ctx->rdi);
     int len = (int)ctx->rsi;

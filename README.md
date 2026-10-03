@@ -93,15 +93,7 @@ Recompile the extracted Orbis binaries and package them into a native standalone
 [ps4-mem] sceKernelSetVirtualRangeName: addr=0x18400000 len=268435456 name='dlmalloc_extra'
 [ps4-recomp] Executing _start (0x13550)...
 ........
-[ps4-sys] open: '/app0/Media/RuntimeInitializeOnLoads.json' -> fd=5
-[ps4-sys] open: '/app0/Media/ScriptingAssemblies.json' -> fd=5
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd06f0000
-[ps4-sys] open: '/dev/urandom' -> fd=5
-[ps4-sys] open: '/app0/Media/globalgamemanagers' -> fd=5
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd0800000
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd0840000
-[ps4-recomp] WARN: Called unimplemented function 'sceSaveDataInitialize3' (NID: TywrFKCoLGY, Lib: libSceSaveData) at RIP=0x1a27600
-zsh: abort
+[ps4-recomp] WARN: Called unimplemented function 'sceGnmGetTheTessellationFactorRingBufferBaseAddress' (NID: ln33zjBrfjk, Lib: libSceGnmDriver) at RIP=0x1a284d0 (caller RIP=0x153ecd7, RSP=0x7ffffa938)
 ```
 
 ### Hogwarts Legacy (Unreal Engine 4)
