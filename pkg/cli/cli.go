@@ -805,10 +805,18 @@ func loadCompanionModules(cfg *Config, main *elfloader.LoadedELF) ([]emitter.Gue
 		nextBase = (main.MaxVAddr + 0xFFFF) &^ 0xFFFF
 		exports := mod.ExportedFunctions()
 		modules = append(modules, emitter.GuestModule{
-			FileName: mod.FileName,
-			Aliases:  ref.Aliases,
-			Exports:  exports,
-			Init:     append([]uint64(nil), mod.InitArray...),
+			FileName:       mod.FileName,
+			Aliases:        ref.Aliases,
+			Exports:        exports,
+			Init:           append([]uint64(nil), mod.InitArray...),
+			StartAddr:      mod.MinVAddr,
+			EndAddr:        mod.MaxVAddr,
+			Seg0Addr:       mod.Seg0Addr,
+			Seg0Size:       mod.Seg0Size,
+			EHFrameHdrAddr: mod.EHFrameHdrAddr,
+			EHFrameHdrSize: mod.EHFrameHdrSize,
+			EHFrameAddr:    mod.EHFrameAddr,
+			EHFrameSize:    mod.EHFrameSize,
 		})
 		fmt.Printf("             Linked module %s (%d exports, load 0x%x-0x%x)\n",
 			mod.FileName, len(exports), mod.MinVAddr, mod.MaxVAddr)

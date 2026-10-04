@@ -118,6 +118,16 @@ type LoadedELF struct {
 	// and .eh_frame_hdr), sorted and non-overlapping. PS4 RX segments often
 	// contain both.
 	DataRanges []AddrRange
+
+	// EHFrameHdrAddr and EHFrameHdrSize store the guest virtual address and extent of .eh_frame_hdr.
+	EHFrameHdrAddr uint64
+	EHFrameHdrSize uint64
+	// EHFrameAddr and EHFrameSize store the guest virtual address and extent of .eh_frame.
+	EHFrameAddr uint64
+	EHFrameSize uint64
+	// Seg0Addr and Seg0Size store the start virtual address and extent of segment 0 (the code segment).
+	Seg0Addr uint64
+	Seg0Size uint64
 }
 
 // FunctionHasLSDA reports whether any function extent in [fnStart, fnEnd) has an LSDA
@@ -247,6 +257,11 @@ func LoadELFBytes(data []byte) (*LoadedELF, error) {
 		}
 		seg.Data = loaded.MemoryImage[p.prog.Vaddr:memEnd]
 		loaded.Segments = append(loaded.Segments, seg)
+	}
+
+	if len(loaded.Segments) > 0 {
+		loaded.Seg0Addr = loaded.Segments[0].Vaddr
+		loaded.Seg0Size = loaded.Segments[0].Memsz
 	}
 
 	for _, sec := range file.Sections {

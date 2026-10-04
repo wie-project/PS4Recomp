@@ -193,6 +193,39 @@ void recomp_module_register_init(const char *filename, const uint64_t *inits, si
     pthread_mutex_unlock(&g_sysmodule_mutex);
 }
 
+#define MAX_UNWIND_MODULES 64
+static RecompModuleUnwindInfo g_unwind_modules[MAX_UNWIND_MODULES];
+static int g_unwind_modules_count = 0;
+
+void recomp_module_register_unwind_info(const RecompModuleUnwindInfo *info) {
+    if (!info) {
+        return;
+    }
+    pthread_mutex_lock(&g_sysmodule_mutex);
+    if (g_unwind_modules_count < MAX_UNWIND_MODULES) {
+        g_unwind_modules[g_unwind_modules_count++] = *info;
+    }
+    pthread_mutex_unlock(&g_sysmodule_mutex);
+}
+
+const RecompModuleUnwindInfo *recomp_module_find_by_addr(uint64_t addr) {
+    pthread_mutex_lock(&g_sysmodule_mutex);
+    for (int i = 0; i < g_unwind_modules_count; i++) {
+        if (addr >= g_unwind_modules[i].start_addr && addr < g_unwind_modules[i].end_addr) {
+            const RecompModuleUnwindInfo *res = &g_unwind_modules[i];
+            pthread_mutex_unlock(&g_sysmodule_mutex);
+            return res;
+        }
+    }
+    if (g_unwind_modules_count > 0 && addr == 0) {
+        const RecompModuleUnwindInfo *res = &g_unwind_modules[0];
+        pthread_mutex_unlock(&g_sysmodule_mutex);
+        return res;
+    }
+    pthread_mutex_unlock(&g_sysmodule_mutex);
+    return NULL;
+}
+
 void recomp_module_start(GuestContext *ctx, int32_t handle) {
     if (!ctx || handle <= 0) {
         return;

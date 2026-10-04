@@ -40,6 +40,10 @@ func attachUnwind(l *LoadedELF, file *elf.File) {
 		l.FuncBounds = nil
 		l.UnwindRanges = nil
 		l.DataRanges = nil
+		l.EHFrameHdrAddr = 0
+		l.EHFrameHdrSize = 0
+		l.EHFrameAddr = 0
+		l.EHFrameSize = 0
 	}
 	if sec, ok := l.Sections[".eh_frame_hdr"]; ok && sec != nil && sec.Size >= 4 {
 		if parseEHFrameHdr(l, sec.Addr, sec.Size, 0) {
@@ -49,6 +53,10 @@ func attachUnwind(l *LoadedELF, file *elf.File) {
 		l.FuncBounds = nil
 		l.UnwindRanges = nil
 		l.DataRanges = nil
+		l.EHFrameHdrAddr = 0
+		l.EHFrameHdrSize = 0
+		l.EHFrameAddr = 0
+		l.EHFrameSize = 0
 	}
 	if sec, ok := l.Sections[".eh_frame"]; ok && sec != nil && sec.Size >= 8 && sec.Addr != 0 {
 		limit := sec.Addr + sec.Size
@@ -57,6 +65,8 @@ func attachUnwind(l *LoadedELF, file *elf.File) {
 			l.LSDABounds = normalizeBounds(lsdaBounds)
 			l.UnwindRanges = mergeRanges(append(l.UnwindRanges, l.ExecRanges...))
 			l.DataRanges = mergeRanges([]AddrRange{{Start: sec.Addr, End: end}})
+			l.EHFrameAddr = sec.Addr
+			l.EHFrameSize = end - sec.Addr
 		}
 	}
 }
@@ -152,6 +162,10 @@ func parseEHFrameHdr(l *LoadedELF, hdrVA, hdrSize uint64, pcrelBias int64) bool 
 		{Start: frameVA, End: end},
 		{Start: hdrVA, End: hdrEnd},
 	})
+	l.EHFrameHdrAddr = hdrVA
+	l.EHFrameHdrSize = hdrEnd - hdrVA
+	l.EHFrameAddr = frameVA
+	l.EHFrameSize = end - frameVA
 	return true
 }
 

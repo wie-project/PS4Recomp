@@ -19,10 +19,18 @@ import (
 
 // GuestModule is a recompiled PRX/SPRX whose exports are published to sceKernelDlsym.
 type GuestModule struct {
-	FileName string
-	Aliases  []string
-	Exports  []elfloader.Symbol
-	Init     []uint64
+	FileName       string
+	Aliases        []string
+	Exports        []elfloader.Symbol
+	Init           []uint64
+	StartAddr      uint64
+	EndAddr        uint64
+	Seg0Addr       uint64
+	Seg0Size       uint64
+	EHFrameHdrAddr uint64
+	EHFrameHdrSize uint64
+	EHFrameAddr    uint64
+	EHFrameSize    uint64
 }
 
 // CEmitter emits C source files from disassembled functions.
@@ -1109,6 +1117,28 @@ func (e *CEmitter) EmitGuestModules(path string) (err error) {
 			return err
 		}
 	}
+	if e.elf != nil {
+		mainName := e.elf.FileName
+		if mainName == "" {
+			mainName = "eboot.bin"
+		}
+		if _, err := fmt.Fprintf(w, "    static const RecompModuleUnwindInfo eboot_unwind = {\n"+
+			"        .name = %q,\n"+
+			"        .start_addr = 0x%xULL,\n"+
+			"        .end_addr = 0x%xULL,\n"+
+			"        .seg0_addr = 0x%xULL,\n"+
+			"        .seg0_size = 0x%xULL,\n"+
+			"        .eh_frame_hdr_addr = 0x%xULL,\n"+
+			"        .eh_frame_hdr_size = 0x%xULL,\n"+
+			"        .eh_frame_addr = 0x%xULL,\n"+
+			"        .eh_frame_size = 0x%xULL,\n"+
+			"    };\n"+
+			"    recomp_module_register_unwind_info(&eboot_unwind);\n",
+			mainName, e.elf.MinVAddr, e.elf.MaxVAddr, e.elf.Seg0Addr, e.elf.Seg0Size,
+			e.elf.EHFrameHdrAddr, e.elf.EHFrameHdrSize, e.elf.EHFrameAddr, e.elf.EHFrameSize); err != nil {
+			return err
+		}
+	}
 	for i, mod := range e.Modules {
 		names := uniqueModuleNames(mod.FileName, mod.Aliases)
 		for _, name := range names {
@@ -1120,6 +1150,22 @@ func (e *CEmitter) EmitGuestModules(path string) (err error) {
 					return err
 				}
 			}
+		}
+		if _, err := fmt.Fprintf(w, "    static const RecompModuleUnwindInfo mod_%d_unwind = {\n"+
+			"        .name = %q,\n"+
+			"        .start_addr = 0x%xULL,\n"+
+			"        .end_addr = 0x%xULL,\n"+
+			"        .seg0_addr = 0x%xULL,\n"+
+			"        .seg0_size = 0x%xULL,\n"+
+			"        .eh_frame_hdr_addr = 0x%xULL,\n"+
+			"        .eh_frame_hdr_size = 0x%xULL,\n"+
+			"        .eh_frame_addr = 0x%xULL,\n"+
+			"        .eh_frame_size = 0x%xULL,\n"+
+			"    };\n"+
+			"    recomp_module_register_unwind_info(&mod_%d_unwind);\n",
+			i, mod.FileName, mod.StartAddr, mod.EndAddr, mod.Seg0Addr, mod.Seg0Size,
+			mod.EHFrameHdrAddr, mod.EHFrameHdrSize, mod.EHFrameAddr, mod.EHFrameSize, i); err != nil {
+			return err
 		}
 	}
 	if _, err := w.WriteString("}\n"); err != nil {

@@ -295,6 +295,9 @@ func (l *LoadedELF) ApplyBias(delta uint64) error {
 	if l.CanaryAddr != 0 {
 		l.CanaryAddr += delta
 	}
+	l.Seg0Addr = shift(l.Seg0Addr)
+	l.EHFrameHdrAddr = shift(l.EHFrameHdrAddr)
+	l.EHFrameAddr = shift(l.EHFrameAddr)
 	l.MemoryImage = newImg
 
 	for _, seg := range l.Segments {

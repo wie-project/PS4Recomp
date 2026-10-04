@@ -134,15 +134,27 @@ Recompile the extracted Orbis binary and package it into a native standalone app
 [ps4-mem] sceKernelSetVirtualRangeName: addr=0x18400000 len=268435456 name='dlmalloc_extra'
 [ps4-recomp] Executing _start (0x13550)...
 ........
+[ps4-sys] open: '/archive/mount/point/Media/level0' (resolved='/archive/mount/point/Media/level0', flags=0x0) -> fd=-1
+[ps4-sys] open: '/app0/Media/level0' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/build/eboot.app/Contents/Resources/Media/level0', flags=0x0) -> fd=13
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=2097152 (2.00 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=2097152 (2.00 MB) align=262144 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd5500000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xd5500000
+[ps4-mem] sceKernelReserveVirtualRange: in=0x0 len=2097152 (2.00 MB) flags=0x0 align=262144
+[ps4-vm] recomp_vm_alloc_named_aligned (reserved): size=2097152 (2.00 MB) align=262144 flags=0x0
 [ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd5700000
 [ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xd5700000
 [ps4-mem] sceKernelReserveVirtualRange: in=0x298c0000 len=1048576 (1.00 MB) flags=0x10 align=0
 [ps4-vm] recomp_vm_alloc_fixed (reserved): desired=0x298c0000 size=1048576 (1.00 MB)
 [ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x298c0000
 [ps4-mem] sceKernelCheckedReleaseDirectMemory: phys=0x0 len=1048576
-libunwind: decodeEHHdr W:\Build\J02688918\sys\internal\usermode\src\libc\contrib\libunwind\src/EHHeaderParser.hpp:61 - Unsupported .eh_frame_hdr version
-Trap instruction UD2 at 0x2ca67e1
-zsh: abort
+
+FATAL: Signal 10 at host address 0x6f01f3aa1c (mem_base=0x7000000000)
+RIP=0x2d3b0a0 RSP=0x7ffff9710 RBP=0x7ffff9760 RAX=0xffe8a524 RBX=0x1dc4f3c
+RCX=0xffffffff RDX=0x23e7000 RSI=0xffffffff01f3aa1c RDI=0x2da8f58
+R8=0x1dc4f3c R9=0x7ffff98b0 R10=0x18400000 R11=0x12
+R12=0x2da8f58 R13=0xffffffff01f3aa20 R14=0x7ffff98b0 R15=0x3b031b01
+Guest Stack at RSP=0x7ffff9710 (96 words):
 ```
 
 ### Hogwarts Legacy (Unreal Engine 4)

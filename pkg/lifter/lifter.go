@@ -493,25 +493,6 @@ func (l *Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn
 				lines = append(
 					lines,
 					"    default:",
-				)
-				if fn != nil && len(fn.Blocks) > 1 && fn.EndAddr > fn.EntryAddr {
-					lines = append(
-						lines,
-						fmt.Sprintf("        if (%s >= 0x%xULL && %s < 0x%xULL) {", targetExpr, fn.EntryAddr, targetExpr, fn.EndAddr),
-						fmt.Sprintf("            switch (%s) {", targetExpr),
-					)
-					for _, blockAddr := range fn.BlockOrder {
-						lines = append(lines, fmt.Sprintf("            case 0x%xULL: goto loc_0x%x;", blockAddr, blockAddr))
-					}
-					lines = append(
-						lines,
-						"            default: break;",
-						"            }",
-						"        }",
-					)
-				}
-				lines = append(
-					lines,
 					"        RECOMP_POP_UNWIND();",
 					fmt.Sprintf("        ctx->rip = %s;", targetExpr),
 					fmt.Sprintf("        recomp_dispatch(ctx, %s);", targetExpr),
