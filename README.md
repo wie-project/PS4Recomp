@@ -134,19 +134,23 @@ Recompile the extracted Orbis binary and package it into a native standalone app
 [ps4-mem] sceKernelSetVirtualRangeName: addr=0x18400000 len=268435456 name='dlmalloc_extra'
 [ps4-recomp] Executing _start (0x13550)...
 ........
-[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xd5700000
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd5740000
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xd5740000
 [ps4-mem] sceKernelReserveVirtualRange: in=0x298c0000 len=1048576 (1.00 MB) flags=0x10 align=0
 [ps4-vm] recomp_vm_alloc_fixed (reserved): desired=0x298c0000 size=1048576 (1.00 MB)
 [ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0x298c0000
 [ps4-mem] sceKernelCheckedReleaseDirectMemory: phys=0x0 len=1048576
-Terminating due to uncaught exception 1963a190 of type Il2CppExceptionWrapper
+[ps4-unwind] GetModuleInfoForUnwind: addr=0x2d36ed1 -> mod=libc.prx, hdr=0x0, frame=0x0 (size=0x0)
+[ps4-unwind] GetModuleInfoForUnwind: addr=0x2d37054 -> mod=libc.prx, hdr=0x0, frame=0x0 (size=0x0)
+[ps4-unwind] GetModuleInfoForUnwind: addr=0x2d368a5 -> mod=libc.prx, hdr=0x0, frame=0x0 (size=0x0)
+Terminating due to uncaught exception 195a3440 of type Il2CppExceptionWrapper
 
-FATAL: Unresolved indirect jump/call to 0x0 (from RIP=0x0)
+FATAL: Unresolved indirect jump/call to 0x0 (return addr=0x2d35b16)
 Registers:
-  RAX=0x0000000000000000 RBX=0x000000001963a190 RCX=0x000000001963a190 RDX=0x0000000000000000
+  RAX=0x0000000000000000 RBX=0x00000000195a3440 RCX=0x00000000195a3440 RDX=0x0000000000000000
   RSI=0x0000000000000001 RDI=0x0000000000000000 RBP=0x00000007ffffa2d0 RSP=0x00000007ffffa2c8
-  R8 =0x00000000184000b8 R9 =0x00000000184000b8 R10=0x0000000018400000 R11=0x000000000000001c
-  R12=0x00000000082d0468 R13=0x000000001963a190 R14=0x0000000000000000 R15=0x00000000075b0000
+  R8 =0x00000000184001f8 R9 =0x00000000184001f8 R10=0x0000000018400000 R11=0x000000000000001c
+  R12=0x00000000082d0468 R13=0x00000000195a3440 R14=0x0000000000000000 R15=0x00000000075b0000
 Guest call stack heuristic (RSP=0x7ffffa2c8):
 ```
 

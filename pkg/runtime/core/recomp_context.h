@@ -351,31 +351,14 @@ extern recomp_fn_t **g_dispatch_l1[DISPATCH_LEVEL_SIZE];
 
 void recomp_register_fn(uint64_t guest_addr, recomp_fn_t fn);
 
-static inline void recomp_dispatch(GuestContext *ctx, uint64_t target) {
-  ctx->rip = target;
-  if (__builtin_expect(target < (1ULL << 48), 1)) {
-    uint64_t l1_idx = (target >> DISPATCH_L1_SHIFT) & DISPATCH_LEVEL_MASK;
-    recomp_fn_t **l2 = g_dispatch_l1[l1_idx];
-    if (__builtin_expect(l2 != NULL, 1)) {
-      uint64_t l2_idx = (target >> DISPATCH_L2_SHIFT) & DISPATCH_LEVEL_MASK;
-      recomp_fn_t *l3 = l2[l2_idx];
-      if (__builtin_expect(l3 != NULL, 1)) {
-        recomp_fn_t fn = l3[target & DISPATCH_LEVEL_MASK];
-        if (__builtin_expect(fn != NULL, 1)) {
-          fn(ctx);
-          return;
-        }
-      }
-    }
-  }
+static inline void recomp_dump_guest_context(GuestContext *ctx) {
+  if (!ctx) return;
   fprintf(stderr,
-          "\nFATAL: Unresolved indirect jump/call to 0x%llx (from RIP=0x%llx)\n"
           "Registers:\n"
           "  RAX=0x%016llx RBX=0x%016llx RCX=0x%016llx RDX=0x%016llx\n"
           "  RSI=0x%016llx RDI=0x%016llx RBP=0x%016llx RSP=0x%016llx\n"
           "  R8 =0x%016llx R9 =0x%016llx R10=0x%016llx R11=0x%016llx\n"
           "  R12=0x%016llx R13=0x%016llx R14=0x%016llx R15=0x%016llx\n",
-          (unsigned long long)target, (unsigned long long)ctx->rip,
           (unsigned long long)ctx->rax, (unsigned long long)ctx->rbx,
           (unsigned long long)ctx->rcx, (unsigned long long)ctx->rdx,
           (unsigned long long)ctx->rsi, (unsigned long long)ctx->rdi,
@@ -395,6 +378,40 @@ static inline void recomp_dispatch(GuestContext *ctx, uint64_t target) {
       }
     }
   }
+}
+
+static inline void recomp_dispatch(GuestContext *ctx, uint64_t target) {
+  uint64_t caller_rip = ctx->rip;
+  ctx->rip = target;
+  if (__builtin_expect(target != 0 && target < (1ULL << 48), 1)) {
+    uint64_t l1_idx = (target >> DISPATCH_L1_SHIFT) & DISPATCH_LEVEL_MASK;
+    recomp_fn_t **l2 = g_dispatch_l1[l1_idx];
+    if (__builtin_expect(l2 != NULL, 1)) {
+      uint64_t l2_idx = (target >> DISPATCH_L2_SHIFT) & DISPATCH_LEVEL_MASK;
+      recomp_fn_t *l3 = l2[l2_idx];
+      if (__builtin_expect(l3 != NULL, 1)) {
+        recomp_fn_t fn = l3[target & DISPATCH_LEVEL_MASK];
+        if (__builtin_expect(fn != NULL, 1)) {
+          fn(ctx);
+          return;
+        }
+      }
+    }
+  }
+  uint64_t ret_addr = 0;
+  if (ctx->mem_base && ctx->rsp < ctx->mem_size) {
+    ret_addr = *(uint64_t *)(ctx->mem_base + ctx->rsp);
+  }
+  if (caller_rip != 0 && caller_rip != target) {
+    fprintf(stderr,
+            "\nFATAL: Unresolved indirect jump/call to 0x%llx (from RIP=0x%llx, return addr=0x%llx)\n",
+            (unsigned long long)target, (unsigned long long)caller_rip, (unsigned long long)ret_addr);
+  } else {
+    fprintf(stderr,
+            "\nFATAL: Unresolved indirect jump/call to 0x%llx (return addr=0x%llx)\n",
+            (unsigned long long)target, (unsigned long long)ret_addr);
+  }
+  recomp_dump_guest_context(ctx);
   fflush(stderr);
   abort();
 }

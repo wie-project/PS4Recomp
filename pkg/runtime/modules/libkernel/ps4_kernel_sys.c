@@ -575,13 +575,23 @@ void shim_sceKernelRaiseException(GuestContext *ctx) {
 }
 
 void shim_sceKernelDebugRaiseException(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
+    uint64_t error = ctx->rdi;
+    uint64_t unk = ctx->rsi;
+    fprintf(stderr, "\n[ps4-kernel] Fatal debug exception raised: error=0x%llx (unk=0x%llx, RIP=0x%llx)\n",
+            (unsigned long long)error, (unsigned long long)unk, (unsigned long long)ctx->rip);
+    recomp_dump_guest_context(ctx);
+    fflush(stderr);
+    abort();
 }
 
 void shim_sceKernelDebugRaiseExceptionOnReleaseMode(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
+    uint64_t error = ctx->rdi;
+    uint64_t unk = ctx->rsi;
+    fprintf(stderr, "\n[ps4-kernel] Fatal debug exception (release mode) raised: error=0x%llx (unk=0x%llx, RIP=0x%llx)\n",
+            (unsigned long long)error, (unsigned long long)unk, (unsigned long long)ctx->rip);
+    recomp_dump_guest_context(ctx);
+    fflush(stderr);
+    abort();
 }
 
 void shim_sceKernelPrintBacktraceWithModuleInfo(GuestContext *ctx) {
@@ -707,6 +717,11 @@ void shim_sceKernelGetModuleInfoForUnwind(GuestContext *ctx) {
     info->eh_frame_size = mod->eh_frame_size;
     info->seg0_addr = mod->seg0_addr ? mod->seg0_addr : mod->start_addr;
     info->seg0_size = mod->seg0_size ? mod->seg0_size : (mod->end_addr - mod->start_addr);
+    fprintf(stderr, "[ps4-unwind] GetModuleInfoForUnwind: addr=0x%llx -> mod=%s, hdr=0x%llx, frame=0x%llx (size=0x%llx)\n",
+            (unsigned long long)addr, mod->name ? mod->name : "(null)",
+            (unsigned long long)info->eh_frame_hdr_addr,
+            (unsigned long long)info->eh_frame_addr,
+            (unsigned long long)info->eh_frame_size);
 
     ctx->rax = 0; // ORBIS_OK
     SHIM_RETURN();

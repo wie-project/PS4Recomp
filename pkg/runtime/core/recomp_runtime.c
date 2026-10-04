@@ -141,6 +141,7 @@ void shim_unresolved_stub(GuestContext *ctx) {
             (unsigned long long)caller_rip,
             (unsigned long long)(ctx ? ctx->rsp : 0));
   }
+  recomp_dump_guest_context(ctx);
   fflush(stderr);
   abort();
   if (ctx) {
