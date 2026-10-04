@@ -97,6 +97,9 @@ type LoadedELF struct {
 
 	MinVAddr uint64
 	MaxVAddr uint64
+	// OrigMinVAddr and OrigMaxVAddr track the unmerged extent of this specific ELF image.
+	OrigMinVAddr uint64
+	OrigMaxVAddr uint64
 
 	// ProcParamAddr and ProcParamSize store the guest virtual address and extent of PT_SCE_PROCPARAM.
 	ProcParamAddr uint64
@@ -313,6 +316,8 @@ func LoadELFBytes(data []byte) (*LoadedELF, error) {
 			}
 		}
 	}
+	loaded.OrigMinVAddr = loaded.MinVAddr
+	loaded.OrigMaxVAddr = loaded.MaxVAddr
 	attachUnwind(loaded, file)
 	return loaded, nil
 }

@@ -1122,6 +1122,11 @@ func (e *CEmitter) EmitGuestModules(path string) (err error) {
 		if mainName == "" {
 			mainName = "eboot.bin"
 		}
+		startAddr := e.elf.OrigMinVAddr
+		endAddr := e.elf.OrigMaxVAddr
+		if endAddr == 0 {
+			endAddr = e.elf.MaxVAddr
+		}
 		if _, err := fmt.Fprintf(w, "    static const RecompModuleUnwindInfo eboot_unwind = {\n"+
 			"        .name = %q,\n"+
 			"        .start_addr = 0x%xULL,\n"+
@@ -1134,7 +1139,7 @@ func (e *CEmitter) EmitGuestModules(path string) (err error) {
 			"        .eh_frame_size = 0x%xULL,\n"+
 			"    };\n"+
 			"    recomp_module_register_unwind_info(&eboot_unwind);\n",
-			mainName, e.elf.MinVAddr, e.elf.MaxVAddr, e.elf.Seg0Addr, e.elf.Seg0Size,
+			mainName, startAddr, endAddr, e.elf.Seg0Addr, e.elf.Seg0Size,
 			e.elf.EHFrameHdrAddr, e.elf.EHFrameHdrSize, e.elf.EHFrameAddr, e.elf.EHFrameSize); err != nil {
 			return err
 		}

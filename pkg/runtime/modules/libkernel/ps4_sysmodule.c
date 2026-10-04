@@ -210,12 +210,20 @@ void recomp_module_register_unwind_info(const RecompModuleUnwindInfo *info) {
 
 const RecompModuleUnwindInfo *recomp_module_find_by_addr(uint64_t addr) {
     pthread_mutex_lock(&g_sysmodule_mutex);
+    const RecompModuleUnwindInfo *best = NULL;
+    uint64_t best_size = (uint64_t)-1;
     for (int i = 0; i < g_unwind_modules_count; i++) {
         if (addr >= g_unwind_modules[i].start_addr && addr < g_unwind_modules[i].end_addr) {
-            const RecompModuleUnwindInfo *res = &g_unwind_modules[i];
-            pthread_mutex_unlock(&g_sysmodule_mutex);
-            return res;
+            uint64_t sz = g_unwind_modules[i].end_addr - g_unwind_modules[i].start_addr;
+            if (sz < best_size) {
+                best = &g_unwind_modules[i];
+                best_size = sz;
+            }
         }
+    }
+    if (best) {
+        pthread_mutex_unlock(&g_sysmodule_mutex);
+        return best;
     }
     if (g_unwind_modules_count > 0 && addr == 0) {
         const RecompModuleUnwindInfo *res = &g_unwind_modules[0];

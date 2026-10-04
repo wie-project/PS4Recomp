@@ -292,6 +292,8 @@ func (l *LoadedELF) ApplyBias(delta uint64) error {
 	l.EntryPoint = shift(l.EntryPoint)
 	l.MinVAddr += delta
 	l.MaxVAddr += delta
+	l.OrigMinVAddr += delta
+	l.OrigMaxVAddr += delta
 	if l.CanaryAddr != 0 {
 		l.CanaryAddr += delta
 	}
