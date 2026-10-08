@@ -37,6 +37,23 @@ func attachUnwind(l *LoadedELF, file *elf.File) {
 			l.UnwindRanges = mergeRanges(append(l.UnwindRanges, l.ExecRanges...))
 			return
 		}
+		// If PT_GNU_EH_FRAME does not start with a GNU .eh_frame_hdr (common in stripped
+		// Orbis companion PRXs where PT_GNU_EH_FRAME points only to the binary search table
+		// or raw unwind metadata), .eh_frame precedes prog.Vaddr and ends with a terminator.
+		if start, end, bounds, lsdaBounds := scanBackwardEHFrame(l.MemoryImage, prog.Vaddr); len(bounds) > 0 {
+			l.FuncBounds = normalizeBounds(bounds)
+			l.LSDABounds = normalizeBounds(lsdaBounds)
+			l.UnwindRanges = mergeRanges(append(l.UnwindRanges, l.ExecRanges...))
+			l.DataRanges = mergeRanges([]AddrRange{
+				{Start: start, End: end},
+				{Start: prog.Vaddr, End: prog.Vaddr + prog.Filesz},
+			})
+			l.EHFrameAddr = start
+			l.EHFrameSize = end - start
+			l.EHFrameHdrAddr = 0
+			l.EHFrameHdrSize = 0
+			return
+		}
 		l.FuncBounds = nil
 		l.UnwindRanges = nil
 		l.DataRanges = nil
@@ -60,7 +77,7 @@ func attachUnwind(l *LoadedELF, file *elf.File) {
 	}
 	if sec, ok := l.Sections[".eh_frame"]; ok && sec != nil && sec.Size >= 8 && sec.Addr != 0 {
 		limit := sec.Addr + sec.Size
-		if end, bounds, lsdaBounds := walkEHFrame(l.MemoryImage, sec.Addr, limit); len(bounds) > 0 {
+		if end, bounds, lsdaBounds := WalkEHFrame(l.MemoryImage, sec.Addr, limit); len(bounds) > 0 {
 			l.FuncBounds = normalizeBounds(bounds)
 			l.LSDABounds = normalizeBounds(lsdaBounds)
 			l.UnwindRanges = mergeRanges(append(l.UnwindRanges, l.ExecRanges...))
@@ -69,6 +86,44 @@ func attachUnwind(l *LoadedELF, file *elf.File) {
 			l.EHFrameSize = end - sec.Addr
 		}
 	}
+}
+
+// scanBackwardEHFrame locates the start of the .eh_frame stream that immediately precedes limit.
+// In ELF/PRX modules with stripped section headers, .eh_frame is placed directly ahead of
+// the PT_GNU_EH_FRAME table and ends at limit with a 4-byte zero terminator.
+func scanBackwardEHFrame(img []byte, limit uint64) (start uint64, end uint64, bounds []AddrRange, lsdaBounds []AddrRange) {
+	if limit > uint64(len(img)) {
+		limit = uint64(len(img))
+	}
+	const maxLookback = uint64(32 * 1024 * 1024)
+	minAddr := uint64(0)
+	if limit > maxLookback {
+		minAddr = limit - maxLookback
+	}
+
+	for pos := limit - 4; pos >= minAddr; pos -= 4 {
+		if pos+16 > limit {
+			if pos < 4 {
+				break
+			}
+			continue
+		}
+		len32 := readU32(img, int(pos))
+		id := readU32(img, int(pos+4))
+		if id == 0 && len32 >= 12 && len32 <= 256 && (img[pos+8] == 1 || img[pos+8] == 3) {
+			walkEnd, b, lb := WalkEHFrame(img, pos, limit)
+			if walkEnd == limit && len(b) > 0 {
+				start = pos
+				end = walkEnd
+				bounds = b
+				lsdaBounds = lb
+			}
+		}
+		if pos < 4 {
+			break
+		}
+	}
+	return start, end, bounds, lsdaBounds
 }
 
 // parseEHFrameWindow reads unwind info from a PT_GNU_EH_FRAME mapping.
@@ -94,6 +149,11 @@ func parseEHFrameWindow(l *LoadedELF, winVA, winSize uint64) bool {
 			l.DataRanges = nil
 			return false
 		}
+		// For Orbis binaries where PT_GNU_EH_FRAME points to winVA (which the linker used as
+		// the base address for pc-relative and data-relative table fields), libunwind expects
+		// eh_frame_hdr_addr to be winVA (the PT_GNU_EH_FRAME virtual address).
+		l.EHFrameHdrAddr = winVA
+		l.EHFrameHdrSize = end - winVA
 		l.DataRanges = mergeRanges(append(l.DataRanges, AddrRange{Start: winVA, End: end}))
 		return len(l.FuncBounds) > 0
 	}
@@ -148,7 +208,7 @@ func parseEHFrameHdr(l *LoadedELF, hdrVA, hdrSize uint64, pcrelBias int64) bool 
 	if hdrVA > frameVA && hdrVA < limit {
 		limit = hdrVA
 	}
-	end, bounds, lsdaBounds := walkEHFrame(img, frameVA, limit)
+	end, bounds, lsdaBounds := WalkEHFrame(img, frameVA, limit)
 	if len(bounds) == 0 || end <= frameVA {
 		return false
 	}
@@ -177,9 +237,9 @@ type cieInfo struct {
 	ok      bool
 }
 
-// walkEHFrame reads CIE/FDE records in [frameVA, limit). end is the address
+// WalkEHFrame reads CIE/FDE records in [frameVA, limit). end is the address
 // just past the terminator, or the end of the last valid record.
-func walkEHFrame(img []byte, frameVA, limit uint64) (end uint64, bounds []AddrRange, lsdaBounds []AddrRange) {
+func WalkEHFrame(img []byte, frameVA, limit uint64) (end uint64, bounds []AddrRange, lsdaBounds []AddrRange) {
 	if frameVA >= uint64(len(img)) || limit > uint64(len(img)) || frameVA >= limit {
 		return frameVA, nil, nil
 	}
