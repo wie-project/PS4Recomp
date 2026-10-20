@@ -44,7 +44,7 @@ PS4Recomp relies on several 3rd-party submodules located in `3rdparty/`:
 
 ```bash
 # Clone repository with all submodules:
-git clone --recursive https://github.com/vladislavkalinkin/PS4Recomp.git
+git clone --recursive https://github.com/wie-project/PS4Recomp.git
 cd PS4Recomp
 
 # Or if already cloned without --recursive:
