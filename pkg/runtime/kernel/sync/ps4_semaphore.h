@@ -14,6 +14,7 @@ void shim_sem_init(GuestContext *ctx);
 void shim_sem_destroy(GuestContext *ctx);
 void shim_sem_wait(GuestContext *ctx);
 void shim_sem_trywait(GuestContext *ctx);
+void shim_sem_timedwait(GuestContext *ctx);
 void shim_sem_post(GuestContext *ctx);
 void shim_sem_getvalue(GuestContext *ctx);
 

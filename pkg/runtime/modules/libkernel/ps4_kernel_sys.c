@@ -1,5 +1,7 @@
+#include "recomp_runtime.h"
 #include "ps4_kernel_sys.h"
 #include "ps4_sysmodule.h"
+#include "ps4_fiber.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,12 +57,12 @@ uint64_t sceKernelGetProcessTime(void) {
 }
 
 uint64_t sceKernelGetTscFrequency(void) {
-    return 2130000000ULL; // 2.13 GHz (PS4 Pro / Neo clock frequency)
+    return RECOMP_TSC_FREQ; // 2.13 GHz (PS4 Pro / Neo clock frequency)
 }
 
 uint64_t sceKernelReadTsc(void) {
-    // 2.13 GHz ticks = (ns * 213) / 100
-    return (sceKernelGetProcessTimeCounter() * 213ULL) / 100ULL;
+    // Same counter as the lifted RDTSC instruction.
+    return recomp_rdtsc();
 }
 
 int32_t sceKernelGettimeofday(OrbisKernelTimeval *tv) {
@@ -85,16 +87,27 @@ int32_t sceKernelGetCpumode(void) {
     return 1; // 7-core high-performance gaming mode
 }
 
+// PS4 Pro (Neo) mode: 4K checkerboard targets and Neo-only shaders. Comes from the startup
+// settings (on by default; PS4_PRO=0|1 overrides; the older PS4_NEO_MODE=0|1 still works).
+static int ps4_neo_mode(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("PS4_NEO_MODE");
+        mode = (e && *e) ? (e[0] == '1') : (ps4_host_setting_pro_mode() != 0);
+    }
+    return mode;
+}
+
 int32_t sceKernelIsNeoMode(void) {
-    return 1; // PlayStation 4 Pro (Neo) mode enabled
+    return ps4_neo_mode();
 }
 
 int32_t sceKernelHasNeoMode(void) {
-    return 1;
+    return ps4_neo_mode();
 }
 
 int32_t sceKernelIsAuthenticNeo(void) {
-    return 1;
+    return ps4_neo_mode();
 }
 
 int32_t sceKernelGetSystemSwVersion(OrbisKernelSwVersion *version) {
@@ -425,79 +438,156 @@ void shim_sceKernelIsAddressSanitizerEnabled(GuestContext *ctx) {
 #define ORBIS_KERNEL_ERROR_EAGAIN 0x80020023
 #define ORBIS_KERNEL_ERROR_EFAULT 0x8002000e
 
+// The guest general-purpose registers and rip, laid out as at the start of GuestContext.
+typedef struct GuestGprs {
+    uint64_t rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, rip;
+} GuestGprs;
+#define GUEST_GPRS_FIELD(f) \
+    _Static_assert(offsetof(GuestGprs, f) == offsetof(GuestContext, f), "GuestGprs." #f " matches GuestContext")
+GUEST_GPRS_FIELD(rax);
+GUEST_GPRS_FIELD(rcx);
+GUEST_GPRS_FIELD(rdx);
+GUEST_GPRS_FIELD(rbx);
+GUEST_GPRS_FIELD(rsp);
+GUEST_GPRS_FIELD(rbp);
+GUEST_GPRS_FIELD(rsi);
+GUEST_GPRS_FIELD(rdi);
+GUEST_GPRS_FIELD(r8);
+GUEST_GPRS_FIELD(r9);
+GUEST_GPRS_FIELD(r10);
+GUEST_GPRS_FIELD(r11);
+GUEST_GPRS_FIELD(r12);
+GUEST_GPRS_FIELD(r13);
+GUEST_GPRS_FIELD(r14);
+GUEST_GPRS_FIELD(r15);
+GUEST_GPRS_FIELD(rip);
+#undef GUEST_GPRS_FIELD
+_Static_assert(offsetof(GuestContext, fs_base) == sizeof(GuestGprs), "GuestGprs is the start of GuestContext");
+
+// What running guest code changes in its GuestContext: the GPRs and rip, the flags, the vector,
+// x87, MXCSR and MMX state (cf up to mmx). fs_base and gs_base in between and everything after
+// mmx (memory, heap, TLS keys and destructors, unwind frames, the VM mutex) are thread state,
+// which a guest exception handler may change for good.
+#define GUEST_CPU_REST_BEGIN offsetof(GuestContext, cf)
+#define GUEST_CPU_REST_END offsetof(GuestContext, mem_base)
+_Static_assert(offsetof(GuestContext, cf) == offsetof(GuestContext, gs_base) + 8 &&
+                   offsetof(GuestContext, mem_base) == offsetof(GuestContext, mmx) + sizeof(((GuestContext *)0)->mmx),
+               "the guest CPU state is rax..rip and cf..mmx of GuestContext");
+typedef struct GuestCpuState {
+    GuestGprs gprs;
+    uint8_t rest[GUEST_CPU_REST_END - GUEST_CPU_REST_BEGIN];
+} GuestCpuState;
+
+static void guest_cpu_state_save(GuestCpuState *s, const GuestContext *ctx) {
+    memcpy(&s->gprs, ctx, sizeof s->gprs);
+    memcpy(s->rest, (const uint8_t *)ctx + GUEST_CPU_REST_BEGIN, sizeof s->rest);
+}
+
+static void guest_cpu_state_restore(GuestContext *ctx, const GuestCpuState *s) {
+    memcpy(ctx, &s->gprs, sizeof s->gprs);
+    memcpy((uint8_t *)ctx + GUEST_CPU_REST_BEGIN, s->rest, sizeof s->rest);
+}
+
 static uint64_t g_exception_handlers[64] = {0};
 static pthread_mutex_t g_exception_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool g_sigusr1_installed = false;
 
+// The handler table is indexed by the Orbis signal number; the host SIGUSR1 handler looks its
+// entry up by the host number, which is the same (30 on FreeBSD and macOS).
+_Static_assert(SIGUSR1 == 30, "host SIGUSR1 is Orbis signal 30");
+
 static void host_sigusr1_handler(int sig, siginfo_t *si, void *ucontext_raw) {
     (void)si;
-    (void)ucontext_raw;
-    if (sig != 30) return;
+    if (sig != SIGUSR1) return;
 
     uint64_t handler = __atomic_load_n(&g_exception_handlers[sig], __ATOMIC_ACQUIRE);
     if (!handler) return;
 
     GuestContext *ctx = g_current_ctx;
-    if (!ctx || !ctx->mem_base) return;
+    if (!ctx || !ctx->mem_base || !ctx->fs_base) return;
 
-    // Save full guest state to restore after exception handler returns
-    GuestContext saved_ctx = *ctx;
+    // Guest code finds its GuestContext through the TCB slot (contract at recomp_enter_guest).
+    // When the slot names another endpoint of this guest thread, that endpoint is what the
+    // guest thread executes: in fiber thread mode it runs on its own host thread, so pass the
+    // exception on; in coroutine mode this host thread is between endpoints (a hand-over in
+    // progress) and the handler runs on ctx with the slot pointed at it.
+    uint64_t *slot = (uint64_t *)(ctx->mem_base + ctx->fs_base + RECOMP_TCB_CTX_SLOT);
+    const uint64_t saved_slot = *slot;
+    if (saved_slot != (uint64_t)(uintptr_t)ctx && ps4_fiber_threads_mode()) {
+        pthread_t target;
+        if (ps4_fiber_endpoint_host_thread((GuestContext *)(uintptr_t)saved_slot, &target) &&
+            !pthread_equal(target, pthread_self()) && pthread_kill(target, SIGUSR1) == 0)
+            return;
+        // No other host thread runs the endpoint (it is changing hands): handle it here.
+    }
+
+    // The guest CPU state in ctx when the signal arrived: the handler runs guest code on ctx, and
+    // this comes back afterwards (only the CPU state: what the handler did to the thread's TLS,
+    // heap or unwind state stays). `interrupted` holds the registers the handler gets in its
+    // ucontext: in guest code the live registers, else the ones in ctx.
+    GuestCpuState orig_cpu;
+    guest_cpu_state_save(&orig_cpu, ctx);
+    GuestGprs interrupted = orig_cpu.gprs;
 
 #if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
+    // Interrupted in recompiled guest code: the guest registers are the pinned host registers.
+    // Anywhere else (a shim, the bridge, a helper) the host registers hold host values and ctx
+    // holds the guest registers the bridge stored, which the ucontext must show.
     if (ucontext_raw) {
         arm_thread_state64_t *state = (arm_thread_state64_t *)&(((ucontext_t *)ucontext_raw)->uc_mcontext->__ss);
         uint64_t host_x26 = state->__x[26];
-        if (state->__x[28] == (uint64_t)ctx->mem_base &&
+        if (recomp_pc_in_guest_code((uint64_t)state->__pc) &&
+            state->__x[28] == (uint64_t)ctx->mem_base &&
             host_x26 >= 0x10000ULL && host_x26 < ctx->mem_size) {
-            saved_ctx.rax = state->__x[19];
-            saved_ctx.rbx = state->__x[20];
-            saved_ctx.rcx = state->__x[21];
-            saved_ctx.rdx = state->__x[22];
-            saved_ctx.rsi = state->__x[23];
-            saved_ctx.rdi = state->__x[24];
-            saved_ctx.rbp = state->__x[25];
-            saved_ctx.rsp = host_x26;
-            saved_ctx.r8  = state->__x[8];
-            saved_ctx.r9  = state->__x[9];
-            saved_ctx.r10 = state->__x[10];
-            saved_ctx.r11 = state->__x[11];
-            saved_ctx.r12 = state->__x[12];
-            saved_ctx.r13 = state->__x[13];
-            saved_ctx.r14 = state->__x[14];
-            saved_ctx.r15 = state->__x[15];
+            interrupted.rax = state->__x[19];
+            interrupted.rbx = state->__x[20];
+            interrupted.rcx = state->__x[21];
+            interrupted.rdx = state->__x[22];
+            interrupted.rsi = state->__x[23];
+            interrupted.rdi = state->__x[24];
+            interrupted.rbp = state->__x[25];
+            interrupted.rsp = host_x26;
+            interrupted.r8  = state->__x[8];
+            interrupted.r9  = state->__x[9];
+            interrupted.r10 = state->__x[10];
+            interrupted.r11 = state->__x[11];
+            interrupted.r12 = state->__x[12];
+            interrupted.r13 = state->__x[13];
+            interrupted.r14 = state->__x[14];
+            interrupted.r15 = state->__x[15];
         }
     }
 #endif
 
-    if (saved_ctx.rsp < 0x10000ULL || saved_ctx.rsp > ctx->mem_size) {
+    if (interrupted.rsp < 0x10000ULL || interrupted.rsp > ctx->mem_size) {
         return;
     }
 
-    // Allocate Orbis ucontext structure on the guest stack
-    uint64_t ucontext_guest_addr = (saved_ctx.rsp - 0x200ULL) & ~0xfULL;
+    // Allocate Orbis ucontext structure on the guest stack, below the 128-byte red zone
+    uint64_t ucontext_guest_addr = (interrupted.rsp - 128ULL - 0x200ULL) & ~0xfULL;
     if (ucontext_guest_addr + 0x200ULL <= ctx->mem_size) {
         memset(ctx->mem_base + ucontext_guest_addr, 0, 0x200);
         // In FreeBSD/Orbis x86_64 ucontext_t:
         // mc_rdi=0x48, mc_rsi=0x50, mc_rdx=0x58, mc_rcx=0x60, mc_r8=0x68, mc_r9=0x70
         // mc_rax=0x78, mc_rbx=0x80, mc_rbp=0x88, mc_r10=0x90, mc_r11=0x98, mc_r12=0xa0
         // mc_r13=0xa8, mc_r14=0xb0, mc_r15=0xb8, mc_rip=0xe0, mc_rsp=0xf8
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x48ULL) = saved_ctx.rdi;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x50ULL) = saved_ctx.rsi;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x58ULL) = saved_ctx.rdx;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x60ULL) = saved_ctx.rcx;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x68ULL) = saved_ctx.r8;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x70ULL) = saved_ctx.r9;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x78ULL) = saved_ctx.rax;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x80ULL) = saved_ctx.rbx;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x88ULL) = saved_ctx.rbp;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x90ULL) = saved_ctx.r10;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x98ULL) = saved_ctx.r11;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xa0ULL) = saved_ctx.r12;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xa8ULL) = saved_ctx.r13;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xb0ULL) = saved_ctx.r14;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xb8ULL) = saved_ctx.r15;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xe0ULL) = saved_ctx.rip;
-        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xf8ULL) = saved_ctx.rsp;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x48ULL) = interrupted.rdi;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x50ULL) = interrupted.rsi;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x58ULL) = interrupted.rdx;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x60ULL) = interrupted.rcx;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x68ULL) = interrupted.r8;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x70ULL) = interrupted.r9;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x78ULL) = interrupted.rax;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x80ULL) = interrupted.rbx;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x88ULL) = interrupted.rbp;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x90ULL) = interrupted.r10;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0x98ULL) = interrupted.r11;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xa0ULL) = interrupted.r12;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xa8ULL) = interrupted.r13;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xb0ULL) = interrupted.r14;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xb8ULL) = interrupted.r15;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xe0ULL) = interrupted.rip;
+        *(uint64_t *)(ctx->mem_base + ucontext_guest_addr + 0xf8ULL) = interrupted.rsp;
     }
 
     // Set arguments for Orbis exception handler:
@@ -511,10 +601,15 @@ static void host_sigusr1_handler(int sig, siginfo_t *si, void *ucontext_raw) {
     ctx->rip = handler;
 
     // Execute the guest exception handler (which signals SuspendSemaphore and waits on event flag)
+    *slot = (uint64_t)(uintptr_t)ctx;
     recomp_dispatch(ctx, handler);
+    *slot = saved_slot;
 
-    // Restore guest registers exactly as before signal interruption
-    *ctx = saved_ctx;
+    // The CPU state in ctx as before the signal. Not `interrupted`: in guest code its GPRs are the
+    // live registers, which may not hold what the code wrote to ctx just before (a helper's
+    // rcx result the lifted code has not loaded yet); the live registers come back by
+    // sigreturn anyway.
+    guest_cpu_state_restore(ctx, &orig_cpu);
 }
 
 int32_t sceKernelInstallExceptionHandler(int32_t signum, uint64_t handler) {
@@ -571,11 +666,16 @@ int32_t sceKernelRaiseException(uint64_t thread, int32_t signum) {
     if (t->finished || !t->host_thread) {
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    if (pthread_equal(t->host_thread, pthread_self())) {
+    // The host thread that executes the guest thread now (a fiber's own host thread in fiber
+    // thread mode).
+    pthread_t target = t->host_thread;
+    pthread_t fiber_host;
+    if (t->ctx && ps4_fiber_endpoint_host_thread(t->ctx, &fiber_host)) target = fiber_host;
+    if (pthread_equal(target, pthread_self())) {
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
-    int rc = pthread_kill(t->host_thread, SIGUSR1);
+    int rc = pthread_kill(target, SIGUSR1);
     if (rc != 0) {
         if (rc == ESRCH) return ORBIS_KERNEL_ERROR_ESRCH;
         if (rc == EINVAL) return ORBIS_KERNEL_ERROR_EINVAL;
@@ -676,125 +776,66 @@ typedef struct OrbisModuleInfoForUnwind {
     uint64_t seg0_size;
 } OrbisModuleInfoForUnwind;
 
-static void populate_segments(const RecompModuleUnwindInfo *mod, OrbisKernelModuleSegmentInfo *segs, uint32_t *count) {
-    if (mod && mod->num_segments > 0) {
-        *count = mod->num_segments > 4 ? 4 : mod->num_segments;
-        for (uint32_t i = 0; i < *count; i++) {
-            segs[i].address = mod->segments[i].addr;
-            segs[i].size = (uint32_t)mod->segments[i].size;
-            segs[i].prot = mod->segments[i].prot;
-        }
-        return;
+// Copies the segments of m (recomp_module_snapshot_segments: the ones the emitter registered)
+// into the console's segment-info layout; returns their number.
+static uint32_t snapshot_segments_out(const RecompModuleSnapshot *m, OrbisKernelModuleSegmentInfo segs[4]) {
+    RecompModuleSegment s[4];
+    const uint32_t n = recomp_module_snapshot_segments(m, s);
+    for (uint32_t i = 0; i < n; i++) {
+        segs[i].address = s[i].addr;
+        segs[i].size = (uint32_t)s[i].size;
+        segs[i].prot = s[i].prot;
     }
-    if (mod && mod->start_addr == 0 && mod->end_addr >= 0x2200000ULL) {
-        // eboot.bin default segments (Code R-X, Rodata R--, Data/BSS RW-)
-        segs[0].address = mod->seg0_addr ? mod->seg0_addr : 0x0ULL;
-        segs[0].size = mod->seg0_size ? (uint32_t)mod->seg0_size : 0x1e07508;
-        segs[0].prot = 5; // PF_R | PF_X
-        segs[1].address = 0x2000000ULL;
-        segs[1].size = 0x71a50;
-        segs[1].prot = 4; // PF_R
-        segs[2].address = 0x2200000ULL;
-        segs[2].size = (uint32_t)(mod->end_addr - 0x2200000ULL);
-        segs[2].prot = 6; // PF_R | PF_W
-        *count = 3;
-        return;
-    }
-    if (mod) {
-        segs[0].address = mod->seg0_addr ? mod->seg0_addr : mod->start_addr;
-        segs[0].size = mod->seg0_size ? (uint32_t)mod->seg0_size : (uint32_t)(mod->end_addr - mod->start_addr);
-        segs[0].prot = 5;
-        *count = 1;
-        if (mod->end_addr > segs[0].address + segs[0].size) {
-            segs[1].address = segs[0].address + segs[0].size;
-            segs[1].size = (uint32_t)(mod->end_addr - segs[1].address);
-            segs[1].prot = 6;
-            *count = 2;
-        }
-        return;
-    }
-    // Fallback if mod is not found
-    segs[0].address = 0x0ULL;
-    segs[0].size = 0x1e07508;
-    segs[0].prot = 5;
-    segs[1].address = 0x2000000ULL;
-    segs[1].size = 0x71a50;
-    segs[1].prot = 4;
-    segs[2].address = 0x2200000ULL;
-    segs[2].size = 0x1e6820;
-    segs[2].prot = 6;
-    *count = 3;
+    return n;
 }
 
 static int fill_module_info_ex(GuestContext *ctx, uint64_t addr, uint64_t info_addr) {
-    if (!info_addr || !ctx->mem_base) return 0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
-    const RecompModuleUnwindInfo *mod = recomp_module_find_by_addr(addr);
+    if (!info_addr || !ctx->mem_base) return ORBIS_KERNEL_ERROR_EFAULT;
+    RecompModuleSnapshot snap;
+    if (recomp_module_info_by_addr(addr, &snap) != 0) return ORBIS_KERNEL_ERROR_ESRCH;
     OrbisKernelModuleInfoEx *info = (OrbisKernelModuleInfoEx *)(ctx->mem_base + info_addr);
     memset(info, 0, sizeof(*info));
     info->st_size = sizeof(OrbisKernelModuleInfoEx);
-    if (mod && mod->name) {
-        snprintf(info->name, sizeof(info->name), "%s", mod->name);
-    } else {
-        snprintf(info->name, sizeof(info->name), "eboot.bin");
-    }
-    info->id = 1;
-    if (mod) {
-        info->eh_frame_hdr_addr = mod->eh_frame_hdr_addr;
-        info->eh_frame_hdr_size = (uint32_t)mod->eh_frame_hdr_size;
-        info->eh_frame_addr = mod->eh_frame_addr;
-        info->eh_frame_size = (uint32_t)mod->eh_frame_size;
-    }
-    populate_segments(mod, info->segments, &info->segment_count);
-    fprintf(stderr, "[ps4-kernel] GetModuleInfoFromAddr: addr=0x%llx -> mod=%s, num_segments=%u\n",
-            (unsigned long long)addr, info->name, info->segment_count);
-    for (uint32_t i = 0; i < info->segment_count; i++) {
-        fprintf(stderr, "    seg[%u]: addr=0x%llx, size=0x%x, prot=%d\n",
-                i, (unsigned long long)info->segments[i].address, info->segments[i].size, info->segments[i].prot);
+    snprintf(info->name, sizeof(info->name), "%s", snap.name);
+    info->id = snap.handle;
+    info->eh_frame_hdr_addr = snap.eh_frame_hdr_addr;
+    info->eh_frame_hdr_size = (uint32_t)snap.eh_frame_hdr_size;
+    info->eh_frame_addr = snap.eh_frame_addr;
+    info->eh_frame_size = (uint32_t)snap.eh_frame_size;
+    info->segment_count = snapshot_segments_out(&snap, info->segments);
+    // Logged on the first call only (unwinding can call this for every frame).
+    static int s_logged;
+    if (!__atomic_exchange_n(&s_logged, 1, __ATOMIC_RELAXED)) {
+        fprintf(stderr, "[ps4-kernel] GetModuleInfoFromAddr: addr=0x%llx -> mod=%s (handle %d), num_segments=%u (first call)\n",
+                (unsigned long long)addr, info->name, info->id, info->segment_count);
+        for (uint32_t i = 0; i < info->segment_count; i++) {
+            fprintf(stderr, "    seg[%u]: addr=0x%llx, size=0x%x, prot=%d\n",
+                    i, (unsigned long long)info->segments[i].address, info->segments[i].size, info->segments[i].prot);
+        }
     }
     return 0;
 }
 
+// The first segment of the module containing rsi, to rdx; ESRCH if no module contains it.
 void shim_sceKernelInternalMemoryGetModuleSegmentInfo(GuestContext *ctx) {
     uint64_t seg_out = ctx->rdx;
-    if (seg_out && ctx->mem_base) {
-        const RecompModuleUnwindInfo *mod = recomp_module_find_by_addr(ctx->rsi);
-        OrbisKernelModuleSegmentInfo *seg = (OrbisKernelModuleSegmentInfo *)(ctx->mem_base + seg_out);
-        uint32_t count = 0;
-        OrbisKernelModuleSegmentInfo segs[4];
-        populate_segments(mod, segs, &count);
-        if (count > 0) {
-            *seg = segs[0];
-        }
+    if (!seg_out || !ctx->mem_base) {
+        ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_KERNEL_ERROR_EFAULT;
+        SHIM_RETURN();
     }
+    RecompModuleSnapshot snap;
+    OrbisKernelModuleSegmentInfo segs[4];
+    if (recomp_module_info_by_addr(ctx->rsi, &snap) != 0 || snapshot_segments_out(&snap, segs) == 0) {
+        ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_KERNEL_ERROR_ESRCH;
+        SHIM_RETURN();
+    }
+    *(OrbisKernelModuleSegmentInfo *)(ctx->mem_base + seg_out) = segs[0];
     ctx->rax = 0;
     SHIM_RETURN();
 }
 
-void shim_sceKernelGetModuleInfo(GuestContext *ctx) {
-    int32_t handle = (int32_t)ctx->rdi;
-    uint64_t info_addr = ctx->rsi;
-    if (!info_addr || !ctx->mem_base) {
-        ctx->rax = (uint64_t)(int64_t)0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
-        SHIM_RETURN();
-    }
-    const RecompModuleUnwindInfo *mod = recomp_module_find_by_handle(handle);
-    if (!mod) {
-        ctx->rax = (uint64_t)(int64_t)0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
-        SHIM_RETURN();
-    }
-    OrbisKernelModuleInfo *info = (OrbisKernelModuleInfo *)(ctx->mem_base + info_addr);
-    memset(info, 0, sizeof(*info));
-    info->st_size = sizeof(OrbisKernelModuleInfo);
-    if (mod->name) {
-        snprintf(info->name, sizeof(info->name), "%s", mod->name);
-    } else {
-        snprintf(info->name, sizeof(info->name), "eboot.bin");
-    }
-    populate_segments(mod, info->segments, &info->num_segments);
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
+// shim_sceKernelGetModuleInfo lives in ps4_kernel_modules.c (it shares the module handles of
+// sceKernelGetModuleList); GetModuleInfo2 is the same call.
 void shim_sceKernelGetModuleInfo2(GuestContext *ctx) {
     shim_sceKernelGetModuleInfo(ctx);
 }
@@ -806,25 +847,21 @@ void shim_sceKernelGetModuleInfoInternal(GuestContext *ctx) {
         ctx->rax = (uint64_t)(int64_t)0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
         SHIM_RETURN();
     }
-    const RecompModuleUnwindInfo *mod = recomp_module_find_by_handle(handle);
-    if (!mod) {
+    RecompModuleSnapshot snap;
+    if (recomp_module_info_by_handle(handle, &snap) != 0) {
         ctx->rax = (uint64_t)(int64_t)0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
         SHIM_RETURN();
     }
     OrbisKernelModuleInfoEx *info = (OrbisKernelModuleInfoEx *)(ctx->mem_base + info_addr);
     memset(info, 0, sizeof(*info));
     info->st_size = sizeof(OrbisKernelModuleInfoEx);
-    if (mod->name) {
-        snprintf(info->name, sizeof(info->name), "%s", mod->name);
-    } else {
-        snprintf(info->name, sizeof(info->name), "eboot.bin");
-    }
+    snprintf(info->name, sizeof(info->name), "%s", snap.name);
     info->id = handle;
-    info->eh_frame_hdr_addr = mod->eh_frame_hdr_addr;
-    info->eh_frame_hdr_size = (uint32_t)mod->eh_frame_hdr_size;
-    info->eh_frame_addr = mod->eh_frame_addr;
-    info->eh_frame_size = (uint32_t)mod->eh_frame_size;
-    populate_segments(mod, info->segments, &info->segment_count);
+    info->eh_frame_hdr_addr = snap.eh_frame_hdr_addr;
+    info->eh_frame_hdr_size = (uint32_t)snap.eh_frame_hdr_size;
+    info->eh_frame_addr = snap.eh_frame_addr;
+    info->eh_frame_size = (uint32_t)snap.eh_frame_size;
+    info->segment_count = snapshot_segments_out(&snap, info->segments);
     ctx->rax = 0;
     SHIM_RETURN();
 }
@@ -950,3 +987,17 @@ void shim_Need_sceLibcInternal(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+
+// int sceKernelSetFsstParam(uint32_t a, uint32_t b)
+//
+// Class N (documented no-op returning 0). The function has no public documentation and no
+// shadPS4 implementation (only an aerolib name stub); its name and the values Uncharted 4
+// passes at boot (0x100, 0x40, call at 0x265f2f) point to a file-system tuning knob of the
+// console's own file system. The host serves guest files from the host file system through
+// the VFS layer, which has nothing to tune. The only use of the result is a test against zero
+// right after the call (TEST EAX, EAX / JNE at 0x265f34 to the error path), so returning 0
+// is the entire observable behaviour the caller depends on.
+void shim_sceKernelSetFsstParam(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}

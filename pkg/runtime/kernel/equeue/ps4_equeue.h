@@ -11,9 +11,10 @@ extern "C" {
 
 #define ORBIS_KERNEL_EVFILT_READ     (-1)
 #define ORBIS_KERNEL_EVFILT_WRITE    (-2)
-#define ORBIS_KERNEL_EVFILT_USER     (-4)
+#define ORBIS_KERNEL_EVFILT_USER     (-11)
 #define ORBIS_KERNEL_EVFILT_TIMER    (-7)
-#define ORBIS_KERNEL_EVFILT_VIDEO_OUT 1
+#define ORBIS_KERNEL_EVFILT_VIDEO_OUT (-13)
+#define ORBIS_KERNEL_EVFILT_GRAPHICS_CORE (-14)
 
 #define ORBIS_KERNEL_ERROR_EBADF      0x80020009
 #define ORBIS_KERNEL_ERROR_EINVAL     0x80020016
@@ -40,6 +41,14 @@ int sceKernelCreateEqueue(OrbisKernelEqueue *eqOut, const char *name);
 int sceKernelDeleteEqueue(OrbisKernelEqueue eq);
 int sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent *eventsOut, int numEvents, int *outCount, const uint32_t *timeout);
 int ps4_equeue_post_event(OrbisKernelEqueue eq, uint64_t ident, int16_t filter, int64_t data, void *udata);
+// Returns 1 if the equeue handle refers to a live queue, 0 otherwise.
+int ps4_equeue_exists(OrbisKernelEqueue eq);
+// kqueue-style (EV_CLEAR) trigger: if an event with the same (ident, filter) is already
+// pending it is coalesced (data/udata updated, fflags incremented) instead of queued twice.
+// Wakes waiters. Returns 0 on success, -EINVAL if the queue does not exist.
+int ps4_equeue_trigger_event(OrbisKernelEqueue eq, uint64_t ident, int16_t filter, int64_t data, void *udata);
+// Drop all pending (not yet consumed) events matching (ident, filter).
+int ps4_equeue_remove_events(OrbisKernelEqueue eq, uint64_t ident, int16_t filter);
 int sceKernelAddUserEvent(OrbisKernelEqueue eq, int id);
 int sceKernelAddUserEventEdge(OrbisKernelEqueue eq, int id);
 int sceKernelTriggerUserEvent(OrbisKernelEqueue eq, int id, void *udata);

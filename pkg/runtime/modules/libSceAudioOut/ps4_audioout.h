@@ -10,6 +10,7 @@ extern "C" {
 void shim_sceAudioOutInit(GuestContext *ctx);
 void shim_sceAudioOutOpen(GuestContext *ctx);
 void shim_sceAudioOutOutput(GuestContext *ctx);
+void shim_sceAudioOutOutputs(GuestContext *ctx);
 void shim_sceAudioOutClose(GuestContext *ctx);
 void shim_sceAudioOutGetPortState(GuestContext *ctx);
 void shim_sceAudioOutSetVolume(GuestContext *ctx);

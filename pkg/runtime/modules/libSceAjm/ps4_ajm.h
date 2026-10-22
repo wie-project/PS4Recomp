@@ -104,6 +104,37 @@ typedef struct {
     uint32_t frame_samples;
 } OrbisAjmSidebandDecAt9CodecInfo;
 
+typedef struct {
+    uint32_t total_samples;
+    uint16_t skip_samples;
+    uint16_t skipped_samples;
+} OrbisAjmSidebandGaplessDecode;
+
+typedef struct {
+    uint32_t num_frames;
+    uint32_t reserved;
+} OrbisAjmSidebandMFrame;
+
+// AjmJobFlags bit layout (u64):
+//   version:3 | codec:8 | run_flags:2 | control_flags:3 | reserved:29 | sideband_flags:3
+#define AJM_JOB_RUN_FLAGS(f)      ((uint32_t)(((f) >> 11) & 0x3))
+#define AJM_JOB_CONTROL_FLAGS(f)  ((uint32_t)(((f) >> 13) & 0x7))
+#define AJM_JOB_SIDEBAND_FLAGS(f) ((uint32_t)(((f) >> 45) & 0x7))
+
+#define AJM_RUN_GET_CODEC_INFO    0x1
+#define AJM_RUN_MULTIPLE_FRAMES   0x2
+#define AJM_CONTROL_RESET         0x1
+#define AJM_CONTROL_INITIALIZE    0x2
+#define AJM_CONTROL_RESAMPLE      0x4
+#define AJM_SIDEBAND_GAPLESS      0x1
+#define AJM_SIDEBAND_FORMAT       0x2
+#define AJM_SIDEBAND_STREAM       0x4
+
+// AjmInstanceFlags: version:3 | channels:4 | format:3 | gapless_loop:1 | :21 | codec:28
+#define AJM_INSTANCE_FLAG_GAPLESS_LOOP (1ULL << 10)
+#define AJM_AT9_FLAG_PARSE_RIFF        0x1
+#define AJM_AT9_FLAG_NON_INTERLEAVED   0x100
+
 // Host shim declarations for libSceAjm
 void shim_sceAjmInitialize(GuestContext *ctx);
 void shim_sceAjmFinalize(GuestContext *ctx);

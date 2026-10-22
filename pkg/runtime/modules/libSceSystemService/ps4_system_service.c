@@ -3,13 +3,15 @@
 #include <string.h>
 #include <errno.h>
 
+int ps4_host_choose_language(void); // ps4_language.m
+
 int32_t sceSystemServiceParamGetInt(int32_t paramId, int32_t *value) {
     if (!value) {
         return -EINVAL;
     }
     switch (paramId) {
     case ORBIS_SYSTEM_SERVICE_PARAM_ID_LANG:
-        *value = ORBIS_SYSTEM_PARAM_LANG_ENGLISH_US; // 1 = English (US)
+        *value = ps4_host_choose_language(); // PS4_LANG / saved choice / startup dialog
         break;
     case ORBIS_SYSTEM_SERVICE_PARAM_ID_DATE_FORMAT:
         *value = 1; // DDMMYYYY
@@ -59,8 +61,11 @@ int32_t sceSystemServiceGetDisplaySafeAreaInfo(void *info) {
 }
 
 int32_t sceSystemServiceReceiveEvent(void *event) {
+    // No system events are ever generated: report SCE_SYSTEM_SERVICE_ERROR_NO_EVENT.
+    // Returning 0 made the game spin forever in its event-drain loop, handling
+    // uninitialized event structs as real events.
     (void)event;
-    return 0;
+    return (int32_t)0x80A10003;
 }
 
 // Shims
@@ -106,6 +111,20 @@ void shim_sceSystemServiceHideSplashScreen(GuestContext *ctx) {
 }
 
 void shim_sceSystemServiceGetStatus(GuestContext *ctx) {
+    // int sceSystemServiceGetStatus(SceSystemServiceStatus *status):
+    //   s32 eventNum; bool isSystemUiOverlaid; bool isInBackgroundExecution;
+    //   bool isCpuMode7CpuNormal; bool isGameLiveStreamingOnAir; bool isOutOfVrPlayArea; ...
+    // The struct must be filled: the game reads eventNum (event-drain loop bound) and the
+    // overlay/background flags (pauses the game when set) straight from its stack.
+    uint64_t p = ctx->rdi;
+    if (p == 0 || !ctx->mem_base || p + 12 > ctx->mem_size) {
+        ctx->rax = (uint64_t)(int64_t)(int32_t)0x80A10001; // SCE_SYSTEM_SERVICE_ERROR_PARAMETER
+        SHIM_RETURN();
+    }
+    uint8_t *st = (uint8_t *)(ctx->mem_base + p);
+    memset(st, 0, 12);
+    *(int32_t *)st = 0;  // eventNum
+    st[6] = 1;           // isCpuMode7CpuNormal
     ctx->rax = (uint64_t)(int64_t)sceSystemServiceGetStatus();
     SHIM_RETURN();
 }

@@ -76,6 +76,24 @@ typedef struct OrbisSaveDataMemorySync {
     uint8_t _reserved[28];
 } OrbisSaveDataMemorySync;
 
+// OrbisSaveDataParam (1328 bytes), as stored in <save dir>/sce_sys/param.bin.
+typedef struct Ps4SaveDataParam {
+    char title[128];
+    char subTitle[128];
+    char detail[1024];
+    uint32_t userParam;
+    int32_t _pad0;
+    int64_t mtime;
+    uint8_t _reserved[32];
+} Ps4SaveDataParam;
+
+// Host-side view of one save directory, for the save data dialog's list.
+// Returns false when <save root>/user_<uid>/<dirName> does not exist.
+// out_param gets the stored parameters (mtime falls back to the newest file
+// time when unset); out_bytes the total size of the directory's files.
+bool ps4_savedata_read_dir_info(int32_t user_id, const char *dir_name,
+                                Ps4SaveDataParam *out_param, uint64_t *out_bytes);
+
 // C API
 int32_t sceSaveDataInitialize(const void *param);
 int32_t sceSaveDataInitialize2(const void *param);

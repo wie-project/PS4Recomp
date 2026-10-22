@@ -31,10 +31,10 @@ func (l *Arm64Lifter) liftMmxMovdMovq(inst disasm.Instruction, nextPC uint64, li
 
 	// Case 1: MMX <- MMX
 	if okDstReg && isMmx(dstReg) && okSrcReg && isMmx(srcReg) {
-		lines = append(lines, l.emitLoadCtxPtr("x18")...)
+		lines = append(lines, l.emitLoadCtxPtr("x5")...)
 		lines = append(lines,
-			fmt.Sprintf("    ldr x16, [x18, #%d]", mmxOffset(mmxIdx(srcReg))),
-			fmt.Sprintf("    str x16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))),
+			fmt.Sprintf("    ldr x16, [x5, #%d]", mmxOffset(mmxIdx(srcReg))),
+			fmt.Sprintf("    str x16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))),
 		)
 		return lines, true, nil
 	}
@@ -43,17 +43,17 @@ func (l *Arm64Lifter) liftMmxMovdMovq(inst disasm.Instruction, nextPC uint64, li
 	if okDstReg && isMmx(dstReg) {
 		if mem, okMem := src.(x86asm.Mem); okMem {
 			lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
-			lines = append(lines, l.emitLoadCtxPtr("x18")...)
+			lines = append(lines, l.emitLoadCtxPtr("x5")...)
 			if is64 {
 				lines = append(lines,
 					"    ldr x17, [x28, x16]",
-					fmt.Sprintf("    str x17, [x18, #%d]", mmxOffset(mmxIdx(dstReg))),
+					fmt.Sprintf("    str x17, [x5, #%d]", mmxOffset(mmxIdx(dstReg))),
 				)
 			} else {
 				lines = append(lines,
 					"    ldr w17, [x28, x16]",
 					"    uxtw x17, w17",
-					fmt.Sprintf("    str x17, [x18, #%d]", mmxOffset(mmxIdx(dstReg))),
+					fmt.Sprintf("    str x17, [x5, #%d]", mmxOffset(mmxIdx(dstReg))),
 				)
 			}
 			return lines, true, nil
@@ -63,15 +63,15 @@ func (l *Arm64Lifter) liftMmxMovdMovq(inst disasm.Instruction, nextPC uint64, li
 	// Case 3: Mem <- MMX
 	if mem, okMem := dst.(x86asm.Mem); okMem && okSrcReg && isMmx(srcReg) {
 		lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
-		lines = append(lines, l.emitLoadCtxPtr("x18")...)
+		lines = append(lines, l.emitLoadCtxPtr("x5")...)
 		if is64 {
 			lines = append(lines,
-				fmt.Sprintf("    ldr x17, [x18, #%d]", mmxOffset(mmxIdx(srcReg))),
+				fmt.Sprintf("    ldr x17, [x5, #%d]", mmxOffset(mmxIdx(srcReg))),
 				"    str x17, [x28, x16]",
 			)
 		} else {
 			lines = append(lines,
-				fmt.Sprintf("    ldr w17, [x18, #%d]", mmxOffset(mmxIdx(srcReg))),
+				fmt.Sprintf("    ldr w17, [x5, #%d]", mmxOffset(mmxIdx(srcReg))),
 				"    str w17, [x28, x16]",
 			)
 		}
@@ -81,13 +81,13 @@ func (l *Arm64Lifter) liftMmxMovdMovq(inst disasm.Instruction, nextPC uint64, li
 	// Case 4: MMX <- GPR
 	if okDstReg && isMmx(dstReg) && okSrcReg {
 		if descSrc, okDesc := arm64RegMap[srcReg]; okDesc {
-			lines = append(lines, l.emitLoadCtxPtr("x18")...)
+			lines = append(lines, l.emitLoadCtxPtr("x5")...)
 			if is64 {
-				lines = append(lines, fmt.Sprintf("    str %s, [x18, #%d]", descSrc.X, mmxOffset(mmxIdx(dstReg))))
+				lines = append(lines, fmt.Sprintf("    str %s, [x5, #%d]", descSrc.X, mmxOffset(mmxIdx(dstReg))))
 			} else {
 				lines = append(lines,
 					fmt.Sprintf("    uxtw x16, %s", descSrc.W),
-					fmt.Sprintf("    str x16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))),
+					fmt.Sprintf("    str x16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))),
 				)
 			}
 			return lines, true, nil
@@ -97,11 +97,11 @@ func (l *Arm64Lifter) liftMmxMovdMovq(inst disasm.Instruction, nextPC uint64, li
 	// Case 5: GPR <- MMX
 	if okDstReg && okSrcReg && isMmx(srcReg) {
 		if descDst, okDesc := arm64RegMap[dstReg]; okDesc {
-			lines = append(lines, l.emitLoadCtxPtr("x18")...)
+			lines = append(lines, l.emitLoadCtxPtr("x5")...)
 			if is64 {
-				lines = append(lines, fmt.Sprintf("    ldr %s, [x18, #%d]", descDst.X, mmxOffset(mmxIdx(srcReg))))
+				lines = append(lines, fmt.Sprintf("    ldr %s, [x5, #%d]", descDst.X, mmxOffset(mmxIdx(srcReg))))
 			} else {
-				lines = append(lines, fmt.Sprintf("    ldr %s, [x18, #%d]", descDst.W, mmxOffset(mmxIdx(srcReg))))
+				lines = append(lines, fmt.Sprintf("    ldr %s, [x5, #%d]", descDst.W, mmxOffset(mmxIdx(srcReg))))
 			}
 			return lines, true, nil
 		}
@@ -110,10 +110,10 @@ func (l *Arm64Lifter) liftMmxMovdMovq(inst disasm.Instruction, nextPC uint64, li
 	// Case 6: MMX <- XMM
 	if okDstReg && isMmx(dstReg) && okSrcReg {
 		if _, _, _, _, _, _, sLowD, okS := getVectorDesc(srcReg); okS {
-			lines = append(lines, l.emitLoadCtxPtr("x18")...)
+			lines = append(lines, l.emitLoadCtxPtr("x5")...)
 			lines = append(lines,
 				fmt.Sprintf("    fmov x16, %s", sLowD),
-				fmt.Sprintf("    str x16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))),
+				fmt.Sprintf("    str x16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))),
 			)
 			return lines, true, nil
 		}
@@ -122,9 +122,9 @@ func (l *Arm64Lifter) liftMmxMovdMovq(inst disasm.Instruction, nextPC uint64, li
 	// Case 7: XMM <- MMX
 	if okDstReg && okSrcReg && isMmx(srcReg) {
 		if _, _, _, dLowV, _, _, dLowD, okD := getVectorDesc(dstReg); okD {
-			lines = append(lines, l.emitLoadCtxPtr("x18")...)
+			lines = append(lines, l.emitLoadCtxPtr("x5")...)
 			lines = append(lines,
-				fmt.Sprintf("    ldr %s, [x18, #%d]", dLowD, mmxOffset(mmxIdx(srcReg))),
+				fmt.Sprintf("    ldr %s, [x5, #%d]", dLowD, mmxOffset(mmxIdx(srcReg))),
 				fmt.Sprintf("    mov %s.d[1], xzr", dLowV),
 			)
 			return lines, true, nil
@@ -146,16 +146,16 @@ func (l *Arm64Lifter) liftMmxLogic(inst disasm.Instruction, armOp string, nextPC
 
 	// Fast path: PXOR M, M -> zero out
 	if okSrc && isMmx(srcReg) && dstReg == srcReg && armOp == "eor" {
-		lines = append(lines, l.emitLoadCtxPtr("x18")...)
-		lines = append(lines, fmt.Sprintf("    str xzr, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+		lines = append(lines, l.emitLoadCtxPtr("x5")...)
+		lines = append(lines, fmt.Sprintf("    str xzr, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 		return lines, true, nil
 	}
 
-	lines = append(lines, l.emitLoadCtxPtr("x18")...)
-	lines = append(lines, fmt.Sprintf("    ldr d16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+	lines = append(lines, l.emitLoadCtxPtr("x5")...)
+	lines = append(lines, fmt.Sprintf("    ldr d16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 
 	if okSrc && isMmx(srcReg) {
-		lines = append(lines, fmt.Sprintf("    ldr d17, [x18, #%d]", mmxOffset(mmxIdx(srcReg))))
+		lines = append(lines, fmt.Sprintf("    ldr d17, [x5, #%d]", mmxOffset(mmxIdx(srcReg))))
 	} else if mem, okMem := src.(x86asm.Mem); okMem {
 		lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
 		lines = append(lines, "    ldr d17, [x28, x16]")
@@ -176,7 +176,7 @@ func (l *Arm64Lifter) liftMmxLogic(inst disasm.Instruction, armOp string, nextPC
 		lines = append(lines, "    bic v16.8b, v17.8b, v16.8b")
 	}
 
-	lines = append(lines, fmt.Sprintf("    str d16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+	lines = append(lines, fmt.Sprintf("    str d16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 	return lines, true, nil
 }
 
@@ -188,11 +188,11 @@ func (l *Arm64Lifter) liftMmxBinary(inst disasm.Instruction, nextPC uint64, line
 	}
 
 	src := inst.Inst.Args[1]
-	lines = append(lines, l.emitLoadCtxPtr("x18")...)
-	lines = append(lines, fmt.Sprintf("    ldr d16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+	lines = append(lines, l.emitLoadCtxPtr("x5")...)
+	lines = append(lines, fmt.Sprintf("    ldr d16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 
 	if srcReg, okSrc := src.(x86asm.Reg); okSrc && isMmx(srcReg) {
-		lines = append(lines, fmt.Sprintf("    ldr d17, [x18, #%d]", mmxOffset(mmxIdx(srcReg))))
+		lines = append(lines, fmt.Sprintf("    ldr d17, [x5, #%d]", mmxOffset(mmxIdx(srcReg))))
 	} else if mem, okMem := src.(x86asm.Mem); okMem {
 		lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
 		lines = append(lines, "    ldr d17, [x28, x16]")
@@ -282,7 +282,7 @@ func (l *Arm64Lifter) liftMmxBinary(inst disasm.Instruction, nextPC uint64, line
 		return lines, false, nil
 	}
 
-	lines = append(lines, fmt.Sprintf("    str d16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+	lines = append(lines, fmt.Sprintf("    str d16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 	return lines, true, nil
 }
 
@@ -293,8 +293,8 @@ func (l *Arm64Lifter) liftMmxShift(inst disasm.Instruction, nextPC uint64, lines
 		return lines, false, nil
 	}
 
-	lines = append(lines, l.emitLoadCtxPtr("x18")...)
-	lines = append(lines, fmt.Sprintf("    ldr d16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+	lines = append(lines, l.emitLoadCtxPtr("x5")...)
+	lines = append(lines, fmt.Sprintf("    ldr d16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 
 	src := inst.Inst.Args[1]
 	if imm, okImm := src.(x86asm.Imm); okImm {
@@ -352,7 +352,7 @@ func (l *Arm64Lifter) liftMmxShift(inst disasm.Instruction, nextPC uint64, lines
 	} else {
 		// Shift by register / memory count
 		if sReg, okSR := src.(x86asm.Reg); okSR && isMmx(sReg) {
-			lines = append(lines, fmt.Sprintf("    ldr x16, [x18, #%d]", mmxOffset(mmxIdx(sReg))))
+			lines = append(lines, fmt.Sprintf("    ldr x16, [x5, #%d]", mmxOffset(mmxIdx(sReg))))
 		} else if sReg, okSR := src.(x86asm.Reg); okSR {
 			if _, _, _, _, _, _, sLowD, okS := getVectorDesc(sReg); okS {
 				lines = append(lines, fmt.Sprintf("    fmov x16, %s", sLowD))
@@ -443,7 +443,7 @@ func (l *Arm64Lifter) liftMmxShift(inst disasm.Instruction, nextPC uint64, lines
 		)
 	}
 
-	lines = append(lines, fmt.Sprintf("    str d16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+	lines = append(lines, fmt.Sprintf("    str d16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 	return lines, true, nil
 }
 
@@ -455,11 +455,11 @@ func (l *Arm64Lifter) liftMmxUnpck(inst disasm.Instruction, nextPC uint64, lines
 	}
 
 	src2 := inst.Inst.Args[1]
-	lines = append(lines, l.emitLoadCtxPtr("x18")...)
-	lines = append(lines, fmt.Sprintf("    ldr d16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+	lines = append(lines, l.emitLoadCtxPtr("x5")...)
+	lines = append(lines, fmt.Sprintf("    ldr d16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 
 	if sReg, okS := src2.(x86asm.Reg); okS && isMmx(sReg) {
-		lines = append(lines, fmt.Sprintf("    ldr d17, [x18, #%d]", mmxOffset(mmxIdx(sReg))))
+		lines = append(lines, fmt.Sprintf("    ldr d17, [x5, #%d]", mmxOffset(mmxIdx(sReg))))
 	} else if mem, okMem := src2.(x86asm.Mem); okMem {
 		lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
 		lines = append(lines, "    ldr d17, [x28, x16]")
@@ -484,7 +484,7 @@ func (l *Arm64Lifter) liftMmxUnpck(inst disasm.Instruction, nextPC uint64, lines
 		return lines, false, nil
 	}
 
-	lines = append(lines, fmt.Sprintf("    str d16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+	lines = append(lines, fmt.Sprintf("    str d16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 	return lines, true, nil
 }
 
@@ -496,11 +496,11 @@ func (l *Arm64Lifter) liftMmxPack(inst disasm.Instruction, nextPC uint64, lines 
 	}
 
 	src := inst.Inst.Args[1]
-	lines = append(lines, l.emitLoadCtxPtr("x18")...)
-	lines = append(lines, fmt.Sprintf("    ldr d16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+	lines = append(lines, l.emitLoadCtxPtr("x5")...)
+	lines = append(lines, fmt.Sprintf("    ldr d16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 
 	if sReg, okS := src.(x86asm.Reg); okS && isMmx(sReg) {
-		lines = append(lines, fmt.Sprintf("    ldr d17, [x18, #%d]", mmxOffset(mmxIdx(sReg))))
+		lines = append(lines, fmt.Sprintf("    ldr d17, [x5, #%d]", mmxOffset(mmxIdx(sReg))))
 	} else if mem, okMem := src.(x86asm.Mem); okMem {
 		lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
 		lines = append(lines, "    ldr d17, [x28, x16]")
@@ -531,6 +531,6 @@ func (l *Arm64Lifter) liftMmxPack(inst disasm.Instruction, nextPC uint64, lines 
 		return lines, false, nil
 	}
 
-	lines = append(lines, fmt.Sprintf("    str d16, [x18, #%d]", mmxOffset(mmxIdx(dstReg))))
+	lines = append(lines, fmt.Sprintf("    str d16, [x5, #%d]", mmxOffset(mmxIdx(dstReg))))
 	return lines, true, nil
 }

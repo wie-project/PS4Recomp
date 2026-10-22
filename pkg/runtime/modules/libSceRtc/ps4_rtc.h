@@ -35,6 +35,12 @@ int32_t sceRtcParseDateTime(OrbisRtcTick *pTickUtc, const char *pszDateTime);
 int32_t sceRtcFormatRFC3339(char *pszDateTime, const OrbisRtcTick *pTickUtc, int iTimeZoneMinutes);
 int32_t sceRtcParseRFC3339(OrbisRtcTick *pTickUtc, const char *pszDateTime);
 int32_t sceRtcGetCurrentNetworkTick(OrbisRtcTick *tick);
+int32_t sceRtcSetTime_t(OrbisDateTime *out, int64_t time, uint32_t sdk_version);
+int32_t sceRtcFormatRFC3339LocalTime(char *out, const OrbisRtcTick *tick_utc);
+// Ticks in this module count microseconds since the Unix epoch; real PS4 ticks (since year 1)
+// are accepted as well.
+int64_t ps4_rtc_tick_to_unix_us(uint64_t tick);
+int32_t ps4_rtc_format_rfc3339(char *out, int64_t unix_us, int tz_minutes);
 
 // Guest ABI shims
 void shim_sceRtcGetCurrentTick(GuestContext *ctx);
@@ -49,6 +55,8 @@ void shim_sceRtcParseDateTime(GuestContext *ctx);
 void shim_sceRtcFormatRFC3339(GuestContext *ctx);
 void shim_sceRtcParseRFC3339(GuestContext *ctx);
 void shim_sceRtcGetCurrentNetworkTick(GuestContext *ctx);
+void shim_sceRtcSetTime_t(GuestContext *ctx);
+void shim_sceRtcFormatRFC3339LocalTime(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

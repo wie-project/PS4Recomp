@@ -13,176 +13,73 @@ func (l *Arm64Lifter) liftBmi(inst disasm.Instruction, nextPC uint64, lines []st
 	args := inst.Inst.Args
 
 	switch op {
-	case x86asm.BLSI, x86asm.BLSR, x86asm.BLSMSK:
+	case x86asm.BLSI, x86asm.BLSR, x86asm.BLSMSK, x86asm.BZHI:
+		// SF/ZF from the result (BLSMSK: ZF = 0, its result is never 0), OF = 0, and
+		//   BLSI: CF = (src != 0); BLSR, BLSMSK: CF = (src == 0); BZHI: CF = (index >= size).
+		// ANDS/TST set N, Z and clear V; CF is then inserted into C (carryAdd).
 		dstReg, okDst := args[0].(x86asm.Reg)
 		descDst, okDD := arm64RegMap[dstReg]
 		if !okDst || !okDD {
 			lines = append(lines, l.emitUnsupported(inst, "unsupported bmi dst")...)
 			return lines, nil
 		}
-
 		sz := descDst.Size
-		if sz == 0 {
-			sz = 4
+		r := "w"
+		bits := 32
+		dst := descDst.W
+		if sz == 8 {
+			r, bits, dst = "x", 64, descDst.X
 		}
-
-		// Load src into x16 / w16
+		if op == x86asm.BZHI {
+			idxReg, okIdx := args[2].(x86asm.Reg)
+			descIdx, okIdxD := arm64RegMap[idxReg]
+			if !okIdx || !okIdxD {
+				lines = append(lines, l.emitUnsupported(inst, "unsupported bzhi index")...)
+				return lines, nil
+			}
+			lines = append(lines, fmt.Sprintf("    and w3, %s, #0xff", descIdx.W)) // before dst is written
+		}
+		// Load src into x0 / w0
 		if sReg, okS := args[1].(x86asm.Reg); okS {
-			rc, _ := readRegTo(sReg, "x16", "w16")
+			rc, _ := readRegTo(sReg, "x0", "w0")
 			lines = append(lines, rc...)
 		} else if mem, okMem := args[1].(x86asm.Mem); okMem {
-			lines = append(lines, readMemTo(mem, nextPC, sz, "x16", "w16")...)
+			lines = append(lines, readMemTo(mem, nextPC, sz, "x0", "w0")...)
 		} else {
 			lines = append(lines, l.emitUnsupported(inst, "unsupported bmi src")...)
 			return lines, nil
 		}
-
-		if sz == 8 {
-			switch op {
-			case x86asm.BLSI:
-				// dst = (-src) & src
-				// CF = (src != 0) -> ARM C = (src == 0)
-				// ZF = (dst == 0)
-				lines = append(lines,
-					"    neg x17, x16",
-					fmt.Sprintf("    and %s, x16, x17", descDst.X),
-					fmt.Sprintf("    cmp %s, #0", descDst.X),
-					"    cset w17, eq",
-					"    cmp x16, #0",
-					"    cset w18, eq",
-					"    add w17, w18, w17, lsl #1",
-					"    lsl w17, w17, #29",
-					"    msr nzcv, x17",
-				)
-			case x86asm.BLSR:
-				// dst = (src - 1) & src
-				// CF = (src == 0) -> ARM C = (src != 0)
-				// ZF = (dst == 0)
-				lines = append(lines,
-					"    sub x17, x16, #1",
-					fmt.Sprintf("    and %s, x16, x17", descDst.X),
-					fmt.Sprintf("    cmp %s, #0", descDst.X),
-					"    cset w17, eq",
-					"    cmp x16, #0",
-					"    cset w18, ne",
-					"    add w17, w18, w17, lsl #1",
-					"    lsl w17, w17, #29",
-					"    msr nzcv, x17",
-				)
-			case x86asm.BLSMSK:
-				// dst = (src - 1) ^ src
-				// CF = (src == 0) -> ARM C = (src != 0)
-				// ZF = 0
-				lines = append(lines,
-					"    sub x17, x16, #1",
-					fmt.Sprintf("    eor %s, x16, x17", descDst.X),
-					"    cmp x16, #0",
-					"    cset w18, ne",
-					"    lsl w18, w18, #29",
-					"    msr nzcv, x18",
-				)
+		flags := !inst.SkipFlags
+		switch op {
+		case x86asm.BLSI:
+			if flags {
+				lines = append(lines, fmt.Sprintf("    cmp %s0, #0", r), "    cset w2, ne")
 			}
-		} else {
-			switch op {
-			case x86asm.BLSI:
-				lines = append(lines,
-					"    neg w17, w16",
-					fmt.Sprintf("    and %s, w16, w17", descDst.W),
-					fmt.Sprintf("    cmp %s, #0", descDst.W),
-					"    cset w17, eq",
-					"    cmp w16, #0",
-					"    cset w18, eq",
-					"    add w17, w18, w17, lsl #1",
-					"    lsl w17, w17, #29",
-					"    msr nzcv, x17",
-				)
-			case x86asm.BLSR:
-				lines = append(lines,
-					"    sub w17, w16, #1",
-					fmt.Sprintf("    and %s, w16, w17", descDst.W),
-					fmt.Sprintf("    cmp %s, #0", descDst.W),
-					"    cset w17, eq",
-					"    cmp w16, #0",
-					"    cset w18, ne",
-					"    add w17, w18, w17, lsl #1",
-					"    lsl w17, w17, #29",
-					"    msr nzcv, x17",
-				)
-			case x86asm.BLSMSK:
-				lines = append(lines,
-					"    sub w17, w16, #1",
-					fmt.Sprintf("    eor %s, w16, w17", descDst.W),
-					"    cmp w16, #0",
-					"    cset w18, ne",
-					"    lsl w18, w18, #29",
-					"    msr nzcv, x18",
-				)
+			lines = append(lines, fmt.Sprintf("    neg %s1, %s0", r, r), fmt.Sprintf("    and %s1, %s0, %s1", r, r, r))
+		case x86asm.BLSR, x86asm.BLSMSK:
+			if flags {
+				lines = append(lines, fmt.Sprintf("    cmp %s0, #0", r), "    cset w2, eq")
 			}
-		}
-		return lines, nil
-
-	case x86asm.BZHI:
-		// BZHI dst, src, index
-		dstReg, okDst := args[0].(x86asm.Reg)
-		idxReg, okIdx := args[2].(x86asm.Reg)
-		descDst, okDD := arm64RegMap[dstReg]
-		descIdx, okIdxD := arm64RegMap[idxReg]
-		if !okDst || !okIdx || !okDD || !okIdxD {
-			lines = append(lines, l.emitUnsupported(inst, "unsupported bzhi operands")...)
-			return lines, nil
-		}
-
-		sz := descDst.Size
-		if sz == 0 {
-			sz = 4
-		}
-
-		// Load src into x17 / w17
-		if sReg, okS := args[1].(x86asm.Reg); okS {
-			rc, _ := readRegTo(sReg, "x17", "w17")
-			lines = append(lines, rc...)
-		} else if mem, okMem := args[1].(x86asm.Mem); okMem {
-			lines = append(lines, readMemTo(mem, nextPC, sz, "x17", "w17")...)
-		} else {
-			lines = append(lines, l.emitUnsupported(inst, "unsupported bzhi src")...)
-			return lines, nil
-		}
-
-		l.labelCounter++
-		lblPass := fmt.Sprintf("L_bzhi_pass_%d", l.labelCounter)
-		lblDone := fmt.Sprintf("L_bzhi_done_%d", l.labelCounter)
-
-		if sz == 8 {
+			arith := "and"
+			if op == x86asm.BLSMSK {
+				arith = "eor"
+			}
+			lines = append(lines, fmt.Sprintf("    sub %s1, %s0, #1", r, r), fmt.Sprintf("    %s %s1, %s1, %s0", arith, r, r, r))
+		case x86asm.BZHI:
 			lines = append(lines,
-				fmt.Sprintf("    and w16, %s, #0xff", descIdx.W),
-				"    cmp w16, #64",
-				fmt.Sprintf("    b.hs %s", lblPass),
-				"    mov x18, #1",
-				"    lsl x18, x18, x16",
-				"    sub x18, x18, #1",
-				fmt.Sprintf("    and %s, x17, x18", descDst.X),
-				fmt.Sprintf("    b %s", lblDone),
-				fmt.Sprintf("%s:", lblPass),
-				fmt.Sprintf("    mov %s, x17", descDst.X),
-				fmt.Sprintf("%s:", lblDone),
-				fmt.Sprintf("    cmp %s, #0", descDst.X),
-			)
-		} else {
-			lines = append(lines,
-				fmt.Sprintf("    and w16, %s, #0xff", descIdx.W),
-				"    cmp w16, #32",
-				fmt.Sprintf("    b.hs %s", lblPass),
-				"    mov w18, #1",
-				"    lsl w18, w18, w16",
-				"    sub w18, w18, #1",
-				fmt.Sprintf("    and %s, w17, w18", descDst.W),
-				fmt.Sprintf("    b %s", lblDone),
-				fmt.Sprintf("%s:", lblPass),
-				fmt.Sprintf("    mov %s, w17", descDst.W),
-				fmt.Sprintf("%s:", lblDone),
-				fmt.Sprintf("    cmp %s, #0", descDst.W),
-			)
+				fmt.Sprintf("    mov %s4, #1", r),
+				fmt.Sprintf("    lsl %s4, %s4, %s3", r, r, r),
+				fmt.Sprintf("    sub %s4, %s4, #1", r, r),
+				fmt.Sprintf("    cmp w3, #%d", bits),
+				fmt.Sprintf("    csinv %s4, %s4, %szr, lo", r, r, r),
+				"    cset w2, hs",
+				fmt.Sprintf("    and %s1, %s0, %s4", r, r, r))
 		}
+		if flags {
+			lines = append(lines, fmt.Sprintf("    tst %s1, %s1", r, r), "    rmif x2, #63, #2")
+			l.cpol = carryAdd
+		}
+		lines = append(lines, fmt.Sprintf("    mov %s, %s1", dst, r))
 		return lines, nil
 
 	case x86asm.SHLX, x86asm.SHRX, x86asm.SARX:

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -74,6 +75,105 @@ type AsmEmitter struct {
 	HLE          *HLEReport
 	linesBuf     []string
 	knownFuncSet map[uint64]bool
+	// unresolved describes every import slot (PLT stub and GOT slot address) that no host
+	// shim and no loaded module satisfies. Each one is bound to shim_unresolved_stub.
+	unresolved map[uint64]unresolvedImport
+	// UnresolvedFuncImports and UnresolvedDataImports count the unresolved import relocations:
+	// JUMP_SLOT ones are calls, GLOB_DAT/R_X86_64_64 ones are address loads (a data import is
+	// bound to the same stub, so reading it as data yields the stub's address).
+	UnresolvedFuncImports int
+	UnresolvedDataImports int
+	// UnresolvedDataNames lists the unresolved data imports, sorted, each as its name (the NID
+	// when the NID database does not know it) and importing library.
+	UnresolvedDataNames []string
+	// Warnings collects generation-time problems that do not stop the generation (the caller
+	// prints them in its summary).
+	Warnings []string
+}
+
+// maxModuleSegments is the number of segments a module registers with the runtime
+// (RecompModuleUnwindInfo.segments, the four of SceKernelModuleInfo).
+const maxModuleSegments = 4
+
+// registeredSegments returns the segments of module name that fit the runtime's table, with a
+// warning in e.Warnings when some do not.
+func (e *AsmEmitter) registeredSegments(name string, segs []*elfloader.Segment) []*elfloader.Segment {
+	if len(segs) <= maxModuleSegments {
+		return segs
+	}
+	e.Warnings = append(e.Warnings, fmt.Sprintf("module %s has %d segments; module info reports only the first %d",
+		name, len(segs), maxModuleSegments))
+	return segs[:maxModuleSegments]
+}
+
+// unresolvedImport is what shim_unresolved_stub reports when the guest calls a missing import.
+type unresolvedImport struct {
+	nid  string // NID portion of the dynsym name
+	name string // plaintext symbol name when the NID database knows it
+	lib  string // importing library as named by DT_SCE_IMPORT_LIB
+}
+
+// unresolvedStubShim is the host function every unresolved import reports through.
+const unresolvedStubShim = "shim_unresolved_stub"
+
+// collectUnresolvedImports finds the import slots that remain self-bound after module
+// relocation: elfloader.ResolveModuleRelocations leaves a slot pointing at its own PLT stub
+// (or at itself when there is no PLT) when neither a module export nor the canary applies, and
+// the emitter binds a host shim to the slots it can serve. What is left would jump to itself
+// forever, so it is routed to shim_unresolved_stub with its name instead.
+func collectUnresolvedImports(loaded *elfloader.LoadedELF, shimMap map[uint64]string) (out map[uint64]unresolvedImport, funcs, data int, dataNames []string) {
+	out = make(map[uint64]unresolvedImport)
+	seenData := make(map[string]bool)
+	for _, rel := range loaded.Relocations {
+		switch rel.Type {
+		case elfloader.R_X86_64_JUMP_SLOT, elfloader.R_X86_64_GLOB_DAT, elfloader.R_X86_64_64:
+		default:
+			continue
+		}
+		if rel.SymName == "" || rel.Offset+8 > uint64(len(loaded.MemoryImage)) {
+			continue
+		}
+		if _, ok := LookupShim(rel.SymName); ok {
+			continue
+		}
+		slot := binary.LittleEndian.Uint64(loaded.MemoryImage[rel.Offset : rel.Offset+8])
+		if slot != rel.Offset && (rel.PltAddr == 0 || slot != rel.PltAddr) {
+			continue
+		}
+		imp := unresolvedImport{nid: elfloader.NIDPrefix(rel.SymName), lib: loaded.LibraryForNID(rel.SymName)}
+		if canon, ok := elfloader.ResolveNID(rel.SymName); ok {
+			imp.name = canon
+		}
+		if rel.Type == elfloader.R_X86_64_JUMP_SLOT {
+			funcs++
+		} else {
+			data++
+			label := imp.name
+			if label == "" {
+				label = imp.nid
+			}
+			if imp.lib != "" {
+				label += " (" + imp.lib + ")"
+			}
+			if !seenData[label] {
+				seenData[label] = true
+				dataNames = append(dataNames, label)
+			}
+		}
+		for _, addr := range []uint64{rel.PltAddr, rel.Offset} {
+			if addr == 0 {
+				continue
+			}
+			if _, bound := shimMap[addr]; bound {
+				continue
+			}
+			if _, dup := out[addr]; !dup {
+				out[addr] = imp
+			}
+		}
+	}
+	slices.Sort(dataNames)
+	return out, funcs, data, dataNames
 }
 
 // NewAsmEmitter creates a new ARM64 assembly emitter.
@@ -120,11 +220,21 @@ func NewAsmEmitter(loaded *elfloader.LoadedELF, d *disasm.Disassembler, l *lifte
 		bindAddr(sym.Name, sym.Address)
 	}
 
+	unresolved, unresFuncs, unresData, unresDataNames := collectUnresolvedImports(loaded, shimMap)
+	for addr := range unresolved {
+		shimMap[addr] = unresolvedStubShim
+	}
+
 	return &AsmEmitter{
-		elf:     loaded,
-		disasm:  d,
-		lifter:  l,
-		shimMap: shimMap,
+		elf:        loaded,
+		disasm:     d,
+		lifter:     l,
+		shimMap:    shimMap,
+		unresolved: unresolved,
+
+		UnresolvedFuncImports: unresFuncs,
+		UnresolvedDataImports: unresData,
+		UnresolvedDataNames:   unresDataNames,
 	}
 }
 
@@ -300,17 +410,14 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
 
-	if _, err := fmt.Fprintf(w, "// Chunk %d (%d functions)\n.text\n.p2align 2\n\n", chunkIdx, len(chunkAddrs)); err != nil {
+	if _, err := fmt.Fprintf(w, "// Chunk %d (%d functions)\n%s\n.p2align 2\n\n", chunkIdx, len(chunkAddrs), guestTextSection); err != nil {
 		return err
 	}
 
 	for _, addr := range chunkAddrs {
 		if shim, isShimmed := e.shimMap[addr]; isShimmed {
 			// Forward directly to host shim via bridge
-			fmt.Fprintf(w, ".globl _fn_0x%x\n_fn_0x%x:\n", addr, addr)
-			fmt.Fprintf(w, "    adrp x0, _%s@PAGE\n", shim)
-			fmt.Fprintf(w, "    add  x0, x0, _%s@PAGEOFF\n", shim)
-			fmt.Fprintf(w, "    b    _recomp_call_shim\n\n")
+			writeShimStub(w, fmt.Sprintf("_fn_0x%x", addr), shim, addr)
 			continue
 		}
 
@@ -325,7 +432,7 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 		fmt.Fprintf(w, ".globl _fn_0x%x\n_fn_0x%x:\n", addr, addr)
 		fmt.Fprintf(w, "    str x30, [sp, #-16]!\n")
 
-		for _, blockAddr := range fn.BlockOrder {
+		for bi, blockAddr := range fn.BlockOrder {
 			block := fn.Blocks[blockAddr]
 			if block == nil {
 				continue
@@ -347,6 +454,27 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 					}
 				}
 			}
+			// A block that falls through hands the next one CF in the block-boundary sense.
+			if n := len(block.Insts); n > 0 {
+				for _, line := range e.lifter.EndBlock(block.Insts[n-1]) {
+					w.WriteString(line)
+					w.WriteByte('\n')
+				}
+				// The next emitted block is not always the fall-through successor
+				// (overlapping instruction streams): branch to it then.
+				var next uint64
+				hasNext := false
+				for _, a := range fn.BlockOrder[bi+1:] {
+					if fn.Blocks[a] != nil {
+						next, hasNext = a, true
+						break
+					}
+				}
+				for _, line := range e.lifter.FallThrough(fn, block.Insts[n-1], next, hasNext) {
+					w.WriteString(line)
+					w.WriteByte('\n')
+				}
+			}
 		}
 		w.WriteString("    ldr x30, [sp], #16\n    ret\n\n")
 	}
@@ -361,6 +489,27 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 		return err
 	}
 	return writeFileIfChanged(path, buf.Bytes())
+}
+
+// guestTextSection holds all code that runs with the guest registers pinned in host registers:
+// recompiled functions, shim stubs and the indirect-branch entry points of the trampoline. The
+// runtime tells guest code from host code by this section (recomp_pc_in_guest_code).
+const guestTextSection = ".section __TEXT,__recomp_guest,regular,pure_instructions"
+
+// writeShimStub emits the guest-callable symbol sym of a host shim for guest address addr:
+// guest code calls it like any recompiled function, and it hands the shim and addr (stored
+// to ctx->rip, so diagnostics name the shim a thread is in) to _recomp_call_shim.
+func writeShimStub(w io.Writer, sym, shim string, addr uint64) {
+	fmt.Fprintf(w, ".globl %s\n%s:\n", sym, sym)
+	fmt.Fprintf(w, "    adrp x0, _%s@PAGE\n", shim)
+	fmt.Fprintf(w, "    add  x0, x0, _%s@PAGEOFF\n", shim)
+	fmt.Fprintf(w, "    movz x1, #0x%x\n", addr&0xffff)
+	for shift := 16; shift < 64; shift += 16 {
+		if chunk := (addr >> shift) & 0xffff; chunk != 0 {
+			fmt.Fprintf(w, "    movk x1, #0x%x, lsl #%d\n", chunk, shift)
+		}
+	}
+	fmt.Fprintf(w, "    b    _recomp_call_shim\n\n")
 }
 
 func (e *AsmEmitter) emitChunkRegistration(path string, chunkIdx int, chunkAddrs []uint64) error {
@@ -385,291 +534,10 @@ func (e *AsmEmitter) emitChunkRegistration(path string, chunkIdx int, chunkAddrs
 	return writeFileIfChanged(path, buf.Bytes())
 }
 
-// EmitTrampoline generates the ARM64 assembly bridge between host C and guest assembly.
+// EmitTrampoline writes the ARM64 assembly bridge between the host C runtime and guest
+// assembly (trampolineAsm).
 func (e *AsmEmitter) EmitTrampoline(path string) error {
-	content := `// ARM64 Assembly Bridge between host C runtime and guest assembly
-.text
-.p2align 2
-
-// Global pointer to active GuestContext
-// void recomp_enter_guest(GuestContext *ctx, uint64_t target_fn)
-// x0 = ctx, x1 = target_fn
-.globl _recomp_enter_guest
-_recomp_enter_guest:
-    // 1. Save host callee-saved registers, frame pointer, and ctx on host stack
-    stp x29, x30, [sp, #-112]!
-    mov x29, sp
-    stp x19, x20, [sp, #16]
-    stp x21, x22, [sp, #32]
-    stp x23, x24, [sp, #48]
-    stp x25, x26, [sp, #64]
-    stp x27, x28, [sp, #80]
-    str x0,       [sp, #96]
-
-    // 2. Load guest registers from GuestContext (x0)
-    ldr x19, [x0, #0x0]   // rax
-    ldr x21, [x0, #0x8]   // rcx
-    ldr x22, [x0, #0x10]  // rdx
-    ldr x20, [x0, #0x18]  // rbx
-    ldr x26, [x0, #0x20]  // rsp
-    ldr x25, [x0, #0x28]  // rbp
-    ldr x23, [x0, #0x30]  // rsi
-    ldr x24, [x0, #0x38]  // rdi
-    ldr x8,  [x0, #0x40]  // r8
-    ldr x9,  [x0, #0x48]  // r9
-    ldr x10, [x0, #0x50]  // r10
-    ldr x11, [x0, #0x58]  // r11
-    ldr x12, [x0, #0x60]  // r12
-    ldr x13, [x0, #0x68]  // r13
-    ldr x14, [x0, #0x70]  // r14
-    ldr x15, [x0, #0x78]  // r15
-    ldr x27, [x0, #0x88]  // fs_base
-    ldr x28, [x0, #0x330] // mem_base (offset 816 in GuestContext)
-
-    // 3. Jump to target guest function (x1)
-    blr x1
-
-    // 4. On return: save guest registers back to GuestContext (from thread host stack)
-    ldr  x0, [sp, #96]
-    str x19, [x0, #0x0]   // rax
-    str x21, [x0, #0x8]   // rcx
-    str x22, [x0, #0x10]  // rdx
-    str x20, [x0, #0x18]  // rbx
-    str x26, [x0, #0x20]  // rsp
-    str x25, [x0, #0x28]  // rbp
-    str x23, [x0, #0x30]  // rsi
-    str x24, [x0, #0x38]  // rdi
-    str x8,  [x0, #0x40]  // r8
-    str x9,  [x0, #0x48]  // r9
-    str x10, [x0, #0x50]  // r10
-    str x11, [x0, #0x58]  // r11
-    str x12, [x0, #0x60]  // r12
-    str x13, [x0, #0x68]  // r13
-    str x14, [x0, #0x70]  // r14
-    str x15, [x0, #0x78]  // r15
-
-    // 5. Restore host callee-saved registers
-    ldp x19, x20, [sp, #16]
-    ldp x21, x22, [sp, #32]
-    ldp x23, x24, [sp, #48]
-    ldp x25, x26, [sp, #64]
-    ldp x27, x28, [sp, #80]
-    ldp x29, x30, [sp], #112
-    ret
-
-// _recomp_call_shim: calls a host C shim from guest assembly
-// x0 = host shim function pointer
-.globl _recomp_call_shim
-_recomp_call_shim:
-    // Save LR and allocate frame (160 bytes: 32 for fp/lr/x0 + 128 for q0-q7)
-    stp x29, x30, [sp, #-160]!
-    mov x29, sp
-    str x0, [sp, #16]
-    stp q0, q1, [sp, #32]
-    stp q2, q3, [sp, #64]
-    stp q4, q5, [sp, #96]
-    stp q6, q7, [sp, #128]
-
-    // Load active thread ctx into x1 from [x28, x27 + 0x70] (thread-local TCB)
-    add  x1, x27, #0x70
-    ldr  x1, [x28, x1]
-
-    // Sync registers to ctx before calling shim
-    str x19, [x1, #0x0]   // rax
-    str x21, [x1, #0x8]   // rcx
-    str x22, [x1, #0x10]  // rdx
-    str x20, [x1, #0x18]  // rbx
-    str x26, [x1, #0x20]  // rsp
-    str x25, [x1, #0x28]  // rbp
-    str x23, [x1, #0x30]  // rsi
-    str x24, [x1, #0x38]  // rdi
-    str x8,  [x1, #0x40]  // r8
-    str x9,  [x1, #0x48]  // r9
-    str x10, [x1, #0x50]  // r10
-    str x11, [x1, #0x58]  // r11
-    str x12, [x1, #0x60]  // r12
-    str x13, [x1, #0x68]  // r13
-    str x14, [x1, #0x70]  // r14
-    str x15, [x1, #0x78]  // r15
-
-    // Call shim: shim(GuestContext *ctx)
-    mov x0, x1
-    ldr x2, [sp, #16]
-    blr x2
-
-    // Reload active thread ctx from [x28, x27 + 0x70]
-    add  x1, x27, #0x70
-    ldr  x1, [x28, x1]
-
-    // Reload return value (rax, rdx) and caller-saved registers
-    ldr x19, [x1, #0x0]   // rax
-    ldr x22, [x1, #0x10]  // rdx
-    ldr x26, [x1, #0x20]  // rsp
-    ldr x8,  [x1, #0x40]  // r8
-    ldr x9,  [x1, #0x48]  // r9
-    ldr x10, [x1, #0x50]  // r10
-    ldr x11, [x1, #0x58]  // r11
-    ldr x12, [x1, #0x60]  // r12
-    ldr x13, [x1, #0x68]  // r13
-    ldr x14, [x1, #0x70]  // r14
-    ldr x15, [x1, #0x78]  // r15
-    ldr x27, [x1, #0x88]  // fs_base
-    ldr x28, [x1, #0x330] // mem_base
-
-    ldp q0, q1, [sp, #32]
-    ldp q2, q3, [sp, #64]
-    ldp q4, q5, [sp, #96]
-    ldp q6, q7, [sp, #128]
-    ldp x29, x30, [sp], #160
-    ret
-
-// _recomp_indirect_call: calls a guest function via dispatch
-// x0 = guest target RIP
-.globl _recomp_indirect_call
-_recomp_indirect_call:
-    adrp x16, _g_dispatch_l1@PAGE
-    add  x16, x16, _g_dispatch_l1@PAGEOFF
-    lsr  x17, x0, #32
-    and  x17, x17, #0xffff
-    ldr  x16, [x16, x17, lsl #3]
-    cbz  x16, 99f
-    lsr  x17, x0, #16
-    and  x17, x17, #0xffff
-    ldr  x16, [x16, x17, lsl #3]
-    cbz  x16, 99f
-    and  x17, x0, #0xffff
-    ldr  x16, [x16, x17, lsl #3]
-    cbz  x16, 99f
-    br   x16
-99:
-    stp x29, x30, [sp, #-32]!
-    mov x29, sp
-    str x0, [sp, #16]
-    add x2, x27, #0x70
-    ldr x2, [x28, x2]
-    cbz  x2, 98f
-    str x19, [x2, #0x0]   // rax
-    str x21, [x2, #0x8]   // rcx
-    str x22, [x2, #0x10]  // rdx
-    str x20, [x2, #0x18]  // rbx
-    str x26, [x2, #0x20]  // rsp
-    str x25, [x2, #0x28]  // rbp
-    str x23, [x2, #0x30]  // rsi
-    str x24, [x2, #0x38]  // rdi
-    str x8,  [x2, #0x40]  // r8
-    str x9,  [x2, #0x48]  // r9
-    str x10, [x2, #0x50]  // r10
-    str x11, [x2, #0x58]  // r11
-    str x12, [x2, #0x60]  // r12
-    str x13, [x2, #0x68]  // r13
-    str x14, [x2, #0x70]  // r14
-    str x15, [x2, #0x78]  // r15
-
-98:
-    ldr x1, [sp, #16]
-    mov x0, x2
-    bl   _recomp_dispatch_external
-
-    add x0, x27, #0x70
-    ldr x0, [x28, x0]
-    cbz  x0, 97f
-    ldr x19, [x0, #0x0]   // rax
-    ldr x21, [x0, #0x8]   // rcx
-    ldr x22, [x0, #0x10]  // rdx
-    ldr x20, [x0, #0x18]  // rbx
-    ldr x26, [x0, #0x20]  // rsp
-    ldr x25, [x0, #0x28]  // rbp
-    ldr x23, [x0, #0x30]  // rsi
-    ldr x24, [x0, #0x38]  // rdi
-    ldr x8,  [x0, #0x40]  // r8
-    ldr x9,  [x0, #0x48]  // r9
-    ldr x10, [x0, #0x50]  // r10
-    ldr x11, [x0, #0x58]  // r11
-    ldr x12, [x0, #0x60]  // r12
-    ldr x13, [x0, #0x68]  // r13
-    ldr x14, [x0, #0x70]  // r14
-    ldr x15, [x0, #0x78]  // r15
-    ldr x27, [x0, #0x88]  // fs_base
-    ldr x28, [x0, #0x330] // mem_base
-
-97:
-    ldp x29, x30, [sp], #32
-    ret
-
-// _recomp_indirect_jump: jumps to a guest function via dispatch
-// x0 = guest target RIP
-.globl _recomp_indirect_jump
-_recomp_indirect_jump:
-    adrp x16, _g_dispatch_l1@PAGE
-    add  x16, x16, _g_dispatch_l1@PAGEOFF
-    lsr  x17, x0, #32
-    and  x17, x17, #0xffff
-    ldr  x16, [x16, x17, lsl #3]
-    cbz  x16, 99f
-    lsr  x17, x0, #16
-    and  x17, x17, #0xffff
-    ldr  x16, [x16, x17, lsl #3]
-    cbz  x16, 99f
-    and  x17, x0, #0xffff
-    ldr  x16, [x16, x17, lsl #3]
-    cbz  x16, 99f
-    br   x16
-99:
-    stp x29, x30, [sp, #-32]!
-    mov x29, sp
-    str x0, [sp, #16]
-    add x2, x27, #0x70
-    ldr x2, [x28, x2]
-    cbz  x2, 98f
-    str x19, [x2, #0x0]   // rax
-    str x21, [x2, #0x8]   // rcx
-    str x22, [x2, #0x10]  // rdx
-    str x20, [x2, #0x18]  // rbx
-    str x26, [x2, #0x20]  // rsp
-    str x25, [x2, #0x28]  // rbp
-    str x23, [x2, #0x30]  // rsi
-    str x24, [x2, #0x38]  // rdi
-    str x8,  [x2, #0x40]  // r8
-    str x9,  [x2, #0x48]  // r9
-    str x10, [x2, #0x50]  // r10
-    str x11, [x2, #0x58]  // r11
-    str x12, [x2, #0x60]  // r12
-    str x13, [x2, #0x68]  // r13
-    str x14, [x2, #0x70]  // r14
-    str x15, [x2, #0x78]  // r15
-
-98:
-    ldr x1, [sp, #16]
-    mov x0, x2
-    bl   _recomp_dispatch_external
-
-    add x0, x27, #0x70
-    ldr x0, [x28, x0]
-    cbz  x0, 97f
-    ldr x19, [x0, #0x0]   // rax
-    ldr x21, [x0, #0x8]   // rcx
-    ldr x22, [x0, #0x10]  // rdx
-    ldr x20, [x0, #0x18]  // rbx
-    ldr x26, [x0, #0x20]  // rsp
-    ldr x25, [x0, #0x28]  // rbp
-    ldr x23, [x0, #0x30]  // rsi
-    ldr x24, [x0, #0x38]  // rdi
-    ldr x8,  [x0, #0x40]  // r8
-    ldr x9,  [x0, #0x48]  // r9
-    ldr x10, [x0, #0x50]  // r10
-    ldr x11, [x0, #0x58]  // r11
-    ldr x12, [x0, #0x60]  // r12
-    ldr x13, [x0, #0x68]  // r13
-    ldr x14, [x0, #0x70]  // r14
-    ldr x15, [x0, #0x78]  // r15
-    ldr x27, [x0, #0x88]  // fs_base
-    ldr x28, [x0, #0x330] // mem_base
-
-97:
-    ldp x29, x30, [sp], #32
-    ret
-`
-	return writeFileIfChanged(path, []byte(content))
+	return writeFileIfChanged(path, []byte(trampolineAsm))
 }
 
 // EmitDispatch ties all chunk registrations together.
@@ -713,9 +581,17 @@ func (e *AsmEmitter) EmitMainRunner(path string) error {
 extern void recomp_init_dispatch_table(void);
 extern void recomp_enter_guest(GuestContext *ctx, uint64_t target_fn);
 
-int main(int argc, char **argv) {
-    setvbuf(stdout, NULL, _IONBF, 0);
-    setvbuf(stderr, NULL, _IONBF, 0);
+typedef struct {
+    int argc;
+    char **argv;
+} GuestMainArgs;
+
+// Guest code runs on a secondary host thread so the host main thread stays free
+// for AppKit (window creation, event pumping, dialogs).
+static void *guest_main(void *p) {
+    GuestMainArgs *a = (GuestMainArgs *)p;
+    int argc = a->argc;
+    char **argv = a->argv;
     printf("[ps4-recomp] Initializing runtime (ARM64 Assembly Backend)...\n");
     ps4_vfs_init(%s);
     recomp_init_dispatch_table();
@@ -724,7 +600,7 @@ int main(int argc, char **argv) {
     GuestContext *ctx = recomp_init_runtime_file("guest_image.bin", 0, prog_name);
     if (!ctx) {
         fprintf(stderr, "[ps4-recomp] Failed to allocate guest memory or load guest_image.bin\n");
-        return 1;
+        exit(1);
     }
 
     recomp_init_process_param(ctx, 0x%xULL);
@@ -739,11 +615,52 @@ int main(int argc, char **argv) {
 
     printf("[ps4-recomp] Execution complete.\n");
     recomp_free_runtime(ctx);
+    exit(0);
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    static GuestMainArgs args;
+    args.argc = argc;
+    args.argv = argv;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 64 * 1024 * 1024);
+    // Startup settings (language, PS4 Pro mode, upscaling, FPS HUD) are resolved before the
+    // guest starts; the dialog needs the application directory for the language list.
+    ps4_vfs_init(%s);
+    ps4_host_settings_init();
+    pthread_t guest_thread;
+    if (pthread_create(&guest_thread, &attr, guest_main, &args) != 0) {
+        fprintf(stderr, "[ps4-recomp] Failed to start guest thread\n");
+        return 1;
+    }
+    pthread_attr_destroy(&attr);
+    ps4_host_run_main_loop();
     return 0;
 }
-`, vfsInitArg, e.elf.ProcParamAddr, e.elf.TLSVaddr, e.elf.TLSFilesz, e.elf.TLSMemsz, e.elf.TLSAlign, entryAddr, entryName, entryAddr, entryAddr, entryAddr)
+`, vfsInitArg, e.elf.ProcParamAddr, e.elf.TLSVaddr, e.elf.TLSFilesz, e.elf.TLSMemsz, e.elf.TLSAlign, entryAddr, entryName, entryAddr, entryAddr, entryAddr, vfsInitArg)
 
 	return writeFileIfChanged(path, []byte(content))
+}
+
+// ownSegments returns the segments of the main image itself. MergeImages appends the
+// segments of merged companion modules (e.g. libSceFios2) to the main image, but the eboot's
+// module info must list only its own mapped segments.
+func ownSegments(elf *elfloader.LoadedELF) []*elfloader.Segment {
+	end := elf.OrigMaxVAddr
+	if end == 0 {
+		end = elf.MaxVAddr
+	}
+	var segs []*elfloader.Segment
+	for _, s := range elf.Segments {
+		if s.Vaddr >= elf.OrigMinVAddr && s.Vaddr < end {
+			segs = append(segs, s)
+		}
+	}
+	return segs
 }
 
 // EmitGuestModules writes the runtime export tables, synthetic shims, and unwind registrations.
@@ -806,7 +723,7 @@ func (e *AsmEmitter) EmitGuestModules(path string) error {
 
 	// Forward declarations and weak fallback implementations for host shims
 	uniqueShims := make(map[string]bool)
-	uniqueShims["shim_unresolved_stub"] = true
+	uniqueShims[unresolvedStubShim] = true
 	for _, target := range CanonicalShims {
 		uniqueShims[target] = true
 	}
@@ -822,7 +739,7 @@ func (e *AsmEmitter) EmitGuestModules(path string) error {
 	}
 	w.WriteString("\n// Weak fallback implementations\n")
 	for _, s := range sortedShims {
-		if s == "shim_unresolved_stub" {
+		if s == unresolvedStubShim {
 			continue
 		}
 		fmt.Fprintf(w, "__attribute__((weak)) void %s(GuestContext *ctx) { recomp_unimplemented_shim(ctx, %q); }\n", s, s)
@@ -852,6 +769,29 @@ func (e *AsmEmitter) EmitGuestModules(path string) error {
 	}
 
 	w.WriteString("void recomp_register_guest_modules(void) {\n")
+	unresolvedAddrs := make([]uint64, 0, len(e.unresolved))
+	for addr := range e.unresolved {
+		unresolvedAddrs = append(unresolvedAddrs, addr)
+	}
+	slices.Sort(unresolvedAddrs)
+	for _, addr := range unresolvedAddrs {
+		imp := e.unresolved[addr]
+		fmt.Fprintf(w, "    recomp_register_unresolved(0x%xULL, %q, %q, %q);\n", addr, imp.nid, imp.name, imp.lib)
+	}
+	// Slots that are not discovered functions (GOT entries) still need a registered target;
+	// the discovered ones (PLT stubs) get their stub from the code chunks.
+	isFunc := make(map[uint64]bool)
+	for _, a := range e.functionAddrs() {
+		isFunc[a] = true
+	}
+	var unresolvedSynth []uint64
+	for _, addr := range unresolvedAddrs {
+		if isFunc[addr] {
+			continue
+		}
+		unresolvedSynth = append(unresolvedSynth, addr)
+		fmt.Fprintf(w, "    extern void fn_0x%x(GuestContext *ctx);\n    recomp_register_fn(0x%xULL, fn_0x%x);\n", addr, addr, addr)
+	}
 	for _, line := range synthRegs {
 		w.WriteString(line)
 	}
@@ -870,13 +810,11 @@ func (e *AsmEmitter) EmitGuestModules(path string) error {
 		if endAddr == 0 {
 			endAddr = e.elf.MaxVAddr
 		}
-		numSegs := len(e.elf.Segments)
-		if numSegs > 4 {
-			numSegs = 4
-		}
+		mainSegs := e.registeredSegments(mainName, ownSegments(e.elf))
+		numSegs := len(mainSegs)
 		var segsInit strings.Builder
 		for si := 0; si < numSegs; si++ {
-			s := e.elf.Segments[si]
+			s := mainSegs[si]
 			prot := 0
 			if s.Flags&1 != 0 {
 				prot |= 1
@@ -917,13 +855,11 @@ func (e *AsmEmitter) EmitGuestModules(path string) error {
 				fmt.Fprintf(w, "    recomp_module_register_init(%q, recomp_module_init_%d, %d);\n", name, i, len(mod.Init))
 			}
 		}
-		modNumSegs := len(mod.Segments)
-		if modNumSegs > 4 {
-			modNumSegs = 4
-		}
+		modSegs := e.registeredSegments(mod.FileName, mod.Segments)
+		modNumSegs := len(modSegs)
 		var modSegsInit strings.Builder
 		for si := 0; si < modNumSegs; si++ {
-			s := mod.Segments[si]
+			s := modSegs[si]
 			prot := 0
 			if s.Flags&1 != 0 {
 				prot |= 1
@@ -968,12 +904,12 @@ func (e *AsmEmitter) EmitGuestModules(path string) error {
 	synthPath := strings.TrimSuffix(path, ".c") + "_synth.s"
 	var sBuf bytes.Buffer
 	sw := bufio.NewWriter(&sBuf)
-	sw.WriteString("// Synthetic shims ARM64 bridge\n.text\n.p2align 2\n\n")
+	sw.WriteString("// Synthetic shims ARM64 bridge\n" + guestTextSection + "\n.p2align 2\n\n")
 	for _, entry := range synthList {
-		fmt.Fprintf(sw, ".globl _fn_0x%x\n_fn_0x%x:\n", entry.addr, entry.addr)
-		fmt.Fprintf(sw, "    adrp x0, _%s@PAGE\n", entry.shim)
-		fmt.Fprintf(sw, "    add  x0, x0, _%s@PAGEOFF\n", entry.shim)
-		fmt.Fprintf(sw, "    b    _recomp_call_shim\n\n")
+		writeShimStub(sw, fmt.Sprintf("_fn_0x%x", entry.addr), entry.shim, entry.addr)
+	}
+	for _, addr := range unresolvedSynth {
+		writeShimStub(sw, fmt.Sprintf("_fn_0x%x", addr), unresolvedStubShim, addr)
 	}
 	if err := sw.Flush(); err != nil {
 		return err

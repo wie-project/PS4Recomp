@@ -66,6 +66,7 @@ OrbisCommonDialogStatus sceNpProfileDialogUpdateStatus(void);
 OrbisCommonDialogStatus sceNpProfileDialogGetStatus(void);
 int32_t sceNpProfileDialogGetResult(OrbisNpProfileDialogResult *result);
 int32_t sceNpProfileDialogTerminate(void);
+int32_t sceNpProfileDialogClose(void);
 
 // Shims
 void shim_sceNpProfileDialogInitialize(GuestContext *ctx);
@@ -74,6 +75,7 @@ void shim_sceNpProfileDialogUpdateStatus(GuestContext *ctx);
 void shim_sceNpProfileDialogGetStatus(GuestContext *ctx);
 void shim_sceNpProfileDialogGetResult(GuestContext *ctx);
 void shim_sceNpProfileDialogTerminate(GuestContext *ctx);
+void shim_sceNpProfileDialogClose(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

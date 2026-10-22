@@ -203,6 +203,9 @@ int32_t sceNpSignalingInitialize(int64_t memorySize, int32_t threadPriority, int
 int32_t sceNpSignalingTerminate(void);
 int32_t sceNpSignalingCreateContext(const void* npId, void* callback, void* callbackArg, uint32_t* outContextId);
 int32_t sceNpSignalingCreateContextA(int32_t userId, void* callback, void* callbackArg, uint32_t* outContextId);
+int32_t sceNpSignalingSetContextOption(uint32_t ctxId, int32_t optionId, int32_t optionValue);
+void ps4_np_signaling_ctx_forget(uint32_t ctxId);
+int64_t ps4_np_signaling_ctx_flags(uint32_t ctxId);
 
 int32_t sceNpWebApiInitialize(int32_t libHttpCtxId, uint64_t poolSize);
 int32_t sceNpWebApiTerminate(int32_t libCtxId);
@@ -293,6 +296,7 @@ void shim_sceNpSignalingInitialize(GuestContext *ctx);
 void shim_sceNpSignalingTerminate(GuestContext *ctx);
 void shim_sceNpSignalingCreateContext(GuestContext *ctx);
 void shim_sceNpSignalingCreateContextA(GuestContext *ctx);
+void shim_sceNpSignalingSetContextOption(GuestContext *ctx);
 
 void shim_sceNpWebApiInitialize(GuestContext *ctx);
 void shim_sceNpWebApiTerminate(GuestContext *ctx);
@@ -331,6 +335,25 @@ void shim_sceNpUtilityInit(GuestContext *ctx);
 void shim_sceNpUtilityTerm(GuestContext *ctx);
 void shim_sceNpGameIntentInitialize(GuestContext *ctx);
 void shim_sceNpGameIntentTerminate(GuestContext *ctx);
+
+// libSceNpParty (ps4_np_party.c)
+int32_t sceNpPartyInitialize(void);
+int32_t sceNpPartyTerminate(void);
+int32_t sceNpPartyRegisterHandler(uint64_t param_gaddr);
+int32_t sceNpPartyRegisterPrivateHandler(uint64_t param_gaddr);
+int32_t sceNpPartyUnregisterPrivateHandler(void);
+int32_t sceNpPartyCheckCallback(void);
+int32_t sceNpPartyGetVoiceChatPriority(uint64_t out_gaddr);
+int32_t sceNpPartySetVoiceChatPriority(uint64_t in_gaddr);
+uint64_t ps4_np_party_handler(bool private_handler);
+void shim_sceNpPartyInitialize(GuestContext *ctx);
+void shim_sceNpPartyTerminate(GuestContext *ctx);
+void shim_sceNpPartyRegisterHandler(GuestContext *ctx);
+void shim_sceNpPartyRegisterPrivateHandler(GuestContext *ctx);
+void shim_sceNpPartyUnregisterPrivateHandler(GuestContext *ctx);
+void shim_sceNpPartyCheckCallback(GuestContext *ctx);
+void shim_sceNpPartyGetVoiceChatPriority(GuestContext *ctx);
+void shim_sceNpPartySetVoiceChatPriority(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

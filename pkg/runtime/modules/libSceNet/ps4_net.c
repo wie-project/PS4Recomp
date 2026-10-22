@@ -521,3 +521,31 @@ void shim_sceNetGetSockInfo(GuestContext *ctx) {
     ctx->rax = ORBIS_OK;
     SHIM_RETURN();
 }
+
+// int sceNetEtherNtostr(const SceNetEtherAddr *n, char *str, size_t len)
+//
+// Formats a 6-byte Ethernet address as "%02x:%02x:%02x:%02x:%02x:%02x" (17 characters plus
+// the terminator, SCE_NET_ETHER_ADDRSTRLEN = 18). Behaviour as in shadPS4
+// (libraries/net/net.cpp sceNetEtherNtostr): a NULL address or buffer fails with EFAULT,
+// a buffer shorter than 18 bytes with ENOSPC; both return -1 and set errno. Returns 0, or
+// the errno value to report.
+#define PS4_NET_ETHER_ADDRSTRLEN 18
+
+int ps4_net_ether_ntostr(const uint8_t *addr, char *str, size_t len) {
+    if (!addr || !str) return EFAULT;
+    if (len < PS4_NET_ETHER_ADDRSTRLEN) return ENOSPC;
+    snprintf(str, len, "%02x:%02x:%02x:%02x:%02x:%02x", addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+    return 0;
+}
+
+void shim_sceNetEtherNtostr(GuestContext *ctx) {
+    int err = ps4_net_ether_ntostr((const uint8_t *)guest_to_host(ctx, ctx->rdi), (char *)guest_to_host(ctx, ctx->rsi),
+                                   (size_t)ctx->rdx);
+    if (err) {
+        set_net_errno(ctx, err);
+        ctx->rax = (uint64_t)-1;
+    } else {
+        ctx->rax = ORBIS_OK;
+    }
+    SHIM_RETURN();
+}

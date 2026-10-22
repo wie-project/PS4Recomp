@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MAX_SEMS 1024
 #define SEM_MAGIC 0x53454d31 // 'SEM1'
@@ -133,6 +134,82 @@ void shim_sem_wait(GuestContext *ctx) {
   pthread_mutex_unlock(&s->mutex);
 
   ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+// int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout)
+//
+// Order of checks as in libkernel (see shadPS4 libraries/kernel/threads/semaphore.cpp,
+// posix_sem_timedwait / PthreadSemWait): a NULL or unknown semaphore fails with EINVAL; a
+// token that is available is taken before the timeout is looked at, so a bad timespec does not
+// fail a wait that would succeed; then tv_nsec outside [0, 1e9) fails with EINVAL; otherwise
+// the thread sleeps until the absolute CLOCK_REALTIME deadline and a miss returns -1 with
+// errno ETIMEDOUT (FreeBSD value 60, same as the host). A NULL abs_timeout waits without
+// limit, like sem_wait. A deadline more than 30 years away is treated the same way, which
+// keeps far-future values from overflowing the host's timed wait.
+void shim_sem_timedwait(GuestContext *ctx) {
+  uint64_t sem_addr = ctx->rdi;
+  uint64_t ts_addr = ctx->rsi;
+  RecompInternalSem *s = NULL;
+  if (sem_addr) {
+    s = get_sem(*(uint32_t *)(ctx->mem_base + sem_addr));
+  }
+  if (!s) {
+    set_guest_errno(ctx, EINVAL);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+
+  pthread_mutex_lock(&s->mutex);
+  if (s->value > 0) {
+    s->value--;
+    pthread_mutex_unlock(&s->mutex);
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+
+  struct timespec deadline = {0, 0};
+  int timed = 0;
+  if (ts_addr) {
+    const int64_t *ts = (const int64_t *)(ctx->mem_base + ts_addr);
+    int64_t sec = ts[0], nsec = ts[1];
+    if (nsec < 0 || nsec >= 1000000000LL) {
+      pthread_mutex_unlock(&s->mutex);
+      set_guest_errno(ctx, EINVAL);
+      ctx->rax = (uint64_t)-1;
+      SHIM_RETURN();
+    }
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    if (sec < (int64_t)now.tv_sec + 30LL * 365 * 86400) {
+      deadline.tv_sec = (time_t)sec;
+      deadline.tv_nsec = (long)nsec;
+      timed = 1;
+    }
+  }
+
+  while (s->value <= 0 && s->magic == SEM_MAGIC) {
+    if (!timed) {
+      pthread_cond_wait(&s->cond, &s->mutex);
+    } else if (pthread_cond_timedwait(&s->cond, &s->mutex, &deadline) != 0) {
+      break; // ETIMEDOUT, or an error that would otherwise spin (EINVAL): report a timeout
+    }
+  }
+  if (s->magic != SEM_MAGIC) { // destroyed while waiting
+    pthread_mutex_unlock(&s->mutex);
+    set_guest_errno(ctx, EINVAL);
+    ctx->rax = (uint64_t)-1;
+    SHIM_RETURN();
+  }
+  if (s->value > 0) { // a post that raced the timeout still wins
+    s->value--;
+    pthread_mutex_unlock(&s->mutex);
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+  pthread_mutex_unlock(&s->mutex);
+  set_guest_errno(ctx, ETIMEDOUT);
+  ctx->rax = (uint64_t)-1;
   SHIM_RETURN();
 }
 

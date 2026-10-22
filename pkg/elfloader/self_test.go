@@ -1,6 +1,7 @@
 package elfloader_test
 
 import (
+	"encoding/binary"
 	"os"
 	"testing"
 
@@ -61,4 +62,29 @@ func TestTitleIDNotInLoader(t *testing.T) {
 	if elfloader.IsSELF([]byte{0x7f, 'E', 'L', 'F'}) {
 		t.Fatal("ELF magic must not be classified as SELF")
 	}
+}
+
+// A SELF's program headers without their own entry (PT_SCE_PROCPARAM among them) lie inside a
+// PT_LOAD that is copied from its entry; they must not be refilled from SELF-layout bytes. The
+// process parameters of the eboot in PS4RECOMP_EBOOT must therefore read back intact: size,
+// then the "ORBI" magic.
+func TestSELFProcParamIntactFromEnv(t *testing.T) {
+	path := os.Getenv("PS4RECOMP_EBOOT")
+	if path == "" {
+		t.Skip("PS4RECOMP_EBOOT not set")
+	}
+	loaded, err := elfloader.LoadELF(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := loaded.ProcParamAddr
+	if a == 0 || loaded.ProcParamSize < 16 || a+16 > uint64(len(loaded.MemoryImage)) {
+		t.Fatalf("PT_SCE_PROCPARAM at %#x size %#x (image %#x)", a, loaded.ProcParamSize, len(loaded.MemoryImage))
+	}
+	m := loaded.MemoryImage[a:]
+	size := binary.LittleEndian.Uint64(m)
+	if string(m[8:12]) != "ORBI" || size < 16 || size > loaded.ProcParamSize {
+		t.Fatalf("process parameters at %#x: size %#x magic %q, want size <= %#x and \"ORBI\"", a, size, m[8:12], loaded.ProcParamSize)
+	}
+	t.Logf("process parameters at %#x: size %#x, SDK version %#x", a, size, binary.LittleEndian.Uint32(m[16:]))
 }

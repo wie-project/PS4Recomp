@@ -392,24 +392,17 @@ func (l *Arm64Lifter) liftShuf(inst disasm.Instruction, nextPC uint64, lines []s
 			}
 		}
 
-		// Ensure we don't clobber s1 if dst == s1
-		if dLowV == s1LowV {
-			lines = append(lines, fmt.Sprintf("    mov v28.16b, %s.16b", s1LowV))
-			s1LowV = "v28"
+		// Build the result in v28: the destination may alias either source.
+		shuf := func(d, a, b string) {
+			lines = append(lines, fmt.Sprintf("    mov v28.s[0], %s.s[%d]", a, immVal&3),
+				fmt.Sprintf("    mov v28.s[1], %s.s[%d]", a, (immVal>>2)&3),
+				fmt.Sprintf("    mov v28.s[2], %s.s[%d]", b, (immVal>>4)&3),
+				fmt.Sprintf("    mov v28.s[3], %s.s[%d]", b, (immVal>>6)&3),
+				fmt.Sprintf("    mov %s.16b, v28.16b", d))
 		}
-		lines = append(lines, fmt.Sprintf("    mov %s.s[0], %s.s[%d]", dLowV, s1LowV, immVal&3))
-		lines = append(lines, fmt.Sprintf("    mov %s.s[1], %s.s[%d]", dLowV, s1LowV, (immVal>>2)&3))
-		lines = append(lines, fmt.Sprintf("    mov %s.s[2], %s.s[%d]", dLowV, s2LowV, (immVal>>4)&3))
-		lines = append(lines, fmt.Sprintf("    mov %s.s[3], %s.s[%d]", dLowV, s2LowV, (immVal>>6)&3))
+		shuf(dLowV, s1LowV, s2LowV)
 		if isYmm {
-			if dHighV == s1HighV {
-				lines = append(lines, fmt.Sprintf("    mov v28.16b, %s.16b", s1HighV))
-				s1HighV = "v28"
-			}
-			lines = append(lines, fmt.Sprintf("    mov %s.s[0], %s.s[%d]", dHighV, s1HighV, immVal&3))
-			lines = append(lines, fmt.Sprintf("    mov %s.s[1], %s.s[%d]", dHighV, s1HighV, (immVal>>2)&3))
-			lines = append(lines, fmt.Sprintf("    mov %s.s[2], %s.s[%d]", dHighV, s2HighV, (immVal>>4)&3))
-			lines = append(lines, fmt.Sprintf("    mov %s.s[3], %s.s[%d]", dHighV, s2HighV, (immVal>>6)&3))
+			shuf(dHighV, s1HighV, s2HighV)
 		} else if isAvx {
 			lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
 		}
@@ -452,19 +445,14 @@ func (l *Arm64Lifter) liftShuf(inst disasm.Instruction, nextPC uint64, lines []s
 			}
 		}
 
-		if dLowV == s1LowV {
-			lines = append(lines, fmt.Sprintf("    mov v28.16b, %s.16b", s1LowV))
-			s1LowV = "v28"
-		}
-		lines = append(lines, fmt.Sprintf("    mov %s.d[0], %s.d[%d]", dLowV, s1LowV, immVal&1))
-		lines = append(lines, fmt.Sprintf("    mov %s.d[1], %s.d[%d]", dLowV, s2LowV, (immVal>>1)&1))
+		// Build the result in v28: the destination may alias either source.
+		lines = append(lines, fmt.Sprintf("    mov v28.d[0], %s.d[%d]", s1LowV, immVal&1),
+			fmt.Sprintf("    mov v28.d[1], %s.d[%d]", s2LowV, (immVal>>1)&1),
+			fmt.Sprintf("    mov %s.16b, v28.16b", dLowV))
 		if isYmm {
-			if dHighV == s1HighV {
-				lines = append(lines, fmt.Sprintf("    mov v28.16b, %s.16b", s1HighV))
-				s1HighV = "v28"
-			}
-			lines = append(lines, fmt.Sprintf("    mov %s.d[0], %s.d[%d]", dHighV, s1HighV, (immVal>>2)&1))
-			lines = append(lines, fmt.Sprintf("    mov %s.d[1], %s.d[%d]", dHighV, s2HighV, (immVal>>3)&1))
+			lines = append(lines, fmt.Sprintf("    mov v28.d[0], %s.d[%d]", s1HighV, (immVal>>2)&1),
+				fmt.Sprintf("    mov v28.d[1], %s.d[%d]", s2HighV, (immVal>>3)&1),
+				fmt.Sprintf("    mov %s.16b, v28.16b", dHighV))
 		} else if isAvx {
 			lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
 		}
@@ -1103,6 +1091,16 @@ func (l *Arm64Lifter) liftAvx3Op(inst disasm.Instruction, nextPC uint64, armOp s
 	}
 	_ = isInt32
 
+	if armOp == "fmax" || armOp == "fmin" {
+		lines = append(lines, x86MinMax(armOp == "fmax", ".4s", dLowV, s1LowV, s2LowV)...)
+		if isYmm {
+			lines = append(lines, x86MinMax(armOp == "fmax", ".4s", dHighV, s1HighV, s2HighV)...)
+		} else if isVex {
+			lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
+		}
+		return lines, nil
+	}
+
 	lines = append(lines, fmt.Sprintf("    %s %s%s, %s%s, %s%s", armOp, dLowV, laneSuffix, s1LowV, laneSuffix, s2LowV, laneSuffix))
 	if isYmm {
 		lines = append(lines, fmt.Sprintf("    %s %s%s, %s%s, %s%s", armOp, dHighV, laneSuffix, s1HighV, laneSuffix, s2HighV, laneSuffix))
@@ -1110,6 +1108,19 @@ func (l *Arm64Lifter) liftAvx3Op(inst disasm.Instruction, nextPC uint64, armOp s
 		lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
 	}
 	return lines, nil
+}
+
+// x86MinMax emits x86 MAXPS/MINPS-style lane selection: max(a, b) = a > b ? a : b and
+// min(a, b) = a < b ? a : b, so the second operand is returned when either is NaN or both are
+// zero (ARM FMAX/FMIN would return NaN or order the zeros). v29 is the mask scratch register.
+func x86MinMax(isMax bool, arr, d, a, b string) []string {
+	cmp := fmt.Sprintf("    fcmgt v29%s, %s%s, %s%s", arr, a, arr, b, arr)
+	if !isMax {
+		cmp = fmt.Sprintf("    fcmgt v29%s, %s%s, %s%s", arr, b, arr, a, arr)
+	}
+	return []string{cmp,
+		fmt.Sprintf("    bsl v29.16b, %s.16b, %s.16b", a, b),
+		fmt.Sprintf("    mov %s.16b, v29.16b", d)}
 }
 
 // liftMovddup handles MOVDDUP and VMOVDDUP.
@@ -1188,43 +1199,34 @@ func (l *Arm64Lifter) liftMovlpsMovhps(inst disasm.Instruction, nextPC uint64, l
 				lines = append(lines, l.emitUnsupported(inst, "unsupported avx movlps/hps src1")...)
 				return lines, nil
 			}
-			if dLowV != s1LowV {
-				lines = append(lines, fmt.Sprintf("    mov %s.16b, %s.16b", dLowV, s1LowV))
-			}
-
 			src2 := inst.Inst.Args[2]
-			if op == x86asm.VMOVLPS || op == x86asm.VMOVLPD {
-				if mem, okMem := src2.(x86asm.Mem); okMem {
-					lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
-					lines = append(lines, "    ldr d31, [x28, x16]")
-					lines = append(lines, fmt.Sprintf("    mov %s.d[0], v31.d[0]", dLowV))
-					lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
-					return lines, nil
-				}
-			} else if op == x86asm.VMOVHPS || op == x86asm.VMOVHPD {
-				if mem, okMem := src2.(x86asm.Mem); okMem {
-					lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
-					lines = append(lines, "    ldr d31, [x28, x16]")
-					lines = append(lines, fmt.Sprintf("    mov %s.d[1], v31.d[0]", dLowV))
-					lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
-					return lines, nil
-				}
-			} else if op == x86asm.VMOVLHPS {
+			if op == x86asm.VMOVLHPS || op == x86asm.VMOVHLPS {
+				// One ZIP reads both sources before writing: the destination may alias src2.
 				if s2Reg, okS2 := src2.(x86asm.Reg); okS2 {
 					if _, _, _, s2LowV, _, _, _, okDesc2 := getVectorDesc(s2Reg); okDesc2 {
-						lines = append(lines, fmt.Sprintf("    mov %s.d[1], %s.d[0]", dLowV, s2LowV))
+						if op == x86asm.VMOVLHPS { // [s1.lo, s2.lo]
+							lines = append(lines, fmt.Sprintf("    zip1 %s.2d, %s.2d, %s.2d", dLowV, s1LowV, s2LowV))
+						} else { // [s2.hi, s1.hi]
+							lines = append(lines, fmt.Sprintf("    zip2 %s.2d, %s.2d, %s.2d", dLowV, s2LowV, s1LowV))
+						}
 						lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
 						return lines, nil
 					}
 				}
-			} else if op == x86asm.VMOVHLPS {
-				if s2Reg, okS2 := src2.(x86asm.Reg); okS2 {
-					if _, _, _, s2LowV, _, _, _, okDesc2 := getVectorDesc(s2Reg); okDesc2 {
-						lines = append(lines, fmt.Sprintf("    mov %s.d[0], %s.d[1]", dLowV, s2LowV))
-						lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
-						return lines, nil
-					}
+			} else if mem, okMem := src2.(x86asm.Mem); okMem {
+				// VMOVLPS/VMOVHPS/VMOVLPD/VMOVHPD dst, src1, m64
+				lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
+				lines = append(lines, "    ldr d31, [x28, x16]")
+				if dLowV != s1LowV {
+					lines = append(lines, fmt.Sprintf("    mov %s.16b, %s.16b", dLowV, s1LowV))
 				}
+				lane := 0
+				if op == x86asm.VMOVHPS || op == x86asm.VMOVHPD {
+					lane = 1
+				}
+				lines = append(lines, fmt.Sprintf("    mov %s.d[%d], v31.d[0]", dLowV, lane))
+				lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
+				return lines, nil
 			}
 		}
 
@@ -1884,21 +1886,21 @@ func (l *Arm64Lifter) liftPtestVtest(inst disasm.Instruction, nextPC uint64, lin
 	isTestPD := (op == x86asm.VTESTPD)
 
 	if isTestPS {
-		lines = append(lines, loadImm64("x18", 0x8000000080000000)...)
+		lines = append(lines, loadImm64("x5", 0x8000000080000000)...)
 		lines = append(lines,
-			"    mov x16, v16.d[0]", "    mov x0, v16.d[1]", "    orr x16, x16, x0", "    and x16, x16, x18",
-			"    mov x17, v17.d[0]", "    mov x0, v17.d[1]", "    orr x17, x17, x0", "    and x17, x17, x18",
+			"    mov x16, v16.d[0]", "    mov x0, v16.d[1]", "    orr x16, x16, x0", "    and x16, x16, x5",
+			"    mov x17, v17.d[0]", "    mov x0, v17.d[1]", "    orr x17, x17, x0", "    and x17, x17, x5",
 		)
 	} else if isTestPD {
-		lines = append(lines, loadImm64("x18", 0x8000000000000000)...)
+		lines = append(lines, loadImm64("x5", 0x8000000000000000)...)
 		lines = append(lines,
-			"    mov x16, v16.d[0]", "    mov x0, v16.d[1]", "    orr x16, x16, x0", "    and x16, x16, x18",
-			"    mov x17, v17.d[0]", "    mov x0, v17.d[1]", "    orr x17, x17, x0", "    and x17, x17, x18",
+			"    mov x16, v16.d[0]", "    mov x0, v16.d[1]", "    orr x16, x16, x0", "    and x16, x16, x5",
+			"    mov x17, v17.d[0]", "    mov x0, v17.d[1]", "    orr x17, x17, x0", "    and x17, x17, x5",
 		)
 	} else {
 		lines = append(lines,
-			"    mov x16, v16.d[0]", "    mov x18, v16.d[1]", "    orr x16, x16, x18",
-			"    mov x17, v17.d[0]", "    mov x18, v17.d[1]", "    orr x17, x17, x18",
+			"    mov x16, v16.d[0]", "    mov x5, v16.d[1]", "    orr x16, x16, x5",
+			"    mov x17, v17.d[0]", "    mov x5, v17.d[1]", "    orr x17, x17, x5",
 		)
 	}
 
@@ -1914,6 +1916,7 @@ func (l *Arm64Lifter) liftPtestVtest(inst disasm.Instruction, nextPC uint64, lin
 		"    lsl w16, w16, #29",
 		"    msr nzcv, x16",
 	)
+	l.cpol = carrySub
 	return lines, nil
 }
 
@@ -2083,21 +2086,55 @@ func (l *Arm64Lifter) liftRcp(inst disasm.Instruction, nextPC uint64, lines []st
 				}
 			}
 		}
-		scalarSrc := "s" + sLowV[1:]
-		lines = append(lines, fmt.Sprintf("    frecpe s16, %s", scalarSrc))
+		lines = append(lines, x86Recip(false, "v16", sLowV)...)
 		lines = append(lines, fmt.Sprintf("    mov %s.s[0], v16.s[0]", dLowV))
 		if isAvx {
 			lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
 		}
 	} else {
-		lines = append(lines, fmt.Sprintf("    frecpe %s.4s, %s.4s", dLowV, sLowV))
+		lines = append(lines, x86Recip(false, dLowV, sLowV)...)
 		if isYmm {
-			lines = append(lines, fmt.Sprintf("    frecpe %s.4s, %s.4s", dHighV, sHighV))
+			lines = append(lines, x86Recip(false, dHighV, sHighV)...)
 		} else if isAvx {
 			lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
 		}
 	}
 	return lines, nil
+}
+
+// flushDenormals4s writes v (four floats) to d with denormals replaced by zero of the same
+// sign: all bits but the sign are cleared where the exponent field is zero. Scratch: v25, v26.
+func flushDenormals4s(d, v string) []string {
+	return []string{
+		fmt.Sprintf("    shl v25.4s, %s.4s, #1", v),
+		"    movi v26.4s, #0x1, lsl #24",
+		"    cmhi v25.4s, v26.4s, v25.4s",
+		"    movi v26.4s, #0x80, lsl #24",
+		"    orn v25.16b, v26.16b, v25.16b",
+		fmt.Sprintf("    and %s.16b, %s.16b, v25.16b", d, v),
+	}
+}
+
+// x86Recip emits RCPPS/RSQRTPS (rsqrt) on four floats of vector register a into d with the
+// x86 behaviour: denormal inputs count as zero (sign kept), denormal results (RCPPS of huge
+// values) are flushed to zero, and the precision meets x86's bound (relative error <=
+// 1.5 * 2^-12): the ARM estimate (about 8 bits) is refined by one Newton-Raphson step
+// (FRECPS/FRSQRTS, which give 2.0 / 1.5 for 0 * inf, so zero and infinite inputs stay exact).
+// Scalar forms use lane 0. v24-v27 are scratch; d may alias a.
+func x86Recip(rsqrt bool, d, a string) []string {
+	out := flushDenormals4s("v24", a)
+	if rsqrt {
+		return append(out,
+			"    frsqrte v27.4s, v24.4s",
+			"    fmul v26.4s, v27.4s, v27.4s",
+			"    frsqrts v26.4s, v26.4s, v24.4s",             // (3 - a * x0^2) / 2
+			fmt.Sprintf("    fmul %s.4s, v27.4s, v26.4s", d)) // never denormal
+	}
+	out = append(out,
+		"    frecpe v27.4s, v24.4s",
+		"    frecps v26.4s, v24.4s, v27.4s", // 2 - a * x0
+		"    fmul v27.4s, v27.4s, v26.4s")
+	return append(out, flushDenormals4s(d, "v27")...)
 }
 
 // liftAvxShift handles packed integer shifts by immediate (VPSLLQ, VPSRLQ, VPSLLD, VPSRLD, VPSRAD, VPSLLW, VPSRLW, VPSRAW).
@@ -3919,9 +3956,9 @@ func (l *Arm64Lifter) liftPsadbw(inst disasm.Instruction, nextPC uint64, lines [
 	computeSadHalf := func(s1, s2, d string) []string {
 		return []string{
 			fmt.Sprintf("    uabd v28.16b, %s.16b, %s.16b", s1, s2), // absolute difference
-			"    uaddlp v29.8h, v28.16b",                             // sum 8-bit pairs to 16-bit
-			"    uaddlp v28.4s, v29.8h",                              // sum 16-bit pairs to 32-bit
-			"    uaddlp v29.2d, v28.4s",                              // sum 32-bit pairs to 64-bit
+			"    uaddlp v29.8h, v28.16b",                            // sum 8-bit pairs to 16-bit
+			"    uaddlp v28.4s, v29.8h",                             // sum 16-bit pairs to 32-bit
+			"    uaddlp v29.2d, v28.4s",                             // sum 32-bit pairs to 64-bit
 			fmt.Sprintf("    mov %s.16b, v29.16b", d),
 		}
 	}
@@ -3980,10 +4017,10 @@ func (l *Arm64Lifter) liftPmaddwd(inst disasm.Instruction, nextPC uint64, lines 
 
 	computePmadd := func(s1, s2, d string) []string {
 		return []string{
-			fmt.Sprintf("    smull v28.4s, %s.4h, %s.4h", s1, s2),   // low 4 words multiply
+			fmt.Sprintf("    smull v28.4s, %s.4h, %s.4h", s1, s2),  // low 4 words multiply
 			fmt.Sprintf("    smull2 v29.4s, %s.8h, %s.8h", s1, s2), // high 4 words multiply
-			"    addp v28.4s, v28.4s, v28.4s",                  // pairwise add low halves
-			"    addp v29.4s, v29.4s, v29.4s",                  // pairwise add high halves
+			"    addp v28.4s, v28.4s, v28.4s",                      // pairwise add low halves
+			"    addp v29.4s, v29.4s, v29.4s",                      // pairwise add high halves
 			fmt.Sprintf("    mov %s.d[0], v28.d[0]", d),
 			fmt.Sprintf("    mov %s.d[1], v29.d[0]", d),
 		}
@@ -3997,6 +4034,3 @@ func (l *Arm64Lifter) liftPmaddwd(inst disasm.Instruction, nextPC uint64, lines 
 	}
 	return lines, nil
 }
-
-
-

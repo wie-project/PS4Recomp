@@ -1,10 +1,15 @@
 #include "ps4_direct_mem.h"
+#include "ps4_hitch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
 #include <sys/mman.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 
 typedef struct DirectMemBlock {
     off_t phys_offset;
@@ -17,6 +22,137 @@ typedef struct DirectMemBlock {
 
 static DirectMemBlock *g_direct_blocks = NULL;
 static pthread_mutex_t g_direct_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// ---------------------------------------------------------------------------------
+// Physical backing for direct memory. Every direct-memory page lives at
+// g_phys_base + physAddr (a lazily committed host region); sceKernelMapDirectMemory
+// aliases guest virtual ranges onto it (mach_vm_remap, shared), so the same physical
+// pages can be mapped at several guest addresses, unmapped and re-mapped elsewhere
+// with their contents intact (Naughty Dog's memory linearizer relies on this).
+// ---------------------------------------------------------------------------------
+typedef struct DirectMapping {
+    uint64_t vaddr;
+    uint64_t size;
+    uint64_t phys;
+    struct DirectMapping *next;
+} DirectMapping;
+
+static DirectMapping *g_dmaps = NULL; // protected by g_direct_mutex
+static uint8_t *g_phys_base = NULL;
+static size_t g_phys_size = 0;
+
+__attribute__((weak)) void ps4_gnm_guest_remapped(uint64_t addr, uint64_t size) {
+    (void)addr; (void)size;
+}
+
+static void dm_phys_init(void) {
+    if (g_phys_base || getenv("PS4_NO_PHYS_ALIAS")) return;
+    size_t sz = 128ULL << 30; // virtual only; pages are committed on first touch
+    void *p = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+    if (p == MAP_FAILED) {
+        fprintf(stderr, "[ps4-mem] WARNING: cannot reserve physical backing (%d); direct memory aliasing disabled\n", errno);
+        return;
+    }
+    g_phys_base = (uint8_t *)p;
+    g_phys_size = sz;
+}
+
+// Map guest [vaddr, vaddr+len) onto physical [phys, phys+len). Caller holds g_direct_mutex.
+static int dm_alias(GuestContext *ctx, uint64_t vaddr, uint64_t phys, size_t len) {
+#if defined(__APPLE__)
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    if (!g_phys_base || ((vaddr | phys | len) & 0x3fffULL) || phys + len > g_phys_size ||
+        vaddr + len > proc->mem_size)
+        return -1;
+    mach_vm_address_t target = (mach_vm_address_t)(uintptr_t)(proc->mem_base + vaddr);
+    vm_prot_t cur = 0, max = 0;
+    kern_return_t kr;
+    PS4_HITCH_TIMED(PS4_HITCH_VM, kr = mach_vm_remap(mach_task_self(), &target, len, 0,
+                                                     VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(),
+                                                     (mach_vm_address_t)(uintptr_t)(g_phys_base + phys), FALSE,
+                                                     &cur, &max, VM_INHERIT_SHARE));
+    if (kr != KERN_SUCCESS) {
+        fprintf(stderr, "[ps4-mem] mach_vm_remap(va=0x%llx phys=0x%llx len=0x%zx) failed: %d\n",
+                (unsigned long long)vaddr, (unsigned long long)phys, len, kr);
+        return -1;
+    }
+    DirectMapping *m = (DirectMapping *)calloc(1, sizeof(*m));
+    if (m) {
+        m->vaddr = vaddr;
+        m->size = len;
+        m->phys = phys;
+        m->next = g_dmaps;
+        g_dmaps = m;
+    }
+    if (ps4_gnm_guest_remapped) ps4_gnm_guest_remapped(vaddr, len);
+    return 0;
+#else
+    (void)ctx; (void)vaddr; (void)phys; (void)len;
+    return -1;
+#endif
+}
+
+// Called by recomp_vm_free (without vm_mutex held): detach guest [addr, addr+size) from
+// physical memory so the virtual range no longer aliases it.
+void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size) {
+    if (!ctx || size == 0) return;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    uint64_t end = addr + size;
+    pthread_mutex_lock(&g_direct_mutex);
+    DirectMapping **pp = &g_dmaps;
+    while (*pp) {
+        DirectMapping *m = *pp;
+        uint64_t mend = m->vaddr + m->size;
+        if (m->vaddr >= end || mend <= addr) { pp = &m->next; continue; }
+        uint64_t ostart = m->vaddr > addr ? m->vaddr : addr;
+        uint64_t oend = mend < end ? mend : end;
+        // Replace the overlap with fresh private zero pages.
+        PS4_HITCH_TIMED(PS4_HITCH_VM, mmap(proc->mem_base + ostart, oend - ostart, PROT_READ | PROT_WRITE,
+                                           MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0));
+        if (ps4_gnm_guest_remapped) ps4_gnm_guest_remapped(ostart, oend - ostart);
+        if (ostart > m->vaddr && oend < mend) {
+            DirectMapping *tail = (DirectMapping *)calloc(1, sizeof(*tail));
+            if (tail) {
+                tail->vaddr = oend;
+                tail->size = mend - oend;
+                tail->phys = m->phys + (oend - m->vaddr);
+                tail->next = m->next;
+                m->next = tail;
+            }
+            m->size = ostart - m->vaddr;
+            pp = &m->next;
+        } else if (ostart > m->vaddr) {
+            m->size = ostart - m->vaddr;
+            pp = &m->next;
+        } else if (oend < mend) {
+            m->phys += oend - m->vaddr;
+            m->size = mend - oend;
+            m->vaddr = oend;
+            pp = &m->next;
+        } else {
+            *pp = m->next;
+            free(m);
+        }
+    }
+    pthread_mutex_unlock(&g_direct_mutex);
+}
+
+// Physical address backing guest address `addr`, if it is mapped direct memory.
+static bool dm_lookup(uint64_t addr, uint64_t *start, uint64_t *end, uint64_t *phys) {
+    bool ok = false;
+    pthread_mutex_lock(&g_direct_mutex);
+    for (DirectMapping *m = g_dmaps; m; m = m->next) {
+        if (addr >= m->vaddr && addr < m->vaddr + m->size) {
+            *start = m->vaddr;
+            *end = m->vaddr + m->size;
+            *phys = m->phys;
+            ok = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_direct_mutex);
+    return ok;
+}
 static int g_direct_inited = 0;
 
 static size_t get_total_direct_mem_size(void) {
@@ -49,6 +185,7 @@ int ps4_direct_mem_init(void) {
         g_direct_blocks->next = NULL;
         g_direct_blocks->prev = NULL;
         g_direct_inited = 1;
+        dm_phys_init();
     }
     pthread_mutex_unlock(&g_direct_mutex);
     return 0;
@@ -208,7 +345,9 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
     DirectMemBlock *curr = g_direct_blocks;
     DirectMemBlock *found = NULL;
     while (curr) {
-        if (!curr->is_free && curr->phys_offset == physAddr) {
+        // Any sub-range of an allocated block may be mapped (not only its start).
+        if (!curr->is_free && physAddr >= curr->phys_offset &&
+            (uint64_t)physAddr + length <= (uint64_t)curr->phys_offset + curr->size) {
             found = curr;
             break;
         }
@@ -216,7 +355,7 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
     }
 
     if (!found) {
-        fprintf(stderr, "[ps4-mem] ERROR: sceKernelMapDirectMemory: physAddr 0x%llx not found or free!\n", (unsigned long long)physAddr);
+        fprintf(stderr, "[ps4-mem] ERROR: sceKernelMapDirectMemory: physAddr 0x%llx (len 0x%zx) not in an allocated block!\n", (unsigned long long)physAddr, length);
         pthread_mutex_unlock(&g_direct_mutex);
         return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     }
@@ -241,6 +380,10 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
 
     found->mapped_guest_vaddr = vaddr;
     *addrInOut = (void *)vaddr;
+    if (dm_alias(ctx, vaddr, (uint64_t)physAddr, (length + 0x3fffULL) & ~0x3fffULL) != 0 && g_phys_base) {
+        fprintf(stderr, "[ps4-mem] WARNING: direct mapping 0x%llx (phys 0x%llx) is not physically aliased\n",
+                (unsigned long long)vaddr, (unsigned long long)physAddr);
+    }
 
     printf("[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=%p\n", (void *)vaddr);
     fflush(stdout);
@@ -429,6 +572,15 @@ int sceKernelVirtualQuery(GuestContext *ctx, const void *addr, int flags, OrbisK
     info->isDirectMemory = (strstr(extent->name, "direct") != NULL) ? 1 : 0;
     info->isPooledMemory = (strstr(extent->name, "pool") != NULL) ? 1 : 0;
     strncpy(info->name, extent->name, sizeof(info->name) - 1);
+    uint64_t ds, de, dp;
+    if (dm_lookup(vaddr, &ds, &de, &dp)) {
+        info->start = (void *)ds;
+        info->end = (void *)de;
+        info->offset = (off_t)dp;
+        info->isDirectMemory = 1;
+        info->isFlexibleMemory = 0;
+        info->isCommitted = 1;
+    }
 
     return 0;
 }
@@ -969,3 +1121,130 @@ void shim_sceKernelMprotect(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+
+// ---------------------------------------------------------------------------------
+// sceKernelMtypeprotect / sceKernelBatchMap
+// ---------------------------------------------------------------------------------
+
+__attribute__((weak)) void ps4_gnm_notify_cpu_write(uint64_t addr, uint64_t size) {
+    (void)addr; (void)size;
+}
+
+// int sceKernelMtypeprotect(void *addr, size_t len, int mtype, int prot)
+//
+// Changes the protection and the memory type (cache attribute: 0 WB_ONION, 3 WC_GARLIC,
+// 10 WB_GARLIC ...) of the mapped part of [addr, addr+len). Behaviour follows shadPS4
+// (libraries/kernel/memory.cpp sceKernelMtypeprotect): the range is widened to 16 KiB pages,
+// the protection is applied, the type is recorded, GPU-visible copies are invalidated. A range
+// without any mapping fails with EINVAL. The host maps guest memory once with full rights
+// (there is no per-range host mprotect, see sceKernelMprotect), so protection and type are
+// bookkeeping that sceKernelVirtualQuery and later calls observe; extents are split at the
+// range edges so a small range inside a large mapping does not retag the whole mapping.
+int sceKernelMtypeprotect(GuestContext *ctx, const void *addr, size_t size, int mtype, int prot) {
+    if (!ctx) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    if (size == 0) return 0;
+
+    uint64_t vaddr = (uint64_t)addr;
+    uint64_t start = vaddr & ~0x3fffULL;
+    uint64_t span = (size + (vaddr - start) + 0x3fffULL) & ~0x3fffULL;
+    uint64_t end = start + span;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    if (end < start || end > proc->mem_size) return 0x80020016;
+
+    uint64_t covered = 0;
+    pthread_mutex_lock(&proc->vm_mutex);
+    for (GuestVMExtent *e = proc->vm_extents; e; e = e->next) {
+        if (!e->is_free && e->addr < end && e->addr + e->size > start) covered++;
+    }
+    if (covered) {
+        if (!recomp_vm_split_extent_at(proc, start) || !recomp_vm_split_extent_at(proc, end)) {
+            pthread_mutex_unlock(&proc->vm_mutex);
+            return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM: bookkeeping for the split is unavailable
+        }
+        for (GuestVMExtent *e = proc->vm_extents; e; e = e->next) {
+            if (e->is_free || e->addr < start || e->addr + e->size > end) continue;
+            e->prot = prot;
+            e->mtype = mtype;
+        }
+    }
+    pthread_mutex_unlock(&proc->vm_mutex);
+    if (!covered) return 0x80020016;
+
+    if (ps4_gnm_notify_cpu_write) ps4_gnm_notify_cpu_write(start, span);
+    return 0;
+}
+
+void shim_sceKernelMtypeprotect(GuestContext *ctx) {
+    int rc = sceKernelMtypeprotect(ctx, (const void *)ctx->rdi, (size_t)ctx->rsi, (int)ctx->rdx, (int)ctx->rcx);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+// int sceKernelBatchMap(SceKernelBatchMapEntry *entries, int numEntries, int *numEntriesOut)
+//
+// Runs the entries in order until the first failure. *numEntriesOut (may be NULL) receives the
+// number of entries that completed, written on failure too; the failed entry is not counted.
+// The result is the failed entry's error, or 0. Entry layout, operation numbers and the
+// failure rules follow shadPS4 (libraries/kernel/memory.cpp sceKernelBatchMap2, SDK struct
+// SceKernelBatchMapEntry): length == 0 or an unknown operation fails with EINVAL, a NULL
+// array with a positive count too. The map operations pass MAP_FIXED (0x10), exactly like
+// sceKernelBatchMap does on the console; `start` is the requested address (0 = anywhere) and
+// receives the mapped address.
+// The map operations pass MAP_FIXED. When an address was requested and the allocator placed the
+// mapping elsewhere (it falls back to any free range when the requested one is taken) the
+// console fails the entry; undo the stray mapping and fail it too.
+static int batch_fixed_result(GuestContext *ctx, int result, uint64_t requested, void *mapped, uint64_t length) {
+    if (result != 0 || requested == 0 || (uint64_t)mapped == requested) return result;
+    recomp_vm_free(ctx, (uint64_t)mapped, (size_t)length);
+    return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
+}
+
+int sceKernelBatchMap(GuestContext *ctx, OrbisKernelBatchMapEntry *entries, int numEntries, int *numEntriesOut) {
+    const int kFlagsMapFixed = 0x10;
+    int result = 0;
+    int processed = 0;
+    for (int i = 0; i < numEntries; i++) {
+        OrbisKernelBatchMapEntry *e = entries ? &entries[i] : NULL;
+        if (!e || e->length == 0 || (uint32_t)e->operation > ORBIS_KERNEL_BATCH_MAP_TYPE_PROTECT) {
+            result = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+            break;
+        }
+        const int prot = (uint8_t)e->protection;
+        void *mapped = (void *)e->start;
+        switch (e->operation) {
+        case ORBIS_KERNEL_BATCH_MAP_DIRECT:
+            result = sceKernelMapDirectMemory(ctx, &mapped, (size_t)e->length, prot, kFlagsMapFixed,
+                                              (off_t)e->offset, 0);
+            result = batch_fixed_result(ctx, result, e->start, mapped, e->length);
+            if (result == 0) e->start = (uint64_t)mapped;
+            break;
+        case ORBIS_KERNEL_BATCH_MAP_UNMAP:
+            result = recomp_vm_free(ctx, e->start, (size_t)e->length) == 0 ? 0 : 0x80020016;
+            break;
+        case ORBIS_KERNEL_BATCH_MAP_PROTECT:
+            result = sceKernelMprotect(ctx, (const void *)e->start, (size_t)e->length, prot);
+            break;
+        case ORBIS_KERNEL_BATCH_MAP_FLEXIBLE:
+            result = sceKernelMapNamedFlexibleMemory(ctx, &mapped, (size_t)e->length, prot, kFlagsMapFixed, "anon");
+            result = batch_fixed_result(ctx, result, e->start, mapped, e->length);
+            if (result == 0) e->start = (uint64_t)mapped;
+            break;
+        case ORBIS_KERNEL_BATCH_MAP_TYPE_PROTECT:
+            result = sceKernelMtypeprotect(ctx, (const void *)e->start, (size_t)e->length, (uint8_t)e->type, prot);
+            break;
+        }
+        if (result != 0) break;
+        processed++;
+    }
+    if (numEntriesOut) *numEntriesOut = processed;
+    return result;
+}
+
+void shim_sceKernelBatchMap(GuestContext *ctx) {
+    OrbisKernelBatchMapEntry *entries =
+        ctx->rdi ? (OrbisKernelBatchMapEntry *)(ctx->mem_base + ctx->rdi) : NULL;
+    int *out = ctx->rdx ? (int *)(ctx->mem_base + ctx->rdx) : NULL;
+    int rc = sceKernelBatchMap(ctx, entries, (int)ctx->rsi, out);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}

@@ -16,6 +16,11 @@ type Instruction struct {
 	Address   uint64
 	Inst      x86asm.Inst
 	SkipFlags bool
+	// CarryDead / OverflowDead: CF / OF cannot be read after this instruction before being
+	// redefined, in this block or any successor (see carry_liveness.go). False is the
+	// conservative default.
+	CarryDead    bool
+	OverflowDead bool
 }
 
 // BasicBlock represents a straight-line sequence of instructions.
@@ -32,8 +37,12 @@ type Function struct {
 	EntryAddr  uint64
 	EndAddr    uint64
 	Blocks     map[uint64]*BasicBlock
-	BlockOrder []uint64 // Topologically or address-sorted block start addresses
+	BlockOrder []uint64            // Topologically or address-sorted block start addresses
 	JumpTables map[uint64][]uint64 // Map of indirect jump PC -> target addresses
+	// UsesYmm: some instruction names a YMM register. Only then can a YMM upper half be live
+	// inside the function (they are caller-saved), so only then must the lifter keep the upper
+	// halves it uses as scratch registers.
+	UsesYmm bool
 }
 
 // CapHitInfo records diagnostic information about a function decode that hit safety caps.
@@ -346,6 +355,13 @@ func (d *Disassembler) WalkReachable(entryAddrs []uint64, visit func(fn *Functio
 	return nil
 }
 
+// isTailCallTarget reports whether a direct branch out of a function lands on a function entry:
+// every such target in code is queued as a function by WalkReachable (the decoders add it to
+// their discovered calls), so it is lifted as one and entered by a tail call.
+func (d *Disassembler) isTailCallTarget(addr uint64) bool {
+	return d != nil && d.inCode(addr)
+}
+
 // seedableFunc reports whether a RIP-relative address is worth queuing as a
 // new function. With unwind extents, only real entries qualify. Otherwise the
 // prologue heuristic is the filter.
@@ -612,7 +628,11 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 	}
 	slices.Sort(fn.BlockOrder)
 
+	fn.UsesYmm = usesYmm(fn)
 	d.analyzeBlockFlagLiveness(fn)
+	if !d.SkipFlagLiveness {
+		analyzeCarryOverflowLiveness(fn, d.isTailCallTarget)
+	}
 	return fn, discoveredCalls, nil
 }
 
@@ -690,177 +710,272 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	capped := false
 	var capReason string
 	var capPC uint64
-	for head := 0; head < len(blockQueue); head++ {
-		if len(instAtAddr) >= maxFnInsts {
-			capped = true
-			capReason = fmt.Sprintf("function instruction count (%d) >= cap (%d)", len(instAtAddr), maxFnInsts)
-			capPC = blockQueue[head]
-			break
+	// Switch tables whose length could not be proven are scanned until the
+	// entries stop looking like code addresses, which can overrun into the
+	// next table and yield targets in the middle of real instructions. Their
+	// targets are added only after all other code is decoded, and the scan is
+	// cut at the first entry that lands inside an already decoded instruction.
+	type weakSwitch struct {
+		pc, from uint64
+		targets  []uint64
+	}
+	var weak []weakSwitch
+	insideDecoded := func(target uint64) bool {
+		for back := uint64(1); back < 16 && back <= target; back++ {
+			if in, ok := instAtAddr[target-back]; ok && uint64(in.Inst.Len) > back {
+				return true
+			}
 		}
-		blockStart = blockQueue[head]
-		pc := blockStart
-		var curBlock []Instruction
-
-		for pc < fnEnd && d.inCode(pc) {
-			if pc >= uint64(len(d.elf.MemoryImage)) {
-				break
-			}
-
-			inst, err := x86asm.Decode(d.elf.MemoryImage[pc:], 64)
-			if err != nil || inst.Len == 0 {
-				break
-			}
-			if inst.Op == 0 {
-				inst.Op = x86asm.UD2
-			}
-			if isPrivileged(inst.Op) {
-				d.PrivilegedStops++
-				break
-			}
-
-			wrapped := Instruction{
-				Address: pc,
-				Inst:    inst,
-			}
-			instAtAddr[pc] = wrapped
-			curBlock = append(curBlock, wrapped)
-
-			nextPC := pc + uint64(inst.Len)
-
-			isBranch := false
-			isTerminal := false
-
-			switch inst.Op {
-			case x86asm.JMP:
-				isBranch = true
-				isTerminal = true
-				if rel, ok := inst.Args[0].(x86asm.Rel); ok {
-					edge(uint64(int64(nextPC) + int64(rel)))
-				} else {
-					findTableAddr := func(reg x86asm.Reg) (uint64, bool) {
-						visited := make(map[uint64]bool)
-						queue := append([]uint64(nil), blockPreds[blockStart]...)
-						for _, q := range queue {
-							visited[q] = true
-						}
-						depth := 0
-						for len(queue) > 0 && depth < 16 {
-							depth++
-							var nextQueue []uint64
-							for _, pred := range queue {
-								insts := blockInsts[pred]
-								for i := len(insts) - 1; i >= 0; i-- {
-									dst, target, isLEA := leaRIPTarget(insts[i])
-									if isLEA && sameGPR(dst, reg) {
-										return target, true
-									}
-								}
-								for _, p := range blockPreds[pred] {
-									if !visited[p] {
-										visited[p] = true
-										nextQueue = append(nextQueue, p)
-									}
-								}
-							}
-							queue = nextQueue
-						}
-						return 0, false
-					}
-
-					findCount := func(idxReg x86asm.Reg) (int, bool) {
-						visited := make(map[uint64]bool)
-						queue := append([]uint64(nil), blockPreds[blockStart]...)
-						for _, q := range queue {
-							visited[q] = true
-						}
-						depth := 0
-						for len(queue) > 0 && depth < 16 {
-							depth++
-							var nextQueue []uint64
-							for _, pred := range queue {
-								insts := blockInsts[pred]
-								if c := switchTableCount(insts, idxReg); c > 0 {
-									return c, true
-								}
-								for _, p := range blockPreds[pred] {
-									if !visited[p] {
-										visited[p] = true
-										nextQueue = append(nextQueue, p)
-									}
-								}
-							}
-							queue = nextQueue
-						}
-						return 0, false
-					}
-
-					if sw, ok := d.ResolveJumpTable(curBlock, findTableAddr, findCount, entryAddr, fnEnd); ok && len(sw.Targets) > 0 {
-						fn.JumpTables[pc] = sw.Targets
-						for _, target := range sw.Targets {
-							edge(target)
-						}
-					}
-				}
-			case x86asm.RET:
-				isTerminal = true
-			case x86asm.UD2:
-				isTerminal = true
-			case x86asm.CALL:
-				// Call does not terminate the basic block unless target is noreturn.
-				if rel, ok := inst.Args[0].(x86asm.Rel); ok {
-					target := uint64(int64(nextPC) + int64(rel))
-					discoveredCalls = append(discoveredCalls, target)
-					if d.isNoReturn(target) {
-						isTerminal = true
-					}
-				} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
-					disp := int64(int32(mem.Disp))
-					target := uint64(int64(nextPC) + disp)
-					if d.isNoReturn(target) {
-						isTerminal = true
-					}
-				}
-			case x86asm.LEA:
-				if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
-					disp := int64(int32(mem.Disp))
-					target := uint64(int64(nextPC) + disp)
-					if d.seedableFunc(target) {
-						discoveredCalls = append(discoveredCalls, target)
-					}
-				}
-			default:
-				if isJcc(inst.Op) {
-					isBranch = true
-					if rel, ok := inst.Args[0].(x86asm.Rel); ok {
-						edge(uint64(int64(nextPC) + int64(rel)))
-					}
-					if inside(nextPC) {
-						edge(nextPC)
-					}
-				}
-			}
-
-			pc = nextPC
-			if isTerminal || isBranch {
-				break
-			}
-			if pc-blockStart >= maxBlockBytes {
-				// Block splitting: do not truncate function or drop code.
-				// Split the oversized block by enqueuing a fallthrough edge
-				// to the next PC and terminate the current block.
-				if inside(pc) {
-					edge(pc)
-				}
-				break
-			}
+		return false
+	}
+	head := 0
+	for {
+		for ; head < len(blockQueue); head++ {
 			if len(instAtAddr) >= maxFnInsts {
 				capped = true
 				capReason = fmt.Sprintf("function instruction count (%d) >= cap (%d)", len(instAtAddr), maxFnInsts)
-				capPC = pc
+				capPC = blockQueue[head]
 				break
 			}
+			blockStart = blockQueue[head]
+			pc := blockStart
+			var curBlock []Instruction
+
+			for pc < fnEnd && d.inCode(pc) {
+				if pc >= uint64(len(d.elf.MemoryImage)) {
+					break
+				}
+
+				inst, err := x86asm.Decode(d.elf.MemoryImage[pc:], 64)
+				if err != nil || inst.Len == 0 {
+					break
+				}
+				if inst.Op == 0 {
+					inst.Op = x86asm.UD2
+				}
+				if isPrivileged(inst.Op) {
+					d.PrivilegedStops++
+					break
+				}
+
+				wrapped := Instruction{
+					Address: pc,
+					Inst:    inst,
+				}
+				instAtAddr[pc] = wrapped
+				curBlock = append(curBlock, wrapped)
+
+				nextPC := pc + uint64(inst.Len)
+
+				isBranch := false
+				isTerminal := false
+
+				switch inst.Op {
+				case x86asm.JMP:
+					isBranch = true
+					isTerminal = true
+					if rel, ok := inst.Args[0].(x86asm.Rel); ok {
+						edge(uint64(int64(nextPC) + int64(rel)))
+					} else {
+						findTableAddr := func(reg x86asm.Reg) (uint64, bool) {
+							visited := make(map[uint64]bool)
+							queue := append([]uint64(nil), blockPreds[blockStart]...)
+							for _, q := range queue {
+								visited[q] = true
+							}
+							depth := 0
+							for len(queue) > 0 && depth < 16 {
+								depth++
+								var nextQueue []uint64
+								for _, pred := range queue {
+									insts := blockInsts[pred]
+									for i := len(insts) - 1; i >= 0; i-- {
+										dst, target, isLEA := leaRIPTarget(insts[i])
+										if isLEA && sameGPR(dst, reg) {
+											return target, true
+										}
+									}
+									for _, p := range blockPreds[pred] {
+										if !visited[p] {
+											visited[p] = true
+											nextQueue = append(nextQueue, p)
+										}
+									}
+								}
+								queue = nextQueue
+							}
+							return 0, false
+						}
+
+						findCount := func(idxReg x86asm.Reg) (int, bool) {
+							visited := make(map[uint64]bool)
+							queue := append([]uint64(nil), blockPreds[blockStart]...)
+							for _, q := range queue {
+								visited[q] = true
+							}
+							depth := 0
+							for len(queue) > 0 && depth < 16 {
+								depth++
+								var nextQueue []uint64
+								for _, pred := range queue {
+									insts := blockInsts[pred]
+									c, killed := switchTableCountKill(insts, idxReg)
+									if c > 0 {
+										return c, true
+									}
+									if killed {
+										continue
+									}
+									for _, p := range blockPreds[pred] {
+										if !visited[p] {
+											visited[p] = true
+											nextQueue = append(nextQueue, p)
+										}
+									}
+								}
+								queue = nextQueue
+							}
+							return 0, false
+						}
+
+						// findCap follows the index register back through the predecessors to its
+						// source; a cap needs every path to end in a byte load (byteIndexCap).
+						findCap := func(idxReg x86asm.Reg) int {
+							type item struct {
+								block uint64
+								reg   x86asm.Reg
+							}
+							visited := make(map[uint64]bool)
+							var queue []item
+							for _, p := range blockPreds[blockStart] {
+								if !visited[p] {
+									visited[p] = true
+									queue = append(queue, item{p, idxReg})
+								}
+							}
+							found := 0
+							for depth := 0; len(queue) > 0 && depth < 16; depth++ {
+								var next []item
+								for _, it := range queue {
+									c, from, killed := byteIndexCapKill(blockInsts[it.block], it.reg)
+									if killed {
+										return 0
+									}
+									if c > 0 {
+										found = c
+										continue
+									}
+									preds := blockPreds[it.block]
+									if len(preds) == 0 {
+										return 0
+									}
+									for _, p := range preds {
+										if !visited[p] {
+											visited[p] = true
+											next = append(next, item{p, from})
+										}
+									}
+								}
+								queue = next
+							}
+							if len(queue) > 0 {
+								return 0
+							}
+							return found
+						}
+
+						if sw, ok := d.resolveJumpTableCapped(curBlock, findTableAddr, findCount, findCap, entryAddr, fnEnd); ok && len(sw.Targets) > 0 && sw.Count <= 0 {
+							weak = append(weak, weakSwitch{pc: pc, from: blockStart, targets: sw.Targets})
+						} else if ok && len(sw.Targets) > 0 {
+							fn.JumpTables[pc] = sw.Targets
+							for _, target := range sw.Targets {
+								edge(target)
+							}
+						}
+					}
+				case x86asm.RET:
+					isTerminal = true
+				case x86asm.UD2:
+					isTerminal = true
+				case x86asm.CALL:
+					// Call does not terminate the basic block unless target is noreturn.
+					if rel, ok := inst.Args[0].(x86asm.Rel); ok {
+						target := uint64(int64(nextPC) + int64(rel))
+						discoveredCalls = append(discoveredCalls, target)
+						if d.isNoReturn(target) {
+							isTerminal = true
+						}
+					} else if mem, ok := inst.Args[0].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
+						disp := int64(int32(mem.Disp))
+						target := uint64(int64(nextPC) + disp)
+						if d.isNoReturn(target) {
+							isTerminal = true
+						}
+					}
+				case x86asm.LEA:
+					if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
+						disp := int64(int32(mem.Disp))
+						target := uint64(int64(nextPC) + disp)
+						if d.seedableFunc(target) {
+							discoveredCalls = append(discoveredCalls, target)
+						}
+					}
+				default:
+					if isJcc(inst.Op) {
+						isBranch = true
+						if rel, ok := inst.Args[0].(x86asm.Rel); ok {
+							edge(uint64(int64(nextPC) + int64(rel)))
+						}
+						if inside(nextPC) {
+							edge(nextPC)
+						}
+					}
+				}
+
+				pc = nextPC
+				if isTerminal || isBranch {
+					break
+				}
+				if pc-blockStart >= maxBlockBytes {
+					// Block splitting: do not truncate function or drop code.
+					// Split the oversized block by enqueuing a fallthrough edge
+					// to the next PC and terminate the current block.
+					if inside(pc) {
+						edge(pc)
+					}
+					break
+				}
+				if len(instAtAddr) >= maxFnInsts {
+					capped = true
+					capReason = fmt.Sprintf("function instruction count (%d) >= cap (%d)", len(instAtAddr), maxFnInsts)
+					capPC = pc
+					break
+				}
+			}
+			blockInsts[blockStart] = curBlock
 		}
-		blockInsts[blockStart] = curBlock
+		if capped || len(weak) == 0 {
+			break
+		}
+		pending := weak
+		weak = nil
+		for _, w := range pending {
+			var accepted []uint64
+			for _, t := range w.targets {
+				if _, ok := instAtAddr[t]; !ok && insideDecoded(t) {
+					break
+				}
+				accepted = append(accepted, t)
+			}
+			if len(accepted) == 0 {
+				continue
+			}
+			fn.JumpTables[w.pc] = accepted
+			blockStart = w.from
+			for _, t := range accepted {
+				edge(t)
+			}
+		}
 	}
 	if capped {
 		d.CapHits++
@@ -893,13 +1008,31 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	}
 	slices.Sort(sortedAddrs)
 
-	// Build basic blocks
+	// A branch into the middle of an instruction gives two overlapping instruction streams, and
+	// in address order an instruction of one stream can sit between an instruction of the other
+	// and its successor. Blocks must not run on across such a seam: the instruction after the
+	// seam starts a block, and so does the address the instruction before it falls through to.
+	for i := 0; i+1 < len(sortedAddrs); i++ {
+		in := instAtAddr[sortedAddrs[i]]
+		end := in.Address + uint64(in.Inst.Len)
+		if sortedAddrs[i+1] == end {
+			continue
+		}
+		leaders[sortedAddrs[i+1]] = true
+		if _, ok := instAtAddr[end]; ok {
+			leaders[end] = true
+		}
+	}
+
+	// Build basic blocks. A block ends where its last instruction ends (the fall-through
+	// address), which is not always where the next block in address order starts.
 	var currentBlock *BasicBlock
 	for _, addr := range sortedAddrs {
 		inst := instAtAddr[addr]
 		if leaders[addr] || currentBlock == nil {
 			if currentBlock != nil && len(currentBlock.Insts) > 0 {
-				currentBlock.EndAddr = addr
+				lastInst := currentBlock.Insts[len(currentBlock.Insts)-1]
+				currentBlock.EndAddr = lastInst.Address + uint64(lastInst.Inst.Len)
 				fn.Blocks[currentBlock.StartAddr] = currentBlock
 			}
 			currentBlock = &BasicBlock{
@@ -930,7 +1063,11 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 	}
 	fn.EndAddr = maxEnd
 
+	fn.UsesYmm = usesYmm(fn)
 	d.analyzeBlockFlagLiveness(fn)
+	if !d.SkipFlagLiveness {
+		analyzeCarryOverflowLiveness(fn, d.isTailCallTarget)
+	}
 	return fn, discoveredCalls, nil
 }
 
@@ -942,10 +1079,8 @@ func (d *Disassembler) analyzeBlockFlagLiveness(fn *Function) {
 		flagsLive := true // Conservatively assume flags are live at block boundary
 		for i := len(block.Insts) - 1; i >= 0; i-- {
 			inst := &block.Insts[i]
-			op := inst.Inst.Op
-
-			reads := usesFlags(op)
-			definesAll := definesAllFlags(op)
+			reads := readsAnyFlag(inst.Inst)
+			definesAll := definesAllFlags(inst.Inst)
 
 			if definesAll {
 				if !flagsLive {
@@ -961,25 +1096,18 @@ func (d *Disassembler) analyzeBlockFlagLiveness(fn *Function) {
 	}
 }
 
-func usesFlags(op x86asm.Op) bool {
-	if isJcc(op) || isSetcc(op) || isCmovcc(op) {
-		return true
-	}
-	switch op {
-	case x86asm.ADC, x86asm.SBB:
-		return true
-	default:
-		return false
-	}
-}
-
-func definesAllFlags(op x86asm.Op) bool {
-	switch op {
+// definesAllFlags reports instructions that write (or leave undefined) every arithmetic flag, so
+// earlier flag values cannot be observed after them. A shift or rotate by CL or by a masked
+// count of 0 leaves the flags unchanged and does not count.
+func definesAllFlags(inst x86asm.Inst) bool {
+	switch inst.Op {
 	case x86asm.ADD, x86asm.SUB, x86asm.CMP, x86asm.TEST,
-		x86asm.AND, x86asm.OR, x86asm.XOR,
-		x86asm.NEG, x86asm.SHL, x86asm.SHR, x86asm.SAR,
+		x86asm.AND, x86asm.OR, x86asm.XOR, x86asm.NEG,
 		x86asm.TZCNT, x86asm.LZCNT, x86asm.BSF, x86asm.BSR:
 		return true
+	case x86asm.SHL, x86asm.SHR, x86asm.SAR:
+		c, ok := shiftImmCount(inst)
+		return ok && c != 0
 	default:
 		return false
 	}
@@ -1025,10 +1153,11 @@ func isPrivileged(op x86asm.Op) bool {
 	}
 }
 
+// isJcc reports the conditional branches: Jcc, JrCXZ and LOOP/LOOPE/LOOPNE.
 func isJcc(op x86asm.Op) bool {
 	switch op {
 	case x86asm.JA, x86asm.JAE, x86asm.JB, x86asm.JBE,
-		x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ,
+		x86asm.JCXZ, x86asm.JECXZ, x86asm.JRCXZ, x86asm.LOOP, x86asm.LOOPE, x86asm.LOOPNE,
 		x86asm.JE, x86asm.JG, x86asm.JGE,
 		x86asm.JL, x86asm.JLE, x86asm.JNE,
 		x86asm.JNO, x86asm.JNP, x86asm.JNS,
@@ -1037,4 +1166,21 @@ func isJcc(op x86asm.Op) bool {
 	default:
 		return false
 	}
+}
+
+// usesYmm reports whether an instruction of fn names a YMM register.
+func usesYmm(fn *Function) bool {
+	for _, b := range fn.Blocks {
+		for _, in := range b.Insts {
+			for _, a := range in.Inst.Args {
+				if a == nil {
+					break
+				}
+				if r, ok := a.(x86asm.Reg); ok && r >= x86asm.Y0 && r <= x86asm.Y15 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

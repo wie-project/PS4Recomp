@@ -15,19 +15,38 @@ func (l *Arm64Lifter) liftMxcsr(inst disasm.Instruction, nextPC uint64, lines []
 		lines = append(lines, l.emitUnsupported(inst, "mxcsr arg not memory")...)
 		return lines, nil
 	}
+	// GuestContext.mxcsr is at 0x2e8 (checked by the lifter-difftest-asm harness).
 	isStore := (inst.Inst.Op == x86asm.STMXCSR || inst.Inst.Op == x86asm.VSTMXCSR)
 	if isStore {
 		lines = append(lines, l.emitLoadCtxPtr("x17")...)
-		lines = append(lines, "    ldr w18, [x17, #0x2ec]")
+		lines = append(lines, "    ldr w0, [x17, #0x2e8]")
 		lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
-		lines = append(lines, "    str w18, [x28, x16]")
+		lines = append(lines, "    str w0, [x28, x16]")
 	} else {
 		lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
-		lines = append(lines, "    ldr w18, [x28, x16]")
+		lines = append(lines, "    ldr w0, [x28, x16]")
 		lines = append(lines, l.emitLoadCtxPtr("x17")...)
-		lines = append(lines, "    str w18, [x17, #0x2ec]")
+		lines = append(lines, "    str w0, [x17, #0x2e8]")
+		lines = append(lines, mxcsrToFpcr("w0")...)
 	}
 	return lines, nil
+}
+
+// mxcsrToFpcr applies the MXCSR value in register w (rounding mode and flush-to-zero) to FPCR.
+// x86 RC (bits 14:13: 00 nearest, 01 down, 10 up, 11 zero) is ARM RMode (bits 23:22: 00 RN,
+// 01 RP, 10 RM, 11 RZ) with the two bits swapped; MXCSR.FZ (bit 15) is FPCR.FZ (bit 24).
+// Scratch: x1, x2.
+func mxcsrToFpcr(w string) []string {
+	return []string{
+		"    mrs x1, fpcr",
+		fmt.Sprintf("    ubfx w2, %s, #14, #1", w),
+		"    bfi x1, x2, #22, #1",
+		fmt.Sprintf("    ubfx w2, %s, #13, #1", w),
+		"    bfi x1, x2, #23, #1",
+		fmt.Sprintf("    ubfx w2, %s, #15, #1", w),
+		"    bfi x1, x2, #24, #1",
+		"    msr fpcr, x1",
+	}
 }
 
 // liftMaskmov handles VMASKMOVPS and VMASKMOVPD.
@@ -65,14 +84,14 @@ func (l *Arm64Lifter) liftMaskmov(inst disasm.Instruction, nextPC uint64, lines 
 			numLanes := 4
 			laneSize := 4
 			elemStr := "s"
-			regStr := "w18"
+			regStr := "w5"
 			bit := 31
 			movOp := "smov"
 			if isDouble {
 				numLanes = 2
 				laneSize = 8
 				elemStr = "d"
-				regStr = "x18"
+				regStr = "x5"
 				bit = 63
 				movOp = "mov"
 			}
@@ -101,7 +120,7 @@ func (l *Arm64Lifter) liftMaskmov(inst disasm.Instruction, nextPC uint64, lines 
 			numLanes := 4
 			laneSize := 4
 			elemStr := "s"
-			regStr := "w18"
+			regStr := "w5"
 			zeroStr := "wzr"
 			bit := 31
 			movOp := "smov"
@@ -109,7 +128,7 @@ func (l *Arm64Lifter) liftMaskmov(inst disasm.Instruction, nextPC uint64, lines 
 				numLanes = 2
 				laneSize = 8
 				elemStr = "d"
-				regStr = "x18"
+				regStr = "x5"
 				zeroStr = "xzr"
 				bit = 63
 				movOp = "mov"
@@ -512,43 +531,36 @@ func (l *Arm64Lifter) liftAes(inst disasm.Instruction, nextPC uint64, lines []st
 	return lines, nil
 }
 
-// liftPushfq handles PUSHFQ.
+// liftPushfq handles PUSHFQ: SF, ZF, CF (in the tracked carry sense) and OF from NZCV, IF and
+// bit 1 set; AF and PF are not modeled.
 func (l *Arm64Lifter) liftPushfq(inst disasm.Instruction, lines []string) ([]string, error) {
 	lines = append(lines,
-		"    mrs  x16, nzcv",
-		"    ubfx w17, w16, #31, #1", // N -> SF (bit 7)
-		"    lsl  w17, w17, #7",
-		"    ubfx w18, w16, #30, #1", // Z -> ZF (bit 6)
-		"    add  w17, w17, w18, lsl #6",
-		"    ubfx w18, w16, #29, #1", // C -> NOT CF (bit 0)
-		"    eor  w18, w18, #1",
-		"    add  w17, w17, w18",
-		"    ubfx w18, w16, #28, #1", // V -> OF (bit 11)
-		"    add  w17, w17, w18, lsl #11",
-		"    movz w18, #0x202",
-		"    orr  w17, w17, w18",
-		"    sub  x26, x26, #8",
-		"    str  x17, [x28, x26]",
+		"    cset w0, mi",
+		"    cset w1, eq",
+		fmt.Sprintf("    cset w2, %s", l.carryCond(true)),
+		"    cset w3, vs",
+		"    orr w0, w2, w0, lsl #7",
+		"    orr w0, w0, w1, lsl #6",
+		"    orr w0, w0, w3, lsl #11",
+		"    mov w1, #0x202",
+		"    orr w0, w0, w1",
+		"    sub x26, x26, #8",
+		"    str x0, [x28, x26]",
 	)
 	return lines, nil
 }
 
-// liftPopfq handles POPFQ.
+// liftPopfq handles POPFQ: N = SF, Z = ZF, C = CF (carryAdd), V = OF.
 func (l *Arm64Lifter) liftPopfq(inst disasm.Instruction, lines []string) ([]string, error) {
 	lines = append(lines,
-		"    ldr  x17, [x28, x26]",
-		"    add  x26, x26, #8",
-		"    ubfx w16, w17, #7, #1", // SF -> N (bit 31)
-		"    lsl  w16, w16, #31",
-		"    ubfx w18, w17, #6, #1", // ZF -> Z (bit 30)
-		"    add  w16, w16, w18, lsl #30",
-		"    ubfx w18, w17, #0, #1", // CF -> NOT C (bit 29)
-		"    eor  w18, w18, #1",
-		"    add  w16, w16, w18, lsl #29",
-		"    ubfx w18, w17, #11, #1", // OF -> V (bit 28)
-		"    add  w16, w16, w18, lsl #28",
-		"    msr  nzcv, x16",
+		"    ldr x0, [x28, x26]",
+		"    add x26, x26, #8",
+		"    rmif x0, #4, #12", // N = bit 7, Z = bit 6
+		"    rmif x0, #63, #2", // C = bit 0
+		"    ubfx w1, w0, #11, #1",
+		"    rmif x1, #0, #1", // V = bit 11
 	)
+	l.cpol = carryAdd
 	return lines, nil
 }
 
@@ -563,7 +575,9 @@ func (l *Arm64Lifter) liftXlatb(lines []string) ([]string, error) {
 	return lines, nil
 }
 
-// liftLoop handles LOOP, LOOPE, LOOPNE, and JRCXZ.
+// liftLoop handles LOOP, LOOPE, LOOPNE, and JRCXZ. LOOP/LOOPE/LOOPNE decrement RCX without
+// changing the flags (SUB, not SUBS); LOOPE/LOOPNE also test the guest ZF (Z of NZCV). The
+// targets start in the block-boundary carry sense, so C is normalized first when CF is live.
 func (l *Arm64Lifter) liftLoop(inst disasm.Instruction, nextPC uint64, fn *disasm.Function, lines []string) ([]string, error) {
 	op := inst.Inst.Op
 	rel, okRel := inst.Inst.Args[0].(x86asm.Rel)
@@ -572,69 +586,46 @@ func (l *Arm64Lifter) liftLoop(inst disasm.Instruction, nextPC uint64, fn *disas
 		return lines, nil
 	}
 	target := uint64(int64(nextPC) + int64(rel))
+	if !inst.CarryDead {
+		lines = append(lines, l.normalizeCarry()...)
+	}
+	localLbl := localLabel(fn, target)
+	local := localLbl != ""
+	skip := fmt.Sprintf("L_%s_skip_%x", strings.ToLower(op.String()), inst.Address)
+	far := func() { lines = append(lines, l.branchTo(fn, target)...) }
 
 	switch op {
 	case x86asm.LOOP:
-		lines = append(lines, "    subs x21, x21, #1")
-		if fn != nil && fn.Blocks[target] != nil {
-			lines = append(lines, fmt.Sprintf("    b.ne L_fn_0x%x_loc_0x%x", fn.EntryAddr, target))
-		} else {
-			skip := fmt.Sprintf("L_loop_skip_%x", inst.Address)
-			lines = append(lines, fmt.Sprintf("    b.eq %s", skip))
-			lines = append(lines, loadImm64("x0", target)...)
-			lines = append(lines,
-				"    ldr  x30, [sp], #16",
-				"    b    _recomp_indirect_jump",
-				fmt.Sprintf("%s:", skip),
-			)
+		lines = append(lines, "    sub x21, x21, #1")
+		if local {
+			lines = append(lines, fmt.Sprintf("    cbnz x21, %s", localLbl))
+			return lines, nil
 		}
+		lines = append(lines, fmt.Sprintf("    cbz x21, %s", skip))
+		far()
 
-	case x86asm.LOOPE:
-		lines = append(lines, "    subs x21, x21, #1")
-		skip := fmt.Sprintf("L_loope_skip_%x", inst.Address)
-		lines = append(lines, fmt.Sprintf("    b.eq %s", skip))
-		if fn != nil && fn.Blocks[target] != nil {
-			lines = append(lines, fmt.Sprintf("    b.eq L_fn_0x%x_loc_0x%x", fn.EntryAddr, target))
-		} else {
-			lines = append(lines, fmt.Sprintf("    b.ne %s", skip))
-			lines = append(lines, loadImm64("x0", target)...)
-			lines = append(lines,
-				"    ldr  x30, [sp], #16",
-				"    b    _recomp_indirect_jump",
-			)
+	case x86asm.LOOPE, x86asm.LOOPNE:
+		taken, notTaken := "eq", "ne" // LOOPE: ZF = 1
+		if op == x86asm.LOOPNE {
+			taken, notTaken = "ne", "eq"
 		}
-		lines = append(lines, fmt.Sprintf("%s:", skip))
-
-	case x86asm.LOOPNE:
-		lines = append(lines, "    subs x21, x21, #1")
-		skip := fmt.Sprintf("L_loopne_skip_%x", inst.Address)
-		lines = append(lines, fmt.Sprintf("    b.eq %s", skip))
-		if fn != nil && fn.Blocks[target] != nil {
-			lines = append(lines, fmt.Sprintf("    b.ne L_fn_0x%x_loc_0x%x", fn.EntryAddr, target))
+		lines = append(lines, "    sub x21, x21, #1", fmt.Sprintf("    cbz x21, %s", skip))
+		if local {
+			lines = append(lines, fmt.Sprintf("    b.%s %s", taken, localLbl))
 		} else {
-			lines = append(lines, fmt.Sprintf("    b.eq %s", skip))
-			lines = append(lines, loadImm64("x0", target)...)
-			lines = append(lines,
-				"    ldr  x30, [sp], #16",
-				"    b    _recomp_indirect_jump",
-			)
+			lines = append(lines, fmt.Sprintf("    b.%s %s", notTaken, skip))
+			far()
 		}
-		lines = append(lines, fmt.Sprintf("%s:", skip))
 
 	case x86asm.JRCXZ:
-		if fn != nil && fn.Blocks[target] != nil {
-			lines = append(lines, fmt.Sprintf("    cbz x21, L_fn_0x%x_loc_0x%x", fn.EntryAddr, target))
-		} else {
-			skip := fmt.Sprintf("L_jrcxz_skip_%x", inst.Address)
-			lines = append(lines, fmt.Sprintf("    cbnz x21, %s", skip))
-			lines = append(lines, loadImm64("x0", target)...)
-			lines = append(lines,
-				"    ldr  x30, [sp], #16",
-				"    b    _recomp_indirect_jump",
-				fmt.Sprintf("%s:", skip),
-			)
+		if local {
+			lines = append(lines, fmt.Sprintf("    cbz x21, %s", localLbl))
+			return lines, nil
 		}
+		lines = append(lines, fmt.Sprintf("    cbnz x21, %s", skip))
+		far()
 	}
+	lines = append(lines, fmt.Sprintf("%s:", skip))
 	return lines, nil
 }
 
@@ -649,16 +640,16 @@ func (l *Arm64Lifter) liftFxsave(inst disasm.Instruction, nextPC uint64, lines [
 	lines = append(lines, "    add x16, x28, x16")
 	lines = append(lines, l.emitLoadCtxPtr("x17")...)
 	lines = append(lines,
-		"    ldrh w18, [x17, #0x2e4]",
-		"    strh w18, [x16, #0]",
-		"    ldrh w18, [x17, #0x2e6]",
-		"    strh w18, [x16, #2]",
-		"    mov  w18, #0xff",
-		"    strb w18, [x16, #4]",
-		"    ldr  w18, [x17, #0x2ec]",
-		"    str  w18, [x16, #24]",
-		"    movz w18, #0xffff",
-		"    str  w18, [x16, #28]",
+		"    ldrh w5, [x17, #0x2e4]",
+		"    strh w5, [x16, #0]",
+		"    ldrh w5, [x17, #0x2e6]",
+		"    strh w5, [x16, #2]",
+		"    mov  w5, #0xff",
+		"    strb w5, [x16, #4]",
+		"    ldr  w5, [x17, #0x2e8]", // mxcsr
+		"    str  w5, [x16, #24]",
+		"    movz w5, #0xffff",
+		"    str  w5, [x16, #28]",
 		"    stp  q0, q1, [x16, #160]",
 		"    stp  q2, q3, [x16, #192]",
 		"    stp  q4, q5, [x16, #224]",
@@ -682,12 +673,12 @@ func (l *Arm64Lifter) liftFxrstor(inst disasm.Instruction, nextPC uint64, lines 
 	lines = append(lines, "    add x16, x28, x16")
 	lines = append(lines, l.emitLoadCtxPtr("x17")...)
 	lines = append(lines,
-		"    ldrh w18, [x16, #0]",
-		"    strh w18, [x17, #0x2e4]",
-		"    ldrh w18, [x16, #2]",
-		"    strh w18, [x17, #0x2e6]",
-		"    ldr  w18, [x16, #24]",
-		"    str  w18, [x17, #0x2ec]",
+		"    ldrh w5, [x16, #0]",
+		"    strh w5, [x17, #0x2e4]",
+		"    ldrh w5, [x16, #2]",
+		"    strh w5, [x17, #0x2e6]",
+		"    ldr  w5, [x16, #24]",
+		"    str  w5, [x17, #0x2e8]", // mxcsr
 		"    ldp  q0, q1, [x16, #160]",
 		"    ldp  q2, q3, [x16, #192]",
 		"    ldp  q4, q5, [x16, #224]",
@@ -697,6 +688,8 @@ func (l *Arm64Lifter) liftFxrstor(inst disasm.Instruction, nextPC uint64, lines 
 		"    ldp  q12, q13, [x16, #352]",
 		"    ldp  q14, q15, [x16, #384]",
 	)
+	lines = append(lines, "    ldr w0, [x17, #0x2e8]")
+	lines = append(lines, mxcsrToFpcr("w0")...)
 	return lines, nil
 }
 
@@ -871,18 +864,19 @@ func (l *Arm64Lifter) liftPcmpistri(inst disasm.Instruction, nextPC uint64, line
 	lines = append(lines,
 		"    ldr  x21, [x17, #8]",
 		"    ldrb w16, [x17, #0x9a]", // sf -> N (bit 31)
-		"    ldrb w18, [x17, #0x99]", // zf -> Z (bit 30)
-		"    orr  w16, w18, w16, lsl #1",
-		"    ldrb w18, [x17, #0x98]", // cf
-		"    eor  w18, w18, #1",      // ARM64 C = NOT x86 CF (C=1 means no carry / above or equal)
-		"    orr  w16, w18, w16, lsl #1",
-		"    ldrb w18, [x17, #0x9b]", // of -> V (bit 28)
-		"    orr  w16, w18, w16, lsl #1",
+		"    ldrb w5, [x17, #0x99]",  // zf -> Z (bit 30)
+		"    orr  w16, w5, w16, lsl #1",
+		"    ldrb w5, [x17, #0x98]", // cf
+		"    eor  w5, w5, #1",       // ARM64 C = NOT x86 CF (C=1 means no carry / above or equal)
+		"    orr  w16, w5, w16, lsl #1",
+		"    ldrb w5, [x17, #0x9b]", // of -> V (bit 28)
+		"    orr  w16, w5, w16, lsl #1",
 		"    lsl  w16, w16, #28",
 		"    msr  nzcv, x16",
 		"    ldp  x29, x30, [sp, #112]",
 		"    add  sp, sp, #128",
 	)
+	l.cpol = carrySub
 	return lines, nil
 }
 
@@ -948,17 +942,93 @@ func (l *Arm64Lifter) liftPcmpestri(inst disasm.Instruction, nextPC uint64, line
 	lines = append(lines,
 		"    ldr  x21, [x17, #8]",
 		"    ldrb w16, [x17, #0x9a]", // sf -> N (bit 31)
-		"    ldrb w18, [x17, #0x99]", // zf -> Z (bit 30)
-		"    orr  w16, w18, w16, lsl #1",
-		"    ldrb w18, [x17, #0x98]", // cf
-		"    eor  w18, w18, #1",      // ARM64 C = NOT x86 CF (C=1 means no carry / above or equal)
-		"    orr  w16, w18, w16, lsl #1",
-		"    ldrb w18, [x17, #0x9b]", // of -> V (bit 28)
-		"    orr  w16, w18, w16, lsl #1",
+		"    ldrb w5, [x17, #0x99]",  // zf -> Z (bit 30)
+		"    orr  w16, w5, w16, lsl #1",
+		"    ldrb w5, [x17, #0x98]", // cf
+		"    eor  w5, w5, #1",       // ARM64 C = NOT x86 CF (C=1 means no carry / above or equal)
+		"    orr  w16, w5, w16, lsl #1",
+		"    ldrb w5, [x17, #0x9b]", // of -> V (bit 28)
+		"    orr  w16, w5, w16, lsl #1",
 		"    lsl  w16, w16, #28",
 		"    msr  nzcv, x16",
 		"    ldp  x29, x30, [sp, #112]",
 		"    add  sp, sp, #128",
 	)
+	l.cpol = carrySub
+	return lines, nil
+}
+
+// ssse3Operands resolves the operands of a 128-bit integer op in its legacy (dst, src) or VEX
+// (dst, src1, src2) form; a memory src2 is loaded into v28.
+func (l *Arm64Lifter) ssse3Operands(inst disasm.Instruction, nextPC uint64, lines []string) (
+	out []string, d, dHigh, a, b string, vex, ok bool) {
+	args := inst.Inst.Args
+	vex = strings.HasPrefix(inst.Inst.Op.String(), "V")
+	dReg, okD := args[0].(x86asm.Reg)
+	src1, src2 := args[0], args[1]
+	if vex {
+		src1, src2 = args[1], args[2]
+	}
+	s1Reg, okS1 := src1.(x86asm.Reg)
+	isY, _, _, dLow, dHi, _, _, okDD := getVectorDesc(dReg)
+	_, _, _, s1Low, _, _, _, okS1D := getVectorDesc(s1Reg)
+	if !okD || !okS1 || !okDD || !okS1D || isY {
+		return lines, "", "", "", "", vex, false
+	}
+	switch v := src2.(type) {
+	case x86asm.Reg:
+		_, _, _, s2Low, _, _, _, okS2 := getVectorDesc(v)
+		if !okS2 {
+			return lines, "", "", "", "", vex, false
+		}
+		b = s2Low
+	case x86asm.Mem:
+		lines = append(lines, computeEffAddr(v, nextPC, "x16")...)
+		lines = append(lines, "    ldr q28, [x28, x16]")
+		b = "v28"
+	default:
+		return lines, "", "", "", "", vex, false
+	}
+	return lines, dLow, dHi, s1Low, b, vex, true
+}
+
+// liftPmulhrsw handles (V)PMULHRSW: per signed word, (a * b + 0x4000) >> 15, truncated to 16
+// bits (so -32768 * -32768 gives -32768; ARM SQRDMULH would saturate to 32767).
+func (l *Arm64Lifter) liftPmulhrsw(inst disasm.Instruction, nextPC uint64, lines []string) ([]string, error) {
+	lines, d, dHigh, a, b, vex, ok := l.ssse3Operands(inst, nextPC, lines)
+	if !ok {
+		lines = append(lines, l.emitUnsupported(inst, "unsupported pmulhrsw operands")...)
+		return lines, nil
+	}
+	lines = append(lines,
+		fmt.Sprintf("    smull v29.4s, %s.4h, %s.4h", a, b),
+		fmt.Sprintf("    smull2 v30.4s, %s.8h, %s.8h", a, b),
+		fmt.Sprintf("    rshrn %s.4h, v29.4s, #15", d),
+		fmt.Sprintf("    rshrn2 %s.8h, v30.4s, #15", d))
+	if vex {
+		lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHigh))
+	}
+	return lines, nil
+}
+
+// liftPsign handles (V)PSIGNB/W/D: each element of src1 is negated where the src2 element is
+// negative, zeroed where it is zero and kept where it is positive (negation wraps, as on x86).
+func (l *Arm64Lifter) liftPsign(inst disasm.Instruction, nextPC uint64, lines []string) ([]string, error) {
+	lines, d, dHigh, a, b, vex, ok := l.ssse3Operands(inst, nextPC, lines)
+	if !ok {
+		lines = append(lines, l.emitUnsupported(inst, "unsupported psign operands")...)
+		return lines, nil
+	}
+	arr := map[x86asm.Op]string{x86asm.PSIGNB: ".16b", x86asm.VPSIGNB: ".16b", x86asm.PSIGNW: ".8h",
+		x86asm.VPSIGNW: ".8h", x86asm.PSIGND: ".4s", x86asm.VPSIGND: ".4s"}[inst.Inst.Op]
+	lines = append(lines,
+		fmt.Sprintf("    cmlt v29%s, %s%s, #0", arr, b, arr), // negative
+		fmt.Sprintf("    cmeq v30%s, %s%s, #0", arr, b, arr), // zero
+		fmt.Sprintf("    neg v31%s, %s%s", arr, a, arr),
+		fmt.Sprintf("    bsl v29.16b, v31.16b, %s.16b", a),
+		fmt.Sprintf("    bic %s.16b, v29.16b, v30.16b", d))
+	if vex {
+		lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHigh))
+	}
 	return lines, nil
 }

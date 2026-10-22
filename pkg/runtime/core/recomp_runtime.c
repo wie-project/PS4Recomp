@@ -1,9 +1,13 @@
 #include "recomp_runtime.h"
 #include "ps4_sysmodule.h"
 #include "ps4_vfs.h"
+#include "ps4_log.h"
 
+#include <errno.h>
 #include <signal.h>
+#include <unistd.h>
 #if defined(__APPLE__)
+#include <dlfcn.h>
 #include <execinfo.h>
 #include <libgen.h>
 #include <mach-o/dyld.h>
@@ -25,6 +29,7 @@ void recomp_set_current_ctx(GuestContext *ctx) {
 }
 
 static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
+  ps4_log_drain_sync(1.0); // pending output first, so the FATAL report below is not lost
   if (g_current_ctx) {
     fprintf(stderr,
             "\nFATAL: Signal %d at host address %p (mem_base=%p)\n"
@@ -59,8 +64,59 @@ static void crash_handler(int sig, siginfo_t *si, void *ucontext) {
         }
       }
     }
+    if (g_current_ctx->mem_base) {
+      // Guest backtrace: likely return addresses found on the stack, plus the
+      // frame-pointer chain.
+      fprintf(stderr, "Guest thread_id=%llu; code addresses on stack:", (unsigned long long)g_current_ctx->thread_id);
+      uint64_t *sp = (uint64_t *)(g_current_ctx->mem_base + g_current_ctx->rsp);
+      int shown = 0;
+      for (int i = 0; i < 512 && shown < 24; i++) {
+        if ((uint64_t)(g_current_ctx->rsp + i * 8 + 8) > g_current_ctx->mem_size) break;
+        uint64_t v = sp[i];
+        if (recomp_module_text_contains(v)) {
+          // Return addresses point into the middle of a function.
+          fprintf(stderr, " %llx", (unsigned long long)v);
+          shown++;
+        }
+      }
+      fprintf(stderr, "\nGuest RBP chain:");
+      uint64_t bp = g_current_ctx->rbp;
+      for (int k = 0; k < 16 && bp && bp + 16 <= g_current_ctx->mem_size; k++) {
+        fprintf(stderr, " %llx", (unsigned long long)*(uint64_t *)(g_current_ctx->mem_base + bp + 8));
+        bp = *(uint64_t *)(g_current_ctx->mem_base + bp);
+      }
+      fprintf(stderr, "\n");
+    }
 #if defined(__APPLE__) && defined(__arm64__)
     arm_thread_state64_t *state = (arm_thread_state64_t *)&(((ucontext_t *)ucontext)->uc_mcontext->__ss);
+    if (recomp_pc_in_guest_code(state->__pc)) {
+      // The registers above are what the last shim call stored; in guest code the pinned host
+      // registers are the live guest registers (contract at recomp_enter_guest).
+      Dl_info di;
+      const int named = dladdr((void *)state->__pc, &di) && di.dli_sname;
+      const uint64_t *x = state->__x;
+      fprintf(stderr,
+              "In recompiled guest code (%s+0x%llx); live guest registers:\n"
+              "RSP=0x%llx RBP=0x%llx RAX=0x%llx RBX=0x%llx RCX=0x%llx RDX=0x%llx RSI=0x%llx RDI=0x%llx\n"
+              "R8=0x%llx R9=0x%llx R10=0x%llx R11=0x%llx R12=0x%llx R13=0x%llx R14=0x%llx R15=0x%llx FS=0x%llx\n",
+              named ? di.dli_sname : "?", named ? (unsigned long long)(state->__pc - (uint64_t)(uintptr_t)di.dli_saddr) : 0ULL,
+              (unsigned long long)x[26], (unsigned long long)x[25], (unsigned long long)x[19], (unsigned long long)x[20],
+              (unsigned long long)x[21], (unsigned long long)x[22], (unsigned long long)x[23], (unsigned long long)x[24],
+              (unsigned long long)x[8], (unsigned long long)x[9], (unsigned long long)x[10], (unsigned long long)x[11],
+              (unsigned long long)x[12], (unsigned long long)x[13], (unsigned long long)x[14], (unsigned long long)x[15],
+              (unsigned long long)x[27]);
+      if (x[28] == (uint64_t)(uintptr_t)g_current_ctx->mem_base && x[26] < g_current_ctx->mem_size) {
+        fprintf(stderr, "Guest code addresses on the live stack:");
+        const uint64_t *sp = (const uint64_t *)(g_current_ctx->mem_base + x[26]);
+        for (int i = 0, shown = 0; i < 512 && shown < 24 && x[26] + (uint64_t)i * 8 + 8 <= g_current_ctx->mem_size; i++) {
+          if (recomp_module_text_contains(sp[i])) {
+            fprintf(stderr, " %llx", (unsigned long long)sp[i]);
+            shown++;
+          }
+        }
+        fprintf(stderr, "\n");
+      }
+    }
     fprintf(stderr, "Host PC: 0x%llx (ARM64)\n", (unsigned long long)state->__pc);
     for (int i = 0; i < 29; i++) {
       fprintf(stderr, "x%d=0x%llx ", i, (unsigned long long)state->__x[i]);
@@ -277,6 +333,8 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
 
   ctx->mem_base = mem;
   ctx->mem_size = guest_mem_sz;
+  fprintf(stderr, "[ps4-recomp] guest memory at host %p (0x%llx bytes)\n", (void *)mem,
+          (unsigned long long)guest_mem_sz);
 
   ctx->fpu_cw = 0x037F; // Standard x87 control word default
 
@@ -297,7 +355,7 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
   ctx->fs_base = tcb_addr;
   MEM_U64(tcb_addr) = tcb_addr;
   MEM_U64(tcb_addr + 0x28ULL) = 0x595e9fbd94fda766ULL;
-  MEM_U64(tcb_addr + 0x70ULL) = (uint64_t)ctx;
+  MEM_U64(tcb_addr + RECOMP_TCB_CTX_SLOT) = (uint64_t)ctx;
   ctx->mxcsr = 0x1f80;
   ctx->fpu_cw = 0x037f;
 
@@ -403,6 +461,49 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
   return ctx;
 }
 
+// Debug aid: PS4_WATCH=<hex guest addr>[:<len>] polls that guest range from a host thread
+// (~every 50 us) and logs every change with the video flip count, to find out when (and by
+// whom: CPU or GPU) memory gets clobbered.
+#include <pthread.h>
+#include <time.h>
+extern volatile uint64_t g_ps4_videoout_flip_count;
+static uint8_t *g_watch_ptr;
+static size_t g_watch_len;
+static void *watch_thread(void *arg) {
+  (void)arg;
+  uint8_t prev[256], cur[256];
+  memcpy(prev, g_watch_ptr, g_watch_len);
+  for (;;) {
+    struct timespec ts = {0, 50000};
+    nanosleep(&ts, NULL);
+    memcpy(cur, g_watch_ptr, g_watch_len);
+    if (memcmp(cur, prev, g_watch_len) != 0) {
+      fprintf(stderr, "[watch] flip %llu: changed:", (unsigned long long)g_ps4_videoout_flip_count);
+      for (size_t i = 0; i < g_watch_len; i += 4)
+        fprintf(stderr, " %08x", *(uint32_t *)(cur + i));
+      fprintf(stderr, "\n");
+      memcpy(prev, cur, g_watch_len);
+    }
+  }
+  return NULL;
+}
+static void start_watch(GuestContext *ctx) {
+  const char *w = getenv("PS4_WATCH");
+  if (!w || !ctx || !ctx->mem_base) return;
+  char *end;
+  uint64_t addr = strtoull(w, &end, 16);
+  size_t len = 16;
+  if (*end == ':') len = (size_t)strtoul(end + 1, NULL, 0);
+  if (len > 256) len = 256;
+  len &= ~(size_t)3;
+  if (!len || addr >= ctx->mem_size) return;
+  g_watch_ptr = ctx->mem_base + addr;
+  g_watch_len = len;
+  pthread_t t;
+  pthread_create(&t, NULL, watch_thread, NULL);
+  fprintf(stderr, "[watch] watching guest 0x%llx len %zu\n", (unsigned long long)addr, len);
+}
+
 GuestContext *recomp_init_runtime_file(const char *image_filename,
                                        size_t requested_mem_sz,
                                        const char *prog_name) {
@@ -483,9 +584,20 @@ GuestContext *recomp_init_runtime_file(const char *image_filename,
   }
   fclose(fp);
 
-  // Guard guest NULL page (0x0 .. 0x10000) against invalid reads/writes
-  mprotect(ctx->mem_base, 0x10000, PROT_NONE);
+  // PS4_NULL_GUARD=1 makes guest [0, 0x10000) inaccessible, so NULL dereferences fault.
+  // Off by default: the C build read zeros there and the acceptance bar is "no worse than
+  // the C build"; the eboot's first segment also starts at guest address 0 in some games.
+  // GPU windows never cover this range (ps4_gnm_guest_window.h), so Metal works either way.
+  const char *null_guard = getenv("PS4_NULL_GUARD");
+  if (null_guard && null_guard[0] == '1') {
+    if (mprotect(ctx->mem_base, 0x10000, PROT_NONE) == 0) {
+      fprintf(stderr, "[ps4-recomp] PS4_NULL_GUARD: guest [0, 0x10000) is PROT_NONE\n");
+    } else {
+      fprintf(stderr, "[ps4-recomp] PS4_NULL_GUARD: mprotect failed: %s\n", strerror(errno));
+    }
+  }
 
+  start_watch(ctx);
   return ctx;
 }
 
@@ -560,6 +672,15 @@ void recomp_init_process_param(GuestContext *ctx, uint64_t proc_param_addr) {
   }
 }
 
+// x86-64 static TLS is TLS variant II: the main module's block ends at the thread pointer
+// (fs base) and starts at fs - round_up(p_memsz, p_align). The linker resolves the eboot's
+// fs-relative TLS accesses with this offset, so the .tdata template is copied there.
+uint64_t recomp_tls_block_offset(const GuestContext *ctx) {
+  if (!ctx || ctx->tls_memsz == 0) return 0;
+  uint64_t align = ctx->tls_align ? ctx->tls_align : 1;
+  return (ctx->tls_memsz + align - 1) / align * align;
+}
+
 void recomp_init_tls(GuestContext *ctx, uint64_t tls_vaddr, uint64_t tls_filesz, uint64_t tls_memsz, uint64_t tls_align) {
   if (!ctx) return;
   uint64_t align = tls_align ? tls_align : 16;
@@ -581,12 +702,19 @@ void recomp_init_tls(GuestContext *ctx, uint64_t tls_vaddr, uint64_t tls_filesz,
     ctx->process_ctx->static_tls_size = static_tls_size;
   }
 
-  // Populate main thread static TLS block [ctx->fs_base - static_tls_size, ctx->fs_base)
+  // Main thread static TLS area [fs_base - static_tls_size, fs_base): zeroed, with the .tdata
+  // template at fs_base - recomp_tls_block_offset() (variant II). recomp_init_runtime
+  // reserves 64 KB below the TCB for it.
+  if (static_tls_size > 0x10000ULL) {
+    fprintf(stderr, "[ps4-recomp] FATAL: static TLS 0x%llx exceeds the 64 KB main thread TLS area\n",
+            (unsigned long long)static_tls_size);
+    abort();
+  }
   if (ctx->mem_base && ctx->fs_base >= static_tls_size) {
-    uint8_t *dest = ctx->mem_base + ctx->fs_base - static_tls_size;
-    memset(dest, 0, static_tls_size);
-    if (tls_filesz > 0 && tls_vaddr > 0 && tls_vaddr + tls_filesz <= ctx->mem_size) {
-      memcpy(dest, ctx->mem_base + tls_vaddr, tls_filesz);
+    memset(ctx->mem_base + ctx->fs_base - static_tls_size, 0, static_tls_size);
+    uint64_t block = ctx->fs_base - recomp_tls_block_offset(ctx);
+    if (tls_filesz > 0 && tls_filesz <= tls_memsz && tls_vaddr > 0 && tls_vaddr + tls_filesz <= ctx->mem_size) {
+      memcpy(ctx->mem_base + block, ctx->mem_base + tls_vaddr, tls_filesz);
     }
     printf("[ps4-recomp] TLS initialized: vaddr=0x%llx filesz=0x%llx memsz=0x%llx align=%llu static_tls_size=0x%llx (fs_base=0x%llx)\n",
            (unsigned long long)tls_vaddr, (unsigned long long)tls_filesz,
@@ -668,6 +796,22 @@ void recomp_dispatch_external(GuestContext *ctx, uint64_t target) {
   recomp_dispatch(ctx, target);
 }
 
+#if defined(__APPLE__)
+// Bounds of the __TEXT,__recomp_guest section, provided by the linker (empty when there is no
+// guest code, as in host tests).
+extern const char g_recomp_guest_text_start[] __asm("section$start$__TEXT$__recomp_guest");
+extern const char g_recomp_guest_text_end[] __asm("section$end$__TEXT$__recomp_guest");
+
+bool recomp_pc_in_guest_code(uint64_t pc) {
+  return pc >= (uint64_t)(uintptr_t)g_recomp_guest_text_start && pc < (uint64_t)(uintptr_t)g_recomp_guest_text_end;
+}
+#else
+bool recomp_pc_in_guest_code(uint64_t pc) {
+  (void)pc;
+  return false;
+}
+#endif
+
 void recomp_free_runtime(GuestContext *ctx) {
   if (!ctx)
     return;
@@ -708,6 +852,44 @@ void recomp_free_runtime(GuestContext *ctx) {
   free(ctx);
 }
 
+// Guest non-local control transfers (longjmp, C++ exception unwinding: libunwind's jumpto)
+// restore the target frame's registers and RET to an address that is not the caller's. The
+// ARM64 assembly backend returns through the host return address of each guest call (contract
+// at recomp_enter_guest), so such a RET would continue after the call that started the
+// transfer. Neither TLOU nor Uncharted 4 imports longjmp, setjmp, __cxa_throw or _Unwind_*;
+// libc.prx reaches them only on error paths. These shims stop there with a report.
+static uint64_t guest_return_address(GuestContext *ctx) {
+  return ctx->rsp + 8 <= ctx->mem_size ? *(uint64_t *)(ctx->mem_base + ctx->rsp) : 0;
+}
+
+void shim_guest_nonlocal_jump(GuestContext *ctx) {
+  fprintf(stderr,
+          "\nFATAL: guest longjmp(env=0x%llx, val=%d) called from 0x%llx: non-local jumps are not "
+          "supported by the ARM64 assembly backend\n",
+          (unsigned long long)ctx->rdi, (int)ctx->rsi, (unsigned long long)guest_return_address(ctx));
+  recomp_dump_guest_context(ctx);
+  fflush(stderr);
+  abort();
+}
+
+// __cxa_throw(void *object, std::type_info *type, void (*dtor)(void *)); __cxa_rethrow(void).
+void shim_guest_cxa_throw(GuestContext *ctx) {
+  const char *type = "?";
+  const uint64_t ti = ctx->rdi && ctx->rsi ? ctx->rsi : 0; // __cxa_rethrow has no type argument
+  if (ti && ti + 16 <= ctx->mem_size) {
+    const uint64_t name = *(uint64_t *)(ctx->mem_base + ti + 8); // Itanium type_info::__name
+    if (name && name < ctx->mem_size) type = (const char *)(ctx->mem_base + name);
+  }
+  fprintf(stderr,
+          "\nFATAL: guest C++ exception (type %.80s) thrown from 0x%llx: exception unwinding is not "
+          "supported by the ARM64 assembly backend\n",
+          type, (unsigned long long)guest_return_address(ctx));
+  recomp_dump_guest_context(ctx);
+  fflush(stderr);
+  abort();
+}
+
+// C backend only: recompiled C functions push UnwindFrames; assembly code never does.
 void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip) {
   ctx->rip = target_ip;
   UnwindFrame *f = ctx->unwind_frame;
@@ -975,102 +1157,121 @@ GuestVMExtent *recomp_vm_find(GuestContext *ctx, uint64_t addr) {
   return NULL;
 }
 
+void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size);
+
+// Splits the non-free extent that strictly contains `at` into [addr, at) and [at, end); both
+// halves keep every attribute (name, prot, flags, mtype). Caller holds vm_mutex. Returns false
+// only when memory for the second half is unavailable (nothing is changed then).
+bool recomp_vm_split_extent_at(GuestContext *proc, uint64_t at) {
+  for (GuestVMExtent *e = proc->vm_extents; e; e = e->next) {
+    if (e->is_free || at <= e->addr || at >= e->addr + e->size)
+      continue;
+    GuestVMExtent *tail = (GuestVMExtent *)calloc(1, sizeof(*tail));
+    if (!tail)
+      return false;
+    *tail = *e;
+    tail->addr = at;
+    tail->size = e->addr + e->size - at;
+    tail->prev = e;
+    e->size = at - e->addr;
+    e->next = tail;
+    if (tail->next)
+      tail->next->prev = tail;
+    return true;
+  }
+  return true; // no extent to split: the boundary already exists (or is in a hole)
+}
+
+// Merges free extents that touch, for the extents overlapping [start, end] plus one neighbour
+// on each side. Caller holds vm_mutex.
+static void vm_coalesce_free(GuestContext *proc, uint64_t start, uint64_t end) {
+  GuestVMExtent *e = proc->vm_extents;
+  while (e && e->addr + e->size < start)
+    e = e->next;
+  if (e && e->prev)
+    e = e->prev;
+  while (e && e->next && e->addr <= end) {
+    GuestVMExtent *n = e->next;
+    if (e->is_free && n->is_free && e->addr + e->size == n->addr) {
+      e->size += n->size;
+      e->next = n->next;
+      if (n->next)
+        n->next->prev = e;
+      free(n);
+    } else {
+      e = n;
+    }
+  }
+}
+
+// munmap over [addr, addr+size) (page-widened). Every mapped extent in the range is freed,
+// also when the range spans several extents (a mapping that was split, e.g. by
+// sceKernelMtypeprotect, is several) or crosses a hole; the parts of extents outside the range
+// stay as they were with all their attributes; unmapped parts are skipped. The whole change is
+// made under one vm_mutex hold per phase and no range is ever freed by address twice:
+//  1. (locked) split the extents at both ends, note the mapped ranges inside;
+//  2. (unlocked, the ranges are still allocated so nobody can take them) detach direct-memory
+//     aliases and release the host pages, once per mapped range (ps4_direct_mem_on_unmap takes
+//     the direct-memory lock, which is held while mapping calls into the allocator, so it must
+//     not run under vm_mutex);
+//  3. (locked) mark the ranges free and merge neighbours.
+// Returns 0, or -1 for bad arguments or when memory for the bookkeeping is unavailable (the
+// extents are then unchanged apart from harmless splits).
 int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
   if (!ctx || addr == 0 || size == 0)
     return -1;
   GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-  uint64_t aligned_addr = addr & ~4095ULL;
-  size_t aligned_size = (size + 4095ULL) & ~4095ULL;
+  const uint64_t start = addr & ~4095ULL;
+  const uint64_t end = start + ((size + 4095ULL) & ~4095ULL);
+  if (end < start)
+    return -1;
 
   pthread_mutex_lock(&proc->vm_mutex);
-
-  GuestVMExtent *curr = proc->vm_extents;
-  while (curr) {
-    if (aligned_addr >= curr->addr && aligned_addr < curr->addr + curr->size) {
-      break;
-    }
-    curr = curr->next;
+  if (!recomp_vm_split_extent_at(proc, start) || !recomp_vm_split_extent_at(proc, end)) {
+    pthread_mutex_unlock(&proc->vm_mutex);
+    return -1;
   }
-
-  if (!curr) {
+  size_t n = 0;
+  for (GuestVMExtent *e = proc->vm_extents; e; e = e->next)
+    if (!e->is_free && e->addr >= start && e->addr + e->size <= end)
+      n++;
+  if (n == 0) {
     pthread_mutex_unlock(&proc->vm_mutex);
     return 0;
   }
-
-  // Release host physical pages
-  if (proc->mem_base && aligned_addr + aligned_size <= proc->mem_size) {
-#if defined(__APPLE__) || defined(__linux__)
-    madvise(proc->mem_base + aligned_addr, aligned_size, MADV_DONTNEED);
-#endif
-  }
-
-  // If already free, nothing to do
-  if (curr->is_free) {
+  struct Range {
+    uint64_t addr, size;
+  } *ranges = (struct Range *)malloc(n * sizeof(*ranges));
+  if (!ranges) {
     pthread_mutex_unlock(&proc->vm_mutex);
-    return 0;
+    return -1;
   }
-
-  // Case 1: aligned_addr is inside curr, but after curr->addr: split off the
-  // prefix
-  if (aligned_addr > curr->addr) {
-    GuestVMExtent *mid = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
-    if (mid) {
-      mid->addr = aligned_addr;
-      mid->size = curr->size - (aligned_addr - curr->addr);
-      mid->is_free = false;
-      mid->prev = curr;
-      mid->next = curr->next;
-      if (curr->next)
-        curr->next->prev = mid;
-      curr->next = mid;
-      curr->size = aligned_addr - curr->addr;
-      curr = mid;
+  size_t k = 0;
+  for (GuestVMExtent *e = proc->vm_extents; e && k < n; e = e->next)
+    if (!e->is_free && e->addr >= start && e->addr + e->size <= end) {
+      ranges[k].addr = e->addr;
+      ranges[k].size = e->size;
+      k++;
     }
-  }
-
-  // Case 2: aligned_size is less than curr->size: split off the suffix
-  if (aligned_size < curr->size) {
-    GuestVMExtent *suffix = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
-    if (suffix) {
-      suffix->addr = curr->addr + aligned_size;
-      suffix->size = curr->size - aligned_size;
-      suffix->is_free = false;
-      suffix->prev = curr;
-      suffix->next = curr->next;
-      if (curr->next)
-        curr->next->prev = suffix;
-      curr->next = suffix;
-      curr->size = aligned_size;
-    }
-  }
-
-  // Now curr matches [aligned_addr, aligned_addr + aligned_size] exactly
-  curr->is_free = true;
-
-  // Coalesce with next if adjacent and free
-  if (curr->next && curr->next->is_free &&
-      (curr->addr + curr->size == curr->next->addr)) {
-    GuestVMExtent *next_node = curr->next;
-    curr->size += next_node->size;
-    curr->next = next_node->next;
-    if (next_node->next)
-      next_node->next->prev = curr;
-    free(next_node);
-  }
-
-  // Coalesce with prev if adjacent and free
-  if (curr->prev && curr->prev->is_free &&
-      (curr->prev->addr + curr->prev->size == curr->addr)) {
-    GuestVMExtent *prev_node = curr->prev;
-    prev_node->size += curr->size;
-    prev_node->next = curr->next;
-    if (curr->next)
-      curr->next->prev = prev_node;
-    free(curr);
-    curr = prev_node;
-  }
-
   pthread_mutex_unlock(&proc->vm_mutex);
+
+  for (size_t i = 0; i < k; i++) {
+    ps4_direct_mem_on_unmap(proc, ranges[i].addr, ranges[i].size);
+    if (proc->mem_base && ranges[i].addr + ranges[i].size <= proc->mem_size) {
+#if defined(__APPLE__) || defined(__linux__)
+      madvise(proc->mem_base + ranges[i].addr, ranges[i].size, MADV_DONTNEED);
+#endif
+    }
+  }
+
+  pthread_mutex_lock(&proc->vm_mutex);
+  for (size_t i = 0; i < k; i++)
+    for (GuestVMExtent *e = proc->vm_extents; e; e = e->next)
+      if (!e->is_free && e->addr >= ranges[i].addr && e->addr + e->size <= ranges[i].addr + ranges[i].size)
+        e->is_free = true;
+  vm_coalesce_free(proc, start, end);
+  pthread_mutex_unlock(&proc->vm_mutex);
+  free(ranges);
   return 0;
 }
 
@@ -1095,11 +1296,13 @@ GuestContext *recomp_create_thread_context(GuestContext *parent,
   }
   uint64_t tcb_base = stack_base + stack_size + tls_size;
 
-  // Initialize Static TLS block for new thread [tcb_base - tls_size, tcb_base)
-  uint8_t *dest = parent->mem_base + tcb_base - tls_size;
-  memset(dest, 0, tls_size);
-  if (proc->tls_filesz > 0 && proc->tls_vaddr > 0 && proc->tls_vaddr + proc->tls_filesz <= parent->mem_size) {
-    memcpy(dest, parent->mem_base + proc->tls_vaddr, proc->tls_filesz);
+  // Static TLS area for the new thread [tcb_base - tls_size, tcb_base): zeroed, with the
+  // .tdata template at tcb_base - recomp_tls_block_offset() (variant II, see recomp_init_tls).
+  memset(parent->mem_base + tcb_base - tls_size, 0, tls_size);
+  if (proc->tls_filesz > 0 && proc->tls_filesz <= proc->tls_memsz && proc->tls_vaddr > 0 &&
+      proc->tls_vaddr + proc->tls_filesz <= parent->mem_size) {
+    memcpy(parent->mem_base + tcb_base - recomp_tls_block_offset(proc), parent->mem_base + proc->tls_vaddr,
+           proc->tls_filesz);
   }
 
   // Initialize FS TCB base and stack canary
@@ -1110,7 +1313,7 @@ GuestContext *recomp_create_thread_context(GuestContext *parent,
   if (!t_ctx)
     return NULL;
 
-  *(uint64_t *)(parent->mem_base + tcb_base + 0x70ULL) = (uint64_t)t_ctx;
+  *(uint64_t *)(parent->mem_base + tcb_base + RECOMP_TCB_CTX_SLOT) = (uint64_t)t_ctx;
 
   t_ctx->mem_base = parent->mem_base;
   t_ctx->mem_size = parent->mem_size;
@@ -1122,6 +1325,7 @@ GuestContext *recomp_create_thread_context(GuestContext *parent,
   t_ctx->rsp = (stack_base + stack_size - 0x100ULL) & ~0xFFULL;
   t_ctx->rbp = t_ctx->rsp;
   t_ctx->fpu_cw = 0x037F;
+  t_ctx->mxcsr = 0x1F80; // x86 default: all exceptions masked, round to nearest
   t_ctx->tls_vaddr = proc->tls_vaddr;
   t_ctx->tls_filesz = proc->tls_filesz;
   t_ctx->tls_memsz = proc->tls_memsz;
@@ -1141,7 +1345,7 @@ void recomp_free_thread_context(GuestContext *ctx) {
   free(ctx);
 }
 
-void recomp_vpcmpistri(GuestContext *ctx, const void *src2_ptr,
+void recomp_vpcmpistri_impl(GuestContext *ctx, const void *src2_ptr,
                        const void *src1_ptr, uint8_t imm8) {
   const uint8_t *s2_bytes = (const uint8_t *)src2_ptr;
   const uint8_t *s1_bytes = (const uint8_t *)src1_ptr;
@@ -1339,7 +1543,7 @@ void recomp_vpcmpistri(GuestContext *ctx, const void *src2_ptr,
   ctx->pf = 0;
 }
 
-void recomp_vpcmpe_stri(GuestContext *ctx, const void *src2_ptr,
+void recomp_vpcmpe_stri_impl(GuestContext *ctx, const void *src2_ptr,
                         const void *src1_ptr, uint8_t imm8) {
   int is_word = (imm8 & 1);
   int is_signed = ((imm8 >> 1) & 1);
@@ -1749,7 +1953,7 @@ static inline uint32_t aes_rotword(uint32_t w) {
   return (w >> 8) | ((w & 0xFF) << 24);
 }
 
-xmm_reg_t recomp_vaeskeygenassist(xmm_reg_t s, uint8_t rcon) {
+xmm_reg_t recomp_vaeskeygenassist_impl(xmm_reg_t s, uint8_t rcon) {
   xmm_reg_t res = {0};
   uint32_t x1 = s.u32[1];
   uint32_t x3 = s.u32[3];
@@ -1777,4 +1981,39 @@ void recomp_unsupported_instruction(uint64_t rip, uint64_t fn_entry, const char 
   fprintf(stderr, "=======================================================\n\n");
   fflush(stderr);
   abort();
+}
+
+// ---- Long-frame counters (ps4_hitch.h) ---------------------------------------------------
+#include "ps4_hitch.h"
+#include <stdatomic.h>
+
+static _Atomic uint64_t g_hitch_ns[PS4_HITCH_KINDS];
+
+uint64_t ps4_hitch_now_ns(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+
+void ps4_hitch_add_ns(int kind, uint64_t ns) {
+  if ((unsigned)kind < PS4_HITCH_KINDS) atomic_fetch_add_explicit(&g_hitch_ns[kind], ns, memory_order_relaxed);
+}
+
+uint64_t ps4_hitch_take_ns(int kind) {
+  return (unsigned)kind < PS4_HITCH_KINDS ? atomic_exchange_explicit(&g_hitch_ns[kind], 0, memory_order_relaxed) : 0;
+}
+
+// ---- Quit --------------------------------------------------------------------------------
+// exit() would run static destructors while game threads and Metal completion handlers keep
+// using the objects being destroyed (crash in RunFences on a destroyed mutex). Nothing needs to
+// be written on exit except the pipeline archive; stdio buffers are flushed.
+// Mach-O static links cannot leave a weak reference undefined, so the default is an empty weak
+// definition; the pipeline archive module provides the strong one.
+__attribute__((weak)) void ps4_gnm_pso_archive_save_for_quit(double timeout_s) { (void)timeout_s; }
+// A GNM frame capture in progress (PS4_GNM_CAPTURE_FRAME) writes what it recorded; the Metal
+// driver provides the strong definition.
+__attribute__((weak)) void ps4_gnm_capture_save_for_quit(double timeout_s) { (void)timeout_s; }
+
+void ps4_host_quit(int code) {
+  ps4_gnm_pso_archive_save_for_quit(2.0);
+  ps4_gnm_capture_save_for_quit(2.0);
+  fflush(NULL);
+  ps4_log_drain_sync(1.0);
+  _exit(code);
 }

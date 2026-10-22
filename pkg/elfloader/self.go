@@ -14,9 +14,9 @@ const (
 	selfHeaderSize = 0x20
 	selfEntrySize  = 0x20
 
-	selfPropHasBlocks     = 11
-	selfPropSegmentShift  = 20
-	selfPropSegmentMask   = 0xFFFF
+	selfPropHasBlocks    = 11
+	selfPropSegmentShift = 20
+	selfPropSegmentMask  = 0xFFFF
 )
 
 // IsSELF reports whether data starts with a PS4 SELF header.
@@ -139,34 +139,59 @@ func ExtractELFFromSELF(data []byte) ([]byte, error) {
 	binary.LittleEndian.PutUint16(out[60:], 0)
 	binary.LittleEndian.PutUint16(out[62:], 0)
 
-	copied := 0
-	for _, ph := range phdrs {
-		if ph.filesz == 0 || ph.offset >= outSize {
-			continue
-		}
-		n := ph.filesz
-		if ph.offset+n > outSize {
-			n = outSize - ph.offset
-		}
-		src := findSELFSegment(data, entries, ph.index, ph.filesz)
-		if src == nil {
-			srcOff := elfOff + int(ph.offset)
-			if srcOff >= 0 && srcOff < len(data) {
-				avail := uint64(len(data) - srcOff)
-				if n > avail {
-					n = avail
-				}
-				src = data[srcOff : srcOff+int(n)]
+	// Segments backed by a SELF entry are copied first. Program headers without
+	// their own entry (PT_SCE_PROCPARAM, PT_GNU_EH_FRAME, PT_DYNAMIC, ...) usually
+	// describe a sub-range of a PT_LOAD that is already in place; the raw
+	// elfOff+p_offset fallback would read SELF-layout bytes and clobber it, so it
+	// is only used for ranges no entry-backed segment covered.
+	type span struct{ start, end uint64 }
+	var covered []span
+	isCovered := func(start, end uint64) bool {
+		for _, c := range covered {
+			if start >= c.start && end <= c.end {
+				return true
 			}
 		}
-		if src == nil {
-			continue
+		return false
+	}
+	copied := 0
+	for pass := 0; pass < 2; pass++ {
+		for _, ph := range phdrs {
+			if ph.filesz == 0 || ph.offset >= outSize {
+				continue
+			}
+			n := ph.filesz
+			if ph.offset+n > outSize {
+				n = outSize - ph.offset
+			}
+			src := findSELFSegment(data, entries, ph.index, ph.filesz)
+			if pass == 0 {
+				if src == nil {
+					continue
+				}
+			} else {
+				if src != nil || isCovered(ph.offset, ph.offset+n) {
+					continue
+				}
+				srcOff := elfOff + int(ph.offset)
+				if srcOff >= 0 && srcOff < len(data) {
+					avail := uint64(len(data) - srcOff)
+					if n > avail {
+						n = avail
+					}
+					src = data[srcOff : srcOff+int(n)]
+				}
+			}
+			if src == nil {
+				continue
+			}
+			if uint64(len(src)) < n {
+				n = uint64(len(src))
+			}
+			copy(out[ph.offset:ph.offset+n], src[:n])
+			covered = append(covered, span{ph.offset, ph.offset + n})
+			copied++
 		}
-		if uint64(len(src)) < n {
-			n = uint64(len(src))
-		}
-		copy(out[ph.offset:ph.offset+n], src[:n])
-		copied++
 	}
 	if copied == 0 {
 		return nil, fmt.Errorf("SELF contained no loadable segment data")

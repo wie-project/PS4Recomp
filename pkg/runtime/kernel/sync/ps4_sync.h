@@ -16,6 +16,8 @@ void shim_pthread_mutex_trylock(GuestContext *ctx);
 void shim_pthread_mutex_unlock(GuestContext *ctx);
 void shim_pthread_mutex_destroy(GuestContext *ctx);
 void shim_pthread_mutexattr_init(GuestContext *ctx);
+void shim_pthread_condattr_init(GuestContext *ctx);
+void shim_pthread_condattr_destroy(GuestContext *ctx);
 void shim_pthread_mutexattr_settype(GuestContext *ctx);
 void shim_pthread_mutexattr_destroy(GuestContext *ctx);
 void shim_pthread_cond_init(GuestContext *ctx);
@@ -57,6 +59,9 @@ void shim_scePthreadCondWait(GuestContext *ctx);
 void shim_scePthreadCondTimedwait(GuestContext *ctx);
 void shim_scePthreadCondattrInit(GuestContext *ctx);
 void shim_scePthreadCondattrDestroy(GuestContext *ctx);
+
+// Prints guest mutex statistics gathered over the last `frames` frames.
+void ps4_sync_print_stats(int frames);
 
 // C++ ABI guard shims
 void shim_cxa_guard_acquire(GuestContext *ctx);

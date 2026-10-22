@@ -143,6 +143,93 @@ int ps4_equeue_post_event(OrbisKernelEqueue id, uint64_t ident, int16_t filter, 
     return 0;
 }
 
+int ps4_equeue_exists(OrbisKernelEqueue id) {
+    pthread_mutex_lock(&g_eq_table_mutex);
+    KernelEqueueInternal *eq = find_equeue_locked(id);
+    int ok = (eq && !eq->is_deleted) ? 1 : 0;
+    pthread_mutex_unlock(&g_eq_table_mutex);
+    return ok;
+}
+
+int ps4_equeue_trigger_event(OrbisKernelEqueue id, uint64_t ident, int16_t filter, int64_t data, void *udata) {
+    pthread_mutex_lock(&g_eq_table_mutex);
+    KernelEqueueInternal *eq = find_equeue_locked(id);
+    if (!eq) {
+        pthread_mutex_unlock(&g_eq_table_mutex);
+        return -EINVAL;
+    }
+
+    pthread_mutex_lock(&eq->mutex);
+    pthread_mutex_unlock(&g_eq_table_mutex);
+
+    if (eq->is_deleted) {
+        pthread_mutex_unlock(&eq->mutex);
+        return -EINVAL;
+    }
+
+    int coalesced = 0;
+    for (int i = 0; i < eq->count; i++) {
+        int idx = (eq->head + i) % EQUEUE_CAPACITY;
+        OrbisKernelEvent *ev = &eq->events[idx];
+        if (ev->ident == ident && ev->filter == filter) {
+            ev->data = data;
+            ev->udata = udata;
+            ev->fflags++;
+            coalesced = 1;
+            break;
+        }
+    }
+
+    if (!coalesced && eq->count < EQUEUE_CAPACITY) {
+        OrbisKernelEvent *ev = &eq->events[eq->tail];
+        ev->ident = ident;
+        ev->filter = filter;
+        ev->flags = 0;
+        ev->fflags = 1;
+        ev->data = data;
+        ev->udata = udata;
+        eq->tail = (eq->tail + 1) % EQUEUE_CAPACITY;
+        eq->count++;
+    }
+    // Broadcast: several threads may be blocked on the same queue.
+    pthread_cond_broadcast(&eq->cond);
+
+    pthread_mutex_unlock(&eq->mutex);
+    return 0;
+}
+
+static void remove_events_locked(KernelEqueueInternal *eq, uint64_t ident, int16_t filter) {
+    int write_idx = 0;
+    int original_count = eq->count;
+    for (int i = 0; i < original_count; i++) {
+        int idx = (eq->head + i) % EQUEUE_CAPACITY;
+        if (eq->events[idx].filter == filter && eq->events[idx].ident == ident) {
+            continue;
+        }
+        if (write_idx != i) {
+            int target_idx = (eq->head + write_idx) % EQUEUE_CAPACITY;
+            eq->events[target_idx] = eq->events[idx];
+        }
+        write_idx++;
+    }
+    eq->count = write_idx;
+    eq->tail = (eq->head + write_idx) % EQUEUE_CAPACITY;
+}
+
+int ps4_equeue_remove_events(OrbisKernelEqueue id, uint64_t ident, int16_t filter) {
+    pthread_mutex_lock(&g_eq_table_mutex);
+    KernelEqueueInternal *eq = find_equeue_locked(id);
+    if (!eq) {
+        pthread_mutex_unlock(&g_eq_table_mutex);
+        return -EINVAL;
+    }
+    pthread_mutex_lock(&eq->mutex);
+    pthread_mutex_unlock(&g_eq_table_mutex);
+    remove_events_locked(eq, ident, filter);
+    pthread_mutex_unlock(&eq->mutex);
+    return 0;
+}
+
 int sceKernelWaitEqueue(OrbisKernelEqueue id, OrbisKernelEvent *eventsOut, int numEvents, int *outCount, const uint32_t *timeout) {
     if (outCount) {
         *outCount = 0;
@@ -389,7 +476,9 @@ void shim_sceKernelAddUserEventEdge(GuestContext *ctx) {
 void shim_sceKernelTriggerUserEvent(GuestContext *ctx) {
     OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
     int id = (int)ctx->rsi;
-    void *udata = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+    // udata is an opaque guest value that is copied back verbatim into the guest-visible
+    // OrbisKernelEvent by sceKernelWaitEqueue; it must stay a guest address (not host pointer).
+    void *udata = (void *)(uintptr_t)ctx->rdx;
     ctx->rax = (uint64_t)(int64_t)sceKernelTriggerUserEvent(eq, id, udata);
     SHIM_RETURN();
 }

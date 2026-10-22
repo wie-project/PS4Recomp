@@ -81,8 +81,8 @@ func (l *Arm64Lifter) liftMovs(inst disasm.Instruction, width int, lines []strin
 			fmt.Sprintf("    %s %s, [x28, x24]", storeInst, reg),
 			fmt.Sprintf("    add x23, x23, #%d", width),
 			fmt.Sprintf("    add x24, x24, #%d", width),
-			"    subs x21, x21, #1",
-			fmt.Sprintf("    b.ne %s", lblLoop),
+			"    sub x21, x21, #1", // REP MOVS keeps the flags: no SUBS
+			fmt.Sprintf("    cbnz x21, %s", lblLoop),
 			fmt.Sprintf("%s:", lblDone),
 		)
 		return lines, nil
@@ -123,8 +123,8 @@ func (l *Arm64Lifter) liftStos(inst disasm.Instruction, width int, lines []strin
 			fmt.Sprintf("%s:", lblLoop),
 			fmt.Sprintf("    %s %s, [x28, x24]", storeInst, reg),
 			fmt.Sprintf("    add x24, x24, #%d", width),
-			"    subs x21, x21, #1",
-			fmt.Sprintf("    b.ne %s", lblLoop),
+			"    sub x21, x21, #1", // REP STOS keeps the flags: no SUBS
+			fmt.Sprintf("    cbnz x21, %s", lblLoop),
 			fmt.Sprintf("%s:", lblDone),
 		)
 		return lines, nil
@@ -184,118 +184,79 @@ func (l *Arm64Lifter) liftLods(inst disasm.Instruction, width int, lines []strin
 	return lines, nil
 }
 
-func (l *Arm64Lifter) liftScas(inst disasm.Instruction, width int, lines []string) ([]string, error) {
-	loadInst := "ldr"
-	reg := "x16"
-	axReg := "x19"
-	cmpInst := "cmp"
+// strCompare sets NZCV from lhs - rhs at the operand width (x86 CF in the sub sense). 8/16-bit
+// operands are compared in the top bits of a W register, so N, C and V are those of the narrow
+// subtraction. lhs is "x19" (AL/AX/EAX/RAX) or a loaded scratch value; scratch x4.
+func strCompare(width int, lhs, rhs string) []string {
+	switch width {
+	case 1, 2:
+		sh := 32 - 8*width
+		return []string{
+			fmt.Sprintf("    lsl w4, w%s, #%d", lhs[1:], sh),
+			fmt.Sprintf("    cmp w4, w%s, lsl #%d", rhs[1:], sh),
+		}
+	case 4:
+		return []string{fmt.Sprintf("    cmp w%s, w%s", lhs[1:], rhs[1:])}
+	}
+	return []string{fmt.Sprintf("    cmp x%s, x%s", lhs[1:], rhs[1:])}
+}
+
+// strLoad returns the zero-extending load of one element.
+func strLoad(width int, dst, addr string) string {
 	switch width {
 	case 1:
-		loadInst = "ldrb"
-		reg = "w16"
-		axReg = "w19"
+		return fmt.Sprintf("    ldrb w%s, [x28, %s]", dst[1:], addr)
 	case 2:
-		loadInst = "ldrh"
-		reg = "w16"
-		axReg = "w19"
+		return fmt.Sprintf("    ldrh w%s, [x28, %s]", dst[1:], addr)
 	case 4:
-		loadInst = "ldr"
-		reg = "w16"
-		axReg = "w19"
-	case 8:
-		loadInst = "ldr"
-		reg = "x16"
-		axReg = "x19"
+		return fmt.Sprintf("    ldr w%s, [x28, %s]", dst[1:], addr)
 	}
+	return fmt.Sprintf("    ldr x%s, [x28, %s]", dst[1:], addr)
+}
 
-	stopOnMatch := instHasRepn(inst.Inst)
-	counted := stopOnMatch || instHasRep(inst.Inst)
-	if counted {
-		lblLoop := fmt.Sprintf("L_rep_scas_loop_%x", inst.Address)
-		lblDone := fmt.Sprintf("L_rep_scas_done_%x", inst.Address)
-		stopBranch := "b.eq" // REPNE stops when equal
-		if !stopOnMatch {
-			stopBranch = "b.ne" // REPE stops when not equal
-		}
-
-		lines = append(lines,
-			fmt.Sprintf("    cbz x21, %s", lblDone),
-			fmt.Sprintf("%s:", lblLoop),
-			fmt.Sprintf("    %s %s, [x28, x24]", loadInst, reg),
-			fmt.Sprintf("    add x24, x24, #%d", width),
-			"    subs x21, x21, #1",
-			fmt.Sprintf("    %s %s, %s", cmpInst, reg, axReg),
-			fmt.Sprintf("    %s %s", stopBranch, lblDone),
-			fmt.Sprintf("    cbnz x21, %s", lblLoop),
-			fmt.Sprintf("%s:", lblDone),
-		)
-		return lines, nil
-	}
-
-	lines = append(lines,
-		fmt.Sprintf("    %s %s, [x28, x24]", loadInst, reg),
-		fmt.Sprintf("    add x24, x24, #%d", width),
-		fmt.Sprintf("    %s %s, %s", cmpInst, reg, axReg),
-	)
-	return lines, nil
+// liftScas handles SCAS: flags of AL/AX/EAX/RAX - [RDI], RDI advances. liftCmps handles CMPS:
+// flags of [RSI] - [RDI], RSI and RDI advance. With REPE/REPNE the comparison repeats while RCX
+// is not 0 and ZF is 1 (REPE) or 0 (REPNE); RCX = 0 on entry leaves the flags of the previous
+// instruction, so the carry is brought into the sub sense first and both paths end in it.
+func (l *Arm64Lifter) liftScas(inst disasm.Instruction, width int, lines []string) ([]string, error) {
+	body := []string{strLoad(width, "x16", "x24"), fmt.Sprintf("    add x24, x24, #%d", width)}
+	return l.liftRepCompare(inst, "scas", body, strCompare(width, "x19", "x16"), lines), nil
 }
 
 func (l *Arm64Lifter) liftCmps(inst disasm.Instruction, width int, lines []string) ([]string, error) {
-	loadInst := "ldr"
-	r16 := "x16"
-	r17 := "x17"
-	cmpInst := "cmp"
-	switch width {
-	case 1:
-		loadInst = "ldrb"
-		r16 = "w16"
-		r17 = "w17"
-	case 2:
-		loadInst = "ldrh"
-		r16 = "w16"
-		r17 = "w17"
-	case 4:
-		loadInst = "ldr"
-		r16 = "w16"
-		r17 = "w17"
-	case 8:
-		loadInst = "ldr"
-		r16 = "x16"
-		r17 = "x17"
-	}
-
-	stopOnMatch := instHasRepn(inst.Inst)
-	counted := stopOnMatch || instHasRep(inst.Inst)
-	if counted {
-		lblLoop := fmt.Sprintf("L_rep_cmps_loop_%x", inst.Address)
-		lblDone := fmt.Sprintf("L_rep_cmps_done_%x", inst.Address)
-		stopBranch := "b.eq" // REPNE stops when equal
-		if !stopOnMatch {
-			stopBranch = "b.ne" // REPE stops when not equal
-		}
-
-		lines = append(lines,
-			fmt.Sprintf("    cbz x21, %s", lblDone),
-			fmt.Sprintf("%s:", lblLoop),
-			fmt.Sprintf("    %s %s, [x28, x23]", loadInst, r16),
-			fmt.Sprintf("    %s %s, [x28, x24]", loadInst, r17),
-			fmt.Sprintf("    add x23, x23, #%d", width),
-			fmt.Sprintf("    add x24, x24, #%d", width),
-			"    subs x21, x21, #1",
-			fmt.Sprintf("    %s %s, %s", cmpInst, r16, r17),
-			fmt.Sprintf("    %s %s", stopBranch, lblDone),
-			fmt.Sprintf("    cbnz x21, %s", lblLoop),
-			fmt.Sprintf("%s:", lblDone),
-		)
-		return lines, nil
-	}
-
-	lines = append(lines,
-		fmt.Sprintf("    %s %s, [x28, x23]", loadInst, r16),
-		fmt.Sprintf("    %s %s, [x28, x24]", loadInst, r17),
+	body := []string{
+		strLoad(width, "x16", "x23"),
+		strLoad(width, "x17", "x24"),
 		fmt.Sprintf("    add x23, x23, #%d", width),
 		fmt.Sprintf("    add x24, x24, #%d", width),
-		fmt.Sprintf("    %s %s, %s", cmpInst, r16, r17),
+	}
+	return l.liftRepCompare(inst, "cmps", body, strCompare(width, "x16", "x17"), lines), nil
+}
+
+func (l *Arm64Lifter) liftRepCompare(inst disasm.Instruction, name string, body, cmp, lines []string) []string {
+	stopOnMatch := instHasRepn(inst.Inst)
+	if !stopOnMatch && !instHasRep(inst.Inst) {
+		lines = append(lines, body...)
+		lines = append(lines, cmp...)
+		l.cpol = carrySub
+		return lines
+	}
+	lblLoop := fmt.Sprintf("L_rep_%s_loop_%x", name, inst.Address)
+	lblDone := fmt.Sprintf("L_rep_%s_done_%x", name, inst.Address)
+	stopBranch := "b.ne" // REPE stops when not equal
+	if stopOnMatch {
+		stopBranch = "b.eq" // REPNE stops when equal
+	}
+	lines = append(lines, l.normalizeCarry()...)
+	lines = append(lines, fmt.Sprintf("    cbz x21, %s", lblDone), lblLoop+":")
+	lines = append(lines, body...)
+	lines = append(lines, "    sub x21, x21, #1")
+	lines = append(lines, cmp...)
+	lines = append(lines,
+		fmt.Sprintf("    %s %s", stopBranch, lblDone),
+		fmt.Sprintf("    cbnz x21, %s", lblLoop),
+		lblDone+":",
 	)
-	return lines, nil
+	l.cpol = carrySub
+	return lines
 }

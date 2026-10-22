@@ -102,6 +102,22 @@ int32_t sceNetCtlTerm(void) {
     return ORBIS_OK;
 }
 
+// int sceNetCtlGetResult(int eventType, int *errorCode)
+//
+// The error code of the last connection event of the given type (the callback's event type:
+// connected, disconnected, ...). This runtime reports IPOBTAINED from sceNetCtlGetState and
+// never has a failed connection event, so the last result is always "no error". Behaviour
+// as in shadPS4 (libraries/network/netctl.cpp sceNetCtlGetResult): a NULL output is
+// INVALID_ADDR, otherwise *errorCode = 0 and SCE_OK.
+int32_t sceNetCtlGetResult(int32_t eventType, int32_t *errorCode) {
+    (void)eventType;
+    if (!errorCode) {
+        return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
+    }
+    *errorCode = 0;
+    return ORBIS_OK;
+}
+
 int32_t sceNetCtlGetState(int32_t *state) {
     if (!state) {
         return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
@@ -310,6 +326,12 @@ void shim_sceNetCtlTerm(GuestContext *ctx) {
 void shim_sceNetCtlGetState(GuestContext *ctx) {
     int32_t *state = (int32_t *)guest_to_host(ctx, ctx->rdi);
     ctx->rax = (uint64_t)sceNetCtlGetState(state);
+    SHIM_RETURN();
+}
+
+void shim_sceNetCtlGetResult(GuestContext *ctx) {
+    int32_t *err = (int32_t *)guest_to_host(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceNetCtlGetResult((int32_t)ctx->rdi, err);
     SHIM_RETURN();
 }
 

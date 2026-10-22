@@ -78,6 +78,8 @@ int32_t sceHttpGetMemoryPoolStats(int32_t libhttpCtxId, void *currentStat);
 int32_t sceHttpsEnableOption(int32_t id, uint32_t sslFlags);
 int32_t sceHttpsDisableOption(int32_t id, uint32_t sslFlags);
 int32_t sceHttpsSetSslCallback(int32_t id, void *cbfunc, void *userArg);
+int32_t sceHttpsLoadCert(int32_t libhttpCtxId, int32_t caCertNum, const void **caList, const void *cert, const void *privKey);
+bool ps4_http_ctx_has_custom_ca(int32_t libhttpCtxId);
 
 // libSceHttp2 C API
 int32_t sceHttp2Init(int32_t net_id, int32_t ssl_id, uint64_t pool_size, int32_t max_requests);
@@ -123,6 +125,7 @@ void shim_sceHttpGetMemoryPoolStats(GuestContext *ctx);
 void shim_sceHttpsEnableOption(GuestContext *ctx);
 void shim_sceHttpsDisableOption(GuestContext *ctx);
 void shim_sceHttpsSetSslCallback(GuestContext *ctx);
+void shim_sceHttpsLoadCert(GuestContext *ctx);
 void shim_sceHttp2Init(GuestContext *ctx);
 void shim_sceHttp2Term(GuestContext *ctx);
 

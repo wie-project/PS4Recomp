@@ -229,6 +229,11 @@ void shim_sceMsgDialogOpen(GuestContext *ctx) {
       }
     }
   }
+  int sys_type = -1;
+  if (param->mode == 2 /* SYSTEM_MSG */ && param->sysMsgParam)
+    sys_type = *(const int32_t *)(ctx->mem_base + (uint64_t)param->sysMsgParam);
+  fprintf(stderr, "[ps4-dialog] MsgDialogOpen: mode=%d button_type=%d sys_type=%d msg='%s'\n", (int)param->mode,
+          (int)g_dialog_button_type, sys_type, g_dialog_msg);
   pthread_mutex_unlock(&g_dialog_mutex);
 
   ctx->rax = (uint64_t)sceMsgDialogOpen(param);

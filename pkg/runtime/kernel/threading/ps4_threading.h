@@ -36,6 +36,8 @@ typedef struct RecompThread {
 
 void recomp_init_main_thread(GuestContext *ctx);
 RecompThread *recomp_find_thread(uint64_t handle);
+RecompThread *recomp_get_current_thread(void);
+void recomp_set_current_thread(RecompThread *t);
 const char *recomp_get_current_thread_name(void);
 void shim_sceKernelIsStack(GuestContext *ctx);
 

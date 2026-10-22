@@ -99,8 +99,8 @@ func TestMatchPICSwitchInterleaved(t *testing.T) {
 		pc += uint64(len(b))
 	}
 
-	put(0x83, 0xfe, 0x05)             // cmp esi, 5
-	put(0x77, 0x20)                   // ja +0x20
+	put(0x83, 0xfe, 0x05) // cmp esi, 5
+	put(0x77, 0x20)       // ja +0x20
 	leaPC := pc
 	put(0x48, 0x8d, 0x05, 0, 0, 0, 0) // lea rax, [rip+table]
 	put(0x48, 0x63, 0x0c, 0xb0)       // movsxd rcx, [rax+rsi*4]
@@ -566,3 +566,87 @@ func TestBEXTRJumpTable(t *testing.T) {
 	}
 }
 
+// Bounds checks that size a switch table: a CMP on the register the index was copied from
+// (mov ebx, edx; cmp edx, 0xe; ja), CMP + JBE/JB, and no bound when the copy source changes
+// after the copy.
+func TestSwitchTableCountBounds(t *testing.T) {
+	dec := func(hexes ...[]byte) []Instruction {
+		var w []Instruction
+		pc := uint64(0x1000)
+		for _, b := range hexes {
+			inst, err := x86asm.Decode(b, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w = append(w, Instruction{Address: pc, Inst: inst})
+			pc += uint64(inst.Len)
+		}
+		return w
+	}
+	movEbxEdx := []byte{0x89, 0xd3}
+	for _, tc := range []struct {
+		name   string
+		window []Instruction
+		idx    x86asm.Reg
+		want   int
+	}{
+		{"mov ebx, edx; cmp edx, 0xe; ja", dec(movEbxEdx, []byte{0x83, 0xfa, 0x0e}, []byte{0x77, 0x00}), x86asm.RBX, 15},
+		{"cmp ecx, 7; jbe", dec([]byte{0x83, 0xf9, 0x07}, []byte{0x76, 0x00}), x86asm.RCX, 8},
+		{"cmp ecx, 7; jb", dec([]byte{0x83, 0xf9, 0x07}, []byte{0x72, 0x00}), x86asm.RCX, 7},
+		{"cmp ecx, 7; ja", dec([]byte{0x83, 0xf9, 0x07}, []byte{0x77, 0x00}), x86asm.RCX, 8},
+		{"mov ebx, edx; inc edx; cmp edx, 0xe; ja", dec(movEbxEdx, []byte{0xff, 0xc2}, []byte{0x83, 0xfa, 0x0e}, []byte{0x77, 0x00}), x86asm.RBX, 0},
+	} {
+		if got := switchTableCount(tc.window, tc.idx); got != tc.want {
+			t.Errorf("%s: count %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A switch without a provable bound is scanned until the entries stop looking like code; the
+// scan is cut at the first entry that lands inside an already decoded instruction, so neither
+// that entry nor the ones after it become blocks.
+func TestUnboundedSwitchStopsInsideInstruction(t *testing.T) {
+	img := make([]byte, 0x400)
+	pc := uint64(0x100)
+	put := func(b ...byte) uint64 {
+		at := pc
+		copy(img[pc:], b)
+		pc += uint64(len(b))
+		return at
+	}
+	movabs := put(0x48, 0xba, 1, 2, 3, 4, 5, 6, 7, 8) // movabs rdx, imm64 (decoded before the table)
+	lea := put(0x48, 0x8d, 0x05, 0, 0, 0, 0)          // lea rax, [rip+table]
+	put(0x48, 0x63, 0x0c, 0xb0)                       // movsxd rcx, [rax+rsi*4]
+	put(0x48, 0x01, 0xc1)                             // add rcx, rax
+	put(0xff, 0xe1)                                   // jmp rcx
+	case0 := put(0xc3)
+	case1 := put(0xc3)
+	after := put(0xc3) // only an entry past the cut points here
+	const table = 0x200
+	binary.LittleEndian.PutUint32(img[lea+3:], uint32(int32(table-int64(lea+7))))
+	inside := movabs + 3
+	for i, target := range []uint64{case0, case1, inside, after} {
+		binary.LittleEndian.PutUint32(img[table+4*i:], uint32(int32(int64(target)-table)))
+	}
+	d, err := NewDisassembler(switchTestELF(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AnalyzeReachable([]uint64{0x100}); err != nil {
+		t.Fatal(err)
+	}
+	fn := d.Functions[0x100]
+	if fn == nil {
+		t.Fatal("function not recovered")
+	}
+	for _, a := range []uint64{case0, case1} {
+		if fn.Blocks[a] == nil {
+			t.Errorf("case 0x%x is not a block (blocks %#x)", a, fn.BlockOrder)
+		}
+	}
+	for _, a := range []uint64{inside, after} {
+		if fn.Blocks[a] != nil {
+			t.Errorf("0x%x became a block although the table scan should stop at 0x%x (blocks %#x)", a, inside, fn.BlockOrder)
+		}
+	}
+}

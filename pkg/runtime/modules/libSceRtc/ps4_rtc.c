@@ -232,6 +232,10 @@ void shim_sceRtcGetCurrentNetworkTick(GuestContext *ctx) {
     shim_sceRtcGetCurrentTick(ctx);
 }
 
+// Same text as sceRtcFormatRFC3339LocalTime (ps4_rtc_extras.c): the UTC tick is shifted by the
+// given zone offset and printed with the console's two-digit fraction. The earlier version
+// converted through the host's local time zone before adding the offset and printed no
+// fraction, so the zone was applied twice and the text differed from the console's.
 int32_t sceRtcFormatRFC3339(char *pszDateTime, const OrbisRtcTick *pTickUtc, int iTimeZoneMinutes) {
     if (!pszDateTime) {
         return -EINVAL;
@@ -242,25 +246,7 @@ int32_t sceRtcFormatRFC3339(char *pszDateTime, const OrbisRtcTick *pTickUtc, int
     } else {
         tick = *pTickUtc;
     }
-    if (iTimeZoneMinutes != 0) {
-        tick.tick += (int64_t)iTimeZoneMinutes * 60ULL * 1000000ULL;
-    }
-    OrbisDateTime dt;
-    sceRtcSetTick(&dt, &tick);
-    if (iTimeZoneMinutes == 0) {
-        snprintf(pszDateTime, 64, "%04u-%02u-%02uT%02u:%02u:%02uZ",
-                 dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second);
-    } else {
-        int tz = iTimeZoneMinutes;
-        char sign = '+';
-        if (tz < 0) {
-            sign = '-';
-            tz = -tz;
-        }
-        snprintf(pszDateTime, 64, "%04u-%02u-%02uT%02u:%02u:%02u%c%02d:%02d",
-                 dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, sign, tz / 60, tz % 60);
-    }
-    return 0;
+    return ps4_rtc_format_rfc3339(pszDateTime, ps4_rtc_tick_to_unix_us(tick.tick), iTimeZoneMinutes);
 }
 
 int32_t sceRtcParseRFC3339(OrbisRtcTick *pTickUtc, const char *pszDateTime) {

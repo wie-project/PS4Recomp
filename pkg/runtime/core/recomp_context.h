@@ -122,6 +122,64 @@ typedef struct GuestContext {
   uint64_t static_tls_size;
 } GuestContext;
 
+// The TCB slot (guest address fs_base + RECOMP_TCB_CTX_SLOT) that holds the GuestContext
+// pointer of the execution context running on the guest thread (contract at
+// recomp_enter_guest in the emitter's trampoline).
+#define RECOMP_TCB_CTX_SLOT 0x70ULL
+
+// GuestContext offsets that assembly hardcodes: the trampoline (pkg/emitter/asm_trampoline.go)
+// and the lifter's inline sequences (pkg/lifter: x87 stack and control/status words, MXCSR,
+// the flag bytes, the TCB slot). Changing the layout breaks these at build time; update the
+// assembly and pkg/emitter/context_offsets_test.go together with them.
+#ifdef __cplusplus
+#define RECOMP_CTX_OFFSET(field, off) \
+  static_assert(offsetof(GuestContext, field) == (off), "GuestContext." #field " offset is hardcoded in assembly")
+#else
+#define RECOMP_CTX_OFFSET(field, off) \
+  _Static_assert(offsetof(GuestContext, field) == (off), "GuestContext." #field " offset is hardcoded in assembly")
+#endif
+RECOMP_CTX_OFFSET(rax, 0x00);
+RECOMP_CTX_OFFSET(rcx, 0x08);
+RECOMP_CTX_OFFSET(rdx, 0x10);
+RECOMP_CTX_OFFSET(rbx, 0x18);
+RECOMP_CTX_OFFSET(rsp, 0x20);
+RECOMP_CTX_OFFSET(rbp, 0x28);
+RECOMP_CTX_OFFSET(rsi, 0x30);
+RECOMP_CTX_OFFSET(rdi, 0x38);
+RECOMP_CTX_OFFSET(r8, 0x40);
+RECOMP_CTX_OFFSET(r9, 0x48);
+RECOMP_CTX_OFFSET(r10, 0x50);
+RECOMP_CTX_OFFSET(r11, 0x58);
+RECOMP_CTX_OFFSET(r12, 0x60);
+RECOMP_CTX_OFFSET(r13, 0x68);
+RECOMP_CTX_OFFSET(r14, 0x70);
+RECOMP_CTX_OFFSET(r15, 0x78);
+RECOMP_CTX_OFFSET(rip, 0x80);
+RECOMP_CTX_OFFSET(fs_base, 0x88);
+RECOMP_CTX_OFFSET(cf, 0x98);
+RECOMP_CTX_OFFSET(zf, 0x99);
+RECOMP_CTX_OFFSET(sf, 0x9a);
+RECOMP_CTX_OFFSET(of, 0x9b);
+RECOMP_CTX_OFFSET(xmm[0], 0xa0);
+RECOMP_CTX_OFFSET(xmm[2], 0xc0);
+RECOMP_CTX_OFFSET(xmm[4], 0xe0);
+RECOMP_CTX_OFFSET(xmm[6], 0x100);
+RECOMP_CTX_OFFSET(fpu_stack, 0x2a0);
+RECOMP_CTX_OFFSET(fpu_top, 0x2e0);
+RECOMP_CTX_OFFSET(fpu_cw, 0x2e4);
+RECOMP_CTX_OFFSET(fpu_sw, 0x2e6);
+RECOMP_CTX_OFFSET(mxcsr, 0x2e8);
+RECOMP_CTX_OFFSET(mem_base, 0x330);
+#ifdef __cplusplus
+static_assert(sizeof(xmm_reg_t) == 16 && sizeof(((GuestContext *)0)->fpu_stack[0]) == 8 &&
+                  sizeof(((GuestContext *)0)->fpu_top) == 4,
+              "element sizes the assembly assumes");
+#else
+_Static_assert(sizeof(xmm_reg_t) == 16 && sizeof(((GuestContext *)0)->fpu_stack[0]) == 8 &&
+                   sizeof(((GuestContext *)0)->fpu_top) == 4,
+               "element sizes the assembly assumes");
+#endif
+
 #define SHIM_RETURN()                                                          \
   do {                                                                         \
     ctx->rsp += 8;                                                             \
@@ -141,6 +199,7 @@ typedef struct GuestVMExtent {
   bool is_free;
   int prot;
   int flags;
+  int mtype; // memory type set by sceKernelMtypeprotect (0 = write-back onion)
   char name[32];
   struct GuestVMExtent *prev;
   struct GuestVMExtent *next;
@@ -163,16 +222,193 @@ static inline double fpu_pop(GuestContext *ctx) {
 }
 
 // Memory access helpers
+// x86 float -> integer conversions: out-of-range and NaN inputs give the "integer
+// indefinite" value (INT_MIN), not C's undefined behaviour / ARM saturation. The rounding
+// variants use the current rounding mode (round-to-nearest-even by default), like CVTSS2SI.
+static inline int32_t x86_cvtt_f32_i32(float f) {
+  return (f >= -2147483648.0f && f < 2147483648.0f) ? (int32_t)f : INT32_MIN;
+}
+static inline int32_t x86_cvtt_f64_i32(double f) {
+  return (f > -2147483649.0 && f < 2147483648.0) ? (int32_t)f : INT32_MIN;
+}
+static inline int64_t x86_cvtt_f32_i64(float f) {
+  return (f >= -9223372036854775808.0f && f < 9223372036854775808.0f) ? (int64_t)f : INT64_MIN;
+}
+static inline int64_t x86_cvtt_f64_i64(double f) {
+  return (f >= -9223372036854775808.0 && f < 9223372036854775808.0) ? (int64_t)f : INT64_MIN;
+}
+static inline int32_t x86_cvt_f32_i32(float f) { return x86_cvtt_f32_i32(rintf(f)); }
+static inline int32_t x86_cvt_f64_i32(double f) { return x86_cvtt_f64_i32(rint(f)); }
+static inline int64_t x86_cvt_f32_i64(float f) { return x86_cvtt_f32_i64(rintf(f)); }
+static inline int64_t x86_cvt_f64_i64(double f) { return x86_cvtt_f64_i64(rint(f)); }
+
 #define MEM_U8(addr) (*(uint8_t *)((ctx)->mem_base + (uint64_t)(addr)))
 #define MEM_U16(addr) (*(uint16_t *)((ctx)->mem_base + (uint64_t)(addr)))
 #define MEM_U32(addr) (*(uint32_t *)((ctx)->mem_base + (uint64_t)(addr)))
 #define MEM_U64(addr) (*(uint64_t *)((ctx)->mem_base + (uint64_t)(addr)))
 
+// Ordered guest memory access for non-stack addresses. x86 is TSO: every load
+// has acquire and every store release semantics. arm64 is weakly ordered, so
+// lock-free guest code (job queues, spinlocks released with plain stores)
+// breaks with plain accesses. Acquire/release atomics give TSO-equivalent
+// ordering. LDAPR/STLR fault on accesses crossing a 16-byte boundary even
+// with FEAT_LSE2, so those fall back to a plain access plus a fence.
+#define RECOMP_ORD_OK(p, n) ((((uintptr_t)(p)) & 15) + (n) <= 16)
+static inline uint8_t recomp_ld8(GuestContext *ctx, uint64_t a) {
+  return __atomic_load_n((uint8_t *)(ctx->mem_base + a), __ATOMIC_ACQUIRE);
+}
+#define RECOMP_DEF_LD(bits)                                                    \
+  static inline uint##bits##_t recomp_ld##bits(GuestContext *ctx, uint64_t a) { \
+    uint8_t *p = ctx->mem_base + a;                                            \
+    if (__builtin_expect(RECOMP_ORD_OK(p, bits / 8), 1))                       \
+      return __atomic_load_n((uint##bits##_t *)p, __ATOMIC_ACQUIRE);           \
+    uint##bits##_t v;                                                          \
+    __builtin_memcpy(&v, p, sizeof(v));                                        \
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);                                   \
+    return v;                                                                  \
+  }
+RECOMP_DEF_LD(16)
+RECOMP_DEF_LD(32)
+RECOMP_DEF_LD(64)
+static inline void recomp_st8(GuestContext *ctx, uint64_t a, uint8_t v) {
+  __atomic_store_n((uint8_t *)(ctx->mem_base + a), v, __ATOMIC_RELEASE);
+}
+#define RECOMP_DEF_ST(bits)                                                    \
+  static inline void recomp_st##bits(GuestContext *ctx, uint64_t a,            \
+                                     uint##bits##_t v) {                       \
+    uint8_t *p = ctx->mem_base + a;                                            \
+    if (__builtin_expect(RECOMP_ORD_OK(p, bits / 8), 1)) {                     \
+      __atomic_store_n((uint##bits##_t *)p, v, __ATOMIC_RELEASE);              \
+      return;                                                                  \
+    }                                                                          \
+    __atomic_thread_fence(__ATOMIC_RELEASE);                                   \
+    __builtin_memcpy(p, &v, sizeof(v));                                        \
+  }
+RECOMP_DEF_ST(16)
+RECOMP_DEF_ST(32)
+RECOMP_DEF_ST(64)
+// x86 PAUSE: spin-wait hint. On arm64 ISB stalls the pipeline for a short time like PAUSE does
+// (YIELD is a no-op on Apple cores), so guest spin loops do not hammer the cache line at full
+// speed and burn through their spin budgets much faster than on the original hardware.
+#if defined(__aarch64__)
+#define RECOMP_SPIN_PAUSE() __asm__ __volatile__("isb" ::: "memory")
+#elif defined(__x86_64__)
+#define RECOMP_SPIN_PAUSE() __asm__ __volatile__("pause" ::: "memory")
+#else
+#define RECOMP_SPIN_PAUSE() __asm__ __volatile__("" ::: "memory")
+#endif
+
+#define MEM_LD8(addr) recomp_ld8((ctx), (uint64_t)(addr))
+#define MEM_LD16(addr) recomp_ld16((ctx), (uint64_t)(addr))
+#define MEM_LD32(addr) recomp_ld32((ctx), (uint64_t)(addr))
+#define MEM_LD64(addr) recomp_ld64((ctx), (uint64_t)(addr))
+#define MEM_ST8(addr, v) recomp_st8((ctx), (uint64_t)(addr), (v))
+#define MEM_ST16(addr, v) recomp_st16((ctx), (uint64_t)(addr), (v))
+#define MEM_ST32(addr, v) recomp_st32((ctx), (uint64_t)(addr), (v))
+#define MEM_ST64(addr, v) recomp_st64((ctx), (uint64_t)(addr), (v))
+
+// x87 80-bit extended precision <-> host double. The emulated x87 stack holds
+// doubles, but guest code (e.g. libc printf's long double path) stores and
+// reloads 10-byte m80 values and inspects their sign/exponent word directly,
+// so the memory image must use the real extended format.
+static inline double fpu_f80_to_double(const uint8_t *p) {
+  uint64_t mant;
+  uint16_t se;
+  memcpy(&mant, p, 8);
+  memcpy(&se, p + 8, 2);
+  int neg = (se & 0x8000) != 0;
+  int exp = se & 0x7fff;
+  double r;
+  if (exp == 0x7fff) {
+    if ((mant << 1) == 0) {
+      r = INFINITY;
+    } else {
+      uint64_t bits = 0x7ff8000000000000ULL | ((mant >> 11) & 0x000fffffffffffffULL);
+      memcpy(&r, &bits, 8);
+    }
+  } else if (mant == 0) {
+    r = 0.0;
+  } else {
+    int e = (exp == 0 ? 1 : exp) - 16383 - 63;
+    r = ldexp((double)mant, e);
+  }
+  return neg ? -r : r;
+}
+
+static inline void fpu_double_to_f80(double v, uint8_t *p) {
+  uint64_t bits;
+  memcpy(&bits, &v, 8);
+  uint16_t sign = (bits >> 63) ? 0x8000 : 0;
+  int e = (int)((bits >> 52) & 0x7ff);
+  uint64_t frac = bits & 0x000fffffffffffffULL;
+  uint64_t mant;
+  uint16_t exp;
+  if (e == 0x7ff) {
+    exp = 0x7fff;
+    mant = 0x8000000000000000ULL | (frac << 11);
+  } else if (e == 0) {
+    if (frac == 0) {
+      exp = 0;
+      mant = 0;
+    } else {
+      int lz = __builtin_clzll(frac);
+      mant = frac << lz;
+      exp = (uint16_t)(16383 + 63 - 1074 - lz);
+    }
+  } else {
+    exp = (uint16_t)(e - 1023 + 16383);
+    mant = 0x8000000000000000ULL | (frac << 11);
+  }
+  uint16_t se = sign | exp;
+  memcpy(p, &mant, 8);
+  memcpy(p + 8, &se, 2);
+}
+
+#define FPU_LOAD_M80(addr) fpu_f80_to_double((const uint8_t *)((ctx)->mem_base + (uint64_t)(addr)))
+#define FPU_STORE_M80(addr, v) fpu_double_to_f80((v), (uint8_t *)((ctx)->mem_base + (uint64_t)(addr)))
+
+// Round according to the x87 control word rounding-control field (bits 10-11).
+static inline double fpu_round_cw(uint16_t cw, double v) {
+  switch ((cw >> 10) & 3) {
+  case 1: return floor(v);
+  case 2: return ceil(v);
+  case 3: return trunc(v);
+  default: {
+    // round to nearest, ties to even (independent of the host rounding mode)
+    double r = round(v);
+    if (fabs(v - trunc(v)) == 0.5) r = 2.0 * round(v / 2.0);
+    return r;
+  }
+  }
+}
+
+// x87 float -> integer store; out-of-range and NaN produce the "integer
+// indefinite" value (most negative integer of the destination width).
+static inline int64_t fpu_to_i64(double r) {
+  if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0)) return INT64_MIN;
+  return (int64_t)r;
+}
+static inline int32_t fpu_to_i32(double r) {
+  if (!(r >= -2147483648.0 && r < 2147483648.0)) return INT32_MIN;
+  return (int32_t)r;
+}
+static inline int16_t fpu_to_i16(double r) {
+  if (!(r >= -32768.0 && r < 32768.0)) return INT16_MIN;
+  return (int16_t)r;
+}
+
+// Guest TSC frequency reported by sceKernelGetTscFrequency. The guest reads
+// the TSC both through the RDTSC instruction and sceKernelReadTsc, so both must
+// return the same counter in these units.
+#define RECOMP_TSC_FREQ 2130000000ULL
+
 static inline uint64_t recomp_rdtsc(void) {
 #if defined(__aarch64__)
-  uint64_t val;
+  uint64_t val, frq;
   __asm__ volatile("mrs %0, cntvct_el0" : "=r"(val));
-  return val;
+  __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(frq));
+  if (frq == 0) return val;
+  return (uint64_t)(((unsigned __int128)val * RECOMP_TSC_FREQ) / frq);
 #elif defined(__x86_64__)
   uint32_t lo, hi;
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
@@ -440,9 +676,16 @@ static inline void recomp_call_guest(GuestContext *ctx, uint64_t target) {
 #define RECOMP_POP_UNWIND() do { if (__cur_unwind_frame) ctx->unwind_frame = __cur_unwind_frame->prev; } while (0)
 void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip);
 
-// SIMD helpers
+// SIMD helpers. Recompiled code calls recomp_vpcmpistri, recomp_vpcmpe_stri and
+// recomp_vaeskeygenassist in the middle of a guest instruction; those entry points are
+// assembly (trampoline_arm64.s) that keep every vector register and the flags and call the C
+// implementations below. recomp_vpcmpistri/recomp_vpcmpe_stri have the C signature of their
+// implementation; recomp_vaeskeygenassist takes the source in v0 and the round constant in
+// w0 and returns in v0, as the lifter calls it.
 void recomp_vpcmpistri(GuestContext *ctx, const void *src2_ptr, const void *src1_ptr, uint8_t imm8);
 void recomp_vpcmpe_stri(GuestContext *ctx, const void *src2_ptr, const void *src1_ptr, uint8_t imm8);
+void recomp_vpcmpistri_impl(GuestContext *ctx, const void *src2_ptr, const void *src1_ptr, uint8_t imm8);
+void recomp_vpcmpe_stri_impl(GuestContext *ctx, const void *src2_ptr, const void *src1_ptr, uint8_t imm8);
 
 // AES-NI and PCLMULQDQ helpers
 xmm_reg_t recomp_pclmulqdq(uint64_t a, uint64_t b);
@@ -451,7 +694,7 @@ xmm_reg_t recomp_vaesenclast(xmm_reg_t s1, xmm_reg_t s2);
 xmm_reg_t recomp_vaesdec(xmm_reg_t s1, xmm_reg_t s2);
 xmm_reg_t recomp_vaesdeclast(xmm_reg_t s1, xmm_reg_t s2);
 xmm_reg_t recomp_vaesimc(xmm_reg_t s);
-xmm_reg_t recomp_vaeskeygenassist(xmm_reg_t s, uint8_t rcon);
+xmm_reg_t recomp_vaeskeygenassist_impl(xmm_reg_t s, uint8_t rcon);
 
 // CRC32 helpers (Castagnoli 0x1EDC6F41 polynomial)
 static inline uint32_t recomp_crc32_u8(uint32_t crc, uint8_t val) {

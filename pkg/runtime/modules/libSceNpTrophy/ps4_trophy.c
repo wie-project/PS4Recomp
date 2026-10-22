@@ -296,3 +296,18 @@ void shim_sceNpTrophyShowTrophyList(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)ret;
     SHIM_RETURN();
 }
+
+// sceNpTrophyGetTrophyUnlockState(context, handle, SceNpTrophyFlagArray *flags, uint32_t *count)
+// No trophies are tracked on the host: report every trophy as locked.
+void shim_sceNpTrophyGetTrophyUnlockState(GuestContext *ctx) {
+    uint64_t flags_addr = ctx->rdx;
+    uint64_t count_addr = ctx->rcx;
+    if (flags_addr) {
+        memset(ctx->mem_base + flags_addr, 0, 16); // 128-bit flag array
+    }
+    if (count_addr) {
+        *(uint32_t *)(ctx->mem_base + count_addr) = 0;
+    }
+    ctx->rax = 0;
+    SHIM_RETURN();
+}

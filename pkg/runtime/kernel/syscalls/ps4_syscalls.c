@@ -1,3 +1,4 @@
+#include "ps4_hitch.h"
 #include "recomp_runtime.h"
 #include "ps4_syscalls.h"
 #include "ps4_vfs.h"
@@ -12,6 +13,12 @@
 #include <sys/time.h>
 #include <time.h>
 #include <dirent.h>
+#include <pthread.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+static void guest_dir_cache_drop_fd(int fd);
 
 // PS4 specific: sceKernelUsleep sleeps for microseconds
 void shim_sceKernelUsleep(GuestContext *ctx) {
@@ -71,10 +78,12 @@ void shim_writev(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-// Exit (does not return)
+// Exit (does not return). Through ps4_host_quit, as the host's own quit paths: the pipeline
+// archive is saved and the log drained, and no static destructors run while game threads and
+// Metal completion handlers still use global state.
 void shim_exit(GuestContext *ctx) {
   int status = (int)ctx->rdi;
-  exit(status);
+  ps4_host_quit(status);
 }
 
 // errno pointer (allocated within dynamic TLS space)
@@ -189,7 +198,8 @@ void shim_mmap(GuestContext *ctx) {
   } else {
     // If not anonymous and valid fd, read file data into the mapped memory
     if (!(flags & 0x1000) && fd >= 0) {
-      ssize_t nread = pread(fd, ctx->mem_base + alloc_addr, len, offset);
+      ssize_t nread;
+      PS4_HITCH_TIMED(PS4_HITCH_IO, nread = pread(fd, ctx->mem_base + alloc_addr, len, offset));
       if (nread < 0) {
         fprintf(stderr, "[ps4-sys] mmap file read FAILED: fd=%d offset=%lld len=%zu errno=%d (%s)\n",
                 fd, (long long)offset, len, errno, strerror(errno));
@@ -247,7 +257,8 @@ void shim_read(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
   uint64_t buf_addr = ctx->rsi;
   size_t count = (size_t)ctx->rdx;
-  ssize_t ret = read(fd, ctx->mem_base + buf_addr, count);
+  ssize_t ret;
+  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = read(fd, ctx->mem_base + buf_addr, count));
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -291,7 +302,8 @@ void shim_sceKernelPread(GuestContext *ctx) {
   size_t nbytes = (size_t)ctx->rdx;
   off_t offset = (off_t)ctx->rcx;
 
-  ssize_t ret = pread(fd, ctx->mem_base + buf_addr, nbytes, offset);
+  ssize_t ret;
+  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = pread(fd, ctx->mem_base + buf_addr, nbytes, offset));
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -321,7 +333,8 @@ void shim_sceKernelPreadv(GuestContext *ctx) {
     host_iov[i].iov_len = (size_t)guest_iov[i].iov_len;
   }
 
-  ssize_t ret = preadv(fd, host_iov, iovcnt, offset);
+  ssize_t ret;
+  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = preadv(fd, host_iov, iovcnt, offset));
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -368,6 +381,7 @@ void shim_open(GuestContext *ctx) {
 // close
 void shim_close(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
+  guest_dir_cache_drop_fd(fd);
   int ret = close(fd);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
@@ -788,16 +802,150 @@ void shim_mlock(GuestContext *ctx) {
 }
 
 // getdents
+
+// ---------------------------------------------------------------------------
+// Directory enumeration in the guest's FreeBSD dirent format.
+// Host getdirentries64 returns Darwin dirent64 records, which the guest cannot
+// parse. The directory listing is snapshotted per fd (keyed by dev/ino) and
+// served as FreeBSD records:
+//   struct dirent { uint32_t d_fileno; uint16_t d_reclen; uint8_t d_type;
+//                   uint8_t d_namlen; char d_name[d_namlen + 1]; } (4-aligned)
+// AppleDouble "._*" files (created by macOS on exFAT/FAT volumes) are hidden.
+typedef struct GuestDirCache {
+  int fd;
+  dev_t dev;
+  ino_t ino;
+  int count;
+  int pos;
+  char **names;
+  uint32_t *inos;
+  uint8_t *types;
+} GuestDirCache;
+
+#define GUEST_DIR_CACHE_SLOTS 64
+static GuestDirCache g_dir_cache[GUEST_DIR_CACHE_SLOTS];
+static pthread_mutex_t g_dir_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void guest_dir_cache_free(GuestDirCache *c) {
+  for (int i = 0; i < c->count; i++) free(c->names[i]);
+  free(c->names);
+  free(c->inos);
+  free(c->types);
+  memset(c, 0, sizeof(*c));
+  c->fd = -1;
+}
+
+static void guest_dir_cache_drop_fd(int fd) {
+  pthread_mutex_lock(&g_dir_cache_lock);
+  for (int i = 0; i < GUEST_DIR_CACHE_SLOTS; i++) {
+    if (g_dir_cache[i].names && g_dir_cache[i].fd == fd) guest_dir_cache_free(&g_dir_cache[i]);
+  }
+  pthread_mutex_unlock(&g_dir_cache_lock);
+}
+
+static GuestDirCache *guest_dir_cache_get(int fd) {
+  struct stat st;
+  if (fstat(fd, &st) != 0) return NULL;
+  if (!S_ISDIR(st.st_mode)) {
+    errno = ENOTDIR;
+    return NULL;
+  }
+  GuestDirCache *slot = NULL;
+  for (int i = 0; i < GUEST_DIR_CACHE_SLOTS; i++) {
+    GuestDirCache *c = &g_dir_cache[i];
+    if (c->names && c->fd == fd) {
+      if (c->dev == st.st_dev && c->ino == st.st_ino) return c;
+      guest_dir_cache_free(c);
+      slot = c;
+      break;
+    }
+  }
+  if (!slot) {
+    for (int i = 0; i < GUEST_DIR_CACHE_SLOTS && !slot; i++) {
+      if (!g_dir_cache[i].names) slot = &g_dir_cache[i];
+    }
+    if (!slot) {
+      slot = &g_dir_cache[0];
+      guest_dir_cache_free(slot);
+    }
+  }
+  int dfd = dup(fd);
+  if (dfd < 0) return NULL;
+  DIR *d = fdopendir(dfd);
+  if (!d) {
+    close(dfd);
+    return NULL;
+  }
+  rewinddir(d);
+  int cap = 64;
+  slot->names = (char **)calloc(cap, sizeof(char *));
+  slot->inos = (uint32_t *)calloc(cap, sizeof(uint32_t));
+  slot->types = (uint8_t *)calloc(cap, sizeof(uint8_t));
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL) {
+    if (strncmp(e->d_name, "._", 2) == 0) continue;
+    if (strlen(e->d_name) > 255) continue;
+    if (slot->count == cap) {
+      cap *= 2;
+      slot->names = (char **)realloc(slot->names, cap * sizeof(char *));
+      slot->inos = (uint32_t *)realloc(slot->inos, cap * sizeof(uint32_t));
+      slot->types = (uint8_t *)realloc(slot->types, cap * sizeof(uint8_t));
+    }
+    slot->names[slot->count] = strdup(e->d_name);
+    slot->inos[slot->count] = (uint32_t)e->d_ino ? (uint32_t)e->d_ino : (uint32_t)(slot->count + 1);
+    slot->types[slot->count] = e->d_type; // DT_* values match FreeBSD
+    slot->count++;
+  }
+  closedir(d); // closes dfd
+  slot->fd = fd;
+  slot->dev = st.st_dev;
+  slot->ino = st.st_ino;
+  slot->pos = 0;
+  return slot;
+}
+
+// Fills buf with FreeBSD dirents. *basep (if given) is the entry index; a
+// caller-supplied base restarts enumeration from that index. Returns bytes
+// written, 0 at end, or -1 with errno set.
+static int guest_getdirentries(int fd, char *buf, size_t nbytes, int64_t *basep) {
+  pthread_mutex_lock(&g_dir_cache_lock);
+  GuestDirCache *c = guest_dir_cache_get(fd);
+  if (!c) {
+    pthread_mutex_unlock(&g_dir_cache_lock);
+    return -1;
+  }
+  if (basep && *basep >= 0 && *basep <= c->count) c->pos = (int)*basep;
+  if (basep && *basep < 0) c->pos = 0;
+  size_t off = 0;
+  while (c->pos < c->count) {
+    size_t namlen = strlen(c->names[c->pos]);
+    size_t reclen = (8 + namlen + 1 + 3) & ~(size_t)3;
+    if (off + reclen > nbytes) break;
+    char *r = buf + off;
+    memset(r, 0, reclen);
+    *(uint32_t *)(r + 0) = c->inos[c->pos];
+    *(uint16_t *)(r + 4) = (uint16_t)reclen;
+    *(uint8_t *)(r + 6) = c->types[c->pos];
+    *(uint8_t *)(r + 7) = (uint8_t)namlen;
+    memcpy(r + 8, c->names[c->pos], namlen);
+    off += reclen;
+    c->pos++;
+  }
+  if (off == 0 && c->pos < c->count) {
+    pthread_mutex_unlock(&g_dir_cache_lock);
+    errno = EINVAL;
+    return -1;
+  }
+  if (basep) *basep = c->pos;
+  pthread_mutex_unlock(&g_dir_cache_lock);
+  return (int)off;
+}
+
 void shim_getdents(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
   char *buf = (char *)(ctx->mem_base + ctx->rsi);
   size_t nbytes = (size_t)ctx->rdx;
-#if defined(__APPLE__)
-  __darwin_off_t basep = 0;
-  int ret = (int)syscall(344 /* SYS_getdirentries64 */, fd, buf, nbytes, &basep);
-#else
-  int ret = getdents(fd, buf, nbytes);
-#endif
+  int ret = guest_getdirentries(fd, buf, nbytes, NULL);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)-1;
@@ -813,26 +961,12 @@ void shim_getdirentries(GuestContext *ctx) {
   uint64_t buf_addr = ctx->rsi;
   size_t nbytes = (size_t)ctx->rdx;
   uint64_t basep_addr = ctx->rcx;
-  char *buf = (buf_addr && ctx->mem_base) ? (char *)(ctx->mem_base + buf_addr) : NULL;
-#if defined(__APPLE__)
-  __darwin_off_t basep = 0;
-  if (basep_addr && ctx->mem_base) {
-    basep = *(__darwin_off_t *)(ctx->mem_base + basep_addr);
+  char *buf = (char *)(ctx->mem_base + buf_addr);
+  int64_t base = -2;
+  int ret = guest_getdirentries(fd, buf, nbytes, basep_addr ? &base : NULL);
+  if (ret >= 0 && basep_addr) {
+    *(int64_t *)(ctx->mem_base + basep_addr) = base;
   }
-  int ret = (int)syscall(344 /* SYS_getdirentries64 */, fd, buf, nbytes, &basep);
-  if (ret >= 0 && basep_addr && ctx->mem_base) {
-    *(__darwin_off_t *)(ctx->mem_base + basep_addr) = basep;
-  }
-#else
-  long basep = 0;
-  if (basep_addr && ctx->mem_base) {
-    basep = *(long *)(ctx->mem_base + basep_addr);
-  }
-  int ret = getdirentries(fd, buf, nbytes, &basep);
-  if (ret >= 0 && basep_addr && ctx->mem_base) {
-    *(long *)(ctx->mem_base + basep_addr) = basep;
-  }
-#endif
   if (ret < 0) {
     set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)-1;
@@ -847,26 +981,12 @@ void shim_sceKernelGetdirentries(GuestContext *ctx) {
   uint64_t buf_addr = ctx->rsi;
   size_t nbytes = (size_t)ctx->rdx;
   uint64_t basep_addr = ctx->rcx;
-  char *buf = (buf_addr && ctx->mem_base) ? (char *)(ctx->mem_base + buf_addr) : NULL;
-#if defined(__APPLE__)
-  __darwin_off_t basep = 0;
-  if (basep_addr && ctx->mem_base) {
-    basep = *(__darwin_off_t *)(ctx->mem_base + basep_addr);
+  char *buf = (char *)(ctx->mem_base + buf_addr);
+  int64_t base = -2;
+  int ret = guest_getdirentries(fd, buf, nbytes, basep_addr ? &base : NULL);
+  if (ret >= 0 && basep_addr) {
+    *(int64_t *)(ctx->mem_base + basep_addr) = base;
   }
-  int ret = (int)syscall(344 /* SYS_getdirentries64 */, fd, buf, nbytes, &basep);
-  if (ret >= 0 && basep_addr && ctx->mem_base) {
-    *(__darwin_off_t *)(ctx->mem_base + basep_addr) = basep;
-  }
-#else
-  long basep = 0;
-  if (basep_addr && ctx->mem_base) {
-    basep = *(long *)(ctx->mem_base + basep_addr);
-  }
-  int ret = getdirentries(fd, buf, nbytes, &basep);
-  if (ret >= 0 && basep_addr && ctx->mem_base) {
-    *(long *)(ctx->mem_base + basep_addr) = basep;
-  }
-#endif
   if (ret < 0) {
     ctx->rax = 0x80020000 | (uint32_t)errno;
   } else {
@@ -1026,14 +1146,15 @@ void shim_syscall(GuestContext *ctx) {
   switch (num) {
   case 1: { // SYS_exit
     int status = (int)ctx->rsi;
-    exit(status);
+    ps4_host_quit(status); // as shim_exit
     break;
   }
   case 3: { // SYS_read
     int fd = (int)ctx->rsi;
     uint64_t buf = ctx->rdx;
     size_t count = (size_t)ctx->rcx;
-    ssize_t ret = read(fd, ctx->mem_base + buf, count);
+    ssize_t ret;
+    PS4_HITCH_TIMED(PS4_HITCH_IO, ret = read(fd, ctx->mem_base + buf, count));
     if (ret < 0) set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();
@@ -1145,7 +1266,8 @@ void shim_syscall(GuestContext *ctx) {
       ctx->rax = (uint64_t)-1;
     } else {
       if (!(flags & 0x1000) && fd >= 0) {
-        ssize_t nread = pread(fd, ctx->mem_base + alloc_addr, len, offset);
+        ssize_t nread;
+        PS4_HITCH_TIMED(PS4_HITCH_IO, nread = pread(fd, ctx->mem_base + alloc_addr, len, offset));
         if (nread < 0) {
           fprintf(stderr, "[ps4-sys] syscall 477 file read FAILED: fd=%d offset=%lld len=%zu errno=%d (%s)\n",
                   fd, (long long)offset, len, errno, strerror(errno));

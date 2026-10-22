@@ -57,6 +57,9 @@ void shim_sceNetGetMemoryPoolStats(GuestContext *ctx);
 
 void shim_sceNetGetMacAddress(GuestContext *ctx);
 void shim_sceNetGetSockInfo(GuestContext *ctx);
+void shim_sceNetEtherNtostr(GuestContext *ctx);
+// Returns 0 or the errno value (EFAULT, ENOSPC) the shim reports with -1.
+int ps4_net_ether_ntostr(const uint8_t *addr, char *str, size_t len);
 
 #ifdef __cplusplus
 }

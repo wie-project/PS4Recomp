@@ -1,6 +1,7 @@
 #include "ps4_app_content.h"
 #include "ps4_sfo.h"
 #include "ps4_vfs.h"
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,18 +88,81 @@ static void scan_addcont_directory(const char *addon_path) {
     closedir(dir);
 }
 
-static void ensure_temp_dir(char *out_path, size_t out_sz) {
-    const char *app_root = ps4_vfs_get_app_root();
-    if (app_root && *app_root) {
-        snprintf(out_path, out_sz, "%s/temp0", app_root);
+static int app_content_mkdir_p(const char *path, mode_t mode) {
+    char tmp[1024];
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(tmp)) {
+        return -1;
+    }
+    memcpy(tmp, path, len + 1);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
+                return -1;
+            }
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    return 0;
+}
+
+// Host backing directory for the per-title download data area (/download0).
+// On a real PS4 /download0 is always mounted for the running application
+// (it is the writable "download data" partition); games treat it as an
+// existing root and only create sub-directories beneath it. Keep it out of
+// the (read-only) game directory: $PS4_DOWNLOAD0_DIR, else
+// ~/Library/Application Support/PS4Recomp/download0/<TITLE_ID>.
+static void ensure_download0_dir(char *out_path, size_t out_sz) {
+    const char *env_dir = getenv("PS4_DOWNLOAD0_DIR");
+    if (env_dir && *env_dir) {
+        snprintf(out_path, out_sz, "%s", env_dir);
+    } else {
+        const char *home = getenv("HOME");
+        const char *data_dir = getenv("PS4RECOMP_DATA_DIR");
+        const char *tid = g_title_id[0] ? g_title_id : "CUSA00000";
+        if (data_dir && *data_dir) {
+            snprintf(out_path, out_sz, "%s/download0/%s", data_dir, tid);
+        } else if (home && *home) {
+            snprintf(out_path, out_sz, "%s/Library/Application Support/PS4Recomp/download0/%s", home, tid);
+        } else {
+            snprintf(out_path, out_sz, "/tmp/PS4Recomp/download0/%s", tid);
+        }
+    }
+    if (app_content_mkdir_p(out_path, 0755) != 0) {
+        snprintf(out_path, out_sz, "/tmp/ps4_app_download0");
         mkdir(out_path, 0755);
-        if (access(out_path, W_OK) == 0) {
+    }
+}
+
+// /temp0 lives next to /download0 in the user's Application Support folder:
+// the game directory is treated as read-only.
+static void ensure_temp_dir(char *out_path, size_t out_sz) {
+    const char *home = getenv("HOME");
+    const char *data_dir = getenv("PS4RECOMP_DATA_DIR");
+    const char *tid = g_title_id[0] ? g_title_id : "CUSA00000";
+    if (data_dir && *data_dir) {
+        snprintf(out_path, out_sz, "%s/temp0/%s", data_dir, tid);
+        if (app_content_mkdir_p(out_path, 0755) == 0 && access(out_path, W_OK) == 0) {
+            return;
+        }
+    } else if (home && *home) {
+        snprintf(out_path, out_sz, "%s/Library/Application Support/PS4Recomp/temp0/%s", home, tid);
+        if (app_content_mkdir_p(out_path, 0755) == 0 && access(out_path, W_OK) == 0) {
             return;
         }
     }
-    // Fallback to /tmp
     snprintf(out_path, out_sz, "/tmp/ps4_app_temp0");
     mkdir(out_path, 0755);
+}
+
+static void mount_download0(void) {
+    char dl_dir[1024];
+    ensure_download0_dir(dl_dir, sizeof(dl_dir));
+    ps4_vfs_mount("/download0", dl_dir);
 }
 
 int32_t sceAppContentInitialize(const OrbisAppContentInitParam *initParam, OrbisAppContentBootParam *bootParam) {
@@ -151,6 +215,9 @@ int32_t sceAppContentInitialize(const OrbisAppContentInitParam *initParam, Orbis
     ensure_temp_dir(temp_dir, sizeof(temp_dir));
     ps4_vfs_mount("/temp0", temp_dir);
 
+    // Mount /download0 (always present for an application on real hardware).
+    mount_download0();
+
     // Scan for DLCs
     const char *app_root = ps4_vfs_get_app_root();
     if (app_root && *app_root) {
@@ -166,6 +233,38 @@ int32_t sceAppContentInitialize(const OrbisAppContentInitParam *initParam, Orbis
     return 0;
 }
 
+/* USER_DEFINED_PARAM_<n> lookup: env override PS4_APPPARAM_USER<n>, then the
+ * app's param.sfo, then a small table of known values for titles whose dumps
+ * commonly ship a wrong param.sfo (e.g. a DLC's sfo in place of the game's).
+ *
+ * The Last of Us Remastered (all SKUs CUSA00552..CUSA00560) reads
+ * USER_DEFINED_PARAM_1 at boot and formats it as "CUSA%05d" to select its SKU
+ * record (region + allowed-language mask). With 0 it falls back to the US SKU
+ * CUSA00552, whose mask only allows English/French, so the system language
+ * (e.g. Russian on the EU disc CUSA00557) is ignored. */
+static int32_t user_defined_param(int32_t paramId) {
+    char key[32];
+    snprintf(key, sizeof(key), "PS4_APPPARAM_USER%d", paramId);
+    const char *env = getenv(key);
+    if (env && *env) return (int32_t)strtol(env, NULL, 0);
+
+    int32_t v = 0;
+    snprintf(key, sizeof(key), "USER_DEFINED_PARAM_%d", paramId);
+    if (ps4_sfo_get_int(&g_app_sfo, key, &v)) return v;
+
+    // Some titles store their own numeric title id in USER_DEFINED_PARAM_1 and pick
+    // their regional SKU from it (e.g. formatting it with "CUSA%05d"). Repacks whose
+    // param.sfo comes from a DLC lack the key; fall back to the digits of TITLE_ID.
+    if (paramId == ORBIS_APP_CONTENT_APPPARAM_ID_USER_DEFINED_PARAM_1 && strlen(g_title_id) == 9 &&
+        isalpha((unsigned char)g_title_id[0]) && isdigit((unsigned char)g_title_id[4])) {
+        v = (int32_t)strtol(g_title_id + 4, NULL, 10);
+        fprintf(stderr, "[ps4-appcontent] USER_DEFINED_PARAM_1 missing from param.sfo; using %d from %s\n", v,
+                g_title_id);
+        return v;
+    }
+    return 0;
+}
+
 int32_t sceAppContentAppParamGetInt(int32_t paramId, int32_t *value) {
     if (!value) {
         return (int32_t)ORBIS_APP_CONTENT_ERROR_PARAMETER;
@@ -176,24 +275,10 @@ int32_t sceAppContentAppParamGetInt(int32_t paramId, int32_t *value) {
         *value = ORBIS_APP_CONTENT_APPPARAM_SKU_FLAG_FULL;
         return 0;
     case ORBIS_APP_CONTENT_APPPARAM_ID_USER_DEFINED_PARAM_1:
-        if (!ps4_sfo_get_int(&g_app_sfo, "USER_DEFINED_PARAM_1", value)) {
-            *value = 0;
-        }
-        return 0;
     case ORBIS_APP_CONTENT_APPPARAM_ID_USER_DEFINED_PARAM_2:
-        if (!ps4_sfo_get_int(&g_app_sfo, "USER_DEFINED_PARAM_2", value)) {
-            *value = 0;
-        }
-        return 0;
     case ORBIS_APP_CONTENT_APPPARAM_ID_USER_DEFINED_PARAM_3:
-        if (!ps4_sfo_get_int(&g_app_sfo, "USER_DEFINED_PARAM_3", value)) {
-            *value = 0;
-        }
-        return 0;
     case ORBIS_APP_CONTENT_APPPARAM_ID_USER_DEFINED_PARAM_4:
-        if (!ps4_sfo_get_int(&g_app_sfo, "USER_DEFINED_PARAM_4", value)) {
-            *value = 0;
-        }
+        *value = user_defined_param(paramId);
         return 0;
     default:
         return (int32_t)ORBIS_APP_CONTENT_ERROR_PARAMETER;
@@ -295,9 +380,12 @@ int32_t sceAppContentDownloadDataGetAvailableSpaceKb(const OrbisAppContentMountP
         return (int32_t)ORBIS_APP_CONTENT_ERROR_PARAMETER;
     }
 
-    const char *app_root = ps4_vfs_get_app_root();
+    char dl_dir[1024];
+    ensure_download0_dir(dl_dir, sizeof(dl_dir));
+    ps4_vfs_mount("/download0", dl_dir);
+
     struct statvfs st;
-    if (app_root && statvfs(app_root, &st) == 0) {
+    if (statvfs(dl_dir, &st) == 0) {
         *availableSpaceKb = ((uint64_t)st.f_bavail * (uint64_t)st.f_frsize) / 1024;
     } else {
         *availableSpaceKb = 10485760ULL; // 10 GB fallback in KB

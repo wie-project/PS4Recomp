@@ -38,6 +38,8 @@ type Config struct {
 	AppDir        string
 	CopyResources bool
 	Asan          bool
+	// TSO: acquire loads and release stores for non-stack guest memory (x86 memory ordering).
+	TSO bool
 }
 
 const banner = `
@@ -64,6 +66,7 @@ Options:
       -app-dir <dir>      Host directory mapping to /app0 for game assets (auto-detected if omitted)
       -copy-resources     Copy all game assets/resources into macOS .app bundle Resources/ (default: false)
       -asan               Compile with AddressSanitizer and LeakSanitizer (default: false)
+      -tso                x86 memory ordering: acquire/release for non-stack guest memory (default: true)
   -h, -help               Show this help message
 `
 
@@ -109,6 +112,7 @@ func ParseArgs(args []string) (*Config, error) {
 		Jobs:      runtime.NumCPU(),
 		OptLevel:  "2",
 		ChunkSize: 250,
+		TSO:       true,
 	}
 
 	var help bool
@@ -135,6 +139,7 @@ func ParseArgs(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.CopyResources, "copy-resources", false, "Copy all game assets/resources into macOS .app bundle Resources/")
 	fs.BoolVar(&cfg.CopyResources, "bundle-resources", false, "Copy all game assets/resources into macOS .app bundle Resources/ (alias)")
 	fs.BoolVar(&cfg.Asan, "asan", false, "Compile with AddressSanitizer and LeakSanitizer")
+	fs.BoolVar(&cfg.TSO, "tso", cfg.TSO, "x86 memory ordering: acquire/release for non-stack guest memory")
 	fs.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "Verbose logging")
 	fs.BoolVar(&cfg.Verbose, "v", cfg.Verbose, "Verbose logging (short)")
 	fs.BoolVar(&help, "help", false, "Show help message")
@@ -341,6 +346,10 @@ func Execute(args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed scanning runtime files: %w", err)
 	}
+	if gcnInc, _ := findGcnRecompiler(); gcnInc != "" && !seenInc[gcnInc] {
+		seenInc[gcnInc] = true
+		runtimeIncludeDirs = append(runtimeIncludeDirs, gcnInc)
+	}
 	spirvInc, _ := findSpirvCross()
 	if spirvInc != "" && !seenInc[spirvInc] {
 		seenInc[spirvInc] = true
@@ -370,6 +379,7 @@ func Execute(args []string) error {
 	}
 
 	l := lifter.NewArm64Lifter(knownFuncs)
+	l.SetTSO(cfg.TSO)
 	em := emitter.NewAsmEmitter(loaded, d, l)
 	em.AppDir = cfg.AppDir
 	em.Modules = moduleInfos
@@ -385,6 +395,14 @@ func Execute(args []string) error {
 		return fmt.Errorf("failed to write HLE report: %w", err)
 	}
 	fmt.Print(hle.SyscallSummary())
+	fmt.Printf("             Unresolved imports bound to the abort stub: %d calls, %d data (GLOB_DAT/R_64)\n",
+		em.UnresolvedFuncImports, em.UnresolvedDataImports)
+	if len(em.UnresolvedDataNames) > 0 {
+		fmt.Printf("             Unresolved data imports: %s\n", strings.Join(em.UnresolvedDataNames, ", "))
+	}
+	for _, w := range em.Warnings {
+		fmt.Printf("             Warning: %s\n", w)
+	}
 	fmt.Printf("             Wrote %s\n", hlePath)
 
 	if cfg.AppDir != "" {
@@ -397,8 +415,18 @@ func Execute(args []string) error {
 	}
 
 	cFiles = append(cFiles, runtimeCFiles...)
-	fmt.Printf("             Emitted %d C source files | Time: %v\n",
-		len(cFiles), time.Since(stepStart).Round(time.Millisecond))
+	tso := "on (acquire/release for non-stack guest memory)"
+	if !cfg.TSO {
+		tso = "off"
+	}
+	nAsm := 0
+	for _, f := range cFiles {
+		if strings.HasSuffix(f, ".s") {
+			nAsm++
+		}
+	}
+	fmt.Printf("             Emitted %d source files (%d assembly, %d C) | TSO: %s | Time: %v\n",
+		len(cFiles), nAsm, len(cFiles)-nAsm, tso, time.Since(stepStart).Round(time.Millisecond))
 
 	// Step 4: Compile with Clang
 	targetBin := filepath.Join(cfg.OutDir, "ps4_app")
@@ -483,7 +511,9 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		}
 	}
 
-	cflags := []string{"-O" + optLevel, "-fvisibility=hidden", "-Wno-parentheses-equality"}
+	// -ffp-contract=off: keep clang from fusing a*b+c into an arm64 FMA in C runtime code
+	// (x86 SSE/AVX without FMA never fuses, and runtime helpers emulate guest float math).
+	cflags := []string{"-O" + optLevel, "-ffp-contract=off", "-fvisibility=hidden", "-Wno-parentheses-equality"}
 	if asan {
 		cflags = append(cflags, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
 	}
@@ -534,9 +564,12 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	}
 	if runtime.GOOS == "darwin" {
 		ldflags = append(ldflags, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
-			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox")
+			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-lz")
 	} else {
 		ldflags = append(ldflags, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
+	}
+	if _, gcnLib := findGcnRecompiler(); gcnLib != "" {
+		ldflags = append(ldflags, gcnLib)
 	}
 	_, spirvLib := findSpirvCross()
 	if spirvLib != "" {
@@ -668,6 +701,7 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 
 				clangArgs := []string{
 					"-O" + optLevel,
+					"-ffp-contract=off",
 					"-fvisibility=hidden",
 					"-Wno-parentheses-equality",
 					"-I" + outDir,
@@ -726,9 +760,12 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 	}
 	if runtime.GOOS == "darwin" {
 		linkArgs = append(linkArgs, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
-			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox")
+			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-lz")
 	} else {
 		linkArgs = append(linkArgs, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
+	}
+	if _, gcnLib := findGcnRecompiler(); gcnLib != "" {
+		linkArgs = append(linkArgs, gcnLib)
 	}
 	_, spirvLib := findSpirvCross()
 	if spirvLib != "" {
@@ -1088,12 +1125,33 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 	}
 
 	// 5. Generate Contents/Info.plist
-	iconXml := ""
-	if hasIcon {
-		iconXml = "    <key>CFBundleIconFile</key>\n    <string>AppIcon</string>\n"
+	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(appInfoPlist(appName, hasIcon)), 0o644); err != nil {
+		return "", fmt.Errorf("failed to write Info.plist: %w", err)
 	}
 
-	plistContent := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	// 6. Sign the bundle ad hoc: binds Info.plist and seals the resources, so the system (Game
+	// Mode, Metal shader cache, Gatekeeper on a local build) sees one consistent app identity.
+	// A failure is reported but does not fail the build: the unsigned-bundle state of older
+	// builds still runs.
+	if err := signAppBundle(bundleDir); err != nil {
+		// a seal of an earlier build no longer matches: drop it, so the bundle is plainly
+		// linker-signed instead of carrying an invalid signature
+		_ = os.RemoveAll(filepath.Join(contentsDir, "_CodeSignature"))
+		fmt.Printf("             Warning: %v; the bundle is unsigned (Game Mode keys are not bound)\n", err)
+	}
+
+	return bundleDir, nil
+}
+
+// appInfoPlist is the Contents/Info.plist of a generated game bundle. LSSupportsGameMode and the
+// games category let macOS run it in Game Mode (CPU and GPU priority, lower Bluetooth latency for
+// controllers) when it is full screen.
+func appInfoPlist(appName string, hasIcon bool) string {
+	iconXML := ""
+	if hasIcon {
+		iconXML = "    <key>CFBundleIconFile</key>\n    <string>AppIcon</string>\n"
+	}
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -1115,17 +1173,56 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
     <string>1.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.games</string>
+    <key>LSSupportsGameMode</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
 %s</dict>
 </plist>
-`, appName, appName, appName, appName, iconXml)
+`, appName, appName, appName, appName, iconXML)
+}
 
-	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(plistContent), 0o644); err != nil {
-		return "", fmt.Errorf("failed to write Info.plist: %w", err)
+// signAppBundle signs the bundle ad hoc and verifies the signature strictly.
+func signAppBundle(bundleDir string) error {
+	// Finder info and resource forks on files copied from the game folder are "detritus" that a
+	// strict signature does not allow.
+	if out, err := exec.Command("xattr", "-cr", bundleDir).CombinedOutput(); err != nil {
+		return fmt.Errorf("xattr -cr %s: %w: %s", bundleDir, err, strings.TrimSpace(string(out)))
 	}
+	if out, err := exec.Command("codesign", "--force", "--sign", "-", bundleDir).CombinedOutput(); err != nil {
+		return fmt.Errorf("codesign %s: %w: %s", bundleDir, err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("codesign", "--verify", "--deep", "--strict", bundleDir).CombinedOutput(); err != nil {
+		return fmt.Errorf("codesign --verify %s: %w: %s", bundleDir, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
-	return bundleDir, nil
+// findGcnRecompiler locates the GCN shader recompiler library (shadPS4's
+// shader_recompiler packaged in 3rdparty/gcn-recompiler): include dir and the
+// prebuilt static library.
+func findGcnRecompiler() (string, string) {
+	candidates := []string{
+		"3rdparty/gcn-recompiler",
+	}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		candidates = append(candidates,
+			filepath.Join(exeDir, "3rdparty", "gcn-recompiler"),
+			filepath.Join(exeDir, "..", "3rdparty", "gcn-recompiler"),
+		)
+	}
+	for _, dir := range candidates {
+		libPath := filepath.Join(dir, "libgcn_recompiler.a")
+		if _, err := os.Stat(libPath); err == nil {
+			absInc, _ := filepath.Abs(filepath.Join(dir, "include"))
+			absLib, _ := filepath.Abs(libPath)
+			return absInc, absLib
+		}
+	}
+	return "", ""
 }
 
 func findSpirvCross() (string, string) {
@@ -1204,4 +1301,3 @@ func findMinimp3() string {
 	}
 	return ""
 }
-

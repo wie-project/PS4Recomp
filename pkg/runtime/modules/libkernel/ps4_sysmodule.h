@@ -51,10 +51,45 @@ void recomp_module_register_init(const char *filename, const uint64_t *inits,
                                  size_t count);
 void recomp_module_register_unwind_info(const RecompModuleUnwindInfo *info);
 const RecompModuleUnwindInfo *recomp_module_find_by_addr(uint64_t addr);
-const RecompModuleUnwindInfo *recomp_module_find_by_handle(int32_t handle);
+// True when addr is in an executable segment of a registered guest module. Takes no lock
+// (modules register before guest code runs), for crash reports and other signal context.
+bool recomp_module_text_contains(uint64_t addr);
 void recomp_register_guest_modules(void);
 void recomp_module_start(GuestContext *ctx, int32_t handle);
 uint64_t recomp_resolve_symbol(const char *module_name, const char *symbol);
+
+// Module enumeration for sceKernelGetModuleList / sceKernelGetModuleInfo.
+// Entry 0 is always the main executable (handle 0); registered PRXs follow
+// (a handle is assigned on first enumeration, same one LoadStartModule returns).
+typedef struct RecompModuleSnapshot {
+  int32_t handle;
+  char name[256];
+  int has_range;
+  uint64_t start_addr;
+  uint64_t end_addr;
+  uint64_t seg0_addr;
+  uint64_t seg0_size;
+  uint64_t eh_frame_hdr_addr;
+  uint64_t eh_frame_hdr_size;
+  uint64_t eh_frame_addr;
+  uint64_t eh_frame_size;
+  // The module's own segments as the emitter registered them (ELF program header flags in
+  // prot: PF_X 1, PF_W 2, PF_R 4, as the console reports them in SceKernelModuleInfo).
+  uint32_t num_segments;
+  RecompModuleSegment segments[4];
+} RecompModuleSnapshot;
+
+int recomp_module_snapshot(RecompModuleSnapshot *out, int max);
+// The one handle scheme of sceKernelGetModuleList, sceKernelGetModuleInfo, GetModuleInfo2 and
+// GetModuleInfoInternal: the main executable is handle 0 (handle 1 also names it unless a PRX
+// owns that handle); a PRX has the handle sceKernelLoadStartModule returned. 0 on success.
+int recomp_module_info_by_handle(int32_t handle, RecompModuleSnapshot *out);
+// The module whose address range contains addr (the innermost one), with the handle of the
+// scheme above. 0 on success, -1 if no module contains addr.
+int recomp_module_info_by_addr(uint64_t addr, RecompModuleSnapshot *out);
+// Fills out[4] with the segments of m (registered ones, else text + data from its range);
+// returns their number.
+uint32_t recomp_module_snapshot_segments(const RecompModuleSnapshot *m, RecompModuleSegment out[4]);
 
 int32_t sceKernelLoadStartModule(const char *name, size_t argc,
                                  const void *argv, uint32_t flags, void *opt,

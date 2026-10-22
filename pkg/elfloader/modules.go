@@ -27,7 +27,12 @@ var systemStubModules = map[string]struct{}{
 // Real retail modules provided by games (such as retail libc.prx or libSceFios2.prx)
 // contain actual implementations and are much larger.
 func IsSystemStubModule(name string) bool {
-	if _, ok := systemStubModules[strings.ToLower(filepath.Base(name))]; !ok {
+	base := strings.ToLower(filepath.Base(name))
+	if base == "libscenptoolkit2.prx" || base == "libscenptoolkit2.sprx" ||
+		base == "libscenpcppwebapi.prx" || base == "libscenpcppwebapi.sprx" {
+		return true
+	}
+	if _, ok := systemStubModules[base]; !ok {
 		return false
 	}
 	if fi, err := os.Stat(name); err == nil && fi.Size() > 64*1024 {
@@ -215,21 +220,43 @@ func DiscoverCompanionModules(elfPath, appDir string, image []byte) []ModuleRef 
 	seen := make(map[string]struct{})
 	var out []ModuleRef
 
-	for _, dir := range thisAppModuleDirs(elfPath, appDir) {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
+	// Walk application roots recursively to find all companion .prx/.sprx files
+	var roots []string
+	if appDir != "" {
+		roots = append(roots, appDir)
+	}
+	if elfPath != "" {
+		dir := filepath.Dir(elfPath)
+		if dir != appDir {
+			roots = append(roots, dir)
 		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
+	}
+
+	for _, root := range roots {
+		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
 			}
-			ext := strings.ToLower(filepath.Ext(e.Name()))
-			if ext != ".prx" && ext != ".sprx" {
-				continue
+			name := d.Name()
+			if strings.HasPrefix(name, ".") {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
-			addModuleRef(&out, seen, filepath.Join(dir, e.Name()), e.Name())
-		}
+			if d.IsDir() {
+				// Don't recurse into output/build dirs if they are inside the app dir
+				if name == "build" || name == "build_asm" || name == ".git" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			ext := strings.ToLower(filepath.Ext(name))
+			if ext == ".prx" || ext == ".sprx" {
+				addModuleRef(&out, seen, path, name)
+			}
+			return nil
+		})
 	}
 
 	for _, ref := range ReferencedModuleNames(image) {

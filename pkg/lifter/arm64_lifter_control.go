@@ -39,6 +39,26 @@ func (l *Arm64Lifter) liftCmovcc(inst disasm.Instruction, nextPC uint64, cond st
 		return lines, nil
 	}
 
+	if descDst.Size == 2 {
+		// 16-bit: only the low 16 bits of the destination may change.
+		s16 := ""
+		if srcReg, okSrc := src.(x86asm.Reg); okSrc {
+			if descSrc, okDescSrc := arm64RegMap[srcReg]; okDescSrc {
+				s16 = descSrc.W
+			}
+		} else if mem, okMem := src.(x86asm.Mem); okMem {
+			lines = append(lines, readMemTo(mem, nextPC, 2, "x16", "w16")...)
+			s16 = "w16"
+		}
+		if s16 == "" {
+			lines = append(lines, "    brk #0 // unsupported cmov")
+			return lines, nil
+		}
+		lines = append(lines, fmt.Sprintf("    csel w16, %s, %s, %s", s16, descDst.W, cond),
+			fmt.Sprintf("    bfi %s, x16, #0, #16", descDst.X))
+		return lines, nil
+	}
+
 	if srcReg, okSrc := src.(x86asm.Reg); okSrc {
 		if descSrc, okDescSrc := arm64RegMap[srcReg]; okDescSrc {
 			if descDst.Size == 4 {

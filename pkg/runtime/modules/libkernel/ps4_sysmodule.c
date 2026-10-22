@@ -208,6 +208,18 @@ void recomp_module_register_unwind_info(const RecompModuleUnwindInfo *info) {
     pthread_mutex_unlock(&g_sysmodule_mutex);
 }
 
+bool recomp_module_text_contains(uint64_t addr) {
+    const int n = __atomic_load_n(&g_unwind_modules_count, __ATOMIC_ACQUIRE);
+    for (int i = 0; i < n; i++) {
+        const RecompModuleUnwindInfo *m = &g_unwind_modules[i];
+        for (uint32_t k = 0; k < m->num_segments && k < 4; k++) {
+            const RecompModuleSegment *seg = &m->segments[k];
+            if ((seg->prot & 1) && addr >= seg->addr && addr - seg->addr < seg->size) return true; // PF_X
+        }
+    }
+    return false;
+}
+
 const RecompModuleUnwindInfo *recomp_module_find_by_addr(uint64_t addr) {
     pthread_mutex_lock(&g_sysmodule_mutex);
     const RecompModuleUnwindInfo *best = NULL;
@@ -227,22 +239,6 @@ const RecompModuleUnwindInfo *recomp_module_find_by_addr(uint64_t addr) {
     }
     if (g_unwind_modules_count > 0 && addr == 0) {
         const RecompModuleUnwindInfo *res = &g_unwind_modules[0];
-        pthread_mutex_unlock(&g_sysmodule_mutex);
-        return res;
-    }
-    pthread_mutex_unlock(&g_sysmodule_mutex);
-    return NULL;
-}
-
-const RecompModuleUnwindInfo *recomp_module_find_by_handle(int32_t handle) {
-    pthread_mutex_lock(&g_sysmodule_mutex);
-    if (handle == 1 && g_unwind_modules_count > 0) {
-        const RecompModuleUnwindInfo *res = &g_unwind_modules[0];
-        pthread_mutex_unlock(&g_sysmodule_mutex);
-        return res;
-    }
-    if (handle > 1 && handle <= g_unwind_modules_count) {
-        const RecompModuleUnwindInfo *res = &g_unwind_modules[handle - 1];
         pthread_mutex_unlock(&g_sysmodule_mutex);
         return res;
     }
@@ -508,4 +504,152 @@ void shim_sceKernelDlsym(GuestContext *ctx) {
     int32_t ret = sceKernelDlsym(handle, symbol, addr);
     ctx->rax = (uint64_t)(int64_t)ret;
     SHIM_RETURN();
+}
+
+static void snapshot_fill_unwind(RecompModuleSnapshot *m, const RecompModuleUnwindInfo *u) {
+    m->start_addr = u->start_addr;
+    m->end_addr = u->end_addr;
+    m->seg0_addr = u->seg0_addr;
+    m->seg0_size = u->seg0_size;
+    m->eh_frame_hdr_addr = u->eh_frame_hdr_addr;
+    m->eh_frame_hdr_size = u->eh_frame_hdr_size;
+    m->eh_frame_addr = u->eh_frame_addr;
+    m->eh_frame_size = u->eh_frame_size;
+    m->num_segments = u->num_segments > 4 ? 4 : u->num_segments;
+    for (uint32_t i = 0; i < m->num_segments; i++) {
+        m->segments[i] = u->segments[i];
+    }
+}
+
+int recomp_module_snapshot(RecompModuleSnapshot *out, int max) {
+    if (!out || max <= 0) {
+        return 0;
+    }
+    int n = 0;
+    pthread_mutex_lock(&g_sysmodule_mutex);
+
+    RecompModuleSnapshot *m = &out[n++];
+    memset(m, 0, sizeof(*m));
+    m->handle = 0;
+    if (g_unwind_modules_count > 0) {
+        const RecompModuleUnwindInfo *u = &g_unwind_modules[0];
+        snprintf(m->name, sizeof(m->name), "%s", u->name ? path_basename(u->name) : "eboot.bin");
+        m->has_range = 1;
+        m->start_addr = u->start_addr;
+        m->end_addr = u->end_addr;
+        snapshot_fill_unwind(m, u);
+    } else {
+        snprintf(m->name, sizeof(m->name), "eboot.bin");
+    }
+
+    for (int i = 0; i < g_prx_count && n < max; i++) {
+        if (!g_prx[i].in_use) {
+            continue;
+        }
+        const RecompModuleUnwindInfo *u = NULL;
+        for (int j = 1; j < g_unwind_modules_count; j++) {
+            if (g_unwind_modules[j].name && module_names_match(g_unwind_modules[j].name, g_prx[i].filename)) {
+                u = &g_unwind_modules[j];
+                break;
+            }
+        }
+        // Aliases of the same recompiled PRX share an address range: list it once.
+        int dup = 0;
+        if (u) {
+            for (int k = 1; k < n; k++) {
+                if (out[k].has_range && out[k].start_addr == u->start_addr) {
+                    dup = 1;
+                    break;
+                }
+            }
+        }
+        if (dup) {
+            continue;
+        }
+        if (g_prx[i].handle == 0) {
+            g_prx[i].handle = g_next_handle++;
+        }
+        m = &out[n++];
+        memset(m, 0, sizeof(*m));
+        m->handle = g_prx[i].handle;
+        snprintf(m->name, sizeof(m->name), "%s", g_prx[i].filename);
+        if (u) {
+            m->has_range = 1;
+            snapshot_fill_unwind(m, u);
+        }
+    }
+    pthread_mutex_unlock(&g_sysmodule_mutex);
+    return n;
+}
+
+int recomp_module_info_by_handle(int32_t handle, RecompModuleSnapshot *out) {
+    RecompModuleSnapshot *mods = (RecompModuleSnapshot *)calloc(MAX_PRX_MODULES + 1, sizeof(*mods));
+    if (!mods) {
+        return -1;
+    }
+    int n = recomp_module_snapshot(mods, MAX_PRX_MODULES + 1);
+    int found = -1;
+    for (int i = 0; i < n; i++) {
+        if (mods[i].handle == handle) {
+            found = i;
+            break;
+        }
+    }
+    // sceKernelGetModuleInfoFromAddr reports handle 1 for the main module.
+    if (found < 0 && handle == 1 && n > 0) {
+        found = 0;
+    }
+    if (found >= 0) {
+        *out = mods[found];
+    }
+    free(mods);
+    return found >= 0 ? 0 : -1;
+}
+
+int recomp_module_info_by_addr(uint64_t addr, RecompModuleSnapshot *out) {
+    RecompModuleSnapshot *mods = (RecompModuleSnapshot *)calloc(MAX_PRX_MODULES + 1, sizeof(*mods));
+    if (!mods) {
+        return -1;
+    }
+    int n = recomp_module_snapshot(mods, MAX_PRX_MODULES + 1);
+    int found = -1;
+    uint64_t best_size = UINT64_MAX;
+    for (int i = 0; i < n; i++) {
+        if (mods[i].has_range && addr >= mods[i].start_addr && addr < mods[i].end_addr &&
+            mods[i].end_addr - mods[i].start_addr < best_size) {
+            found = i;
+            best_size = mods[i].end_addr - mods[i].start_addr;
+        }
+    }
+    // Address 0 names the main module (as recomp_module_find_by_addr has it).
+    if (found < 0 && addr == 0 && n > 0 && mods[0].has_range) {
+        found = 0;
+    }
+    if (found >= 0) {
+        *out = mods[found];
+    }
+    free(mods);
+    return found >= 0 ? 0 : -1;
+}
+
+uint32_t recomp_module_snapshot_segments(const RecompModuleSnapshot *m, RecompModuleSegment out[4]) {
+    memset(out, 0, 4 * sizeof(*out));
+    if (m->num_segments > 0) {
+        for (uint32_t i = 0; i < m->num_segments; i++) {
+            out[i] = m->segments[i];
+        }
+        return m->num_segments;
+    }
+    if (!m->has_range) {
+        return 0;
+    }
+    uint64_t seg0 = m->seg0_addr ? m->seg0_addr : m->start_addr;
+    uint64_t seg0_size = m->seg0_size ? m->seg0_size : (m->end_addr - m->start_addr);
+    out[0] = (RecompModuleSegment){seg0, seg0_size, 5}; // PF_R | PF_X
+    uint32_t n = 1;
+    if (m->end_addr > seg0 + seg0_size) {
+        out[1] = (RecompModuleSegment){seg0 + seg0_size, m->end_addr - (seg0 + seg0_size), 6}; // PF_R | PF_W
+        n = 2;
+    }
+    return n;
 }

@@ -2,6 +2,7 @@ package lifter
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"ps4-recomp/pkg/disasm"
@@ -159,18 +160,22 @@ var arm64XmmMap = map[x86asm.Reg]XmmDesc{
 	x86asm.X15: {Q: "q15", D: "d15", S: "s15", V: "v15"},
 }
 
-// getVectorDesc resolves XMM or YMM registers to ARM64 NEON registers (q0-q31 / v0-v31).
+// getVectorDesc resolves XMM or YMM registers to ARM64 NEON registers: the low 128 bits live in
+// v0-v15, the YMM upper halves in v16-v31. The upper-half names are returned as placeholders
+// ("vU<n>", "qU<n>"): lowerings also use v16-v31 as scratch registers, and LiftInstructionToBuf
+// moves a scratch register that collides with an operand's upper half elsewhere before it
+// replaces the placeholders with the real names (see fixUpperHalves).
 func getVectorDesc(reg x86asm.Reg) (isYmm bool, lowQ, highQ, lowV, highV, lowS, lowD string, ok bool) {
 	if reg >= x86asm.Y0 && reg <= x86asm.Y15 {
 		idx := int(reg - x86asm.Y0)
-		return true, fmt.Sprintf("q%d", idx), fmt.Sprintf("q%d", idx+16),
-			fmt.Sprintf("v%d", idx), fmt.Sprintf("v%d", idx+16),
+		return true, fmt.Sprintf("q%d", idx), fmt.Sprintf("qU%d", idx+16),
+			fmt.Sprintf("v%d", idx), fmt.Sprintf("vU%d", idx+16),
 			fmt.Sprintf("s%d", idx), fmt.Sprintf("d%d", idx), true
 	}
 	if reg >= x86asm.X0 && reg <= x86asm.X15 {
 		idx := int(reg - x86asm.X0)
-		return false, fmt.Sprintf("q%d", idx), fmt.Sprintf("q%d", idx+16),
-			fmt.Sprintf("v%d", idx), fmt.Sprintf("v%d", idx+16),
+		return false, fmt.Sprintf("q%d", idx), fmt.Sprintf("qU%d", idx+16),
+			fmt.Sprintf("v%d", idx), fmt.Sprintf("vU%d", idx+16),
 			fmt.Sprintf("s%d", idx), fmt.Sprintf("d%d", idx), true
 	}
 	return false, "", "", "", "", "", "", false
@@ -182,48 +187,202 @@ type Arm64Lifter struct {
 	currentFn     *disasm.Function
 	unsuppCounter uint64
 	labelCounter  uint64
-	lastFlagOp    x86asm.Op
+	// cpol is how ARM C holds x86 CF at the current point of the block being lifted.
+	cpol carryPol
+	// noTSO turns off acquire/release for non-stack guest memory (see arm64_lifter_tso.go).
+	noTSO bool
 }
 
-func isSubFlagOp(op x86asm.Op) bool {
-	switch op {
-	case x86asm.CMP, x86asm.SUB, x86asm.BT, x86asm.BTS, x86asm.BTR, x86asm.BTC, x86asm.NEG, x86asm.CLC, x86asm.STC, x86asm.CMC,
-		x86asm.TZCNT, x86asm.LZCNT:
-		return true
-	default:
-		return false
-	}
-}
+// x86 flags live in NZCV: N = SF, Z = ZF, V = OF (PF after an FP compare, the only place PF
+// is modeled), and C = CF in one of the senses below. The sense is tracked statically while a
+// block is lifted; at every block boundary it is carrySub.
+type carryPol uint8
 
-func isAddFlagOp(op x86asm.Op) bool {
-	switch op {
-	case x86asm.ADD, x86asm.ADC:
-		return true
-	default:
-		return false
-	}
-}
+const (
+	// carrySub: C = !CF, ARM's borrow convention after SUBS/CMP.
+	carrySub carryPol = iota
+	// carryAdd: C = CF, after ADDS/ADCS and the lowerings that insert CF into C directly.
+	carryAdd
+	// carryClear: C = 0 and CF = 0, after ANDS/TST and the other logical operations.
+	carryClear
+)
 
-func isLogicalFlagOp(op x86asm.Op) bool {
-	switch op {
-	case x86asm.TEST, x86asm.AND, x86asm.OR, x86asm.XOR,
-		x86asm.SHL, x86asm.SHR, x86asm.SAR,
-		x86asm.BSF, x86asm.BSR:
-		return true
-	default:
-		return false
-	}
-}
-
-func isFlagSettingOp(op x86asm.Op) bool {
-	return isSubFlagOp(op) || isAddFlagOp(op) || isLogicalFlagOp(op) || op == x86asm.SBB
-}
-
-// ResetFlags clears the tracked lastFlagOp.
+// ResetFlags starts a block: C holds CF in the block-boundary sense (carrySub).
 func (l *Arm64Lifter) ResetFlags() {
 	if l != nil {
-		l.lastFlagOp = 0
+		l.cpol = carrySub
 	}
+}
+
+// normalizeCarry returns the instructions that bring C into the block-boundary sense
+// (C = !CF) and records that sense.
+func (l *Arm64Lifter) normalizeCarry() []string {
+	if l.cpol == carrySub {
+		return nil
+	}
+	l.cpol = carrySub
+	return []string{"    cfinv"}
+}
+
+// EndBlock returns the code that ends a block falling through from its last instruction:
+// the next block starts in the carrySub sense, so C is inverted when CF is live there.
+func (l *Arm64Lifter) EndBlock(last disasm.Instruction) []string {
+	if l == nil || last.CarryDead {
+		return nil
+	}
+	return l.normalizeCarry()
+}
+
+// localLabel returns the label of the block of fn that starts at target, or "" when target
+// is no block of fn.
+func localLabel(fn *disasm.Function, target uint64) string {
+	if fn == nil || fn.Blocks[target] == nil {
+		return ""
+	}
+	return fmt.Sprintf("L_fn_0x%x_loc_0x%x", fn.EntryAddr, target)
+}
+
+// branchTo returns the unconditional transfer to the direct branch target target: a branch to
+// its block when it is one of fn, a tail call when it is a known function entry, otherwise the
+// dispatcher (recomp_indirect_jump with x0 = target). The caller brings C into the
+// block-boundary sense first when CF is live at target.
+func (l *Arm64Lifter) branchTo(fn *disasm.Function, target uint64) []string {
+	if lbl := localLabel(fn, target); lbl != "" {
+		return []string{"    b " + lbl}
+	}
+	if l.IsKnownFunc(target) {
+		return []string{"    ldr x30, [sp], #16", fmt.Sprintf("    b _fn_0x%x", target)}
+	}
+	lines := loadImm64("x0", target)
+	return append(lines, "    ldr x30, [sp], #16", "    b _recomp_indirect_jump")
+}
+
+// fallsThrough reports whether control can continue after inst at the next instruction. The
+// set matches disasm.blockSuccessors: RET, LRET, UD2, HLT, JMP and INT end control flow, except
+// INT 0x41 (the Orbis debugger break), which the INT lowering below turns into a no-op.
+func fallsThrough(inst x86asm.Inst) bool {
+	switch inst.Op {
+	case x86asm.JMP, x86asm.RET, x86asm.LRET, x86asm.UD2, x86asm.HLT:
+		return false
+	case x86asm.INT:
+		imm, ok := inst.Args[0].(x86asm.Imm)
+		return ok && imm == 0x41
+	}
+	return true
+}
+
+// FallThrough returns the branch that continues a block at the fall-through address of its
+// last instruction when the code emitted next does not start there (next is the start of the
+// block emitted after this one, hasNext false at the end of the function). Blocks are emitted
+// in address order, and a branch into the middle of an instruction gives overlapping
+// instruction streams (see disasm.disasmBranchFollowing), so the block after this one in
+// address order can belong to the other stream. At the end of a function whose last decoded
+// instruction falls through (decoding stopped at a cap or a decode error), the continuation is
+// a tail jump to that address instead of a return. Returns nil when the next emitted block is
+// the successor, or when the last instruction never falls through. Call it after EndBlock:
+// the target starts in the block-boundary carry sense.
+func (l *Arm64Lifter) FallThrough(fn *disasm.Function, last disasm.Instruction, next uint64, hasNext bool) []string {
+	if !fallsThrough(last.Inst) {
+		return nil
+	}
+	target := last.Address + uint64(last.Inst.Len)
+	if hasNext && next == target {
+		return nil
+	}
+	return l.branchTo(fn, target)
+}
+
+// carryCond returns the ARM condition that is true when x86 CF == want, in the current sense.
+func (l *Arm64Lifter) carryCond(want bool) string {
+	if (l.cpol == carrySub) == want {
+		return "cc"
+	}
+	return "cs"
+}
+
+// x86CondIndex maps Jcc/SETcc/CMOVcc to the x86 condition encoding (O=0 ... G=15).
+func x86CondIndex(op x86asm.Op) (int, bool) {
+	switch op {
+	case x86asm.JO, x86asm.SETO, x86asm.CMOVO:
+		return 0, true
+	case x86asm.JNO, x86asm.SETNO, x86asm.CMOVNO:
+		return 1, true
+	case x86asm.JB, x86asm.SETB, x86asm.CMOVB:
+		return 2, true
+	case x86asm.JAE, x86asm.SETAE, x86asm.CMOVAE:
+		return 3, true
+	case x86asm.JE, x86asm.SETE, x86asm.CMOVE:
+		return 4, true
+	case x86asm.JNE, x86asm.SETNE, x86asm.CMOVNE:
+		return 5, true
+	case x86asm.JBE, x86asm.SETBE, x86asm.CMOVBE:
+		return 6, true
+	case x86asm.JA, x86asm.SETA, x86asm.CMOVA:
+		return 7, true
+	case x86asm.JS, x86asm.SETS, x86asm.CMOVS:
+		return 8, true
+	case x86asm.JNS, x86asm.SETNS, x86asm.CMOVNS:
+		return 9, true
+	case x86asm.JP, x86asm.SETP, x86asm.CMOVP:
+		return 10, true
+	case x86asm.JNP, x86asm.SETNP, x86asm.CMOVNP:
+		return 11, true
+	case x86asm.JL, x86asm.SETL, x86asm.CMOVL:
+		return 12, true
+	case x86asm.JGE, x86asm.SETGE, x86asm.CMOVGE:
+		return 13, true
+	case x86asm.JLE, x86asm.SETLE, x86asm.CMOVLE:
+		return 14, true
+	case x86asm.JG, x86asm.SETG, x86asm.CMOVG:
+		return 15, true
+	}
+	return 0, false
+}
+
+// condFor returns the ARM condition for x86 condition cc in the current carry sense, and the
+// instructions that must run before it is used (A/BE after an addition first invert C, which
+// changes the tracked sense).
+func (l *Arm64Lifter) condFor(cc int) ([]string, string) {
+	switch cc {
+	case 0, 10: // O; P (V holds PF after FP compares)
+		return nil, "vs"
+	case 1, 11:
+		return nil, "vc"
+	case 2: // B: CF = 1
+		return nil, l.carryCond(true)
+	case 3: // AE: CF = 0
+		return nil, l.carryCond(false)
+	case 4:
+		return nil, "eq"
+	case 5:
+		return nil, "ne"
+	case 6, 7: // BE: CF = 1 or ZF = 1; A: CF = 0 and ZF = 0
+		var pre []string
+		switch l.cpol {
+		case carryClear:
+			if cc == 6 {
+				return nil, "eq"
+			}
+			return nil, "ne"
+		case carryAdd:
+			pre = l.normalizeCarry()
+		}
+		if cc == 6 {
+			return pre, "ls"
+		}
+		return pre, "hi"
+	case 8:
+		return nil, "mi"
+	case 9:
+		return nil, "pl"
+	case 12:
+		return nil, "lt"
+	case 13:
+		return nil, "ge"
+	case 14:
+		return nil, "le"
+	}
+	return nil, "gt"
 }
 
 // NewArm64Lifter creates a new ARM64 assembly lifter.
@@ -326,18 +485,65 @@ func defMemSz(inst disasm.Instruction) int {
 	return sz
 }
 
+// unsupportedAddressing reports memory operand forms that computeEffAddr cannot express, which
+// therefore trap instead of accessing a wrong address. None occurs in TLOU or U4 (CUSA00557,
+// CUSA04529):
+//   - the address-size prefix (addr32): the address would have to wrap at 4 GiB;
+//   - MOV with a 64-bit absolute address (moffs, opcodes A0-A3): x86asm reports it like a
+//     RIP-relative operand and the displacement does not fit the 32-bit path;
+//   - GS: the guest GS base is not kept anywhere.
+//
+// NOP and the prefetches do not access memory and are exempt.
+func unsupportedAddressing(inst x86asm.Inst) string {
+	switch inst.Op {
+	case x86asm.NOP, x86asm.PREFETCHT0, x86asm.PREFETCHNTA, x86asm.PREFETCHT1, x86asm.PREFETCHT2, x86asm.PREFETCHW:
+		return ""
+	}
+	for _, a := range inst.Args {
+		if a == nil {
+			break
+		}
+		m, ok := a.(x86asm.Mem)
+		if !ok {
+			continue
+		}
+		switch {
+		case inst.AddrSize == 32:
+			return "addr32 memory operand (32-bit address wrap not lowered)"
+		case inst.Op == x86asm.MOV && inst.Opcode>>24 >= 0xa0 && inst.Opcode>>24 <= 0xa3:
+			return "mov with a 64-bit absolute address (moffs) not lowered"
+		case m.Segment == x86asm.GS:
+			return "GS segment override not lowered"
+		}
+	}
+	return ""
+}
+
 // computeEffAddr generates instructions to compute a guest memory effective address into targetReg (usually x16).
 func computeEffAddr(mem x86asm.Mem, nextPC uint64, targetReg string) []string {
 	var lines []string
 	disp := int64(int32(mem.Disp))
 
-	// 1. RIP-relative addressing: [rip + disp]
-	if mem.Base == x86asm.RIP || (mem.Segment == 0 && mem.Base == 0 && mem.Index == 0 && mem.Disp != 0) {
+	// 1. RIP-relative addressing: [rip + disp]. x86asm's VEX decoder leaves Base unset for
+	// RIP-relative operands; it can be told from the absolute [disp32] form (a SIB byte with no
+	// base and no index) by Scale, which only a SIB byte sets.
+	if mem.Base == x86asm.RIP || (mem.Segment == 0 && mem.Base == 0 && mem.Index == 0 && mem.Scale == 0) {
 		effAddr := uint64(int64(nextPC) + disp)
 		return loadImm64(targetReg, effAddr)
 	}
 
-	// 2. Segment-based (FS: [fs_base + disp])
+	// 2. FS: [fs_base + disp]; with a base or index register the address is computed as usual
+	// and fs_base added at the end.
+	if mem.Segment == x86asm.FS && (mem.Base != 0 || mem.Index != 0) {
+		plain := mem
+		plain.Segment = 0
+		if plain.Base == x86asm.RIP {
+			lines = append(lines, loadImm64(targetReg, uint64(int64(nextPC)+disp))...)
+		} else {
+			lines = append(lines, computeEffAddr(plain, nextPC, targetReg)...)
+		}
+		return append(lines, fmt.Sprintf("    add %s, %s, x27", targetReg, targetReg))
+	}
 	if mem.Segment == x86asm.FS {
 		if disp != 0 {
 			if disp >= 0 && disp <= 4095 {
@@ -519,54 +725,6 @@ func writeMemFrom(mem x86asm.Mem, nextPC uint64, size int, srcX string, srcW str
 	return lines
 }
 
-// arm64Cond converts an x86 condition code to ARM64 condition suffix.
-func arm64Cond(op x86asm.Op, lastFlagOp x86asm.Op) (string, bool) {
-	if isAddFlagOp(lastFlagOp) {
-		switch op {
-		case x86asm.JB:
-			return "cs", true // After ADD/ADC: x86 CF=1 (carry) is ARM C=1 (Carry Set)
-		case x86asm.JAE:
-			return "cc", true // After ADD/ADC: x86 CF=0 (no carry) is ARM C=0 (Carry Clear)
-		}
-	}
-	switch op {
-	case x86asm.JE:
-		return "eq", true
-	case x86asm.JNE:
-		return "ne", true
-	case x86asm.JB:
-		return "cc", true // Carry clear (unsigned lower)
-	case x86asm.JAE:
-		return "cs", true // Carry set (unsigned higher or same)
-	case x86asm.JA:
-		return "hi", true // Unsigned higher
-	case x86asm.JBE:
-		return "ls", true // Unsigned lower or same
-	case x86asm.JL:
-		return "lt", true // Signed less than
-	case x86asm.JGE:
-		return "ge", true // Signed greater or equal
-	case x86asm.JLE:
-		return "le", true // Signed less or equal
-	case x86asm.JG:
-		return "gt", true // Signed greater than
-	case x86asm.JS:
-		return "mi", true // Negative (minus)
-	case x86asm.JNS:
-		return "pl", true // Positive or zero (plus)
-	case x86asm.JO:
-		return "vs", true // Overflow set
-	case x86asm.JNO:
-		return "vc", true // Overflow clear
-	case x86asm.JP:
-		return "vs", true // Parity / FP unordered
-	case x86asm.JNP:
-		return "vc", true // No parity / FP ordered
-	default:
-		return "", false
-	}
-}
-
 func invertArm64Cond(cond string) string {
 	switch cond {
 	case "eq":
@@ -602,120 +760,178 @@ func invertArm64Cond(cond string) string {
 	}
 }
 
-// setccCond returns ARM64 condition suffix for SETcc opcodes.
-func setccCond(op x86asm.Op, lastFlagOp x86asm.Op) (string, bool) {
-	if isAddFlagOp(lastFlagOp) {
-		switch op {
-		case x86asm.SETB:
-			return "cs", true
-		case x86asm.SETAE:
-			return "cc", true
-		}
-	}
-	switch op {
-	case x86asm.SETE:
-		return "eq", true
-	case x86asm.SETNE:
-		return "ne", true
-	case x86asm.SETB:
-		return "cc", true
-	case x86asm.SETAE:
-		return "cs", true
-	case x86asm.SETA:
-		return "hi", true
-	case x86asm.SETBE:
-		return "ls", true
-	case x86asm.SETL:
-		return "lt", true
-	case x86asm.SETGE:
-		return "ge", true
-	case x86asm.SETLE:
-		return "le", true
-	case x86asm.SETG:
-		return "gt", true
-	case x86asm.SETS:
-		return "mi", true
-	case x86asm.SETNS:
-		return "pl", true
-	case x86asm.SETO:
-		return "vs", true
-	case x86asm.SETNO:
-		return "vc", true
-	case x86asm.SETP:
-		return "vs", true // Parity / FP unordered
-	case x86asm.SETNP:
-		return "vc", true // No parity / FP ordered
-	default:
-		return "", false
-	}
-}
-
-// cmovccCond returns ARM64 condition suffix for CMOVcc opcodes.
-func cmovccCond(op x86asm.Op, lastFlagOp x86asm.Op) (string, bool) {
-	if isAddFlagOp(lastFlagOp) {
-		switch op {
-		case x86asm.CMOVB:
-			return "cs", true
-		case x86asm.CMOVAE:
-			return "cc", true
-		}
-	}
-	switch op {
-	case x86asm.CMOVE:
-		return "eq", true
-	case x86asm.CMOVNE:
-		return "ne", true
-	case x86asm.CMOVB:
-		return "cc", true
-	case x86asm.CMOVAE:
-		return "cs", true
-	case x86asm.CMOVA:
-		return "hi", true
-	case x86asm.CMOVBE:
-		return "ls", true
-	case x86asm.CMOVL:
-		return "lt", true
-	case x86asm.CMOVGE:
-		return "ge", true
-	case x86asm.CMOVLE:
-		return "le", true
-	case x86asm.CMOVG:
-		return "gt", true
-	case x86asm.CMOVS:
-		return "mi", true
-	case x86asm.CMOVNS:
-		return "pl", true
-	case x86asm.CMOVO:
-		return "vs", true
-	case x86asm.CMOVNO:
-		return "vc", true
-	case x86asm.CMOVP:
-		return "vs", true // Parity / FP unordered
-	case x86asm.CMOVNP:
-		return "vc", true // No parity / FP ordered
-	default:
-		return "", false
-	}
-}
-
 // LiftInstructionToBuf translates a single x86 instruction into ARM64 assembly instructions.
 func (l *Arm64Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint64, fn *disasm.Function, dst []string) ([]string, error) {
+	start := len(dst)
 	lines, err := l.liftInstructionInternal(inst, nextPC, fn, dst)
+	if err == nil && inst.Inst.Op == x86asm.CALL {
+		// Flags are dead after a call (System V ABI); any sense is consistent.
+		l.cpol = carrySub
+	}
 	if err == nil {
-		op := inst.Inst.Op
-		if isFlagSettingOp(op) && !inst.SkipFlags {
-			l.lastFlagOp = op
-		} else if op == x86asm.CALL {
-			l.lastFlagOp = 0
+		lines = fixUpperHalves(inst.Inst, lines, start, fn != nil && fn.UsesYmm)
+		if !l.noTSO {
+			lines = l.applyTSO(inst, lines, start)
 		}
 	}
 	return lines, err
 }
 
+var (
+	highVecRe  = regexp.MustCompile(`\b[bhsdqv](1[6-9]|2[0-9]|3[01])\b`)
+	upperTokRe = regexp.MustCompile(`\b([bhsdqv])U(1[6-9]|2[0-9]|3[01])\b`)
+)
+
+// vecArg0IsSource reports VEX instructions whose first operand is a source, not a destination.
+func vecArg0IsSource(op x86asm.Op) bool {
+	switch op {
+	case x86asm.VCOMISS, x86asm.VUCOMISS, x86asm.VCOMISD, x86asm.VUCOMISD,
+		x86asm.VPTEST, x86asm.VTESTPS, x86asm.VTESTPD:
+		return true
+	}
+	return false
+}
+
+// fixUpperHalves post-processes the lowering of one instruction (lines[start:]):
+//  1. A scratch register in v16-v31 that is also an operand's upper half (a "vU<n>"
+//     placeholder from getVectorDesc) is renamed to a free one, then the placeholders become
+//     the real register names.
+//  2. In a function with YMM code (ymmFn), every v16-v31 register the lowering touches other
+//     than the upper halves it legitimately reads or writes is saved and restored around it.
+//     The legitimate ones are those of its YMM operands and, for a VEX instruction, the upper
+//     half of its XMM destination (VEX.128 zeroes it). In functions without YMM instructions no
+//     upper half is live (YMM registers are caller-saved), so the scratch use is harmless.
+//     Restoring also makes legacy SSE instructions keep their destination's upper half.
+func fixUpperHalves(inst x86asm.Inst, lines []string, start int, ymmFn bool) []string {
+	body := lines[start:]
+	var opnd, scratch uint32
+	for _, ln := range body {
+		t := strings.TrimSpace(ln)
+		if t == "" || t[0] == '.' || strings.HasPrefix(t, "//") {
+			continue
+		}
+		for _, m := range upperTokRe.FindAllStringSubmatch(t, -1) {
+			n := 0
+			fmt.Sscanf(m[2], "%d", &n)
+			opnd |= 1 << uint(n)
+		}
+		if i := strings.Index(t, "//"); i >= 0 {
+			t = t[:i]
+		}
+		for _, m := range highVecRe.FindAllStringSubmatch(t, -1) {
+			n := 0
+			fmt.Sscanf(m[1], "%d", &n)
+			scratch |= 1 << uint(n)
+		}
+	}
+	if opnd == 0 && (scratch == 0 || !ymmFn) {
+		return lines
+	}
+	// The upper halves the instruction legitimately reads or writes: those of its YMM operands
+	// and, for a VEX instruction, that of its XMM destination (VEX.128 zeroes it).
+	var legit uint32
+	vex := strings.HasPrefix(inst.Op.String(), "V")
+	for i, a := range inst.Args {
+		if a == nil {
+			break
+		}
+		r, ok := a.(x86asm.Reg)
+		if !ok {
+			continue
+		}
+		if r >= x86asm.Y0 && r <= x86asm.Y15 {
+			legit |= 1 << (16 + uint(r-x86asm.Y0))
+		} else if i == 0 && vex && !vecArg0IsSource(inst.Op) && r >= x86asm.X0 && r <= x86asm.X15 {
+			legit |= 1 << (16 + uint(r-x86asm.X0))
+		}
+	}
+	// 1. Rename scratch registers that collide with an operand's upper half (whether or not
+	// the lowering refers to that upper half), then resolve the placeholders.
+	reserved := opnd | legit
+	rename := map[int]int{}
+	free := ^(reserved | scratch) & 0xffff0000
+	for n := 16; n < 32; n++ {
+		if scratch&reserved&(1<<uint(n)) == 0 {
+			continue
+		}
+		for m := 31; m >= 16; m-- {
+			if free&(1<<uint(m)) != 0 {
+				free &^= 1 << uint(m)
+				rename[n] = m
+				scratch = scratch&^(1<<uint(n)) | 1<<uint(m)
+				break
+			}
+		}
+	}
+	for i := start; i < len(lines); i++ {
+		ln := lines[i]
+		t := strings.TrimSpace(ln)
+		if t == "" || t[0] == '.' || strings.HasPrefix(t, "//") {
+			continue
+		}
+		if len(rename) > 0 {
+			ln = highVecRe.ReplaceAllStringFunc(ln, func(r string) string {
+				n := 0
+				fmt.Sscanf(r[1:], "%d", &n)
+				if m, ok := rename[n]; ok {
+					return fmt.Sprintf("%c%d", r[0], m)
+				}
+				return r
+			})
+		}
+		lines[i] = upperTokRe.ReplaceAllString(ln, "$1$2")
+	}
+	if !ymmFn || inst.Op == x86asm.VZEROUPPER || inst.Op == x86asm.VZEROALL {
+		return lines
+	}
+
+	// 2. Save and restore the upper halves the lowering is not meant to change.
+	for _, ln := range lines[start:] {
+		f := strings.Fields(strings.TrimSpace(ln))
+		if len(f) == 0 || strings.HasPrefix(f[0], "//") {
+			continue
+		}
+		if f[0] == "ret" || f[0] == "br" || ((f[0] == "b" || strings.HasPrefix(f[0], "b.")) && len(f) > 1 && strings.HasPrefix(f[1], "L_fn_")) {
+			return lines // control leaves the instruction: no single restore point
+		}
+	}
+	spill := (scratch | opnd) &^ legit
+	if spill == 0 {
+		return lines
+	}
+	var regs []int
+	for n := 16; n < 32; n++ {
+		if spill&(1<<uint(n)) != 0 {
+			regs = append(regs, n)
+		}
+	}
+	var save, restore []string
+	for i := 0; i < len(regs); i += 2 {
+		if i+1 < len(regs) {
+			save = append(save, fmt.Sprintf("    stp q%d, q%d, [sp, #-32]!", regs[i], regs[i+1]))
+			restore = append([]string{fmt.Sprintf("    ldp q%d, q%d, [sp], #32", regs[i], regs[i+1])}, restore...)
+		} else {
+			save = append(save, fmt.Sprintf("    str q%d, [sp, #-16]!", regs[i]))
+			restore = append([]string{fmt.Sprintf("    ldr q%d, [sp], #16", regs[i])}, restore...)
+		}
+	}
+	// Keep the "// 0x...: inst" comment first.
+	body = append([]string(nil), lines[start:]...)
+	out := lines[:start]
+	if len(body) > 0 && strings.HasPrefix(strings.TrimSpace(body[0]), "//") {
+		out = append(out, body[0])
+		body = body[1:]
+	}
+	out = append(out, save...)
+	out = append(out, body...)
+	out = append(out, restore...)
+	return out
+}
+
 func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC uint64, fn *disasm.Function, dst []string) ([]string, error) {
 	if fn != l.currentFn {
 		l.currentFn = fn
-		l.lastFlagOp = 0
+		l.cpol = carrySub
 	}
 	op := inst.Inst.Op
 	args := inst.Inst.Args
@@ -724,15 +940,32 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 	comment := fmt.Sprintf("    // 0x%x: %s", inst.Address, inst.Inst.String())
 	lines = append(lines, comment)
 
+	if reason := unsupportedAddressing(inst.Inst); reason != "" {
+		lines = append(lines, l.emitUnsupported(inst, reason)...)
+		return lines, nil
+	}
+
+	if HasLockPrefix(inst.Inst) {
+		if out, ok := l.liftLocked(inst, nextPC, lines); ok {
+			return out, nil
+		}
+	}
+
 	switch op {
 	case x86asm.NOP, x86asm.FNOP, x86asm.FWAIT,
 		x86asm.PREFETCHT0, x86asm.PREFETCHNTA, x86asm.PREFETCHT1, x86asm.PREFETCHT2, x86asm.PREFETCHW:
 		lines = append(lines, "    nop")
 		return lines, nil
 
-	case x86asm.CLD, x86asm.STD:
-		// In standard x86-64 System V ABI, direction flag is expected to be forward (0).
+	case x86asm.CLD:
+		// DF is not modelled: string instructions always run forward (DF = 0, as the System V
+		// ABI requires at calls).
 		lines = append(lines, "    nop")
+		return lines, nil
+
+	case x86asm.STD:
+		// DF = 1 (backward string operations) is not modelled; STD has no site in TLOU or U4.
+		lines = append(lines, l.emitUnsupported(inst, "std: backward string operations not lowered")...)
 		return lines, nil
 
 	case x86asm.CLC, x86asm.STC, x86asm.CMC, x86asm.LAHF, x86asm.SAHF:
@@ -829,11 +1062,14 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 	case x86asm.CMPXCHG16B:
 		return l.liftCmpxchg16b(inst, nextPC, lines)
 
+	case x86asm.CMPXCHG8B:
+		return l.liftCmpxchg8b(inst, nextPC, lines)
+
 	case x86asm.XCHG:
 		return l.liftXchg(inst, nextPC, lines)
 
 	case x86asm.CDQ:
-		lines = append(lines, "    asr x22, x19, #31")
+		lines = append(lines, "    asr w22, w19, #31") // EDX = sign of EAX; RDX upper half cleared
 		return lines, nil
 
 	case x86asm.CQO:
@@ -876,178 +1112,49 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		lines = append(lines, "    brk #0 // unsupported bswap")
 		return lines, nil
 
-	case x86asm.BSF, x86asm.TZCNT:
-		if dstReg, ok := args[0].(x86asm.Reg); ok {
-			if descDst, okDst := arm64RegMap[dstReg]; okDst {
-				if srcReg, okSrcR := args[1].(x86asm.Reg); okSrcR {
-					if descSrc, okSrc := arm64RegMap[srcReg]; okSrc {
-						if descDst.Size == 4 {
-							lines = append(lines, fmt.Sprintf("    rbit w16, %s", descSrc.W))
-							lines = append(lines, fmt.Sprintf("    clz %s, w16", descDst.W))
-							if !inst.SkipFlags {
-								if inst.Inst.Op == x86asm.TZCNT {
-									lines = append(lines, fmt.Sprintf("    cmp %s, #1", descSrc.W))
-								} else {
-									lines = append(lines, fmt.Sprintf("    tst %s, %s", descSrc.W, descSrc.W))
-								}
-							}
-						} else {
-							lines = append(lines, fmt.Sprintf("    rbit x16, %s", descSrc.X))
-							lines = append(lines, fmt.Sprintf("    clz %s, x16", descDst.X))
-							if !inst.SkipFlags {
-								if inst.Inst.Op == x86asm.TZCNT {
-									lines = append(lines, fmt.Sprintf("    cmp %s, #1", descSrc.X))
-								} else {
-									lines = append(lines, fmt.Sprintf("    tst %s, %s", descSrc.X, descSrc.X))
-								}
-							}
-						}
-						return lines, nil
-					}
-				} else if mem, okMem := args[1].(x86asm.Mem); okMem {
-					lines = append(lines, readMemTo(mem, nextPC, descDst.Size, "x17", "w17")...)
-					if descDst.Size == 4 {
-						lines = append(lines, "    rbit w16, w17")
-						lines = append(lines, fmt.Sprintf("    clz %s, w16", descDst.W))
-						if !inst.SkipFlags {
-							if inst.Inst.Op == x86asm.TZCNT {
-								lines = append(lines, "    cmp w17, #1")
-							} else {
-								lines = append(lines, "    tst w17, w17")
-							}
-						}
-					} else {
-						lines = append(lines, "    rbit x16, x17")
-						lines = append(lines, fmt.Sprintf("    clz %s, x16", descDst.X))
-						if !inst.SkipFlags {
-							if inst.Inst.Op == x86asm.TZCNT {
-								lines = append(lines, "    cmp x17, #1")
-							} else {
-								lines = append(lines, "    tst x17, x17")
-							}
-						}
-					}
-					return lines, nil
-				}
-			}
-		}
-		lines = append(lines, l.emitUnsupported(inst, "unsupported bsf/tzcnt")...)
-		return lines, nil
-
-	case x86asm.BSR:
-		if dstReg, ok := args[0].(x86asm.Reg); ok {
-			if descDst, okDst := arm64RegMap[dstReg]; okDst {
-				if srcReg, okSrcR := args[1].(x86asm.Reg); okSrcR {
-					if descSrc, okSrc := arm64RegMap[srcReg]; okSrc {
-						if descDst.Size == 4 {
-							lines = append(lines, fmt.Sprintf("    clz w16, %s", descSrc.W))
-							lines = append(lines, fmt.Sprintf("    mov %s, #31", descDst.W))
-							lines = append(lines, fmt.Sprintf("    sub %s, %s, w16", descDst.W, descDst.W))
-							if !inst.SkipFlags {
-								lines = append(lines, fmt.Sprintf("    tst %s, %s", descSrc.W, descSrc.W))
-							}
-						} else {
-							lines = append(lines, fmt.Sprintf("    clz x16, %s", descSrc.X))
-							lines = append(lines, fmt.Sprintf("    mov %s, #63", descDst.X))
-							lines = append(lines, fmt.Sprintf("    sub %s, %s, x16", descDst.X, descDst.X))
-							if !inst.SkipFlags {
-								lines = append(lines, fmt.Sprintf("    tst %s, %s", descSrc.X, descSrc.X))
-							}
-						}
-						return lines, nil
-					}
-				} else if mem, okMem := args[1].(x86asm.Mem); okMem {
-					lines = append(lines, readMemTo(mem, nextPC, descDst.Size, "x17", "w17")...)
-					if descDst.Size == 4 {
-						lines = append(lines, "    clz w16, w17")
-						lines = append(lines, fmt.Sprintf("    mov %s, #31", descDst.W))
-						lines = append(lines, fmt.Sprintf("    sub %s, %s, w16", descDst.W, descDst.W))
-						if !inst.SkipFlags {
-							lines = append(lines, "    tst w17, w17")
-						}
-					} else {
-						lines = append(lines, "    clz x16, x17")
-						lines = append(lines, fmt.Sprintf("    mov %s, #63", descDst.X))
-						lines = append(lines, fmt.Sprintf("    sub %s, %s, x16", descDst.X, descDst.X))
-						if !inst.SkipFlags {
-							lines = append(lines, "    tst x17, x17")
-						}
-					}
-					return lines, nil
-				}
-			}
-		}
-		lines = append(lines, l.emitUnsupported(inst, "unsupported bsr")...)
-		return lines, nil
-
-	case x86asm.LZCNT:
-		if dstReg, ok := args[0].(x86asm.Reg); ok {
-			if descDst, okDst := arm64RegMap[dstReg]; okDst {
-				if srcReg, okSrcR := args[1].(x86asm.Reg); okSrcR {
-					if descSrc, okSrc := arm64RegMap[srcReg]; okSrc {
-						if descDst.Size == 4 {
-							lines = append(lines, fmt.Sprintf("    clz %s, %s", descDst.W, descSrc.W))
-							if !inst.SkipFlags {
-								lines = append(lines, fmt.Sprintf("    cmp %s, #1", descSrc.W))
-							}
-						} else {
-							lines = append(lines, fmt.Sprintf("    clz %s, %s", descDst.X, descSrc.X))
-							if !inst.SkipFlags {
-								lines = append(lines, fmt.Sprintf("    cmp %s, #1", descSrc.X))
-							}
-						}
-						return lines, nil
-					}
-				} else if mem, okMem := args[1].(x86asm.Mem); okMem {
-					lines = append(lines, readMemTo(mem, nextPC, descDst.Size, "x17", "w17")...)
-					if descDst.Size == 4 {
-						lines = append(lines, fmt.Sprintf("    clz %s, w17", descDst.W))
-						if !inst.SkipFlags {
-							lines = append(lines, "    cmp w17, #1")
-						}
-					} else {
-						lines = append(lines, fmt.Sprintf("    clz %s, x17", descDst.X))
-						if !inst.SkipFlags {
-							lines = append(lines, "    cmp x17, #1")
-						}
-					}
-					return lines, nil
-				}
-			}
-		}
-		lines = append(lines, l.emitUnsupported(inst, "unsupported lzcnt")...)
-		return lines, nil
+	case x86asm.BSF, x86asm.TZCNT, x86asm.BSR, x86asm.LZCNT:
+		return l.liftBitScan(inst, nextPC, lines)
 
 	case x86asm.JMP:
 		if rel, ok := args[0].(x86asm.Rel); ok {
 			target := uint64(int64(nextPC) + int64(rel))
-			if fn != nil && fn.Blocks[target] != nil {
-				lines = append(lines, fmt.Sprintf("    b L_fn_0x%x_loc_0x%x", fn.EntryAddr, target))
-			} else if l.IsKnownFunc(target) {
-				lines = append(lines, "    ldr x30, [sp], #16")
-				lines = append(lines, fmt.Sprintf("    b _fn_0x%x", target))
-			} else {
-				lines = append(lines, loadImm64("x0", target)...)
-				lines = append(lines, "    ldr x30, [sp], #16")
-				lines = append(lines, "    b _recomp_indirect_jump")
+			// A target outside the function is a tail call to a function (flags dead, so the
+			// liveness pass marks CF dead) or, for a target that is no function entry, an
+			// unknown continuation that starts in the block-boundary sense.
+			if !inst.CarryDead {
+				lines = append(lines, l.normalizeCarry()...)
 			}
+			lines = append(lines, l.branchTo(fn, target)...)
 			return lines, nil
 		}
+		// emitLocalJumpTable dispatches an indirect jump to a block of the function. The table
+		// targets start in the block-boundary carry sense, and the flags (which may be live into
+		// them) survive the dispatch: the range check saves and restores NZCV, the block compare
+		// chain uses EOR/CBZ.
 		emitLocalJumpTable := func(targetReg string) {
 			if fn != nil && len(fn.Blocks) > 1 && fn.EndAddr > fn.EntryAddr {
+				if !inst.CarryDead {
+					lines = append(lines, l.normalizeCarry()...)
+				}
+				outside := fmt.Sprintf("L_fn_0x%x_outside_0x%x", fn.EntryAddr, inst.Address)
 				skipLocal := fmt.Sprintf("L_fn_0x%x_not_local_0x%x", fn.EntryAddr, inst.Address)
+				lines = append(lines, "    mrs x17, nzcv")
 				lines = append(lines, loadImm64("x16", fn.EntryAddr)...)
 				lines = append(lines, fmt.Sprintf("    cmp %s, x16", targetReg))
-				lines = append(lines, fmt.Sprintf("    b.lo %s", skipLocal))
+				lines = append(lines, fmt.Sprintf("    b.lo %s", outside))
 				lines = append(lines, loadImm64("x16", fn.EndAddr)...)
 				lines = append(lines, fmt.Sprintf("    cmp %s, x16", targetReg))
-				lines = append(lines, fmt.Sprintf("    b.hs %s", skipLocal))
+				lines = append(lines, fmt.Sprintf("    b.hs %s", outside))
+				lines = append(lines, "    msr nzcv, x17")
 
 				for _, blockAddr := range fn.BlockOrder {
 					lines = append(lines, loadImm64("x16", blockAddr)...)
-					lines = append(lines, fmt.Sprintf("    cmp %s, x16", targetReg))
-					lines = append(lines, fmt.Sprintf("    b.eq L_fn_0x%x_loc_0x%x", fn.EntryAddr, blockAddr))
+					lines = append(lines, fmt.Sprintf("    eor x16, x16, %s", targetReg))
+					lines = append(lines, fmt.Sprintf("    cbz x16, L_fn_0x%x_loc_0x%x", fn.EntryAddr, blockAddr))
 				}
+				lines = append(lines, fmt.Sprintf("    b %s", skipLocal))
+				lines = append(lines, fmt.Sprintf("%s:", outside))
+				lines = append(lines, "    msr nzcv, x17")
 				lines = append(lines, fmt.Sprintf("%s:", skipLocal))
 			}
 		}
@@ -1117,6 +1224,11 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 
 	case x86asm.PUSH:
 		if reg, ok := args[0].(x86asm.Reg); ok {
+			if reg == x86asm.RSP {
+				// PUSH RSP stores the value RSP had before the instruction.
+				lines = append(lines, "    sub x16, x26, #8", "    str x26, [x28, x16]", "    mov x26, x16")
+				return lines, nil
+			}
 			if desc, okDesc := arm64RegMap[reg]; okDesc {
 				lines = append(lines, "    sub x26, x26, #8")
 				lines = append(lines, fmt.Sprintf("    str %s, [x28, x26]", desc.X))
@@ -1138,6 +1250,11 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 
 	case x86asm.POP:
 		if reg, ok := args[0].(x86asm.Reg); ok {
+			if reg == x86asm.RSP {
+				// POP RSP: RSP is the value loaded from the old top; the increment is lost.
+				lines = append(lines, "    ldr x26, [x28, x26]")
+				return lines, nil
+			}
 			if desc, okDesc := arm64RegMap[reg]; okDesc {
 				lines = append(lines, fmt.Sprintf("    ldr %s, [x28, x26]", desc.X))
 				lines = append(lines, "    add x26, x26, #8")
@@ -1163,8 +1280,15 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		return l.liftShldShrd(inst, nextPC, lines)
 
 	// Vector & Floating Point Moves
-	case x86asm.MOVAPS, x86asm.MOVUPS, x86asm.MOVDQA, x86asm.MOVDQU, x86asm.MOVAPD, x86asm.MOVUPD:
+	case x86asm.MOVAPS, x86asm.MOVUPS, x86asm.MOVDQA, x86asm.MOVDQU, x86asm.MOVAPD, x86asm.MOVUPD,
+		x86asm.LDDQU: // LDDQU is an unaligned load (MOVDQU)
 		return l.liftVectorMove128(inst, nextPC, lines)
+
+	case x86asm.PMULHRSW, x86asm.VPMULHRSW:
+		return l.liftPmulhrsw(inst, nextPC, lines)
+
+	case x86asm.PSIGNB, x86asm.PSIGNW, x86asm.PSIGND, x86asm.VPSIGNB, x86asm.VPSIGNW, x86asm.VPSIGND:
+		return l.liftPsign(inst, nextPC, lines)
 
 	case x86asm.MOVSS:
 		return l.liftVectorMove32(inst, nextPC, lines)
@@ -1310,7 +1434,8 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		x86asm.PSRAW, x86asm.PSRAD:
 		return l.liftVectorShift(inst, nextPC, lines)
 
-	case x86asm.VMOVUPS, x86asm.VMOVUPD, x86asm.VMOVAPS, x86asm.VMOVAPD, x86asm.VMOVDQU, x86asm.VMOVDQA:
+	case x86asm.VMOVUPS, x86asm.VMOVUPD, x86asm.VMOVAPS, x86asm.VMOVAPD, x86asm.VMOVDQU, x86asm.VMOVDQA,
+		x86asm.VLDDQU: // VLDDQU is an unaligned load (VMOVDQU)
 		return l.liftAvxMove(inst, nextPC, lines)
 
 	case x86asm.VMOVSS:
@@ -1626,7 +1751,7 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		return l.liftPmaddwd(inst, nextPC, lines)
 
 	case x86asm.FLD, x86asm.FILD, x86asm.FLDZ, x86asm.FLD1,
-		x86asm.FST, x86asm.FSTP, x86asm.FISTP, x86asm.FISTTP,
+		x86asm.FST, x86asm.FSTP, x86asm.FIST, x86asm.FISTP, x86asm.FISTTP,
 		x86asm.FXCH, x86asm.FCHS, x86asm.FABS, x86asm.FSQRT,
 		x86asm.FADD, x86asm.FADDP, x86asm.FSUB, x86asm.FSUBP, x86asm.FSUBR, x86asm.FSUBRP,
 		x86asm.FMUL, x86asm.FMULP, x86asm.FDIV, x86asm.FDIVP, x86asm.FDIVR, x86asm.FDIVRP,
@@ -1643,6 +1768,19 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		return l.liftFpu(inst, nextPC, lines)
 
 	case x86asm.HLT, x86asm.INT, x86asm.INTO, x86asm.ICEBP:
+		// Software interrupts. Sites in the lifted TLOU / U4 code: INT 0x41 8233 / 13037,
+		// INT3 (CC) 300 / 212, INT 0x44 151 / 151, INTO and ICEBP 0. The C backend made every
+		// INT a no-op. Here only INT 0x41 is one: it is the Orbis debugger break that Naughty
+		// Dog's HALT/ASSERT macros issue after printing the message; without a debugger the
+		// process continues, and TLOU relies on it to recover from "A frame did not complete in
+		// 2.00 seconds" (Task 8). INT3 (assert breaks in game code) and INT 0x44 (a trap with
+		// a code in ECX in the system modules' failure paths) stop a PS4 process without a
+		// debugger, and no asm run so far has reached one, so they keep trapping (BRK, reported
+		// by the signal handler), as do HLT, INTO and ICEBP.
+		if imm, ok := inst.Inst.Args[0].(x86asm.Imm); ok && inst.Inst.Op == x86asm.INT && imm == 0x41 {
+			lines = append(lines, "    // int 0x41: debugger break, no debugger attached")
+			return lines, nil
+		}
 		lines = append(lines, "    brk #0")
 		return lines, nil
 
@@ -1772,35 +1910,38 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		return l.liftStr(inst, nextPC, lines)
 
 	default:
-		// Check SETcc
-		if cond, ok := setccCond(op, l.lastFlagOp); ok {
-			return l.liftSetcc(inst, nextPC, cond, lines)
-		}
-
-		// Check CMOVcc
-		if cond, ok := cmovccCond(op, l.lastFlagOp); ok {
-			return l.liftCmovcc(inst, nextPC, cond, lines)
+		if cc, ok := x86CondIndex(op); ok {
+			opName := op.String()
+			if strings.HasPrefix(opName, "SET") {
+				pre, cond := l.condFor(cc)
+				lines = append(lines, pre...)
+				return l.liftSetcc(inst, nextPC, cond, lines)
+			}
+			if strings.HasPrefix(opName, "CMOV") {
+				pre, cond := l.condFor(cc)
+				lines = append(lines, pre...)
+				return l.liftCmovcc(inst, nextPC, cond, lines)
+			}
 		}
 
 		// Check conditional branches
-		if cond, ok := arm64Cond(op, l.lastFlagOp); ok {
+		if cc, ok := x86CondIndex(op); ok {
+			// The targets start in the block-boundary carry sense; invert first if CF is live.
+			if !inst.CarryDead {
+				lines = append(lines, l.normalizeCarry()...)
+			}
+			pre, cond := l.condFor(cc)
+			lines = append(lines, pre...)
 			if rel, ok := args[0].(x86asm.Rel); ok {
 				target := uint64(int64(nextPC) + int64(rel))
-				if fn != nil && fn.Blocks[target] != nil {
-					lines = append(lines, fmt.Sprintf("    b.%s L_fn_0x%x_loc_0x%x", cond, fn.EntryAddr, target))
+				if lbl := localLabel(fn, target); lbl != "" {
+					lines = append(lines, fmt.Sprintf("    b.%s %s", cond, lbl))
 				} else {
 					inv := invertArm64Cond(cond)
 					skipLabel := fmt.Sprintf("L_fn_0x%x_skip_%d", fn.EntryAddr, l.labelCounter)
 					l.labelCounter++
 					lines = append(lines, fmt.Sprintf("    b.%s %s", inv, skipLabel))
-					if l.IsKnownFunc(target) {
-						lines = append(lines, "    ldr x30, [sp], #16")
-						lines = append(lines, fmt.Sprintf("    b _fn_0x%x", target))
-					} else {
-						lines = append(lines, loadImm64("x0", target)...)
-						lines = append(lines, "    ldr x30, [sp], #16")
-						lines = append(lines, "    b _recomp_indirect_jump")
-					}
+					lines = append(lines, l.branchTo(fn, target)...)
 					lines = append(lines, fmt.Sprintf("%s:", skipLabel))
 				}
 				return lines, nil

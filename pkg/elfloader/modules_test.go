@@ -126,6 +126,29 @@ func TestDiscoverPrxDir(t *testing.T) {
 	}
 }
 
+func TestDiscoverRecursivePrx(t *testing.T) {
+	dir := t.TempDir()
+	nestedDir := filepath.Join(dir, "Media", "Plugins", "Sub")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plugin := filepath.Join(nestedDir, "custom_plugin.prx")
+	if err := os.WriteFile(plugin, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refs := DiscoverCompanionModules(filepath.Join(dir, "eboot.bin"), "", nil)
+	found := false
+	for _, ref := range refs {
+		if filepath.Base(ref.Path) == "custom_plugin.prx" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected custom_plugin.prx in nested directory to be recursively discovered, got %+v", refs)
+	}
+}
+
 func TestApplyBiasCanary(t *testing.T) {
 	img := make([]byte, 0x10000)
 	const origCanaryAddr = 0x5000

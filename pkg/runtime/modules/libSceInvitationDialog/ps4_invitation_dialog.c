@@ -127,3 +127,39 @@ void shim_sceInvitationDialogTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceInvitationDialogTerminate();
     SHIM_RETURN();
 }
+
+// Legacy (non-A) entry points. SceInvitationDialogParam has `size_t size`
+// where the A variant has `uint32_t size; ...; int32_t pad`, so callbackArg
+// sits at the same offset (0x40) in both layouts; only that field is used.
+void shim_sceInvitationDialogOpen(GuestContext *ctx) {
+    if (!ctx->rdi) {
+        ctx->rax = (uint64_t)(int64_t)(int32_t)0x80b8000d; // ARG_NULL
+        SHIM_RETURN();
+    }
+    OrbisInvitationDialogParamA p;
+    memset(&p, 0, sizeof(p));
+    p.callbackArg = *(void **)(ctx->mem_base + ctx->rdi + offsetof(OrbisInvitationDialogParamA, callbackArg));
+    ctx->rax = (uint64_t)(int64_t)sceInvitationDialogOpenA(&p);
+    SHIM_RETURN();
+}
+
+// Result layout shared with the A variant for the leading fields
+// (callbackArg, errorCode, result); the sent-user list is not written.
+void shim_sceInvitationDialogGetResult(GuestContext *ctx) {
+    if (!ctx->rdi) {
+        ctx->rax = (uint64_t)(int64_t)(int32_t)0x80b8000d; // ARG_NULL
+        SHIM_RETURN();
+    }
+    OrbisInvitationDialogResultA r;
+    memset(&r, 0, sizeof(r));
+    int32_t rc = sceInvitationDialogGetResultA(&r);
+    if (rc == 0) {
+        uint8_t *out = ctx->mem_base + ctx->rdi;
+        memcpy(out + offsetof(OrbisInvitationDialogResultA, callbackArg), &r.callbackArg, sizeof(r.callbackArg));
+        memcpy(out + offsetof(OrbisInvitationDialogResultA, errorCode), &r.errorCode, sizeof(r.errorCode));
+        int32_t res = (int32_t)r.result;
+        memcpy(out + offsetof(OrbisInvitationDialogResultA, result), &res, sizeof(res));
+    }
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}

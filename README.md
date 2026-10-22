@@ -7,11 +7,15 @@ A macOS Apple Silicon ahead-of-time (AOT) recompiler that translates PlayStation
 
 ## Features
 
-- **Native ARM64 Assembly AOT Compiler**: Recovers functions, CFG, and jump tables, translating AMD64 instructions directly into native ARM64 assembly (`.s`) chunks for fast, parallel Apple Clang assembler compilation without intermediate C translation overhead.
-- **Native Metal Graphics & GNM Driver**: Direct Apple Metal PM4 Command Processor, hardware context tracking, tessellation ring buffers, zero-copy UMA buffer mapping, and SPIRV-Cross shader translation to MSL with hardware VSync via `CAMetalLayer`.
-- **Orbis & POSIX Subsystems**: Shims for memory (UMA), multi-threading (pthreads / Orbis threads), synchronization primitives, events, networking (`libSceNet`/BSD sockets), and VFS path virtualization (`/app0`).
-- **Media & Hardware**: Low-latency PCM audio (`AudioToolbox`), DualSense/DS4 support (`GameController.framework`), and Cocoa modal dialogs.
-- **Tooling & Bundling**: Companion PRX module analysis, static linking, and automatic macOS `.app` bundle generation.
+- **Native ARM64 Assembly AOT Compiler**: Recovers functions, CFG, and jump tables, translating AMD64 instructions directly into native ARM64 assembly (`.s`) chunks. Compiles via Apple Clang assembler in parallel without intermediate C translation overhead.
+- **x86 Memory Ordering (TSO)**: Supports x86 Total Store Order via acquire/release semantics (`-tso`) on non-stack guest memory, preventing subtle multi-threaded race conditions in game engines and lock-free data structures.
+- **Darwin ABI & Register Safety**: Pinned guest register architecture (`x28` memory base, `x27` TLS/FS base) while strictly respecting Darwin ARM64 calling conventions: `x18` (Apple platform-reserved) is untouched, `d8`-`d15` callee-saved registers are preserved, and stack alignment is verified.
+- **Universal Multi-Module & Plugin Linking**: Recursively discovers and binds all companion `.prx` modules and game plugins throughout the application directory structure. Automatically relocates virtual memory spaces with zero collisions and merges symbols into a unified guest address space.
+- **FreeBSD / Orbis OS Conforming Synchronization**: True guest-memory allocated synchronization primitives (`pthread_mutex_t`, `pthread_cond_t`, `pthread_rwlock_t`) supporting internal libc field accesses (such as Unity's `m_flags`), adaptive spinlocks, and fiber-aware thread ownership.
+- **Native Metal Graphics & VideoOut**: Direct Apple Metal presentation with frame pacing (`ps4_metal_screen`, `ps4_present_queue`), hardware VSync, gamma correction, and zero-copy UMA physical direct memory aliasing (`mach_vm_remap`).
+- **Orbis Kernel & POSIX Subsystems**: High-level emulation (HLE) of direct physical memory, event queues (`libkernel` equeues with condition broadcasting), asynchronous I/O (`aio`), and virtual file system virtualization (`/app0`).
+- **Rich Media & Hardware Integration**: Multi-channel 48 kHz PCM audio mixer paced by device clock (`libSceAudioOut`), hardware AAC decoding via AudioToolbox (`libSceAudiodec`), native GameController gamepad input with hotkeys (`libScePad`), hardware ImageIO decoding (`libScePngDec`, `libSceJpegDec`), directory-based save data (`libSceSaveData`), and RFC-compliant datetime (`libSceRtc`).
+- **Tooling & Standalone Bundling**: Automatic generation of self-contained macOS `.app` application bundles, resource staging, and ad-hoc code-signing.
 
 ---
 
@@ -85,7 +89,7 @@ go build -o ps4-recomp ./cmd/ps4-recomp
 
 ### 1. Analyze a Binary
 
-Scan CFGs, discover companion PRXs, and report instruction compatibility for the decrypted executable:
+Scan CFGs, discover companion PRXs recursively, and report instruction compatibility for the decrypted executable:
 
 ```bash
 ./ps4-recomp analyze path/to/extracted_game/eboot.bin
@@ -96,7 +100,7 @@ Scan CFGs, discover companion PRXs, and report instruction compatibility for the
 Recompile the extracted Orbis binary and package it into a native standalone application bundle:
 
 ```bash
-# Basic compilation to native ARM64 binary
+# Basic compilation to native ARM64 binary with full TSO memory ordering
 ./ps4-recomp path/to/extracted_game/eboot.bin -o output_dir -c
 
 # Full standalone package with VFS assets and resources included into macOS app bundle
@@ -117,6 +121,7 @@ Recompile the extracted Orbis binary and package it into a native standalone app
 | `-a`, `-all-symbols`    | Recompile all symbols in symbol table even if unreachable            | `false`       |
 | `-k`, `-chunk-size <n>` | Number of functions per emitted ARM64 assembly chunk file            | `250`         |
 | `-v`, `-verbose`        | Enable verbose output and detailed timing breakdown                  | `false`       |
+| `--tso`                 | x86 Total Store Order memory model (acquire/release on memory)       | `true`        |
 | `--app-dir <dir>`       | Host directory mapping to `/app0` for game assets                    | Auto-detected |
 | `--copy-resources`      | Copy all game assets/resources into macOS `.app` bundle `Resources/` | `false`       |
 | `--asan`                | Compile runtime with AddressSanitizer and LeakSanitizer              | `false`       |
@@ -127,53 +132,41 @@ Recompile the extracted Orbis binary and package it into a native standalone app
 
 ### Hollow Knight: Silksong (Unity 6 / Il2Cpp)
 
-Silksong boots into the native Unity 6 engine runtime on Apple Silicon, initializes the Boehm GC subsystem with registered host/guest stack boundaries, establishes the Metal display layer (`CAMetalLayer`), and launches over 30 concurrent engine and audio worker threads (`FMOD stream thread`, `Job.Worker`, `AsyncReadManager`):
+Silksong boots into the native Unity 6 engine on Apple Silicon. Over **341,000 reachable functions** and **19.3 million instructions** across `eboot.bin` and 11 companion PRXs and plugins (`Il2cppUserAssemblies.prx`, `HollowKnightPS4Plugin.prx`, `UnityNpToolkit2.prx`, `SaveData.prx`, `CommonDialog.prx`, `PSN.prx`, `lib_burst_generated.prx`, `PS4Util.prx`, `libSceFios2.prx`, `libSceJobManager.prx`, `libc.prx`) are recompiled directly into native ARM64 assembly.
+
+The game successfully maps 2.5 GB direct physical memory, initializes FMOD audio, mounts VFS assets, and runs Unity engine subsystems including `PlayerPrefs` and concurrent workers:
 
 ```text
-[ps4-recomp] Initializing runtime...
-[ps4-recomp] Loading guest memory image (137105408 bytes), allocated dynamic address space (524288.0 MB)
-[ps4-mem] SceLibcParam at 0x2000000: size=0xa8 ver=14.1 malloc_replace=0x20000f8 new_replace=0x2000170
-[ps4-mem] SceLibcMallocReplace at 0x20000f8: size=0x78 init=0x14db270 malloc=0x14dba10
-[ps4-recomp] Initializing custom memory allocator via SceLibcParam at 0x14db270...
-[ps4-mem] sceKernelAllocateDirectMemory: start=0x0 end=0x800000000 len=268435456 (256.00 MB) align=2097152 type=0
-[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=0x8400000
-[ps4-recomp] Initializing libc malloc subsystem via _malloc_init at 0x2ca7a00...
-[ps4-kernel] _sceKernelRtldSetApplicationHeapAPI: table at 0x2da4178
-[ps4-recomp] Executing _start (0x13550)...
+[ps4-thread] Thread created: id=1051, name='PlayerPrefs', entry=0xb2d420, arg=0x2a236108
+[ps4-thread] Thread started: id=1051, name='PlayerPrefs', entry=0xb2d420, arg=0x2a236108
+[ps4-mem] sceKernelReserveVirtualRange: in=0xd7240000 len=65536 (0.06 MB) flags=0x10 align=0
+[ps4-vm] recomp_vm_alloc_fixed (reserved): desired=0xd7240000 size=65536 (0.06 MB)
+[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=0xd7240000
+[ps4-mem] sceKernelCheckedReleaseDirectMemory: phys=0x0 len=65536
+[ps4-thread] Thread exited: id=1051, name='PlayerPrefs', ret=0x0
+[ps4-recomp] sceKernelLoadStartModule: /app0/Media/Plugins/UnityNpToolkit2.prx
+[ps4-recomp] sceKernelDlsym: handle 5 symbol 'UnitySetGraphicsDevice' not found
+[ps4-recomp] sceKernelDlsym: handle 5 symbol 'UnityRenderEvent' not found
+[ps4-recomp] sceKernelDlsym: handle 5 symbol 'UnityGetAudioEffectDefinitions' not found
+[ps4-recomp] sceKernelDlsym: handle 5 symbol 'UnityPluginLoad' not found
+[ps4-recomp] sceKernelDlsym: handle 5 symbol 'UnityPluginUnload' not found
+[ps4-recomp] sceKernelDlsym: handle 5 symbol 'UnityRenderingExtEvent' not found
+[ps4-recomp] sceKernelDlsym: handle 5 symbol 'UnityRenderingExtQuery' not found
+[ps4-recomp] sceKernelDlsym: handle 5 symbol 'UnityShaderCompilerExtEvent' not found
+[ps4-recomp] sceKernelDlsym: handle 5 symbol 'UnitySetEventQueue' not found
+[ps4-recomp] sceKernelLoadStartModule: /app0/Media/Plugins/UnityNpToolkit2.prx
+[ps4-recomp] WARN: Called unimplemented function NID 'vbh-MWtjMh4' (Lib: libSceVrTracker) at RIP=0x8ad0a68 (caller RIP=0x8ada789, RSP=0x7ffff9308)
+Registers:
+  RAX=0x0000000010000000 RBX=0x00000007ffff9b88 RCX=0x00000007ffff9b90 RDX=0x0000000008adaed0
+  RSI=0x00000007ffff9b88 RDI=0x00000007ffff9320 RBP=0x00000007ffff93f0 RSP=0x00000007ffff9308
+  R8 =0x00000000000001f1 R9 =0x0000000000000040 R10=0x0000000019c00000 R11=0x0000000000000000
+  R12=0x0000000008adaed0 R13=0x00000000023e7000 R14=0x00000007ffff9b90 R15=0x00000007ffff9420
 ...
-[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=0xd0ca0000
-[ps4-gnm-metal] Native Apple Metal GNM Command Processor initialized (Apple M1)
-[videoout] Presenting frame 4294967296 (buffer 0, 1920x1080)
-[videoout] sceVideoOutSubmitFlip: handle=1 buf=0 flipQueueReg=1 (num=2)
-[videoout] sceVideoOutGetFlipStatus: handle=1 num=2 currentBuf=0
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=200704 (0.19 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd4731000
-[ps4-thread] Thread created: id=1041, name='UnityGfxDeviceWorker', entry=0xb2d420, arg=0x2891d0b0
-[ps4-thread] Thread started: id=1041, name='UnityGfxDeviceWorker', entry=0xb2d420, arg=0x2891d0b0
-...
-[ps4-sys] open: '/app0/Media/Resources/unity default resources' (resolved='/Volumes/Samsung T7/Hollow Knight Silksong/game/Media/Resources/unity default resources', flags=0x0) -> fd=10
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=331776 (0.32 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd4800000
-[ps4-thread] Thread created: id=1042, name='FMOD mixer thread', entry=0x19aef40, arg=0xd0157848
-[ps4-thread] Thread started: id=1042, name='FMOD mixer thread', entry=0x19aef40, arg=0xd0157848
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=86016 (0.08 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd4762000
-[ps4-thread] Thread created: id=1043, name='FMOD AudioOut thread', entry=0x19aef40, arg=0xd01576f0
-[ps4-thread] Thread started: id=1043, name='FMOD AudioOut thread', entry=0x19aef40, arg=0xd01576f0
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=200704 (0.19 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0xd4851000
-[ps4-thread] Thread created: id=1044, name='FMOD stream thread', entry=0x19aef40, arg=0xd0151338
-[ps4-thread] Thread started: id=1044, name='FMOD stream thread', entry=0x19aef40, arg=0xd0151338
-[gnm] sceGnmSubmitDone called (total=2)
-Forcing submitDone to avoid TRC R4089 breach
-[gnm] sceGnmSubmitDone called (total=3)
-Forcing submitDone to avoid TRC R4089 breach
-[gnm] sceGnmSubmitDone called (total=4)
-Forcing submitDone to avoid TRC R4089 breach
-^C
 ```
 
 ### Hogwarts Legacy (Unreal Engine 4)
+
+Unreal Engine 4 boots past early engine initialization, expands virtual memory pool blocks, configures flexible memory sizes, and parses game packages:
 
 ```text
 [ps4-recomp] Initializing runtime...
@@ -189,28 +182,12 @@ Forcing submitDone to avoid TRC R4089 breach
 [ps4-mem] sceKernelMemoryPoolReserve: in=0x1000000000 len=8589934592 (8192.00 MB) align=0 flags=0x90
 [ps4-vm] recomp_vm_alloc_fixed (pool_reserved): desired=0x1000000000 size=8589934592 (8192.00 MB)
 [ps4-mem] sceKernelMemoryPoolReserve SUCCESS: out=0x1000000000
-[ps4-mem] sceKernelMemoryPoolReserve: in=0x2000000000 len=8589934592 (8192.00 MB) align=0 flags=0x90
-[ps4-vm] recomp_vm_alloc_fixed (pool_reserved): desired=0x2000000000 size=8589934592 (8192.00 MB)
-[ps4-mem] sceKernelMemoryPoolReserve SUCCESS: out=0x2000000000
-[ps4-mem] sceKernelMemoryPoolReserve: in=0x3000000000 len=1073741824 (1024.00 MB) align=0 flags=0x90
-[ps4-vm] recomp_vm_alloc_fixed (pool_reserved): desired=0x3000000000 size=1073741824 (1024.00 MB)
-[ps4-mem] sceKernelMemoryPoolReserve SUCCESS: out=0x3000000000
 [ps4-recomp] Executing _start (0xf9a50)...
 GoodPGO
 File root is /app0/!
 [ps4-mem] sceKernelConfiguredFlexibleMemorySize: 4294967296 (4096.00 MB)
-Used memory before allocating anything was 0.00MB
 FIOS2: built with SDK version 0x09508001
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=81920 (0.08 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x12a80000
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=147456 (0.14 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x12a94000
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=147456 (0.14 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x12ab8000
-
-Failed to allocate virtual address space. (Original Type: CPU, Type: CPU, Size: 2943483904, Alignment: 65536)
-[ps4-mem] sceKernelConfiguredFlexibleMemorySize: 4294967296 (4096.00 MB)
-^C
+...
 ```
 
 ---
@@ -218,24 +195,28 @@ Failed to allocate virtual address space. (Original Type: CPU, Type: CPU, Size: 
 ## Project Structure
 
 ```text
-├── cmd/ps4-recomp/      # CLI entry point
+├── cmd/
+│   ├── ps4-recomp/              # Main CLI entry point
+│   └── lifter-difftest-asm/     # AMD64 vs ARM64 assembly differential testing harness
 └── pkg/
-    ├── analyzer/        # Instruction coverage & CFG analyzer
-    ├── disasm/          # Disassembly & jump tables
-    ├── elfloader/       # ELF64 / PRX loader & relocations
-    ├── lifter/          # AMD64 to ARM64 assembly lifter (ALU, SIMD, AVX, FPU, string ops)
-    ├── emitter/         # Partitioned ARM64 assembly emitter & Clang driver
-    └── runtime/         # macOS host runtime & Orbis/POSIX kernel ABI
-        ├── core/        # Guest context & register state
-        └── modules/     # libSce (VideoOut, AudioOut, Net, Pad, etc.)
+    ├── analyzer/                # Reachable CFG & instruction coverage analyzer
+    ├── disasm/                  # Instruction decoder, jump-table & carry-liveness recovery
+    ├── elfloader/               # ELF64/SELF/PRX parser, recursive companion module discovery
+    ├── lifter/                  # AMD64 to ARM64 assembly lifter (TSO, locked RMW, FPU, SIMD)
+    ├── emitter/                 # Assembly partitioner, bridge trampoline, shims & Ninja driver
+    └── runtime/                 # macOS host runtime & Orbis/POSIX kernel ABI
+        ├── core/                # Guest context, memory manager & Mach-O crash handlers
+        ├── kernel/              # Direct memory aliasing, sync pools, threading, equeue, VFS
+        └── modules/             # HLE modules (VideoOut, AudioOut, Audiodec, Pad, SaveData, RTC, etc.)
 ```
 
 ---
 
 ## Contributing Guidelines
 
-- **Multi-platform support**: macOS Apple Silicon remains the main priority. Contributions for other platforms are welcome as long as they don't break or slow down macOS support.
-- **AI Tooling**: Use of LLMs/AI for development is allowed, provided all generated code is thoroughly verified and does not break recompiled binary builds.
+- **English only**: All code comments, documentation, and commit messages must be written in English.
+- **Strict verification**: All modifications must pass `go test -count=1 ./...` and `go vet ./...` cleanly with zero regressions. No artificial stubs returning 0 where honest implementation is required.
+- **Multi-platform support**: macOS Apple Silicon remains the primary target architecture. Contributions for other platforms are welcome as long as they don't break or slow down macOS support.
 
 ---
 
@@ -243,6 +224,7 @@ Failed to allocate virtual address space. (Original Type: CPU, Type: CPU, Size: 
 
 Special thanks to the open-source PlayStation emulation and research communities:
 
+- **[ps4-native-mac](https://github.com/manjarqo/ps4-native-mac)** — The first fork of the project that improved the work of the original
 - **[OpenOrbis](https://github.com/OpenOrbis)** — Open-source PS4 toolchain and reverse engineering.
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4)** — HLE module architecture and system behavior documentation.
 - **[ps4libdoc](https://github.com/idc/ps4libdoc)** — Symbol dictionaries and NID-to-name mappings.

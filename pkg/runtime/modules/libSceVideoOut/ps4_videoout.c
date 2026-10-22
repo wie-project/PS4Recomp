@@ -1,5 +1,16 @@
 #include "ps4_videoout.h"
 #include "ps4_metal_screen.h"
+
+__attribute__((weak)) int ps4_gnm_metal_present(GuestContext *ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch,
+                          uint32_t tiling_mode, uint32_t pixel_format, void (*on_done)(void *), void *arg) {
+    (void)ctx; (void)addr; (void)width; (void)height; (void)pitch; (void)tiling_mode; (void)pixel_format; (void)on_done; (void)arg;
+    return 0;
+}
+__attribute__((weak)) int ps4_gnm_read_display_cpu(GuestContext *ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch,
+                             uint32_t tiling_mode, uint32_t pixel_format, uint8_t *out_bgra) {
+    (void)ctx; (void)addr; (void)width; (void)height; (void)pitch; (void)tiling_mode; (void)pixel_format; (void)out_bgra;
+    return 0;
+}
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -235,7 +246,9 @@ int32_t sceVideoOutSetFlipRate(int32_t handle, int32_t fliprate) {
     }
 
     pthread_mutex_lock(&vh->mutex);
+    if (vh->flipRate != fliprate) fprintf(stderr, "[videoout] SetFlipRate(handle=%d, rate=%d)\n", handle, fliprate);
     vh->flipRate = fliprate;
+    ps4_metal_screen_set_guest_flip_rate(fliprate);
     pthread_mutex_unlock(&vh->mutex);
 
     pthread_mutex_unlock(&g_video_table_mutex);
@@ -270,57 +283,120 @@ int32_t sceVideoOutAddFlipEvent(OrbisKernelEqueue eq, int32_t handle, void *flip
     return 0;
 }
 
+// Number of flips submitted so far (debug clock for PS4_PAD_CLOCK=frames).
+volatile uint64_t g_ps4_videoout_flip_count;
+
+// A flip completes when the GPU has executed the frame's presentation (like the display engine
+// flipping after the GPU wrote the buffer): flip status and the flip event are updated then.
+typedef struct PendingFlip {
+    int32_t handle;
+    int32_t bufferIndex;
+    int64_t flipArg;
+} PendingFlip;
+
+static void finish_flip(const PendingFlip *pf) {
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(pf->handle);
+    if (vh) {
+        pthread_mutex_lock(&vh->mutex);
+        vh->flipStatus.num++;
+        vh->flipStatus.flipArg = pf->flipArg;
+        vh->flipStatus.currentBuffer = pf->bufferIndex;
+        if (vh->flipStatus.numFlipPending > 0) vh->flipStatus.numFlipPending--;
+        if (vh->flipStatus.numGpuFlipPending > 0) vh->flipStatus.numGpuFlipPending--;
+        vh->flipStatus.ptime = get_time_usec();
+        vh->flipStatus.stime = get_fake_tsc();
+        // Event data: low 12 bits of the timestamp, 4-bit flip counter, flip argument above.
+        uint64_t time_12b = vh->flipStatus.stime & 0xfffULL;
+        uint64_t counter_4b = (uint64_t)(vh->flipStatus.num & 0xfULL);
+        uint64_t event_data = time_12b | (counter_4b << 12) | ((uint64_t)pf->flipArg << 16);
+        for (int q = 0; q < vh->flipQueueCount; q++) {
+            if (vh->flipQueues[q] > 0) {
+                ps4_equeue_post_event(vh->flipQueues[q], 0x6 /* Flip */, ORBIS_KERNEL_EVFILT_VIDEO_OUT,
+                                      (int64_t)event_data, vh->flipQueueUdatas[q]);
+            }
+        }
+        pthread_mutex_unlock(&vh->mutex);
+    }
+    pthread_mutex_unlock(&g_video_table_mutex);
+}
+
+static void complete_flip(void *arg) {
+    finish_flip((const PendingFlip *)arg);
+    free(arg);
+}
+
 int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferIndex, uint32_t flipMode, int64_t flipArg) {
+    static uint32_t s_last_mode = ~0u;
+    if (__atomic_exchange_n(&s_last_mode, flipMode, __ATOMIC_RELAXED) != flipMode)
+        fprintf(stderr, "[videoout] SubmitFlip flip mode %u\n", flipMode);
+    ps4_metal_screen_set_guest_flip_mode((int)flipMode);
+    __atomic_fetch_add(&g_ps4_videoout_flip_count, 1, __ATOMIC_RELAXED);
     pthread_mutex_lock(&g_video_table_mutex);
     VideoOutHandle *vh = find_video_handle_locked(handle);
     if (!vh) {
         pthread_mutex_unlock(&g_video_table_mutex);
         return -EINVAL;
     }
-
     pthread_mutex_lock(&vh->mutex);
-    pthread_mutex_unlock(&g_video_table_mutex);
-
+    // bufferIndex -1 is a flip without a display buffer (blank frame): it only completes the flip.
     if (bufferIndex != -1 && (bufferIndex < 0 || bufferIndex >= vh->bufferCount)) {
         pthread_mutex_unlock(&vh->mutex);
+        pthread_mutex_unlock(&g_video_table_mutex);
         return -EINVAL;
     }
-
-    if (bufferIndex >= 0 && bufferIndex < vh->bufferCount) {
-        uint64_t guest_buf_vaddr = vh->buffers[bufferIndex];
-        if (ctx && guest_buf_vaddr != 0) {
-            const void *pixels = ctx->mem_base + guest_buf_vaddr;
-            int width = vh->attr.width > 0 ? (int)vh->attr.width : 1920;
-            int height = vh->attr.height > 0 ? (int)vh->attr.height : 1080;
-            size_t pitch = vh->attr.pixelPitch > 0 ? (size_t)vh->attr.pixelPitch * 4 : (size_t)width * 4;
-
-            fprintf(stderr, "[videoout] Presenting frame %lld (buffer %d, %dx%d)\n", (long long)flipArg, bufferIndex, width, height);
-            ps4_metal_screen_present_frame(pixels, pitch, width, height);
-        }
-    }
-
-    vh->flipStatus.num++;
-    vh->flipStatus.flipArg = flipArg;
-    vh->flipStatus.currentBuffer = bufferIndex;
-    vh->flipStatus.numFlipPending = 0;
-    vh->flipStatus.numGpuFlipPending = 0;
-    vh->flipStatus.ptime = get_time_usec();
-    vh->flipStatus.stime = get_fake_tsc();
-
-    fprintf(stderr, "[videoout] sceVideoOutSubmitFlip: handle=%d buf=%d flipQueues=%d (num=%llu, flipArg=%lld)\n",
-            handle, bufferIndex, vh->flipQueueCount, (unsigned long long)vh->flipStatus.num, (long long)flipArg);
-
-    uint64_t time_12b = get_fake_tsc() & 0xfffULL;
-    uint64_t counter_4b = (uint64_t)(vh->flipStatus.num & 0xfULL);
-    uint64_t event_data = time_12b | (counter_4b << 12) | ((uint64_t)flipArg << 16);
-
-    for (int q = 0; q < vh->flipQueueCount; q++) {
-        if (vh->flipQueues[q] > 0) {
-            ps4_equeue_post_event(vh->flipQueues[q], 0x6 /* Flip */, ORBIS_KERNEL_EVFILT_VIDEO_OUT, (int64_t)event_data, vh->flipQueueUdatas[q]);
-        }
-    }
-
+    const uint64_t guest_buf_vaddr = bufferIndex >= 0 ? vh->buffers[bufferIndex] : 0;
+    const OrbisVideoOutBufferAttribute attr = vh->attr;
+    vh->flipStatus.numFlipPending++;
+    vh->flipStatus.numGpuFlipPending++;
     pthread_mutex_unlock(&vh->mutex);
+    pthread_mutex_unlock(&g_video_table_mutex);
+
+    PendingFlip *pf = (PendingFlip *)malloc(sizeof(PendingFlip));
+    if (pf) {
+        pf->handle = handle;
+        pf->bufferIndex = bufferIndex;
+        pf->flipArg = flipArg;
+    }
+    // No VideoOut lock is held while presenting: the completion may run on the GPU completion
+    // thread at any time and takes the locks itself.
+    int queued = 0;
+    if (ctx && guest_buf_vaddr != 0) {
+        int width = attr.width > 0 ? (int)attr.width : 1920;
+        int height = attr.height > 0 ? (int)attr.height : 1080;
+        uint32_t pitch_px = attr.pixelPitch > 0 ? attr.pixelPitch : (uint32_t)width;
+        static uint64_t s_presents;
+        ps4_stall_watchdog_note_present();
+        if ((s_presents++ % 300) == 0)
+            fprintf(stderr, "[videoout] Presenting frame %lld (buffer %d, %dx%d, tmode %d, fmt 0x%x)\n", (long long)flipArg,
+                    bufferIndex, width, height, attr.tmode, (unsigned)attr.format);
+        // GPU-rendered display buffer: present straight from the Metal render target.
+        if (pf && ps4_gnm_metal_present(ctx, guest_buf_vaddr, (uint32_t)width, (uint32_t)height, pitch_px,
+                                        (uint32_t)attr.tmode, (uint32_t)attr.format, complete_flip, pf)) {
+            queued = 1;
+        } else {
+            // Otherwise detile the guest memory on the CPU.
+            static uint8_t *s_buf;
+            static size_t s_buf_size;
+            size_t need = (size_t)width * height * 4;
+            if (s_buf_size < need) {
+                free(s_buf);
+                s_buf = (uint8_t *)malloc(need);
+                s_buf_size = s_buf ? need : 0;
+            }
+            if (s_buf && ps4_gnm_read_display_cpu(ctx, guest_buf_vaddr, (uint32_t)width, (uint32_t)height, pitch_px,
+                                                  (uint32_t)attr.tmode, (uint32_t)attr.format, s_buf)) {
+                ps4_metal_screen_present_frame(s_buf, (size_t)width * 4, width, height);
+            } else {
+                ps4_metal_screen_present_frame(ctx->mem_base + guest_buf_vaddr, (size_t)pitch_px * 4, width, height);
+            }
+        }
+    }
+    if (!queued) {
+        const PendingFlip now = {handle, bufferIndex, flipArg};
+        finish_flip(&now);
+        free(pf);
+    }
     return 0;
 }
 
@@ -336,8 +412,11 @@ int32_t sceVideoOutGetFlipStatus(int32_t handle, OrbisVideoOutFlipStatus *status
 
     pthread_mutex_lock(&vh->mutex);
     *status = vh->flipStatus;
-    fprintf(stderr, "[videoout] sceVideoOutGetFlipStatus: handle=%d num=%llu currentBuf=%d\n",
-            handle, (unsigned long long)vh->flipStatus.num, vh->flipStatus.currentBuffer);
+    // Polled every frame: logged on the first call only.
+    static int s_logged;
+    if (!__atomic_exchange_n(&s_logged, 1, __ATOMIC_RELAXED))
+        fprintf(stderr, "[videoout] sceVideoOutGetFlipStatus: handle=%d num=%llu currentBuf=%d (first call)\n",
+                handle, (unsigned long long)vh->flipStatus.num, vh->flipStatus.currentBuffer);
     pthread_mutex_unlock(&vh->mutex);
 
     pthread_mutex_unlock(&g_video_table_mutex);
@@ -405,10 +484,11 @@ void shim_sceVideoOutSetFlipRate(GuestContext *ctx) {
 void shim_sceVideoOutAddFlipEvent(GuestContext *ctx) {
     OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
     int32_t handle = (int32_t)ctx->rsi;
-    uint64_t flipArgGuest = ctx->rdx;
-    void *flipArg = flipArgGuest ? (void *)(ctx->mem_base + flipArgGuest) : NULL;
+    // udata is returned to the guest verbatim, so keep the guest value.
+    void *flipArg = (void *)(uintptr_t)ctx->rdx;
 
     ctx->rax = (uint64_t)(int64_t)sceVideoOutAddFlipEvent(eq, handle, flipArg);
+    fprintf(stderr, "[videoout] AddFlipEvent(eq=%lld, handle=%d, udata=%p) -> %d\n", (long long)(intptr_t)eq, handle, flipArg, (int)ctx->rax);
     SHIM_RETURN();
 }
 
@@ -688,7 +768,8 @@ int32_t sceVideoOutGetEventId(const OrbisKernelEvent *ev) {
 void shim_sceVideoOutAddVblankEvent(GuestContext *ctx) {
     OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
     int32_t handle = (int32_t)ctx->rsi;
-    void *udata = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+    // udata is returned to the guest verbatim, so keep the guest value.
+    void *udata = (void *)(uintptr_t)ctx->rdx;
     int32_t rc = sceVideoOutAddVblankEvent(eq, handle, udata);
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
@@ -796,5 +877,47 @@ void shim_sceVideoOutGetEventData(GuestContext *ctx) {
     int64_t *data = dataGuest ? (int64_t *)(ctx->mem_base + dataGuest) : NULL;
     int32_t rc = sceVideoOutGetEventData(ev, data);
     ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+// Output color settings. The game's brightness option ends up here: it fills the settings
+// with sceVideoOutColorSettingsSetGamma and applies them with sceVideoOutAdjustColor. The
+// presenter applies the gamma when it copies the frame to the window.
+typedef struct {
+    float gamma[3];
+    uint32_t reserved[3];
+} OrbisVideoOutColorSettings;
+
+#define ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE 0x80290001u
+#define ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS 0x80290002u
+
+void shim_sceVideoOutColorSettingsSetGamma_(GuestContext *ctx) {
+    const uint64_t guest = ctx->rdi;
+    const float gamma = ctx->xmm[0].f32[0];
+    if (!guest) {
+        ctx->rax = ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS;
+    } else if (!(gamma >= 0.1f && gamma <= 2.0f)) {
+        ctx->rax = ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
+    } else {
+        OrbisVideoOutColorSettings *s = (OrbisVideoOutColorSettings *)(ctx->mem_base + guest);
+        s->gamma[0] = s->gamma[1] = s->gamma[2] = gamma;
+        ctx->rax = 0;
+    }
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutAdjustColor_(GuestContext *ctx) {
+    const int32_t handle = (int32_t)ctx->rdi;
+    const uint64_t guest = ctx->rsi;
+    if (!guest) {
+        ctx->rax = ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS;
+        SHIM_RETURN();
+        return;
+    }
+    const OrbisVideoOutColorSettings *s = (const OrbisVideoOutColorSettings *)(ctx->mem_base + guest);
+    fprintf(stderr, "[videoout] AdjustColor(handle=%d, gamma=%.3f %.3f %.3f)\n", handle, s->gamma[0], s->gamma[1],
+            s->gamma[2]);
+    ps4_metal_screen_set_gamma(s->gamma[0]);
+    ctx->rax = 0;
     SHIM_RETURN();
 }

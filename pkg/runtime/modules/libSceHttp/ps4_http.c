@@ -22,16 +22,85 @@ static int32_t alloc_http_id(void) {
     return id;
 }
 
+// Live library contexts (sceHttpInit results) and whether sceHttpsLoadCert was called on them.
+#define HTTP_MAX_CTX 256
+static struct {
+    int32_t id;
+    bool custom_ca;
+} g_http_ctx[HTTP_MAX_CTX]; // id 0 = free slot; protected by g_http_mutex
+
 int32_t sceHttpInit(int32_t libnetMemId, int32_t libsslCtxId, uint64_t poolSize) {
     (void)libnetMemId;
     (void)libsslCtxId;
     (void)poolSize;
-    return alloc_http_id();
+    int32_t id = alloc_http_id();
+    bool stored = false;
+    pthread_mutex_lock(&g_http_mutex);
+    for (int i = 0; i < HTTP_MAX_CTX; i++) {
+        if (g_http_ctx[i].id == 0) {
+            g_http_ctx[i].id = id;
+            g_http_ctx[i].custom_ca = false;
+            stored = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_http_mutex);
+    // All slots used: the console's answer when its context pool is exhausted.
+    return stored ? id : (int32_t)0x80431022; // ORBIS_HTTP_ERROR_OUT_OF_MEMORY
 }
 
 int32_t sceHttpTerm(int32_t libhttpCtxId) {
-    (void)libhttpCtxId;
+    pthread_mutex_lock(&g_http_mutex);
+    for (int i = 0; i < HTTP_MAX_CTX; i++) {
+        if (g_http_ctx[i].id == libhttpCtxId) g_http_ctx[i].id = 0;
+    }
+    pthread_mutex_unlock(&g_http_mutex);
     return 0;
+}
+
+// int sceHttpsLoadCert(int libhttpCtxId, int caCertNum, const void **caList, const void *cert,
+//                      const void *privKey)
+//
+// Registers client certificates / CA certificates for the HTTPS requests of a library context.
+// This runtime's libSceHttp never opens a network connection (requests fail with a network
+// error), so there is no TLS handshake the certificates could be used in; what remains
+// observable is the call's validation and the per-context record that custom CAs were
+// supplied (ps4_http_ctx_has_custom_ca). No runtime path reads that flag today: the request
+// functions never reach a TLS layer, so it is state for a future network implementation. Checks as in shadPS4
+// (libraries/network/http.cpp sceHttpsLoadCert): no initialised library is BEFORE_INIT, an
+// unknown context id is INVALID_ID. The certificate blobs are not parsed.
+int32_t sceHttpsLoadCert(int32_t libhttpCtxId, int32_t caCertNum, const void **caList, const void *cert,
+                         const void *privKey) {
+    (void)caCertNum;
+    (void)caList;
+    (void)cert;
+    (void)privKey;
+    int32_t rc = (int32_t)0x80431001; // ORBIS_HTTP_ERROR_BEFORE_INIT
+    pthread_mutex_lock(&g_http_mutex);
+    for (int i = 0; i < HTTP_MAX_CTX; i++) {
+        if (g_http_ctx[i].id == 0) continue;
+        rc = (int32_t)ORBIS_HTTP_ERROR_INVALID_ID; // at least one live context: only the id can be wrong
+        break;
+    }
+    for (int i = 0; i < HTTP_MAX_CTX; i++) {
+        if (g_http_ctx[i].id != 0 && g_http_ctx[i].id == libhttpCtxId) {
+            g_http_ctx[i].custom_ca = true;
+            rc = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_http_mutex);
+    return rc;
+}
+
+bool ps4_http_ctx_has_custom_ca(int32_t libhttpCtxId) {
+    bool r = false;
+    pthread_mutex_lock(&g_http_mutex);
+    for (int i = 0; i < HTTP_MAX_CTX; i++) {
+        if (g_http_ctx[i].id != 0 && g_http_ctx[i].id == libhttpCtxId) r = g_http_ctx[i].custom_ca;
+    }
+    pthread_mutex_unlock(&g_http_mutex);
+    return r;
 }
 
 int32_t sceHttpCreateTemplate(int32_t libhttpCtxId, const char *userAgent, int32_t httpVer, int32_t isAutoProxyConf) {
@@ -600,6 +669,12 @@ void shim_sceHttpSetRedirectCallback(GuestContext *ctx) {
 void shim_sceHttpGetMemoryPoolStats(GuestContext *ctx) {
     void *currentStat = (void *)guest_to_host(ctx, ctx->rsi);
     ctx->rax = (uint64_t)sceHttpGetMemoryPoolStats((int32_t)ctx->rdi, currentStat);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpsLoadCert(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceHttpsLoadCert((int32_t)ctx->rdi, (int32_t)ctx->rsi, (const void **)guest_to_host(ctx, ctx->rdx),
+                                                   guest_to_host(ctx, ctx->rcx), guest_to_host(ctx, ctx->r8));
     SHIM_RETURN();
 }
 

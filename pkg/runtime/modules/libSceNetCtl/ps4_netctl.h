@@ -139,6 +139,8 @@ void shim_sceNetCtlCheckCallback(GuestContext *ctx);
 void shim_sceNetCtlRegisterCallbackForNpToolkit(GuestContext *ctx);
 void shim_sceNetCtlUnregisterCallbackForNpToolkit(GuestContext *ctx);
 void shim_sceNetCtlCheckCallbackForNpToolkit(GuestContext *ctx);
+void shim_sceNetCtlGetResult(GuestContext *ctx);
+int32_t sceNetCtlGetResult(int32_t eventType, int32_t *errorCode);
 
 #ifdef __cplusplus
 }

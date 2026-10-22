@@ -1,8 +1,37 @@
 #include "ps4_np.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <pthread.h>
 
-#define NP_LOG(fmt, ...) printf("[libSceNp] " fmt "\n", ##__VA_ARGS__)
+// Guest pointer arguments are guest addresses; translate them to host pointers.
+#define NP_GPTR(ctx, a) ((a) ? (void *)((ctx)->mem_base + (a)) : NULL)
+
+// The game polls several NP stubs every frame, and a printf to a redirected
+// stdout can block a job the frame waits on. Each call site prints its first
+// call in full; later calls are only counted, with a summary line at every
+// 1000th call. PS4_NP_LOG_ALL=1 prints every call.
+static int np_log_all(void) {
+    static _Atomic int cached = -1;
+    int v = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (v < 0) {
+        const char *e = getenv("PS4_NP_LOG_ALL");
+        v = (e && e[0] == '1') ? 1 : 0;
+        atomic_store_explicit(&cached, v, memory_order_relaxed);
+    }
+    return v;
+}
+
+#define NP_LOG(fmt, ...) ({ \
+    static _Atomic unsigned np_log_calls_; \
+    unsigned np_log_n_ = atomic_fetch_add_explicit(&np_log_calls_, 1, memory_order_relaxed) + 1; \
+    if (np_log_n_ == 1 || np_log_all()) \
+        printf("[libSceNp] " fmt "\n", ##__VA_ARGS__); \
+    else if (np_log_n_ % 1000 == 0) \
+        printf("[libSceNp] %s:%d: %u calls\n", __func__, __LINE__, np_log_n_); \
+})
 
 #define NP_REQUEST_OFFSET 0x20000000
 #define NP_AUTH_REQUEST_OFFSET 0x10000000
@@ -12,7 +41,7 @@ static int32_t g_np_auth_counter = 1;
 static int32_t g_score_req_counter = 1;
 static int32_t g_tus_req_counter = 1;
 static int32_t g_matching_ctx_counter = 1;
-static int32_t g_signaling_ctx_counter = 1;
+static _Atomic int32_t g_signaling_ctx_counter = 1;
 static int32_t g_webapi_user_ctx_counter = 1;
 static int64_t g_webapi_req_counter = 1;
 
@@ -240,7 +269,7 @@ int32_t sceNpCheckCallback(void) {
 
 // GuestContext shims for NpManager
 void shim_sceNpCheckNpAvailability(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCheckNpAvailability((int32_t)ctx->rdi, (OrbisNpOnlineId*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpCheckNpAvailability((int32_t)ctx->rdi, (OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
@@ -250,12 +279,12 @@ void shim_sceNpCheckNpAvailabilityA(GuestContext *ctx) {
 }
 
 void shim_sceNpCheckPlus(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCheckPlus((int32_t)ctx->rdi, (const OrbisNpCheckPlusParameter*)ctx->rsi, (OrbisNpCheckPlusResult*)ctx->rdx);
+    ctx->rax = (uint64_t)sceNpCheckPlus((int32_t)ctx->rdi, (const OrbisNpCheckPlusParameter*)NP_GPTR(ctx, ctx->rsi), (OrbisNpCheckPlusResult*)NP_GPTR(ctx, ctx->rdx));
     SHIM_RETURN();
 }
 
 void shim_sceNpCreateAsyncRequest(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCreateAsyncRequest((const OrbisNpCreateAsyncRequestParameter*)ctx->rdi);
+    ctx->rax = (uint64_t)sceNpCreateAsyncRequest((const OrbisNpCreateAsyncRequestParameter*)NP_GPTR(ctx, ctx->rdi));
     SHIM_RETURN();
 }
 
@@ -270,102 +299,102 @@ void shim_sceNpDeleteRequest(GuestContext *ctx) {
 }
 
 void shim_sceNpGetAccountCountry(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetAccountCountry((OrbisNpOnlineId*)ctx->rdi, (OrbisNpCountryCode*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetAccountCountry((OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rdi), (OrbisNpCountryCode*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountCountryA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetAccountCountryA((int32_t)ctx->rdi, (OrbisNpCountryCode*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetAccountCountryA((int32_t)ctx->rdi, (OrbisNpCountryCode*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountDateOfBirth(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetAccountDateOfBirth((OrbisNpOnlineId*)ctx->rdi, (OrbisNpDate*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetAccountDateOfBirth((OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rdi), (OrbisNpDate*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountDateOfBirthA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetAccountDateOfBirthA((int32_t)ctx->rdi, (OrbisNpDate*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetAccountDateOfBirthA((int32_t)ctx->rdi, (OrbisNpDate*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountId(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetAccountId((OrbisNpOnlineId*)ctx->rdi, (uint64_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetAccountId((OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rdi), (uint64_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountIdA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetAccountIdA((int32_t)ctx->rdi, (uint64_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetAccountIdA((int32_t)ctx->rdi, (uint64_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountLanguage(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetAccountLanguage((OrbisNpOnlineId*)ctx->rdi, (OrbisNpLanguageCode*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetAccountLanguage((OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rdi), (OrbisNpLanguageCode*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetAccountLanguageA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetAccountLanguageA((int32_t)ctx->rdi, (OrbisNpLanguageCode*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetAccountLanguageA((int32_t)ctx->rdi, (OrbisNpLanguageCode*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetGamePresenceStatus(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetGamePresenceStatus((OrbisNpOnlineId*)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetGamePresenceStatus((OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rdi), (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetGamePresenceStatusA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetGamePresenceStatusA((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetGamePresenceStatusA((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetNpId(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetNpId((int32_t)ctx->rdi, (OrbisNpId*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetNpId((int32_t)ctx->rdi, (OrbisNpId*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetNpReachabilityState(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetNpReachabilityState((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetNpReachabilityState((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetOnlineId(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetOnlineId((int32_t)ctx->rdi, (OrbisNpOnlineId*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetOnlineId((int32_t)ctx->rdi, (OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpGetState(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpGetState((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpGetState((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpHasSignedUp(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpHasSignedUp((int32_t)ctx->rdi, (bool*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpHasSignedUp((int32_t)ctx->rdi, (bool*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpIsPlusMember(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpIsPlusMember((int32_t)ctx->rdi, (bool*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpIsPlusMember((int32_t)ctx->rdi, (bool*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpPollAsync(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpPollAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpPollAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpWaitAsync(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpWaitAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpWaitAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpRegisterStateCallback(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpRegisterStateCallback((void*)ctx->rdi, (void*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpRegisterStateCallback((void*)NP_GPTR(ctx, ctx->rdi), (void*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpRegisterStateCallbackA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpRegisterStateCallbackA((void*)ctx->rdi, (void*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpRegisterStateCallbackA((void*)NP_GPTR(ctx, ctx->rdi), (void*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
@@ -380,7 +409,7 @@ void shim_sceNpUnregisterStateCallbackA(GuestContext *ctx) {
 }
 
 void shim_sceNpRegisterStateCallbackForToolkit(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpRegisterStateCallbackForToolkit((void*)ctx->rdi, (void*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpRegisterStateCallbackForToolkit((void*)NP_GPTR(ctx, ctx->rdi), (void*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
@@ -457,7 +486,7 @@ void shim_sceNpAuthCreateRequest(GuestContext *ctx) {
 }
 
 void shim_sceNpAuthCreateAsyncRequest(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpAuthCreateAsyncRequest((const OrbisNpAuthCreateAsyncRequestParameter*)ctx->rdi);
+    ctx->rax = (uint64_t)sceNpAuthCreateAsyncRequest((const OrbisNpAuthCreateAsyncRequestParameter*)NP_GPTR(ctx, ctx->rdi));
     SHIM_RETURN();
 }
 
@@ -467,22 +496,22 @@ void shim_sceNpAuthDeleteRequest(GuestContext *ctx) {
 }
 
 void shim_sceNpAuthGetAuthorizationCode(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpAuthGetAuthorizationCode((int32_t)ctx->rdi, (const void*)ctx->rsi, (OrbisNpAuthorizationCode*)ctx->rdx, (int32_t*)ctx->rcx);
+    ctx->rax = (uint64_t)sceNpAuthGetAuthorizationCode((int32_t)ctx->rdi, (const void*)NP_GPTR(ctx, ctx->rsi), (OrbisNpAuthorizationCode*)NP_GPTR(ctx, ctx->rdx), (int32_t*)NP_GPTR(ctx, ctx->rcx));
     SHIM_RETURN();
 }
 
 void shim_sceNpAuthGetAuthorizationCodeA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpAuthGetAuthorizationCodeA((int32_t)ctx->rdi, (const OrbisNpAuthGetAuthorizationCodeParameterA*)ctx->rsi, (OrbisNpAuthorizationCode*)ctx->rdx, (int32_t*)ctx->rcx);
+    ctx->rax = (uint64_t)sceNpAuthGetAuthorizationCodeA((int32_t)ctx->rdi, (const OrbisNpAuthGetAuthorizationCodeParameterA*)NP_GPTR(ctx, ctx->rsi), (OrbisNpAuthorizationCode*)NP_GPTR(ctx, ctx->rdx), (int32_t*)NP_GPTR(ctx, ctx->rcx));
     SHIM_RETURN();
 }
 
 void shim_sceNpAuthPollAsync(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpAuthPollAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpAuthPollAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpAuthWaitAsync(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpAuthWaitAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpAuthWaitAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
@@ -518,7 +547,7 @@ int32_t sceNpMatching2CreateContextA(const void* param, uint16_t* ctxId) {
 }
 
 void shim_sceNpMatching2Initialize(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpMatching2Initialize((void*)ctx->rdi);
+    ctx->rax = (uint64_t)sceNpMatching2Initialize((void*)NP_GPTR(ctx, ctx->rdi));
     SHIM_RETURN();
 }
 
@@ -528,12 +557,12 @@ void shim_sceNpMatching2Terminate(GuestContext *ctx) {
 }
 
 void shim_sceNpMatching2CreateContext(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpMatching2CreateContext((const void*)ctx->rdi, (uint16_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpMatching2CreateContext((const void*)NP_GPTR(ctx, ctx->rdi), (uint16_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpMatching2CreateContextA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpMatching2CreateContextA((const void*)ctx->rdi, (uint16_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpMatching2CreateContextA((const void*)NP_GPTR(ctx, ctx->rdi), (uint16_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
@@ -541,18 +570,98 @@ void shim_sceNpMatching2CreateContextA(GuestContext *ctx) {
 // libSceNpSignaling
 //=============================================================================
 
+// Library state: initialised flag and the live contexts with their option flags.
+#define SIGNALING_MAX_CTX 64
+static pthread_mutex_t g_signaling_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool g_signaling_initialized;
+static struct {
+    uint32_t id; // 0 = free slot
+    uint32_t flags;
+} g_signaling_ctx[SIGNALING_MAX_CTX];
+
+// Registers a new context; false when all slots are used (the console's context limit).
+static bool signaling_ctx_add(uint32_t id) {
+    bool ok = false;
+    pthread_mutex_lock(&g_signaling_mutex);
+    for (int i = 0; i < SIGNALING_MAX_CTX; i++) {
+        if (g_signaling_ctx[i].id == 0) {
+            g_signaling_ctx[i].id = id;
+            g_signaling_ctx[i].flags = 0;
+            ok = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_signaling_mutex);
+    return ok;
+}
+
+void ps4_np_signaling_ctx_forget(uint32_t id) {
+    pthread_mutex_lock(&g_signaling_mutex);
+    for (int i = 0; i < SIGNALING_MAX_CTX; i++) {
+        if (g_signaling_ctx[i].id == id) g_signaling_ctx[i].id = 0;
+    }
+    pthread_mutex_unlock(&g_signaling_mutex);
+}
+
+// Option flags of a live context, or -1 when the id is not a live context.
+int64_t ps4_np_signaling_ctx_flags(uint32_t id) {
+    int64_t r = -1;
+    pthread_mutex_lock(&g_signaling_mutex);
+    for (int i = 0; i < SIGNALING_MAX_CTX; i++) {
+        if (g_signaling_ctx[i].id == id && id != 0) r = g_signaling_ctx[i].flags;
+    }
+    pthread_mutex_unlock(&g_signaling_mutex);
+    return r;
+}
+
 int32_t sceNpSignalingInitialize(int64_t memorySize, int32_t threadPriority, int32_t cpuAffinityMask, int64_t threadStackSize) {
     (void)memorySize;
     (void)threadPriority;
     (void)cpuAffinityMask;
     (void)threadStackSize;
     NP_LOG("sceNpSignalingInitialize");
+    pthread_mutex_lock(&g_signaling_mutex);
+    g_signaling_initialized = true;
+    pthread_mutex_unlock(&g_signaling_mutex);
     return 0;
 }
 
 int32_t sceNpSignalingTerminate(void) {
     NP_LOG("sceNpSignalingTerminate");
+    pthread_mutex_lock(&g_signaling_mutex);
+    g_signaling_initialized = false;
+    memset(g_signaling_ctx, 0, sizeof(g_signaling_ctx));
+    pthread_mutex_unlock(&g_signaling_mutex);
     return 0;
+}
+
+// int sceNpSignalingSetContextOption(uint32_t ctxId, int optionId, int optionValue)
+//
+// The only option is CONTEXT_OPTION_FLAG (1); its value 0 clears and 1 sets bit 0x2 of the
+// context's flags. Checks in the order of shadPS4 (libraries/np/np_signaling/np_signaling.cpp):
+// library not initialised, unknown context, unknown option id, option value other than 0/1.
+int32_t sceNpSignalingSetContextOption(uint32_t ctxId, int32_t optionId, int32_t optionValue) {
+    int32_t rc = 0;
+    pthread_mutex_lock(&g_signaling_mutex);
+    int idx = -1;
+    for (int i = 0; i < SIGNALING_MAX_CTX && ctxId != 0; i++) {
+        if (g_signaling_ctx[i].id == ctxId) idx = i;
+    }
+    if (!g_signaling_initialized) {
+        rc = (int32_t)ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED;
+    } else if (idx < 0) {
+        rc = (int32_t)0x80552705; // CTX_NOT_FOUND
+    } else if (optionId != 1) { // ORBIS_NP_SIGNALING_CONTEXT_OPTION_FLAG
+        rc = (int32_t)ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
+    } else if (optionValue == 0) {
+        g_signaling_ctx[idx].flags &= ~0x2u;
+    } else if (optionValue == 1) {
+        g_signaling_ctx[idx].flags |= 0x2u;
+    } else {
+        rc = (int32_t)ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
+    }
+    pthread_mutex_unlock(&g_signaling_mutex);
+    return rc;
 }
 
 int32_t sceNpSignalingCreateContext(const void* npId, void* callback, void* callbackArg, uint32_t* outContextId) {
@@ -560,7 +669,11 @@ int32_t sceNpSignalingCreateContext(const void* npId, void* callback, void* call
     (void)callback;
     (void)callbackArg;
     if (!outContextId) return ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
-    *outContextId = (uint32_t)(g_signaling_ctx_counter++);
+    *outContextId = (uint32_t)atomic_fetch_add(&g_signaling_ctx_counter, 1);
+    if (!signaling_ctx_add(*outContextId)) {
+        *outContextId = 0;
+        return (int32_t)0x80552712; // ORBIS_NP_SIGNALING_ERROR_CTX_MAX
+    }
     NP_LOG("sceNpSignalingCreateContext -> outContextId=%u", *outContextId);
     return 0;
 }
@@ -570,7 +683,11 @@ int32_t sceNpSignalingCreateContextA(int32_t userId, void* callback, void* callb
     (void)callback;
     (void)callbackArg;
     if (!outContextId) return ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT;
-    *outContextId = (uint32_t)(g_signaling_ctx_counter++);
+    *outContextId = (uint32_t)atomic_fetch_add(&g_signaling_ctx_counter, 1);
+    if (!signaling_ctx_add(*outContextId)) {
+        *outContextId = 0;
+        return (int32_t)0x80552712; // ORBIS_NP_SIGNALING_ERROR_CTX_MAX
+    }
     NP_LOG("sceNpSignalingCreateContextA -> outContextId=%u", *outContextId);
     return 0;
 }
@@ -586,12 +703,17 @@ void shim_sceNpSignalingTerminate(GuestContext *ctx) {
 }
 
 void shim_sceNpSignalingCreateContext(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpSignalingCreateContext((const void*)ctx->rdi, (void*)ctx->rsi, (void*)ctx->rdx, (uint32_t*)ctx->rcx);
+    ctx->rax = (uint64_t)sceNpSignalingCreateContext((const void*)NP_GPTR(ctx, ctx->rdi), (void*)NP_GPTR(ctx, ctx->rsi), (void*)NP_GPTR(ctx, ctx->rdx), (uint32_t*)NP_GPTR(ctx, ctx->rcx));
+    SHIM_RETURN();
+}
+
+void shim_sceNpSignalingSetContextOption(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceNpSignalingSetContextOption((uint32_t)ctx->rdi, (int32_t)ctx->rsi, (int32_t)ctx->rdx);
     SHIM_RETURN();
 }
 
 void shim_sceNpSignalingCreateContextA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpSignalingCreateContextA((int32_t)ctx->rdi, (void*)ctx->rsi, (void*)ctx->rdx, (uint32_t*)ctx->rcx);
+    ctx->rax = (uint64_t)sceNpSignalingCreateContextA((int32_t)ctx->rdi, (void*)NP_GPTR(ctx, ctx->rsi), (void*)NP_GPTR(ctx, ctx->rdx), (uint32_t*)NP_GPTR(ctx, ctx->rcx));
     SHIM_RETURN();
 }
 
@@ -669,7 +791,7 @@ void shim_sceNpWebApiTerminate(GuestContext *ctx) {
 }
 
 void shim_sceNpWebApiCreateContext(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpWebApiCreateContext((int32_t)ctx->rdi, (OrbisNpOnlineId*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpWebApiCreateContext((int32_t)ctx->rdi, (OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
@@ -685,17 +807,17 @@ void shim_sceNpWebApiDeleteContext(GuestContext *ctx) {
 
 void shim_sceNpWebApiCreateRequest(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpWebApiCreateRequest(
-        (int32_t)ctx->rdi, (const char*)ctx->rsi, (const char*)ctx->rdx, (int32_t)ctx->rcx, (const void*)ctx->r8, (int64_t*)ctx->r9);
+        (int32_t)ctx->rdi, (const char*)NP_GPTR(ctx, ctx->rsi), (const char*)NP_GPTR(ctx, ctx->rdx), (int32_t)ctx->rcx, (const void*)NP_GPTR(ctx, ctx->r8), (int64_t*)NP_GPTR(ctx, ctx->r9));
     SHIM_RETURN();
 }
 
 void shim_sceNpWebApiSendRequest(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpWebApiSendRequest((int64_t)ctx->rdi, (const void*)ctx->rsi, (uint64_t)ctx->rdx);
+    ctx->rax = (uint64_t)sceNpWebApiSendRequest((int64_t)ctx->rdi, (const void*)NP_GPTR(ctx, ctx->rsi), (uint64_t)ctx->rdx);
     SHIM_RETURN();
 }
 
 void shim_sceNpWebApiSendRequest2(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpWebApiSendRequest2((int64_t)ctx->rdi, (const void*)ctx->rsi, (uint64_t)ctx->rdx, (void*)ctx->rcx);
+    ctx->rax = (uint64_t)sceNpWebApiSendRequest2((int64_t)ctx->rdi, (const void*)NP_GPTR(ctx, ctx->rsi), (uint64_t)ctx->rdx, (void*)NP_GPTR(ctx, ctx->rcx));
     SHIM_RETURN();
 }
 
@@ -754,7 +876,7 @@ int32_t sceNpScoreWaitAsync(int32_t reqId, int32_t* result) {
 }
 
 void shim_sceNpScoreCreateNpTitleCtx(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpScoreCreateNpTitleCtx((OrbisNpServiceLabel)ctx->rdi, (const OrbisNpId*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpScoreCreateNpTitleCtx((OrbisNpServiceLabel)ctx->rdi, (const OrbisNpId*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
@@ -779,12 +901,12 @@ void shim_sceNpScoreDeleteRequest(GuestContext *ctx) {
 }
 
 void shim_sceNpScorePollAsync(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpScorePollAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpScorePollAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpScoreWaitAsync(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpScoreWaitAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpScoreWaitAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
@@ -838,7 +960,7 @@ int32_t sceNpTusWaitAsync(int32_t reqId, int32_t* result) {
 }
 
 void shim_sceNpTusCreateNpTitleCtx(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpTusCreateNpTitleCtx((OrbisNpServiceLabel)ctx->rdi, (OrbisNpId*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpTusCreateNpTitleCtx((OrbisNpServiceLabel)ctx->rdi, (OrbisNpId*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
@@ -863,12 +985,12 @@ void shim_sceNpTusDeleteRequest(GuestContext *ctx) {
 }
 
 void shim_sceNpTusPollAsync(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpTusPollAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpTusPollAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
 void shim_sceNpTusWaitAsync(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpTusWaitAsync((int32_t)ctx->rdi, (int32_t*)ctx->rsi);
+    ctx->rax = (uint64_t)sceNpTusWaitAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
     SHIM_RETURN();
 }
 
@@ -933,12 +1055,12 @@ void shim_sceNpCommerceDialogGetStatus(GuestContext *ctx) {
 }
 
 void shim_sceNpCommerceDialogGetResult(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCommerceDialogGetResult((OrbisNpCommerceDialogResult*)ctx->rdi);
+    ctx->rax = (uint64_t)sceNpCommerceDialogGetResult((OrbisNpCommerceDialogResult*)NP_GPTR(ctx, ctx->rdi));
     SHIM_RETURN();
 }
 
 void shim_sceNpCommerceDialogOpen(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCommerceDialogOpen((const void*)ctx->rdi);
+    ctx->rax = (uint64_t)sceNpCommerceDialogOpen((const void*)NP_GPTR(ctx, ctx->rdi));
     SHIM_RETURN();
 }
 

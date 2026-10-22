@@ -25,6 +25,10 @@ func TestLookupShimByNID(t *testing.T) {
 		{"scePlayGoGetProgress", "-RJWNMK3fC8", "shim_scePlayGoGetProgress"},
 		{"sceRtcGetCurrentTick", "18B2NS1y9UU", "shim_sceRtcGetCurrentTick"},
 		{"sceRandomGetRandomNumber", "PI7jIZj4pcE", "shim_sceRandomGetRandomNumber"},
+		{"_sceFiberInitializeImpl", "hVYD7Ou2pCQ", "shim_sceFiberInitializeImpl"},
+		{"sceFiberRun", "a0LLrZWac0M", "shim_sceFiberRun"},
+		{"sceFiberSwitch", "PFT2S-tJ7Uk", "shim_sceFiberSwitch"},
+		{"sceFiberReturnToThread", "B0ZX2hx9DMw", "shim_sceFiberReturnToThread"},
 		{"sceImeDialogInit", "NUeBrN7hzf0", "shim_sceImeDialogInit"},
 		{"sceImeDialogGetResult", "x01jxu+vxlc", "shim_sceImeDialogGetResult"},
 		{"sceSaveDataDialogOpen", "4tPhsP6FpDI", "shim_sceSaveDataDialogOpen"},
@@ -384,3 +388,147 @@ func TestVideoOutAndEqueueShims(t *testing.T) {
 	}
 }
 
+// Guest longjmp and C++ throws cannot work with the assembly backend's structured returns;
+// libc's exports bind to the shims that report them (by name and by NID).
+func TestNonLocalTransfersAreShimmed(t *testing.T) {
+	for name, want := range map[string]string{
+		"longjmp":       "shim_guest_nonlocal_jump",
+		"_longjmp":      "shim_guest_nonlocal_jump",
+		"siglongjmp":    "shim_guest_nonlocal_jump",
+		"__cxa_throw":   "shim_guest_cxa_throw",
+		"__cxa_rethrow": "shim_guest_cxa_throw",
+	} {
+		for _, sym := range []string{name, elfloader.CalculateNID(name) + "#D#A"} {
+			if got, ok := LookupShim(sym); !ok || got != want {
+				t.Errorf("LookupShim(%q) = %q, %v; want %q", sym, got, ok, want)
+			}
+		}
+	}
+	path := "/Volumes/ssd/The Last of Us Remastered Repack/CUSA00557/sce_module/libc.prx"
+	if _, err := os.Stat(path); err != nil {
+		t.Skip("TLOU libc.prx not present")
+	}
+	loaded, err := elfloader.LoadELF(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := NewAsmEmitter(loaded, nil, nil)
+	found := 0
+	for _, sym := range loaded.DynSymbols {
+		switch elfloader.NIDPrefix(sym.Name) {
+		case elfloader.CalculateNID("longjmp"), elfloader.CalculateNID("_longjmp"):
+			found++
+			if e.shimMap[sym.Address] != "shim_guest_nonlocal_jump" {
+				t.Errorf("libc.prx %s at 0x%x: shim %q", sym.Name, sym.Address, e.shimMap[sym.Address])
+			}
+		case elfloader.CalculateNID("__cxa_throw"):
+			found++
+			if e.shimMap[sym.Address] != "shim_guest_cxa_throw" {
+				t.Errorf("libc.prx __cxa_throw at 0x%x: shim %q", sym.Address, e.shimMap[sym.Address])
+			}
+		}
+	}
+	if found != 3 {
+		t.Errorf("found %d of longjmp, _longjmp, __cxa_throw in libc.prx", found)
+	}
+}
+
+// The 23 imports Uncharted 4's eboot needs at boot: each plain name and each NID (as the
+// loader encodes it in the relocation, "<nid>#<lib>#<module>") binds to its runtime shim.
+func TestUncharted4BootPathShims(t *testing.T) {
+	cases := []struct {
+		plain string
+		nid   string
+		shim  string
+	}{
+		{"", "R3TYO7Tdv5o", "shim_Func_4774D83BB4DDBF9A"},
+		{"", "ut57TBmRQN0", "shim_Func_BADE7B4C199140DD"},
+		{"sceKernelSetFsstParam", "VjBtg5Btl94", "shim_sceKernelSetFsstParam"},
+		{"sceKernelBatchMap", "2SKEx6bSq-4", "shim_sceKernelBatchMap"},
+		{"sceKernelMtypeprotect", "9bfdLIyuwCY", "shim_sceKernelMtypeprotect"},
+		{"sem_timedwait", "w5IHyvahg-o", "shim_sem_timedwait"},
+		{"sceHttpsLoadCert", "DK+GoXCNT04", "shim_sceHttpsLoadCert"},
+		{"sceCoredumpAttachMemoryRegionAsUserFile", "MEJ7tc7ThwM", "shim_sceCoredumpAttachMemoryRegionAsUserFile"},
+		{"sceCoredumpGetStopInfoGpu", "nsyWCTsI3MY", "shim_sceCoredumpGetStopInfoGpu"},
+		{"sceRtcSetTime_t", "bDEVVP4bTjQ", "shim_sceRtcSetTime_t"},
+		{"sceRtcFormatRFC3339LocalTime", "DwuHIlLGW8I", "shim_sceRtcFormatRFC3339LocalTime"},
+		{"sceNetEtherNtostr", "v6M4txecCuo", "shim_sceNetEtherNtostr"},
+		{"sceNetCtlGetResult", "0cBgduPRR+M", "shim_sceNetCtlGetResult"},
+		{"sceNpProfileDialogClose", "wkwjz0Xdo2A", "shim_sceNpProfileDialogClose"},
+		{"sceNpSignalingSetContextOption", "IHRDvZodPYY", "shim_sceNpSignalingSetContextOption"},
+		{"sceNpPartyInitialize", "lhYCTQmBkds", "shim_sceNpPartyInitialize"},
+		{"sceNpPartyTerminate", "oLYkibiHqRA", "shim_sceNpPartyTerminate"},
+		{"sceNpPartyRegisterHandler", "kA88gbv71ao", "shim_sceNpPartyRegisterHandler"},
+		{"sceNpPartyRegisterPrivateHandler", "zo4G5WWYpKg", "shim_sceNpPartyRegisterPrivateHandler"},
+		{"sceNpPartyUnregisterPrivateHandler", "zQ7gIvt11Pc", "shim_sceNpPartyUnregisterPrivateHandler"},
+		{"sceNpPartyCheckCallback", "3e4k2mzLkmc", "shim_sceNpPartyCheckCallback"},
+		{"sceNpPartyGetVoiceChatPriority", "-lc6XZnQXvM", "shim_sceNpPartyGetVoiceChatPriority"},
+		{"sceNpPartySetVoiceChatPriority", "nazKyHygHhY", "shim_sceNpPartySetVoiceChatPriority"},
+	}
+	for _, tc := range cases {
+		if tc.plain != "" {
+			if shim, ok := LookupShim(tc.plain); !ok || shim != tc.shim {
+				t.Errorf("LookupShim(%s)=%q, ok=%v, want %s", tc.plain, shim, ok, tc.shim)
+			}
+		}
+		encoded := tc.nid + "#A#B"
+		if shim, ok := LookupShim(encoded); !ok || shim != tc.shim {
+			t.Errorf("LookupShim(%s)=%q, ok=%v, want %s", encoded, shim, ok, tc.shim)
+		}
+	}
+}
+
+// The libSceAudio3d imports of Uncharted 4 (NIDs from its eboot) and the three extra entry points
+// (NIDs from shadPS4's audio3d.cpp) bind to the shims in libSceAudio3d/ps4_audio3d.c.
+func TestAudio3dShimsByNID(t *testing.T) {
+	cases := []struct{ plain, nid string }{
+		{"sceAudio3dAudioOutClose", "pZlOm1aF3aA"},
+		{"sceAudio3dAudioOutOpen", "ucEsi62soTo"},
+		{"sceAudio3dAudioOutOutputs", "HbxYY27lK6E"},
+		{"sceAudio3dGetDefaultOpenParameters", "Im+jOoa5WAI"},
+		{"sceAudio3dInitialize", "UmCvjSmuZIw"},
+		{"sceAudio3dObjectReserve", "jO2tec4dJ2M"},
+		{"sceAudio3dObjectSetAttributes", "4uyHN9q4ZeU"},
+		{"sceAudio3dObjectUnreserve", "1HXxo-+1qCw"},
+		{"sceAudio3dPortAdvance", "lw0qrdSjZt8"},
+		{"sceAudio3dPortClose", "OyVqOeVNtSk"},
+		{"sceAudio3dPortGetAttributesSupported", "9ZA23Ia46Po"},
+		{"sceAudio3dPortOpen", "XeDDK0xJWQA"},
+		{"sceAudio3dPortPush", "VEVhZ9qd4ZY"},
+		{"sceAudio3dPortSetAttribute", "Yq9bfUQ0uJg"},
+		{"sceAudio3dTerminate", "WW1TS2iz5yc"},
+		{"sceAudio3dPortGetQueueLevel", "YaaDbDwKpFM"},
+		{"sceAudio3dBedWrite", "9tEwE0GV0qo"},
+		{"sceAudio3dBedWrite2", "xH4Q9UILL3o"},
+	}
+	for _, tc := range cases {
+		if nid := elfloader.CalculateNID(tc.plain); nid != tc.nid {
+			t.Fatalf("%s NID=%s want %s", tc.plain, nid, tc.nid)
+		}
+		encoded := tc.nid + "#BA#4"
+		if shim, ok := LookupShim(encoded); !ok || shim != "shim_"+tc.plain {
+			t.Fatalf("LookupShim(%s)=%q ok=%v want shim_%s", encoded, shim, ok, tc.plain)
+		}
+	}
+}
+
+// The libSceAudiodec imports of Uncharted 4 (NIDs from its eboot) bind to the shims in
+// libSceAudiodec/ps4_audiodec.c.
+func TestAudiodecShimsByNID(t *testing.T) {
+	cases := []struct{ plain, nid string }{
+		{"sceAudiodecInitLibrary", "VjhsmxpcezI"},
+		{"sceAudiodecTermLibrary", "h5jSB2QIDV0"},
+		{"sceAudiodecCreateDecoder", "O3f1sLMWRvs"},
+		{"sceAudiodecDecode", "KHXHMDLkILw"},
+		{"sceAudiodecDeleteDecoder", "Tp+ZEy69mLk"},
+	}
+	for _, tc := range cases {
+		if nid := elfloader.CalculateNID(tc.plain); nid != tc.nid {
+			t.Fatalf("%s NID=%s want %s", tc.plain, nid, tc.nid)
+		}
+		encoded := tc.nid + "#u#s"
+		if shim, ok := LookupShim(encoded); !ok || shim != "shim_"+tc.plain {
+			t.Fatalf("LookupShim(%s)=%q ok=%v want shim_%s", encoded, shim, ok, tc.plain)
+		}
+	}
+}

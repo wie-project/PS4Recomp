@@ -93,6 +93,31 @@ typedef struct OrbisPadVibrationParam {
     uint8_t smallMotor;
 } OrbisPadVibrationParam;
 
+#define ORBIS_PAD_ERROR_INVALID_ARG    ((int32_t)0x80920001)
+#define ORBIS_PAD_ERROR_INVALID_HANDLE ((int32_t)0x80920003)
+
+#define ORBIS_PAD_CONNECTION_TYPE_LOCAL 0
+#define ORBIS_PAD_DEVICE_CLASS_STANDARD 0
+
+// ScePadControllerInformation (28 bytes). Uncharted 4 reads connectionType (1 = remote play,
+// which remaps L2/R2/L3/R3) whenever connectedCount in the pad data changes.
+typedef struct OrbisPadControllerInformation {
+    float touchPadPixelDensity;
+    uint16_t touchPadResolutionX;
+    uint16_t touchPadResolutionY;
+    uint8_t deadZoneLeft;
+    uint8_t deadZoneRight;
+    uint8_t connectionType;
+    uint8_t connectedCount;
+    uint8_t connected;
+    uint8_t pad0[3];
+    int32_t deviceClass;
+    uint8_t reserve[8];
+} OrbisPadControllerInformation;
+
+_Static_assert(sizeof(OrbisPadControllerInformation) == 28, "ScePadControllerInformation is 28 bytes");
+_Static_assert(sizeof(OrbisPadData) == 120, "ScePadData is 120 bytes");
+
 int32_t scePadInit(void);
 int32_t scePadOpen(int32_t userID, int32_t type, int32_t index, void *param);
 int32_t scePadClose(int32_t handle);
@@ -109,6 +134,7 @@ int32_t scePadSetVibration(int32_t handle, const OrbisPadVibrationParam *pParam)
 int32_t scePadDeviceClassGetExtendedInformation(int32_t handle, void *pExtInfo);
 int32_t scePadDeviceClassParseData(int32_t handle, const OrbisPadData *pData, void *pDeviceClassData);
 int32_t scePadEnableSpecificDeviceClass(int32_t deviceClass);
+int32_t scePadGetControllerInformation(int32_t handle, OrbisPadControllerInformation *info);
 
 // Host input helper (called by window event pump)
 void ps4_pad_handle_key(unsigned short keyCode, int isDown);
@@ -130,6 +156,7 @@ void shim_scePadSetVibration(GuestContext *ctx);
 void shim_scePadDeviceClassGetExtendedInformation(GuestContext *ctx);
 void shim_scePadDeviceClassParseData(GuestContext *ctx);
 void shim_scePadEnableSpecificDeviceClass(GuestContext *ctx);
+void shim_scePadGetControllerInformation(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

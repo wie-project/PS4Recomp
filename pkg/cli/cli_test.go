@@ -106,3 +106,14 @@ func TestParseArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestParseArgsTSO(t *testing.T) {
+	cfg, err := ParseArgs([]string{"eboot.bin"})
+	if err != nil || !cfg.TSO {
+		t.Fatalf("default: TSO = %v, err %v; want on", cfg != nil && cfg.TSO, err)
+	}
+	cfg, err = ParseArgs([]string{"eboot.bin", "-tso=false"})
+	if err != nil || cfg.TSO {
+		t.Fatalf("-tso=false: TSO = %v, err %v; want off", cfg != nil && cfg.TSO, err)
+	}
+}
