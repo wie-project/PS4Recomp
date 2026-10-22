@@ -132,9 +132,7 @@ Recompile the extracted Orbis binary and package it into a native standalone app
 
 ### Hollow Knight: Silksong (Unity 6 / Il2Cpp)
 
-Silksong boots into the native Unity 6 engine on Apple Silicon. Over **341,000 reachable functions** and **19.3 million instructions** across `eboot.bin` and 11 companion PRXs and plugins (`Il2cppUserAssemblies.prx`, `HollowKnightPS4Plugin.prx`, `UnityNpToolkit2.prx`, `SaveData.prx`, `CommonDialog.prx`, `PSN.prx`, `lib_burst_generated.prx`, `PS4Util.prx`, `libSceFios2.prx`, `libSceJobManager.prx`, `libc.prx`) are recompiled directly into native ARM64 assembly.
-
-The game successfully maps 2.5 GB direct physical memory, initializes FMOD audio, mounts VFS assets, and runs Unity engine subsystems including `PlayerPrefs` and concurrent workers:
+WARNING: Work on Silksong is frozen on the promotion of c++ exceptions for il2cpp. At the moment, Unity game testing is suspended
 
 ```text
 [ps4-recomp] sceKernelDlsym: handle 5 symbol 'UnityShaderCompilerExtEvent' not found
@@ -168,65 +166,18 @@ Registers:
 
 ```text
 [ps4-vfs] Application root: /Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/game
-[ps4-settings] language 1, PS4 Pro mode on, MetalFX upscaling off, FPS HUD on
-[ps4-recomp] Initializing runtime (ARM64 Assembly Backend)...
-[ps4-vfs] Application root: /Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/game
-[ps4-recomp] guest memory at host 0x7000000000 (0x8000000000 bytes)
-[ps4-recomp] Loading guest memory image (305774592 bytes), allocated dynamic address space (524288.0 MB)
-[ps4-mem] SceLibcParam at 0x8600000: size=0xa8 ver=14.1 malloc_replace=0x86000f0 new_replace=0x8600168
-[ps4-mem] SceLibcMallocReplace at 0x86000f0: size=0x78 init=0x4188230 malloc=0x4188260
-[ps4-recomp] Initializing custom memory allocator via SceLibcParam at 0x4188230...
-[ps4-mem] sceKernelConfiguredFlexibleMemorySize: 4294967296 (4096.00 MB)
-[ps4-vm] recomp_vm_alloc_named_aligned (sync_pool): size=4194304 (4.00 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x123d0000
-[ps4-mem] sceKernelAllocateMainDirectMemory: len=67108864 (64.00 MB) align=65536 type=3
-[ps4-mem] sceKernelAllocateDirectMemory: start=0x0 end=0xffffffffffffffff len=67108864 (64.00 MB) align=65536 type=3
-[ps4-mem] sceKernelMapDirectMemory: in=0x4000000000 len=67108864 (64.00 MB) prot=0x32 flags=0x90 phys=0x0 align=0
-[ps4-vm] recomp_vm_alloc_fixed (direct_mem): desired=0x4000000000 size=67108864 (64.00 MB)
-[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=0x4000000000
-[ps4-mem] sceKernelMemoryPoolExpand: start=0x4000000 end=0x800000000 len=34292563968 (32703.94 MB) align=0
-[ps4-mem] sceKernelAllocateDirectMemory: start=0x4000000 end=0x800000000 len=34292563968 (32703.94 MB) align=65536 type=3
-[ps4-mem] sceKernelMemoryPoolReserve: in=0x1000000000 len=8589934592 (8192.00 MB) align=0 flags=0x90
-[ps4-vm] recomp_vm_alloc_fixed (pool_reserved): desired=0x1000000000 size=8589934592 (8192.00 MB)
-[ps4-mem] sceKernelMemoryPoolReserve SUCCESS: out=0x1000000000
-[ps4-mem] sceKernelMemoryPoolReserve: in=0x2000000000 len=8589934592 (8192.00 MB) align=0 flags=0x90
-[ps4-vm] recomp_vm_alloc_fixed (pool_reserved): desired=0x2000000000 size=8589934592 (8192.00 MB)
-[ps4-mem] sceKernelMemoryPoolReserve SUCCESS: out=0x2000000000
-[ps4-mem] sceKernelMemoryPoolReserve: in=0x3000000000 len=1073741824 (1024.00 MB) align=0 flags=0x90
-[ps4-vm] recomp_vm_alloc_fixed (pool_reserved): desired=0x3000000000 size=1073741824 (1024.00 MB)
-[ps4-mem] sceKernelMemoryPoolReserve SUCCESS: out=0x3000000000
-[ps4-recomp] Initializing libc malloc subsystem via _malloc_init at 0x122b8ec0...
-[ps4-kernel] _sceKernelRtldSetApplicationHeapAPI: table at 0x123941b8
-[ps4-kernel] heap_malloc=0x4188260, heap_free=0x4188240
-[ps4-vm] recomp_vm_alloc_named_aligned (heap_trace_info): size=4096 (0.00 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x127d0000
-[ps4-recomp] TLS initialized: vaddr=0x9800060 filesz=0x0 memsz=0x68 align=8 static_tls_size=0x100 (fs_base=0x123b0000)
-[ps4-recomp] Executing _start (0xf9a50) via ARM64 assembly...
-GoodPGO
-[ps4-sys] open: '/app0/ue4commandline.txt' (resolved='/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/game/ue4commandline.txt', flags=0x0) -> fd=3
-Using commandline args from /app0/ue4commandline.txt!
-AdditionalArgs before fixup = ../../../Phoenix/Phoenix.uproject
-AdditionalArgs after fixup = ../../../Phoenix/Phoenix.uproject
-File root is /app0/!
-[ps4-mem] sceKernelConfiguredFlexibleMemorySize: 4294967296 (4096.00 MB)
-Used memory before allocating anything was 85.50MB
-FIOS2: built with SDK version 0x09508001
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=86016 (0.08 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x127d1000
-[ps4-thread] Thread created: id=1001, name='SceFiosCallback', entry=0x11a7a710, arg=0x11aa4c98
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=151552 (0.14 MB) align=4096 flags=0x0
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x127e6000
-[ps4-thread] Thread created: id=1002, name='SceFiosIO', entry=0x11a7a710, arg=0x11aa8f60
-[ps4-thread] Thread started: id=1001, name='SceFiosCallback', entry=0x11a7a710, arg=0x11aa4c98
-[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=151552 (0.14 MB) align=4096 flags=0x0
-[ps4-thread] Thread started: id=1002, name='SceFiosIO', entry=0x11a7a710, arg=0x11aa8f60
-[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x1280b000
-[ps4-thread] Thread created: id=1003, name='SceFiosIO /', entry=0x11a7a710, arg=0x11aad1e0
-[ps4-thread] Thread started: id=1003, name='SceFiosIO /', entry=0x11a7a710, arg=0x11aad1e0
-[ps4-sys] open: '/app0/deepfiles' (resolved='/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/game/deepfiles', flags=0x20000) -> fd=-1
-Project file not found: ../../../phoenix/phoenix.uproject
-[ps4-sys] open: '/app0/..' (resolved='/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/game/..', flags=0x20000) -> fd=3
-^C
+...
+[ps4-recomp] WARN: Called unimplemented function 'sceContentExportInit2' (NID: 0GnN4QCgIfs, Lib: libSceContentExport) at RIP=0x70d5d00 (caller RIP=0x41709b0, RSP=0x7ffffe498)
+[ps4-recomp] WARN: Called unimplemented function 'sceGameLiveStreamingInitialize' (NID: kvYEw2lBndk, Lib: libSceGameLiveStreaming) at RIP=0x70d5b00 (caller RIP=0x416e66e, RSP=0x7ffffe4d8)
+[ps4-recomp] WARN: Called unimplemented function 'sceGameLiveStreamingEnableLiveStreaming' (NID: dWM80AX39o4, Lib: libSceGameLiveStreaming) at RIP=0x70d5c90 (caller RIP=0x416e7e7, RSP=0x7ffffe4f8)
+[ps4-sys] open: '/app0/phoenix/intermediate/shaders/tmp' (resolved='/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/game/phoenix/intermediate/shaders/tmp', flags=0x20000, host_flags=0x100000) -> fd=-1
+[ps4-sys] open: '/app0/phoenix/intermediate/shaders/workingdirectory' (resolved='/Volumes/Samsung T7/Hogwarts Legacy Deluxe Edition/game/phoenix/intermediate/shaders/workingdirectory', flags=0x20000, host_flags=0x100000) -> fd=-1
+[ps4-vm] recomp_vm_alloc_named_aligned (anon): size=200704 (0.19 MB) align=4096 flags=0x0
+[ps4-vm] recomp_vm_alloc_named_aligned SUCCESS: addr=0x12d0a000
+[ps4-thread] Thread started: id=1030, name='unnamed', entry=0x418df50, arg=0x100798bec0
+[libSceNp] sceNpGameIntentInitialize
+
+FATAL: Signal 10 at host address 0x7004543b90 (mem_base=0x7000000000)
 ```
 
 ---

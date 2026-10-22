@@ -343,12 +343,85 @@ void shim_sceKernelPreadv(GuestContext *ctx) {
 }
 
 
+// Translate FreeBSD / Orbis OS open() flags to host (Darwin / Linux) open() flags
+static int ps4_open_flags_to_host(int ps4_flags, bool *out_direct) {
+  int host_flags = 0;
+  int acc = ps4_flags & 0x3;
+  if (acc == 1) {
+    host_flags |= O_WRONLY;
+  } else if (acc == 2) {
+    host_flags |= O_RDWR;
+  } else {
+    host_flags |= O_RDONLY;
+  }
+
+  if (ps4_flags & 0x0004) host_flags |= O_NONBLOCK;
+  if (ps4_flags & 0x0008) host_flags |= O_APPEND;
+  if (ps4_flags & 0x0080) host_flags |= O_SYNC;
+  if (ps4_flags & 0x0100) host_flags |= O_NOFOLLOW;
+  if (ps4_flags & 0x0200) host_flags |= O_CREAT;
+  if (ps4_flags & 0x0400) host_flags |= O_TRUNC;
+  if (ps4_flags & 0x0800) host_flags |= O_EXCL;
+#ifdef O_DSYNC
+  if (ps4_flags & 0x1000) host_flags |= O_DSYNC;
+#else
+  if (ps4_flags & 0x1000) host_flags |= O_SYNC;
+#endif
+
+  // FreeBSD O_DIRECTORY = 0x00020000 -> host O_DIRECTORY (0x00100000 on macOS)
+  if (ps4_flags & 0x00020000) host_flags |= O_DIRECTORY;
+
+  // FreeBSD O_CLOEXEC = 0x00100000 -> host O_CLOEXEC (0x01000000 on macOS)
+  if (ps4_flags & 0x00100000) host_flags |= O_CLOEXEC;
+
+  if (out_direct) {
+    *out_direct = (ps4_flags & 0x00010000) != 0;
+  }
+
+  return host_flags;
+}
+
+static int host_open_flags_to_ps4(int host_flags) {
+  int ps4_flags = 0;
+  int acc = host_flags & 0x3;
+  if (acc == O_WRONLY) ps4_flags |= 0x1;
+  else if (acc == O_RDWR) ps4_flags |= 0x2;
+  else ps4_flags |= 0x0;
+
+  if (host_flags & O_NONBLOCK) ps4_flags |= 0x0004;
+  if (host_flags & O_APPEND) ps4_flags |= 0x0008;
+  if (host_flags & O_SYNC) ps4_flags |= 0x0080;
+  if (host_flags & O_NOFOLLOW) ps4_flags |= 0x0100;
+  if (host_flags & O_CREAT) ps4_flags |= 0x0200;
+  if (host_flags & O_TRUNC) ps4_flags |= 0x0400;
+  if (host_flags & O_EXCL) ps4_flags |= 0x0800;
+  if (host_flags & O_DIRECTORY) ps4_flags |= 0x00020000;
+  if (host_flags & O_CLOEXEC) ps4_flags |= 0x00100000;
+
+  return ps4_flags;
+}
+
 // fcntl
 void shim_fcntl(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
   int cmd = (int)ctx->rsi;
   uint64_t arg = ctx->rdx;
-  int ret = fcntl(fd, cmd, arg);
+  int ret;
+  if (cmd == F_SETFL) {
+    bool is_direct = false;
+    int host_flags = ps4_open_flags_to_host((int)arg, &is_direct);
+    ret = fcntl(fd, cmd, host_flags);
+#if defined(__APPLE__) && defined(F_NOCACHE)
+    if (ret >= 0 && is_direct) {
+      fcntl(fd, F_NOCACHE, 1);
+    }
+#endif
+  } else {
+    ret = fcntl(fd, cmd, arg);
+    if (ret >= 0 && cmd == F_GETFL) {
+      ret = host_open_flags_to_ps4(ret);
+    }
+  }
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -367,12 +440,20 @@ void shim_open(GuestContext *ctx) {
   if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
     actual_path = resolved_path;
   }
-  int ret = open(actual_path, flags, mode);
+  bool is_direct = false;
+  int host_flags = ps4_open_flags_to_host(flags, &is_direct);
+  int ret = open(actual_path, host_flags, mode);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
+  } else {
+#if defined(__APPLE__) && defined(F_NOCACHE)
+    if (is_direct) {
+      fcntl(ret, F_NOCACHE, 1);
+    }
+#endif
   }
-  printf("[ps4-sys] open: '%s' (resolved='%s', flags=0x%x) -> fd=%d\n",
-         path ? path : "(null)", actual_path ? actual_path : "(null)", flags, ret);
+  printf("[ps4-sys] open: '%s' (resolved='%s', flags=0x%x, host_flags=0x%x) -> fd=%d\n",
+         path ? path : "(null)", actual_path ? actual_path : "(null)", flags, host_flags, ret);
   fflush(stdout);
   ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
@@ -1178,10 +1259,20 @@ void shim_syscall(GuestContext *ctx) {
     if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
       actual_path = resolved_path;
     }
-    int ret = open(actual_path, flags, mode);
-    if (ret < 0) set_guest_errno(ctx, errno);
-    printf("[ps4-sys] syscall 5 (SYS_open): '%s' (resolved='%s', flags=0x%x) -> fd=%d\n",
-           path ? path : "(null)", actual_path ? actual_path : "(null)", flags, ret);
+    bool is_direct = false;
+    int host_flags = ps4_open_flags_to_host(flags, &is_direct);
+    int ret = open(actual_path, host_flags, mode);
+    if (ret < 0) {
+      set_guest_errno(ctx, errno);
+    } else {
+#if defined(__APPLE__) && defined(F_NOCACHE)
+      if (is_direct) {
+        fcntl(ret, F_NOCACHE, 1);
+      }
+#endif
+    }
+    printf("[ps4-sys] syscall 5 (SYS_open): '%s' (resolved='%s', flags=0x%x, host_flags=0x%x) -> fd=%d\n",
+           path ? path : "(null)", actual_path ? actual_path : "(null)", flags, host_flags, ret);
     fflush(stdout);
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();

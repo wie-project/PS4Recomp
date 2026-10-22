@@ -253,6 +253,8 @@ var shimAliases = map[string]string{
 	"How7B8Oet6k": "shim_scePthreadGetname",
 	"0D4-FVvEikw": "shim_pthread_cancel",
 	"5txKfcMUAok": "shim_pthread_mutexattr_setprotocol",
+	"gKqzW-zWhvY": "shim_pthread_mutex_isowned_np",
+	"W6OrTBO95UY": "shim_scePthreadMutexIsownedNp",
 	// libkernel File System NIDs
 	"1-LFLmRFxxM": "shim_mkdir",
 	"c7ZnT7V1B98": "shim_rmdir",
@@ -913,6 +915,8 @@ var knownDirectShims = []string{
 	"scePthreadMutexattrSettype",
 	"scePthreadMutexattrSetprotocol",
 	"pthread_mutex_timedlock",
+	"pthread_mutex_isowned_np",
+	"scePthreadMutexIsownedNp",
 	"pthread_cancel",
 	"pthread_mutexattr_setprotocol",
 	"scePthreadOnce",
@@ -1230,6 +1234,7 @@ var knownDirectShims = []string{
 	"scePlayGoGetToDoList",
 	"scePlayGoGetEta",
 	"scePlayGoPrefetch",
+	"scePlayGoGetChunkId",
 	// RTC (Real Time Clock)
 	"sceRtcGetCurrentTick",
 	"sceRtcGetTick",

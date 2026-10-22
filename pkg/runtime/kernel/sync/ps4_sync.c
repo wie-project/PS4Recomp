@@ -91,14 +91,25 @@ static void free_guest_sync_mem(GuestContext *ctx, uint64_t guest_addr, size_t s
 typedef struct MutexNode {
   uint64_t guest_addr;
   pthread_mutex_t host_mutex;
-  int type;
   struct MutexNode *next;
 } MutexNode;
 
 static MutexNode *g_mutex_map[MUTEX_MAP_SIZE] = {0};
 static pthread_mutex_t g_mutex_map_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_mutex_static_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static pthread_mutex_t *get_host_mutex_with_type(uint64_t guest_addr, int guest_type) {
+static inline uint64_t get_current_thread_handle(GuestContext *ctx) {
+  if (ctx && ctx->fs_base) {
+    uint64_t t = MEM_U64(ctx->fs_base + 0x10);
+    return (t != 0) ? t : ctx->fs_base;
+  }
+  if (ctx && ctx->thread_id) {
+    return ctx->thread_id;
+  }
+  return 1000;
+}
+
+static pthread_mutex_t *get_host_mutex(uint64_t guest_addr) {
   uint64_t bucket = (guest_addr >> 3) % MUTEX_MAP_SIZE;
   pthread_mutex_lock(&g_mutex_map_lock);
   MutexNode *curr = g_mutex_map[bucket];
@@ -111,22 +122,7 @@ static pthread_mutex_t *get_host_mutex_with_type(uint64_t guest_addr, int guest_
   }
   MutexNode *node = (MutexNode *)calloc(1, sizeof(MutexNode));
   node->guest_addr = guest_addr;
-  node->type = guest_type;
-
-  pthread_mutexattr_t attr;
-  pthread_mutexattr_init(&attr);
-  int host_type = PTHREAD_MUTEX_RECURSIVE;
-  if (guest_type == 1) {
-    host_type = PTHREAD_MUTEX_ERRORCHECK;
-  } else if (guest_type == 2) {
-    host_type = PTHREAD_MUTEX_RECURSIVE;
-  } else if (guest_type == 3) {
-    host_type = PTHREAD_MUTEX_NORMAL;
-  }
-  pthread_mutexattr_settype(&attr, host_type);
-  pthread_mutex_init(&node->host_mutex, &attr);
-  pthread_mutexattr_destroy(&attr);
-
+  pthread_mutex_init(&node->host_mutex, NULL);
   node->next = g_mutex_map[bucket];
   g_mutex_map[bucket] = node;
   pthread_mutex_unlock(&g_mutex_map_lock);
@@ -143,28 +139,29 @@ static uint64_t resolve_mutex_obj(GuestContext *ctx, uint64_t mtx_addr, int gues
   }
   // Otherwise dereference pointer
   uint64_t *p_mtx = (uint64_t *)(ctx->mem_base + mtx_addr);
-  uint64_t obj = *p_mtx;
-  if (obj == 0 || obj == 1) { // 0 = THR_MUTEX_INITIALIZER, 1 = THR_ADAPTIVE_MUTEX_INITIALIZER
+  uint64_t obj = __atomic_load_n(p_mtx, __ATOMIC_ACQUIRE);
+  if (obj <= 2) {
+    if (obj == 2) { // THR_MUTEX_DESTROYED
+      return 0;
+    }
     if (!auto_create) {
       return 0;
     }
-    uint64_t new_obj = alloc_guest_sync_mem(ctx, 128);
-    *p_mtx = new_obj;
-    uint32_t *m_flags = (uint32_t *)(ctx->mem_base + new_obj + 0x20);
-    uint32_t f_type = (obj == 1) ? 4 : (guest_type ? (uint32_t)guest_type : 1);
-    *m_flags = f_type;
-    return new_obj;
-  }
-  if (obj == 2) { // THR_MUTEX_DESTROYED
-    return 0;
+    pthread_mutex_lock(&g_mutex_static_lock);
+    obj = *p_mtx;
+    if (obj <= 1) { // 0 = THR_MUTEX_INITIALIZER, 1 = THR_ADAPTIVE_MUTEX_INITIALIZER
+      uint64_t new_obj = alloc_guest_sync_mem(ctx, 128);
+      uint32_t *m_flags = (uint32_t *)(ctx->mem_base + new_obj + 0x20);
+      uint32_t f_type = (obj == 1) ? 4 : (guest_type ? (uint32_t)guest_type : 1);
+      *m_flags = f_type;
+      (void)get_host_mutex(new_obj);
+      __atomic_store_n(p_mtx, new_obj, __ATOMIC_RELEASE);
+      obj = new_obj;
+    }
+    pthread_mutex_unlock(&g_mutex_static_lock);
+    return (obj == 2) ? 0 : obj;
   }
   return obj;
-}
-
-static pthread_mutex_t *get_host_mutex_from_obj(GuestContext *ctx, uint64_t obj) {
-  uint32_t flags = *(uint32_t *)(ctx->mem_base + obj + 0x20);
-  int guest_type = (int)(flags & 0xff);
-  return get_host_mutex_with_type(obj, guest_type);
 }
 
 void shim_pthread_mutex_init(GuestContext *ctx) {
@@ -193,7 +190,7 @@ void shim_pthread_mutex_init(GuestContext *ctx) {
   uint32_t *m_flags = (uint32_t *)(ctx->mem_base + obj + 0x20);
   *m_flags = (uint32_t)guest_type;
 
-  (void)get_host_mutex_with_type(obj, guest_type);
+  (void)get_host_mutex(obj);
 
   ctx->rax = 0;
   SHIM_RETURN();
@@ -206,12 +203,30 @@ void shim_pthread_mutex_lock(GuestContext *ctx) {
     ctx->rax = (uint64_t)EINVAL;
     SHIM_RETURN();
   }
-  pthread_mutex_t *m = get_host_mutex_from_obj(ctx, obj);
+  uint32_t flags = *(uint32_t *)(ctx->mem_base + obj + 0x20);
+  int type = (int)(flags & 0xff);
+  uint64_t curthread = get_current_thread_handle(ctx);
+  uint64_t *p_owner = (uint64_t *)(ctx->mem_base + obj);
+  int32_t *p_count = (int32_t *)(ctx->mem_base + obj + 0x8);
+
+  if (__atomic_load_n(p_owner, __ATOMIC_ACQUIRE) == curthread) {
+    if (type == 2) { // Recursive
+      (*p_count)++;
+      ctx->rax = 0;
+      SHIM_RETURN();
+    }
+    if (type == 1 || type == 4) { // ErrorCheck or AdaptiveNp
+      ctx->rax = (uint64_t)EDEADLK;
+      SHIM_RETURN();
+    }
+    // Normal (3): POSIX specifies deadlock on self-lock. Fall through to host lock.
+  }
+
+  pthread_mutex_t *m = get_host_mutex(obj);
   int ret = pthread_mutex_lock(m);
   if (ret == 0) {
-    *(uint64_t *)(ctx->mem_base + obj) = (uint64_t)(ctx->thread_id ? ctx->thread_id : 1);
-    int32_t *cnt = (int32_t *)(ctx->mem_base + obj + 0x8);
-    (*cnt)++;
+    __atomic_store_n(p_owner, curthread, __ATOMIC_RELEASE);
+    *p_count = 0;
   }
   ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
@@ -224,12 +239,27 @@ void shim_pthread_mutex_trylock(GuestContext *ctx) {
     ctx->rax = (uint64_t)EINVAL;
     SHIM_RETURN();
   }
-  pthread_mutex_t *m = get_host_mutex_from_obj(ctx, obj);
+  uint32_t flags = *(uint32_t *)(ctx->mem_base + obj + 0x20);
+  int type = (int)(flags & 0xff);
+  uint64_t curthread = get_current_thread_handle(ctx);
+  uint64_t *p_owner = (uint64_t *)(ctx->mem_base + obj);
+  int32_t *p_count = (int32_t *)(ctx->mem_base + obj + 0x8);
+
+  if (__atomic_load_n(p_owner, __ATOMIC_ACQUIRE) == curthread) {
+    if (type == 2) { // Recursive
+      (*p_count)++;
+      ctx->rax = 0;
+      SHIM_RETURN();
+    }
+    ctx->rax = (uint64_t)EBUSY;
+    SHIM_RETURN();
+  }
+
+  pthread_mutex_t *m = get_host_mutex(obj);
   int ret = pthread_mutex_trylock(m);
   if (ret == 0) {
-    *(uint64_t *)(ctx->mem_base + obj) = (uint64_t)(ctx->thread_id ? ctx->thread_id : 1);
-    int32_t *cnt = (int32_t *)(ctx->mem_base + obj + 0x8);
-    (*cnt)++;
+    __atomic_store_n(p_owner, curthread, __ATOMIC_RELEASE);
+    *p_count = 0;
   }
   ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
@@ -269,13 +299,45 @@ void shim_pthread_mutex_timedlock(GuestContext *ctx) {
     ctx->rax = (uint64_t)EINVAL;
     SHIM_RETURN();
   }
-  pthread_mutex_t *m = get_host_mutex_from_obj(ctx, obj);
+  uint32_t flags = *(uint32_t *)(ctx->mem_base + obj + 0x20);
+  int type = (int)(flags & 0xff);
+  uint64_t curthread = get_current_thread_handle(ctx);
+  uint64_t *p_owner = (uint64_t *)(ctx->mem_base + obj);
+  int32_t *p_count = (int32_t *)(ctx->mem_base + obj + 0x8);
+
+  if (__atomic_load_n(p_owner, __ATOMIC_ACQUIRE) == curthread) {
+    if (type == 2) { // Recursive
+      (*p_count)++;
+      ctx->rax = 0;
+      SHIM_RETURN();
+    }
+    if (abstime_addr) {
+      struct timespec now;
+      clock_gettime(CLOCK_REALTIME, &now);
+      struct timespec *ts = (struct timespec *)(ctx->mem_base + abstime_addr);
+      if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L) {
+        ctx->rax = (uint64_t)EINVAL;
+        SHIM_RETURN();
+      }
+      int64_t diff_sec = (int64_t)ts->tv_sec - (int64_t)now.tv_sec;
+      int64_t diff_nsec = (int64_t)ts->tv_nsec - (int64_t)now.tv_nsec;
+      int64_t total_usec = diff_sec * 1000000LL + diff_nsec / 1000LL;
+      if (total_usec > 0) {
+        usleep((useconds_t)total_usec);
+      }
+      ctx->rax = (uint64_t)ETIMEDOUT;
+      SHIM_RETURN();
+    }
+    ctx->rax = (uint64_t)EDEADLK;
+    SHIM_RETURN();
+  }
+
+  pthread_mutex_t *m = get_host_mutex(obj);
   if (!abstime_addr) {
     int ret = pthread_mutex_lock(m);
     if (ret == 0) {
-      *(uint64_t *)(ctx->mem_base + obj) = (uint64_t)(ctx->thread_id ? ctx->thread_id : 1);
-      int32_t *cnt = (int32_t *)(ctx->mem_base + obj + 0x8);
-      (*cnt)++;
+      __atomic_store_n(p_owner, curthread, __ATOMIC_RELEASE);
+      *p_count = 0;
     }
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();
@@ -283,14 +345,17 @@ void shim_pthread_mutex_timedlock(GuestContext *ctx) {
   struct timespec now;
   clock_gettime(CLOCK_REALTIME, &now);
   struct timespec *ts = (struct timespec *)(ctx->mem_base + abstime_addr);
+  if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
   int64_t diff_sec = (int64_t)ts->tv_sec - (int64_t)now.tv_sec;
   int64_t diff_nsec = (int64_t)ts->tv_nsec - (int64_t)now.tv_nsec;
   int64_t total_usec = diff_sec * 1000000LL + diff_nsec / 1000LL;
   if (total_usec <= 0) {
     if (pthread_mutex_trylock(m) == 0) {
-      *(uint64_t *)(ctx->mem_base + obj) = (uint64_t)(ctx->thread_id ? ctx->thread_id : 1);
-      int32_t *cnt = (int32_t *)(ctx->mem_base + obj + 0x8);
-      (*cnt)++;
+      __atomic_store_n(p_owner, curthread, __ATOMIC_RELEASE);
+      *p_count = 0;
       ctx->rax = 0;
     } else {
       ctx->rax = (uint64_t)ETIMEDOUT;
@@ -299,9 +364,8 @@ void shim_pthread_mutex_timedlock(GuestContext *ctx) {
   }
   int ret = host_mutex_timedlock(m, (uint64_t)total_usec);
   if (ret == 0) {
-    *(uint64_t *)(ctx->mem_base + obj) = (uint64_t)(ctx->thread_id ? ctx->thread_id : 1);
-    int32_t *cnt = (int32_t *)(ctx->mem_base + obj + 0x8);
-    (*cnt)++;
+    __atomic_store_n(p_owner, curthread, __ATOMIC_RELEASE);
+    *p_count = 0;
   }
   ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
@@ -314,14 +378,24 @@ void shim_pthread_mutex_unlock(GuestContext *ctx) {
     ctx->rax = (uint64_t)EPERM;
     SHIM_RETURN();
   }
-  pthread_mutex_t *m = get_host_mutex_from_obj(ctx, obj);
-  int32_t *cnt = (int32_t *)(ctx->mem_base + obj + 0x8);
-  if (*cnt > 0) {
-    (*cnt)--;
-    if (*cnt == 0) {
-      *(uint64_t *)(ctx->mem_base + obj) = 0;
-    }
+  uint32_t flags = *(uint32_t *)(ctx->mem_base + obj + 0x20);
+  int type = (int)(flags & 0xff);
+  uint64_t curthread = get_current_thread_handle(ctx);
+  uint64_t *p_owner = (uint64_t *)(ctx->mem_base + obj);
+  int32_t *p_count = (int32_t *)(ctx->mem_base + obj + 0x8);
+
+  if (__atomic_load_n(p_owner, __ATOMIC_ACQUIRE) != curthread) {
+    ctx->rax = (uint64_t)EPERM;
+    SHIM_RETURN();
   }
+  if (type == 2 && *p_count > 0) {
+    (*p_count)--;
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+  __atomic_store_n(p_owner, 0, __ATOMIC_RELEASE);
+  *p_count = 0;
+  pthread_mutex_t *m = get_host_mutex(obj);
   ctx->rax = (uint64_t)pthread_mutex_unlock(m);
   SHIM_RETURN();
 }
@@ -331,6 +405,11 @@ void shim_pthread_mutex_destroy(GuestContext *ctx) {
   uint64_t obj = resolve_mutex_obj(ctx, mtx_addr, 0, 0);
   if (!obj) {
     ctx->rax = 0;
+    SHIM_RETURN();
+  }
+  uint64_t *p_owner = (uint64_t *)(ctx->mem_base + obj);
+  if (__atomic_load_n(p_owner, __ATOMIC_ACQUIRE) != 0) {
+    ctx->rax = (uint64_t)EBUSY;
     SHIM_RETURN();
   }
   uint64_t bucket = (obj >> 3) % MUTEX_MAP_SIZE;
@@ -355,6 +434,23 @@ void shim_pthread_mutex_destroy(GuestContext *ctx) {
 
   ctx->rax = 0;
   SHIM_RETURN();
+}
+
+void shim_pthread_mutex_isowned_np(GuestContext *ctx) {
+  uint64_t mtx_addr = ctx->rdi;
+  uint64_t obj = resolve_mutex_obj(ctx, mtx_addr, 0, 0);
+  if (!obj) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+  uint64_t curthread = get_current_thread_handle(ctx);
+  uint64_t owner = __atomic_load_n((uint64_t *)(ctx->mem_base + obj), __ATOMIC_ACQUIRE);
+  ctx->rax = (owner == curthread) ? 1 : 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadMutexIsownedNp(GuestContext *ctx) {
+  shim_pthread_mutex_isowned_np(ctx);
 }
 
 void shim_pthread_mutexattr_init(GuestContext *ctx) {
@@ -419,6 +515,7 @@ typedef struct CondNode {
 
 static CondNode *g_cond_map[COND_MAP_SIZE] = {0};
 static pthread_mutex_t g_cond_map_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_cond_static_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_cond_t *get_host_cond(uint64_t guest_addr) {
   uint64_t bucket = (guest_addr >> 3) % COND_MAP_SIZE;
@@ -448,17 +545,24 @@ static uint64_t resolve_cond_obj(GuestContext *ctx, uint64_t cond_addr, int auto
     return cond_addr;
   }
   uint64_t *p_cond = (uint64_t *)(ctx->mem_base + cond_addr);
-  uint64_t obj = *p_cond;
-  if (obj == 0) { // THR_COND_INITIALIZER
+  uint64_t obj = __atomic_load_n(p_cond, __ATOMIC_ACQUIRE);
+  if (obj <= 1) {
+    if (obj == 1) { // THR_COND_DESTROYED
+      return 0;
+    }
     if (!auto_create) {
       return 0;
     }
-    uint64_t new_obj = alloc_guest_sync_mem(ctx, 128);
-    *p_cond = new_obj;
-    return new_obj;
-  }
-  if (obj == 1) { // THR_COND_DESTROYED
-    return 0;
+    pthread_mutex_lock(&g_cond_static_lock);
+    obj = *p_cond;
+    if (obj == 0) { // THR_COND_INITIALIZER
+      uint64_t new_obj = alloc_guest_sync_mem(ctx, 128);
+      (void)get_host_cond(new_obj);
+      __atomic_store_n(p_cond, new_obj, __ATOMIC_RELEASE);
+      obj = new_obj;
+    }
+    pthread_mutex_unlock(&g_cond_static_lock);
+    return (obj == 1) ? 0 : obj;
   }
   return obj;
 }
@@ -485,18 +589,26 @@ void shim_pthread_cond_wait(GuestContext *ctx) {
     ctx->rax = (uint64_t)EINVAL;
     SHIM_RETURN();
   }
-  pthread_cond_t *c = get_host_cond(cond_obj);
-  pthread_mutex_t *m = get_host_mutex_from_obj(ctx, mtx_obj);
+  uint64_t curthread = get_current_thread_handle(ctx);
+  uint64_t *p_owner = (uint64_t *)(ctx->mem_base + mtx_obj);
+  int32_t *p_count = (int32_t *)(ctx->mem_base + mtx_obj + 0x8);
 
-  int32_t *cnt = (int32_t *)(ctx->mem_base + mtx_obj + 0x8);
-  int32_t old_cnt = *cnt;
-  *cnt = 0;
-  *(uint64_t *)(ctx->mem_base + mtx_obj) = 0;
+  if (__atomic_load_n(p_owner, __ATOMIC_ACQUIRE) != curthread) {
+    ctx->rax = (uint64_t)EPERM;
+    SHIM_RETURN();
+  }
+
+  int32_t old_recurse = *p_count;
+  *p_count = 0;
+  __atomic_store_n(p_owner, 0, __ATOMIC_RELEASE);
+
+  pthread_cond_t *c = get_host_cond(cond_obj);
+  pthread_mutex_t *m = get_host_mutex(mtx_obj);
 
   int ret = pthread_cond_wait(c, m);
 
-  *cnt = old_cnt;
-  *(uint64_t *)(ctx->mem_base + mtx_obj) = (uint64_t)(ctx->thread_id ? ctx->thread_id : 1);
+  __atomic_store_n(p_owner, curthread, __ATOMIC_RELEASE);
+  *p_count = old_recurse;
 
   ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
@@ -512,25 +624,37 @@ void shim_pthread_cond_timedwait(GuestContext *ctx) {
     ctx->rax = (uint64_t)EINVAL;
     SHIM_RETURN();
   }
-  pthread_cond_t *c = get_host_cond(cond_obj);
-  pthread_mutex_t *m = get_host_mutex_from_obj(ctx, mtx_obj);
+  uint64_t curthread = get_current_thread_handle(ctx);
+  uint64_t *p_owner = (uint64_t *)(ctx->mem_base + mtx_obj);
+  int32_t *p_count = (int32_t *)(ctx->mem_base + mtx_obj + 0x8);
+
+  if (__atomic_load_n(p_owner, __ATOMIC_ACQUIRE) != curthread) {
+    ctx->rax = (uint64_t)EPERM;
+    SHIM_RETURN();
+  }
 
   struct timespec ts;
   if (abstime_addr) {
     uint64_t *guest_ts = (uint64_t *)(ctx->mem_base + abstime_addr);
     ts.tv_sec = (time_t)guest_ts[0];
     ts.tv_nsec = (long)guest_ts[1];
+    if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000L) {
+      ctx->rax = (uint64_t)EINVAL;
+      SHIM_RETURN();
+    }
   }
 
-  int32_t *cnt = (int32_t *)(ctx->mem_base + mtx_obj + 0x8);
-  int32_t old_cnt = *cnt;
-  *cnt = 0;
-  *(uint64_t *)(ctx->mem_base + mtx_obj) = 0;
+  int32_t old_recurse = *p_count;
+  *p_count = 0;
+  __atomic_store_n(p_owner, 0, __ATOMIC_RELEASE);
+
+  pthread_cond_t *c = get_host_cond(cond_obj);
+  pthread_mutex_t *m = get_host_mutex(mtx_obj);
 
   int ret = pthread_cond_timedwait(c, m, abstime_addr ? &ts : NULL);
 
-  *cnt = old_cnt;
-  *(uint64_t *)(ctx->mem_base + mtx_obj) = (uint64_t)(ctx->thread_id ? ctx->thread_id : 1);
+  __atomic_store_n(p_owner, curthread, __ATOMIC_RELEASE);
+  *p_count = old_recurse;
 
   ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
@@ -538,7 +662,7 @@ void shim_pthread_cond_timedwait(GuestContext *ctx) {
 
 void shim_pthread_cond_signal(GuestContext *ctx) {
   uint64_t cond_addr = ctx->rdi;
-  uint64_t cond_obj = resolve_cond_obj(ctx, cond_addr, 0);
+  uint64_t cond_obj = resolve_cond_obj(ctx, cond_addr, 1);
   if (!cond_obj) {
     ctx->rax = 0;
     SHIM_RETURN();
@@ -550,7 +674,7 @@ void shim_pthread_cond_signal(GuestContext *ctx) {
 
 void shim_pthread_cond_broadcast(GuestContext *ctx) {
   uint64_t cond_addr = ctx->rdi;
-  uint64_t cond_obj = resolve_cond_obj(ctx, cond_addr, 0);
+  uint64_t cond_obj = resolve_cond_obj(ctx, cond_addr, 1);
   if (!cond_obj) {
     ctx->rax = 0;
     SHIM_RETURN();
@@ -605,6 +729,7 @@ typedef struct RwlockNode {
 
 static RwlockNode *g_rwlock_map[RWLOCK_MAP_SIZE] = {0};
 static pthread_mutex_t g_rwlock_map_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_rwlock_static_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_rwlock_t *get_host_rwlock(uint64_t guest_addr) {
   uint64_t bucket = (guest_addr >> 3) % RWLOCK_MAP_SIZE;
@@ -634,17 +759,24 @@ static uint64_t resolve_rwlock_obj(GuestContext *ctx, uint64_t rw_addr, int auto
     return rw_addr;
   }
   uint64_t *p_rw = (uint64_t *)(ctx->mem_base + rw_addr);
-  uint64_t obj = *p_rw;
-  if (obj == 0) {
+  uint64_t obj = __atomic_load_n(p_rw, __ATOMIC_ACQUIRE);
+  if (obj <= 1) {
+    if (obj == 1) { // THR_RWLOCK_DESTROYED
+      return 0;
+    }
     if (!auto_create) {
       return 0;
     }
-    uint64_t new_obj = alloc_guest_sync_mem(ctx, 128);
-    *p_rw = new_obj;
-    return new_obj;
-  }
-  if (obj == 1) { // THR_RWLOCK_DESTROYED
-    return 0;
+    pthread_mutex_lock(&g_rwlock_static_lock);
+    obj = *p_rw;
+    if (obj == 0) {
+      uint64_t new_obj = alloc_guest_sync_mem(ctx, 128);
+      (void)get_host_rwlock(new_obj);
+      __atomic_store_n(p_rw, new_obj, __ATOMIC_RELEASE);
+      obj = new_obj;
+    }
+    pthread_mutex_unlock(&g_rwlock_static_lock);
+    return (obj == 1) ? 0 : obj;
   }
   return obj;
 }
@@ -852,12 +984,30 @@ void shim_scePthreadMutexTimedlock(GuestContext *ctx) {
     ctx->rax = (uint64_t)EINVAL;
     SHIM_RETURN();
   }
-  pthread_mutex_t *m = get_host_mutex_from_obj(ctx, obj);
+  uint32_t flags = *(uint32_t *)(ctx->mem_base + obj + 0x20);
+  int type = (int)(flags & 0xff);
+  uint64_t curthread = get_current_thread_handle(ctx);
+  uint64_t *p_owner = (uint64_t *)(ctx->mem_base + obj);
+  int32_t *p_count = (int32_t *)(ctx->mem_base + obj + 0x8);
+
+  if (__atomic_load_n(p_owner, __ATOMIC_ACQUIRE) == curthread) {
+    if (type == 2) { // Recursive
+      (*p_count)++;
+      ctx->rax = 0;
+      SHIM_RETURN();
+    }
+    if (usec > 0) {
+      usleep((useconds_t)usec);
+    }
+    ctx->rax = (uint64_t)ETIMEDOUT;
+    SHIM_RETURN();
+  }
+
+  pthread_mutex_t *m = get_host_mutex(obj);
   int ret = host_mutex_timedlock(m, usec);
   if (ret == 0) {
-    *(uint64_t *)(ctx->mem_base + obj) = (uint64_t)(ctx->thread_id ? ctx->thread_id : 1);
-    int32_t *cnt = (int32_t *)(ctx->mem_base + obj + 0x8);
-    (*cnt)++;
+    __atomic_store_n(p_owner, curthread, __ATOMIC_RELEASE);
+    *p_count = 0;
   }
   ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
@@ -927,8 +1077,14 @@ void shim_scePthreadCondTimedwait(GuestContext *ctx) {
     ctx->rax = (uint64_t)EINVAL;
     SHIM_RETURN();
   }
-  pthread_cond_t *c = get_host_cond(cond_obj);
-  pthread_mutex_t *m = get_host_mutex_from_obj(ctx, mtx_obj);
+  uint64_t curthread = get_current_thread_handle(ctx);
+  uint64_t *p_owner = (uint64_t *)(ctx->mem_base + mtx_obj);
+  int32_t *p_count = (int32_t *)(ctx->mem_base + mtx_obj + 0x8);
+
+  if (__atomic_load_n(p_owner, __ATOMIC_ACQUIRE) != curthread) {
+    ctx->rax = (uint64_t)EPERM;
+    SHIM_RETURN();
+  }
 
   struct timespec now;
   clock_gettime(CLOCK_REALTIME, &now);
@@ -940,15 +1096,17 @@ void shim_scePthreadCondTimedwait(GuestContext *ctx) {
     ts.tv_nsec -= 1000000000L;
   }
 
-  int32_t *cnt = (int32_t *)(ctx->mem_base + mtx_obj + 0x8);
-  int32_t old_cnt = *cnt;
-  *cnt = 0;
-  *(uint64_t *)(ctx->mem_base + mtx_obj) = 0;
+  int32_t old_recurse = *p_count;
+  *p_count = 0;
+  __atomic_store_n(p_owner, 0, __ATOMIC_RELEASE);
+
+  pthread_cond_t *c = get_host_cond(cond_obj);
+  pthread_mutex_t *m = get_host_mutex(mtx_obj);
 
   int ret = pthread_cond_timedwait(c, m, &ts);
 
-  *cnt = old_cnt;
-  *(uint64_t *)(ctx->mem_base + mtx_obj) = (uint64_t)(ctx->thread_id ? ctx->thread_id : 1);
+  __atomic_store_n(p_owner, curthread, __ATOMIC_RELEASE);
+  *p_count = old_recurse;
 
   ctx->rax = (uint64_t)ret;
   SHIM_RETURN();

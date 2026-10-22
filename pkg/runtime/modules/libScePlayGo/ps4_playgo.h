@@ -39,6 +39,24 @@ typedef struct OrbisPlayGoProgress {
     uint64_t totalSize;
 } OrbisPlayGoProgress;
 
+#define ORBIS_PLAYGO_ERROR_UNKNOWN             ((int32_t)0x80B20001)
+#define ORBIS_PLAYGO_ERROR_FATAL               ((int32_t)0x80B20002)
+#define ORBIS_PLAYGO_ERROR_NO_MEMORY           ((int32_t)0x80B20003)
+#define ORBIS_PLAYGO_ERROR_INVALID_ARGUMENT    ((int32_t)0x80B20004)
+#define ORBIS_PLAYGO_ERROR_NOT_INITIALIZED     ((int32_t)0x80B20005)
+#define ORBIS_PLAYGO_ERROR_ALREADY_INITIALIZED ((int32_t)0x80B20006)
+#define ORBIS_PLAYGO_ERROR_ALREADY_STARTED     ((int32_t)0x80B20007)
+#define ORBIS_PLAYGO_ERROR_NOT_STARTED         ((int32_t)0x80B20008)
+#define ORBIS_PLAYGO_ERROR_BAD_HANDLE          ((int32_t)0x80B20009)
+#define ORBIS_PLAYGO_ERROR_BAD_POINTER         ((int32_t)0x80B2000A)
+#define ORBIS_PLAYGO_ERROR_BAD_SIZE            ((int32_t)0x80B2000B)
+#define ORBIS_PLAYGO_ERROR_BAD_CHUNK_ID        ((int32_t)0x80B2000C)
+#define ORBIS_PLAYGO_ERROR_BAD_SPEED           ((int32_t)0x80B2000D)
+#define ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO  ((int32_t)0x80B2000E)
+#define ORBIS_PLAYGO_ERROR_EPERM               ((int32_t)0x80B2000F)
+#define ORBIS_PLAYGO_ERROR_BAD_LOCUS           ((int32_t)0x80B20010)
+#define ORBIS_PLAYGO_ERROR_NEED_DATA_DISC      ((int32_t)0x80B20011)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -56,6 +74,7 @@ int32_t scePlayGoSetInstallSpeed(OrbisPlayGoHandle handle, int32_t speed);
 int32_t scePlayGoGetToDoList(OrbisPlayGoHandle handle, OrbisPlayGoToDo *outToDoList, uint32_t maxEntries, uint32_t *outNumEntries);
 int32_t scePlayGoGetEta(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count, OrbisPlayGoEta *outEta);
 int32_t scePlayGoPrefetch(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count);
+int32_t scePlayGoGetChunkId(OrbisPlayGoHandle handle, OrbisPlayGoChunkId *outChunkIdList, uint32_t numberOfEntries, uint32_t *outEntries);
 
 // Guest ABI shims
 void shim_scePlayGoInitialize(GuestContext *ctx);
@@ -71,6 +90,7 @@ void shim_scePlayGoSetInstallSpeed(GuestContext *ctx);
 void shim_scePlayGoGetToDoList(GuestContext *ctx);
 void shim_scePlayGoGetEta(GuestContext *ctx);
 void shim_scePlayGoPrefetch(GuestContext *ctx);
+void shim_scePlayGoGetChunkId(GuestContext *ctx);
 
 #ifdef __cplusplus
 }
