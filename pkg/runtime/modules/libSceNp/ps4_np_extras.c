@@ -254,3 +254,80 @@ void shim_sceNpWebApiUtilityParseNpId(GuestContext *ctx) {
     ctx->rax = 0;
     SHIM_RETURN();
 }
+
+//=============================================================================
+// libSceNpSessionSignaling
+//=============================================================================
+
+void shim_sceNpSessionSignalingInitialize(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpSessionSignalingTerminate(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpSessionSignalingCreateContext2(GuestContext *ctx) {
+    uint32_t *ctxId = (uint32_t *)NPX_GPTR(ctx, ctx->rdx);
+    if (ctxId) *ctxId = 1;
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpSessionSignalingDestroyContext(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpSessionSignalingActivateSession(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpSessionSignalingDeactivate(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpSessionSignalingActivateUser(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpSessionSignalingGetConnectionInfo(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)NPX_SIGNALING_ERROR_CONN_NOT_FOUND;
+    SHIM_RETURN();
+}
+
+void shim_sceNpSessionSignalingGetConnectionStatus(GuestContext *ctx) {
+    int32_t *status = (int32_t *)NPX_GPTR(ctx, ctx->rdx);
+    if (status) *status = NPX_SIGNALING_CONN_STATUS_INACTIVE;
+    ctx->rax = (uint64_t)(int64_t)NPX_SIGNALING_ERROR_CONN_NOT_FOUND;
+    SHIM_RETURN();
+}
+
+void shim_sceNpSessionSignalingGetLocalNetInfo(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)NPX_SIGNALING_ERROR_NETINFO_NOT_AVAILABLE;
+    SHIM_RETURN();
+}
+
+void shim_sceNpSessionSignalingRequestPrepare(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpGetParentalControlInfoA(GuestContext *ctx) {
+    NPX_LOG_ONCE("sceNpGetParentalControlInfoA -> SIGNED_OUT");
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_ERROR_SIGNED_OUT;
+    SHIM_RETURN();
+}
+
+void shim_sceNpGetUserIdByAccountId(GuestContext *ctx) {
+    int32_t *userId = (int32_t *)NPX_GPTR(ctx, ctx->rsi);
+    if (userId) *userId = 0x10000000;
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+

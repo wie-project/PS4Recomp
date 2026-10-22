@@ -213,9 +213,11 @@ void shim_unresolved_stub(GuestContext *ctx) {
             (unsigned long long)caller_rip,
             (unsigned long long)(ctx ? ctx->rsp : 0));
   }
-  recomp_dump_guest_context(ctx);
   fflush(stderr);
-  abort();
+  if (getenv("PS4_ABORT_ON_UNRESOLVED")) {
+    recomp_dump_guest_context(ctx);
+    abort();
+  }
   if (ctx) {
     ctx->rax = 0;
     ctx->rsp += 8;
