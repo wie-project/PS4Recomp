@@ -271,6 +271,40 @@ void recomp_module_start(GuestContext *ctx, int32_t handle) {
     }
 }
 
+void recomp_modules_start_preloaded(GuestContext *ctx) {
+    if (!ctx) {
+        return;
+    }
+    for (int i = 0; i < MAX_PRX_MODULES; i++) {
+        const uint64_t *inits = NULL;
+        size_t count = 0;
+        const char *mod_name = NULL;
+        pthread_mutex_lock(&g_sysmodule_mutex);
+        if (i < g_prx_count && g_prx[i].in_use && !g_prx[i].started && g_prx[i].inits && g_prx[i].init_count > 0) {
+            // Only preload system runtime libraries (libc.prx, libSceLibcInternal.prx) before game main;
+            // game plugins and other modules are started via sceKernelLoadStartModule / sceSysmoduleLoadModule.
+            if (strcmp(g_prx[i].filename, "libc.prx") == 0 ||
+                strcmp(g_prx[i].filename, "libSceLibcInternal.prx") == 0) {
+                g_prx[i].started = 1;
+                inits = g_prx[i].inits;
+                count = g_prx[i].init_count;
+                mod_name = g_prx[i].filename;
+            }
+        }
+        pthread_mutex_unlock(&g_sysmodule_mutex);
+
+        if (inits && count > 0) {
+            printf("[ps4-sysmodule] Starting preloaded module %s (%zu init functions)...\n",
+                   mod_name ? mod_name : "unknown", count);
+            for (size_t k = 0; k < count; k++) {
+                if (inits[k] != 0) {
+                    recomp_call_guest(ctx, inits[k]);
+                }
+            }
+        }
+    }
+}
+
 int32_t sceSysmoduleLoadModule(uint16_t moduleId) {
     pthread_mutex_lock(&g_sysmodule_mutex);
     for (int i = 0; i < g_loaded_modules_count; i++) {

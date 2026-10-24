@@ -60,6 +60,26 @@ var shimAliases = map[string]string{
 	"sceKernelMunmap": "shim_munmap",
 	// Sysmodule
 	"hHrGoGoNf+s": "shim_sceSysmoduleLoadModuleInternalWithArg",
+	// libSceContentExport NIDs
+	"FzEWeYnAFlI": "shim_sceContentExportInit",
+	"0GnN4QCgIfs": "shim_sceContentExportInit2",
+	"+KDWny9Y-6k": "shim_sceContentExportTerm",
+	// libSceGameLiveStreaming NIDs
+	"kvYEw2lBndk": "shim_sceGameLiveStreamingInitialize",
+	"dWM80AX39o4": "shim_sceGameLiveStreamingEnableLiveStreaming",
+	"CoPMx369EqM": "shim_sceGameLiveStreamingGetCurrentStatus",
+	"lK8dLBNp9OE": "shim_sceGameLiveStreamingGetCurrentStatus2",
+	"K0QxEbD7q+c": "shim_sceGameLiveStreamingPermitLiveStreaming",
+	"-EHnU68gExU": "shim_sceGameLiveStreamingPermitServerSideRecording",
+	"mCoz3k3zPmA": "shim_sceGameLiveStreamingSetServiceProviderPermission",
+	"TwuUzTKKeek": "shim_sceGameLiveStreamingSetDefaultServiceProviderPermission",
+	"Gw6S4oqlY7E": "shim_sceGameLiveStreamingSetGuardAreas",
+	"ZuX+zzz2DkA": "shim_sceGameLiveStreamingSetSpoilerTag",
+	"6c2zGtThFww": "shim_sceGameLiveStreamingClearSpoilerTag",
+	"Y1WxX7dPMCw": "shim_sceGameLiveStreamingStartSocialFeedbackMessageFiltering",
+	"bYuGUBuIsaY": "shim_sceGameLiveStreamingStopSocialFeedbackMessageFiltering",
+	"9yK6Fk8mKOQ": "shim_sceGameLiveStreamingTerminate",
+	"PC4jq87+YQI": "shim_sceGameLiveStreamingCheckCallback",
 	// libkernel File I/O & System Events
 	"sceKernelOpen":          "shim_open",
 	"sceKernelClose":         "shim_close",
@@ -670,6 +690,26 @@ var knownDirectShims = []string{
 	"sceNetSocketAbort",
 	"sceVideoOutAdjustColor_",
 	"sceVideoOutColorSettingsSetGamma_",
+	// libSceContentExport
+	"sceContentExportInit",
+	"sceContentExportInit2",
+	"sceContentExportTerm",
+	// libSceGameLiveStreaming
+	"sceGameLiveStreamingInitialize",
+	"sceGameLiveStreamingTerminate",
+	"sceGameLiveStreamingEnableLiveStreaming",
+	"sceGameLiveStreamingPermitLiveStreaming",
+	"sceGameLiveStreamingPermitServerSideRecording",
+	"sceGameLiveStreamingGetCurrentStatus",
+	"sceGameLiveStreamingGetCurrentStatus2",
+	"sceGameLiveStreamingSetServiceProviderPermission",
+	"sceGameLiveStreamingSetDefaultServiceProviderPermission",
+	"sceGameLiveStreamingSetGuardAreas",
+	"sceGameLiveStreamingSetSpoilerTag",
+	"sceGameLiveStreamingClearSpoilerTag",
+	"sceGameLiveStreamingStartSocialFeedbackMessageFiltering",
+	"sceGameLiveStreamingStopSocialFeedbackMessageFiltering",
+	"sceGameLiveStreamingCheckCallback",
 	// libSceGnmDriver (appended to ps4_gnmdriver.c)
 	"sceGnmDrawIndirectMulti",
 	// libSceHttp extras (libSceHttp/ps4_http_extras.c)

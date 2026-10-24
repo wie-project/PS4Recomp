@@ -251,16 +251,6 @@ int32_t sceNetCtlUnregisterCallback(int32_t cid) {
 }
 
 int32_t sceNetCtlCheckCallback(void) {
-    CallbackSlot copy[MAX_NETCTL_CALLBACKS];
-    pthread_mutex_lock(&g_netctl_mutex);
-    memcpy(copy, g_callbacks, sizeof(copy));
-    pthread_mutex_unlock(&g_netctl_mutex);
-
-    for (int i = 0; i < MAX_NETCTL_CALLBACKS; i++) {
-        if (copy[i].active && copy[i].func) {
-            copy[i].func(ORBIS_NET_CTL_EVENT_TYPE_IPOBTAINED, copy[i].arg);
-        }
-    }
     return ORBIS_OK;
 }
 
@@ -299,16 +289,6 @@ int32_t sceNetCtlUnregisterCallbackForNpToolkit(int32_t cid) {
 }
 
 int32_t sceNetCtlCheckCallbackForNpToolkit(void) {
-    ToolkitCallbackSlot copy[MAX_NETCTL_CALLBACKS];
-    pthread_mutex_lock(&g_netctl_mutex);
-    memcpy(copy, g_toolkit_callbacks, sizeof(copy));
-    pthread_mutex_unlock(&g_netctl_mutex);
-
-    for (int i = 0; i < MAX_NETCTL_CALLBACKS; i++) {
-        if (copy[i].active && copy[i].func) {
-            copy[i].func(ORBIS_NET_CTL_EVENT_TYPE_IPOBTAINED, copy[i].arg);
-        }
-    }
     return ORBIS_OK;
 }
 

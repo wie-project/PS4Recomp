@@ -199,7 +199,7 @@ void shim_mmap(GuestContext *ctx) {
     // If not anonymous and valid fd, read file data into the mapped memory
     if (!(flags & 0x1000) && fd >= 0) {
       ssize_t nread;
-      PS4_HITCH_TIMED(PS4_HITCH_IO, nread = pread(fd, ctx->mem_base + alloc_addr, len, offset));
+      PS4_HITCH_TIMED(PS4_HITCH_IO, nread = ps4_vfs_pread(fd, ctx->mem_base + alloc_addr, len, offset));
       if (nread < 0) {
         fprintf(stderr, "[ps4-sys] mmap file read FAILED: fd=%d offset=%lld len=%zu errno=%d (%s)\n",
                 fd, (long long)offset, len, errno, strerror(errno));
@@ -258,7 +258,7 @@ void shim_read(GuestContext *ctx) {
   uint64_t buf_addr = ctx->rsi;
   size_t count = (size_t)ctx->rdx;
   ssize_t ret;
-  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = read(fd, ctx->mem_base + buf_addr, count));
+  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = ps4_vfs_read(fd, ctx->mem_base + buf_addr, count));
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -303,7 +303,7 @@ void shim_sceKernelPread(GuestContext *ctx) {
   off_t offset = (off_t)ctx->rcx;
 
   ssize_t ret;
-  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = pread(fd, ctx->mem_base + buf_addr, nbytes, offset));
+  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = ps4_vfs_pread(fd, ctx->mem_base + buf_addr, nbytes, offset));
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -435,25 +435,20 @@ void shim_open(GuestContext *ctx) {
   int flags = (int)ctx->rsi;
   mode_t mode = (mode_t)ctx->rdx;
   const char *path = (const char *)(ctx->mem_base + path_addr);
-  char resolved_path[1024];
-  const char *actual_path = path;
-  if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
-    actual_path = resolved_path;
-  }
   bool is_direct = false;
   int host_flags = ps4_open_flags_to_host(flags, &is_direct);
-  int ret = open(actual_path, host_flags, mode);
+  int ret = ps4_vfs_open(path, host_flags, mode);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
-  } else {
+  } else if (!ps4_vfs_is_virtual_fd(ret)) {
 #if defined(__APPLE__) && defined(F_NOCACHE)
     if (is_direct) {
       fcntl(ret, F_NOCACHE, 1);
     }
 #endif
   }
-  printf("[ps4-sys] open: '%s' (resolved='%s', flags=0x%x, host_flags=0x%x) -> fd=%d\n",
-         path ? path : "(null)", actual_path ? actual_path : "(null)", flags, host_flags, ret);
+  printf("[ps4-sys] open: '%s' (flags=0x%x, host_flags=0x%x) -> fd=%d\n",
+         path ? path : "(null)", flags, host_flags, ret);
   fflush(stdout);
   ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
@@ -463,7 +458,7 @@ void shim_open(GuestContext *ctx) {
 void shim_close(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
   guest_dir_cache_drop_fd(fd);
-  int ret = close(fd);
+  int ret = ps4_vfs_close(fd);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -476,7 +471,7 @@ void shim_lseek(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
   off_t offset = (off_t)ctx->rsi;
   int whence = (int)ctx->rdx;
-  off_t ret = lseek(fd, offset, whence);
+  off_t ret = ps4_vfs_lseek(fd, offset, whence);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -549,12 +544,8 @@ void shim_stat(GuestContext *ctx) {
   uint64_t path_addr = ctx->rdi;
   uint64_t statbuf_addr = ctx->rsi;
   const char *path = (const char *)(ctx->mem_base + path_addr);
-  char resolved_path[1024];
-  if (ps4_vfs_resolve(path, resolved_path, sizeof(resolved_path)) == 0) {
-    path = resolved_path;
-  }
   struct stat st;
-  int ret = stat(path, &st);
+  int ret = ps4_vfs_stat(path, &st);
   if (ret == 0) {
     struct ps4_stat *gst = (struct ps4_stat *)(ctx->mem_base + statbuf_addr);
     fill_ps4_stat(gst, &st);
@@ -571,7 +562,7 @@ void shim_fstat(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
   uint64_t statbuf_addr = ctx->rsi;
   struct stat st;
-  int ret = fstat(fd, &st);
+  int ret = ps4_vfs_fstat(fd, &st);
   if (ret == 0) {
     struct ps4_stat *gst = (struct ps4_stat *)(ctx->mem_base + statbuf_addr);
     fill_ps4_stat(gst, &st);

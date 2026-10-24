@@ -577,6 +577,7 @@ func (e *AsmEmitter) EmitMainRunner(path string) error {
 
 	content := fmt.Sprintf(`#include "recomp_runtime.h"
 #include "ps4_vfs.h"
+#include "ps4_sysmodule.h"
 
 extern void recomp_init_dispatch_table(void);
 extern void recomp_enter_guest(GuestContext *ctx, uint64_t target_fn);
@@ -595,6 +596,7 @@ static void *guest_main(void *p) {
     printf("[ps4-recomp] Initializing runtime (ARM64 Assembly Backend)...\n");
     ps4_vfs_init(%s);
     recomp_init_dispatch_table();
+    recomp_register_guest_modules();
 
     const char *prog_name = (argc > 0 && argv[0]) ? argv[0] : "/app0/eboot.bin";
     GuestContext *ctx = recomp_init_runtime_file("guest_image.bin", 0, prog_name);
@@ -603,9 +605,11 @@ static void *guest_main(void *p) {
         exit(1);
     }
 
+    recomp_init_tls(ctx, 0x%xULL, 0x%xULL, 0x%xULL, 0x%xULL);
+
     recomp_init_process_param(ctx, 0x%xULL);
 
-    recomp_init_tls(ctx, 0x%xULL, 0x%xULL, 0x%xULL, 0x%xULL);
+    recomp_modules_start_preloaded(ctx);
 
     recomp_setup_entry_args(ctx, argc, argv, 0x%xULL);
 
@@ -641,7 +645,7 @@ int main(int argc, char **argv) {
     ps4_host_run_main_loop();
     return 0;
 }
-`, vfsInitArg, e.elf.ProcParamAddr, e.elf.TLSVaddr, e.elf.TLSFilesz, e.elf.TLSMemsz, e.elf.TLSAlign, entryAddr, entryName, entryAddr, entryAddr, entryAddr, vfsInitArg)
+`, vfsInitArg, e.elf.TLSVaddr, e.elf.TLSFilesz, e.elf.TLSMemsz, e.elf.TLSAlign, e.elf.ProcParamAddr, entryAddr, entryName, entryAddr, entryAddr, entryAddr, vfsInitArg)
 
 	return writeFileIfChanged(path, []byte(content))
 }

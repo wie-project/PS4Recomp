@@ -1,4 +1,5 @@
 #include "ps4_vfs.h"
+#include "ps4_pak.c"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,7 +8,9 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <strings.h>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -16,6 +19,19 @@
 
 static char *g_app_root = NULL;
 static pthread_mutex_t g_vfs_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#define MAX_VIRTUAL_FILES 256
+typedef struct {
+    int active;
+    int pak_fd;
+    uint64_t data_offset;
+    uint64_t file_size;
+    off_t cur_offset;
+    char path[512];
+} VirtualPakFile;
+
+static VirtualPakFile g_vfiles[MAX_VIRTUAL_FILES];
+static pthread_mutex_t g_vfile_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static char *discover_app_root(const char *hint) {
     // 1. Environment variable override
@@ -30,8 +46,6 @@ static char *discover_app_root(const char *hint) {
 
 #if defined(__APPLE__)
     // 2. Check if running inside macOS .app bundle: <exe_dir>/../Resources
-    // In a standard macOS .app bundle: <Bundle>.app/Contents/MacOS/<exec>
-    // Resources are placed in: <Bundle>.app/Contents/Resources
     char exec_path[1024] = {0};
     uint32_t size = sizeof(exec_path);
     if (_NSGetExecutablePath(exec_path, &size) == 0) {
@@ -81,7 +95,6 @@ static char *discover_app_root(const char *hint) {
 
     // 3. Check compile-time hint if provided and contains valid assets
     if (hint && *hint && access(hint, F_OK) == 0) {
-        // Verify hint actually contains game assets (not an empty leftover folder)
         char check_path[1024];
         snprintf(check_path, sizeof(check_path), "%s/Media", hint);
         int has_media = (access(check_path, F_OK) == 0);
@@ -153,7 +166,15 @@ void ps4_vfs_init(const char *app_root) {
 
     memset(g_mounts, 0, sizeof(g_mounts));
     g_mount_count = 0;
+
+    pthread_mutex_lock(&g_vfile_mutex);
+    memset(g_vfiles, 0, sizeof(g_vfiles));
+    pthread_mutex_unlock(&g_vfile_mutex);
+
     pthread_mutex_unlock(&g_vfs_mutex);
+
+    // Initialize universal PAK provider
+    ps4_pak_init(g_app_root);
 }
 
 const char *ps4_vfs_get_app_root(void) {
@@ -169,7 +190,6 @@ int ps4_vfs_mount(const char *guest_prefix, const char *host_path) {
     }
 
     pthread_mutex_lock(&g_vfs_mutex);
-    // If prefix already exists, update it
     for (int i = 0; i < g_mount_count; i++) {
         if (g_mounts[i].active && strcmp(g_mounts[i].guest_prefix, guest_prefix) == 0) {
             strncpy(g_mounts[i].host_path, host_path, sizeof(g_mounts[i].host_path) - 1);
@@ -212,8 +232,6 @@ int ps4_vfs_unmount(const char *guest_prefix) {
     return -ENOENT;
 }
 
-// Normalizes guest path components within a chroot mount.
-// Eliminates '.', redundant slashes, and resolves '..' without escaping the mount root.
 static void normalize_chroot_subpath(const char *subpath, char *out, size_t out_sz) {
     if (!subpath || !out || out_sz == 0) return;
     out[0] = '\0';
@@ -238,7 +256,6 @@ static void normalize_chroot_subpath(const char *subpath, char *out, size_t out_
             if (seg_count > 0) {
                 seg_count--;
             }
-            // Cannot escape chroot root: if seg_count == 0, stay at root
         } else {
             if (seg_count < 64) {
                 segs[seg_count++] = token;
@@ -261,12 +278,9 @@ static void normalize_chroot_subpath(const char *subpath, char *out, size_t out_
     out[written] = '\0';
 }
 
-// Case-insensitive lookup ported from shadps4 MntPoints::GetHostPath (fs.cpp:279-337).
-// Traverses non-existing components using opendir/readdir with strcasecmp.
 static int case_insensitive_lookup(const char *host_path, char *out_path, size_t out_sz) {
     if (!host_path || !out_path || out_sz == 0) return -EINVAL;
 
-    // Fast path: if path already exists directly on host filesystem, return immediately
     if (access(host_path, F_OK) == 0) {
         if (strlen(host_path) >= out_sz) return -ENAMETOOLONG;
         strncpy(out_path, host_path, out_sz - 1);
@@ -279,7 +293,6 @@ static int case_insensitive_lookup(const char *host_path, char *out_path, size_t
     if (hlen >= sizeof(temp)) return -ENAMETOOLONG;
     memcpy(temp, host_path, hlen + 1);
 
-    // Collect non-existing path components from leaf to root without heap allocation
     const char *parts[64];
     int num_parts = 0;
 
@@ -291,7 +304,6 @@ static int case_insensitive_lookup(const char *host_path, char *out_path, size_t
         char *slash = strrchr(curr, '/');
         if (!slash || slash == curr) {
             if (slash == curr) {
-                // Root "/" is an anchor that exists
                 if (num_parts < 64) parts[num_parts++] = slash + 1;
                 *slash = '\0';
             } else {
@@ -304,7 +316,6 @@ static int case_insensitive_lookup(const char *host_path, char *out_path, size_t
         *slash = '\0';
     }
 
-    // Anchor is in `curr` (or "/" if reached filesystem root)
     char resolved[1024];
     if (*curr) {
         strncpy(resolved, curr, sizeof(resolved) - 1);
@@ -314,7 +325,6 @@ static int case_insensitive_lookup(const char *host_path, char *out_path, size_t
         resolved[sizeof(resolved) - 1] = '\0';
     }
 
-    // Walk down the stacked parts in reverse (from parent to leaf)
     for (int i = num_parts - 1; i >= 0; i--) {
         const char *part = parts[i];
         if (!part || *part == '\0') {
@@ -330,7 +340,6 @@ static int case_insensitive_lookup(const char *host_path, char *out_path, size_t
             continue;
         }
 
-        // Case-insensitive directory scan (matching shadps4 search)
         DIR *dir = opendir(resolved);
         int matched = 0;
         if (dir) {
@@ -348,7 +357,6 @@ static int case_insensitive_lookup(const char *host_path, char *out_path, size_t
         }
 
         if (!matched) {
-            // Keep original component name if no match found
             snprintf(test_path, sizeof(test_path), "%s%s%s", resolved, is_root ? "" : "/", part);
             strncpy(resolved, test_path, sizeof(resolved) - 1);
             resolved[sizeof(resolved) - 1] = '\0';
@@ -371,7 +379,6 @@ int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz
     char raw_host[1024];
     raw_host[0] = '\0';
 
-    // 1. Check custom registered mount points first
     for (int i = 0; i < g_mount_count; i++) {
         if (!g_mounts[i].active) continue;
         size_t plen = strlen(g_mounts[i].guest_prefix);
@@ -391,7 +398,6 @@ int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz
         }
     }
 
-    // 2. Default /app0, /hostapp, /data, or relative path handling
     if (raw_host[0] == '\0') {
         if (strncmp(guest_path, "/app0", 5) == 0 && (guest_path[5] == '/' || guest_path[5] == '\0')) {
             const char *subpath = guest_path + 5;
@@ -427,7 +433,6 @@ int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz
                 snprintf(raw_host, sizeof(raw_host), "%s/data", root);
             }
         } else if (guest_path[0] != '/') {
-            // Relative path: in PS4, process working directory is /app0
             char norm_subpath[1024];
             normalize_chroot_subpath(guest_path, norm_subpath, sizeof(norm_subpath));
             if (norm_subpath[0]) {
@@ -436,15 +441,325 @@ int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz
                 snprintf(raw_host, sizeof(raw_host), "%s", root);
             }
         } else {
-            // Absolute host path or unmounted system path
             strncpy(raw_host, guest_path, sizeof(raw_host) - 1);
             raw_host[sizeof(raw_host) - 1] = '\0';
         }
     }
     pthread_mutex_unlock(&g_vfs_mutex);
 
-    // 3. Apply case-insensitive resolution on the host path
     return case_insensitive_lookup(raw_host, host_path, host_path_sz);
+}
+
+static const char *get_app0_subpath(const char *guest_path) {
+    if (!guest_path) return NULL;
+    if (strncmp(guest_path, "/app0/", 6) == 0) {
+        return guest_path + 6;
+    }
+    if (strcmp(guest_path, "/app0") == 0) {
+        return "";
+    }
+    if (strncmp(guest_path, "/hostapp/", 9) == 0) {
+        return guest_path + 9;
+    }
+    if (guest_path[0] != '/') {
+        return guest_path;
+    }
+    return NULL;
+}
+
+bool ps4_vfs_is_virtual_fd(int fd) {
+    return (fd >= PS4_VFS_VIRTUAL_FD_BASE && fd < PS4_VFS_VIRTUAL_FD_BASE + MAX_VIRTUAL_FILES);
+}
+
+int ps4_vfs_open(const char *guest_path, int host_flags, mode_t mode) {
+    if (!guest_path) {
+        errno = EFAULT;
+        return -1;
+    }
+
+    char resolved[1024];
+    if (ps4_vfs_resolve(guest_path, resolved, sizeof(resolved)) == 0) {
+        if (access(resolved, F_OK) == 0) {
+            return open(resolved, host_flags, mode);
+        }
+    }
+
+    // Path not on physical disk. Check universal PAK archive provider
+    const char *subpath = get_app0_subpath(guest_path);
+    if (subpath) {
+        ps4_pak_entry_t entry;
+        if (ps4_pak_lookup(subpath, &entry)) {
+            // PAK archives are strictly read-only
+            if ((host_flags & O_ACCMODE) != O_RDONLY) {
+                errno = EROFS;
+                return -1;
+            }
+
+            pthread_mutex_lock(&g_vfile_mutex);
+            int slot = -1;
+            for (int i = 0; i < MAX_VIRTUAL_FILES; i++) {
+                if (!g_vfiles[i].active) {
+                    slot = i;
+                    break;
+                }
+            }
+
+            if (slot < 0) {
+                pthread_mutex_unlock(&g_vfile_mutex);
+                errno = ENFILE;
+                return -1;
+            }
+
+            g_vfiles[slot].active = 1;
+            g_vfiles[slot].pak_fd = entry.pak_fd;
+            g_vfiles[slot].data_offset = entry.data_offset;
+            g_vfiles[slot].file_size = entry.size;
+            g_vfiles[slot].cur_offset = 0;
+            strncpy(g_vfiles[slot].path, guest_path, sizeof(g_vfiles[slot].path) - 1);
+            pthread_mutex_unlock(&g_vfile_mutex);
+
+            int vfd = PS4_VFS_VIRTUAL_FD_BASE + slot;
+            printf("[ps4-vfs] Virtual open: '%s' -> vfd=%d (pak_offset=0x%llx, size=%llu)\n",
+                   guest_path, vfd, (unsigned long long)entry.data_offset, (unsigned long long)entry.size);
+            return vfd;
+        }
+    }
+
+    errno = ENOENT;
+    return -1;
+}
+
+int ps4_vfs_close(int fd) {
+    if (ps4_vfs_is_virtual_fd(fd)) {
+        int slot = fd - PS4_VFS_VIRTUAL_FD_BASE;
+        pthread_mutex_lock(&g_vfile_mutex);
+        if (slot >= 0 && slot < MAX_VIRTUAL_FILES && g_vfiles[slot].active) {
+            g_vfiles[slot].active = 0;
+            pthread_mutex_unlock(&g_vfile_mutex);
+            return 0;
+        }
+        pthread_mutex_unlock(&g_vfile_mutex);
+        errno = EBADF;
+        return -1;
+    }
+    return close(fd);
+}
+
+ssize_t ps4_vfs_read(int fd, void *buf, size_t count) {
+    if (ps4_vfs_is_virtual_fd(fd)) {
+        int slot = fd - PS4_VFS_VIRTUAL_FD_BASE;
+        pthread_mutex_lock(&g_vfile_mutex);
+        if (slot < 0 || slot >= MAX_VIRTUAL_FILES || !g_vfiles[slot].active) {
+            pthread_mutex_unlock(&g_vfile_mutex);
+            errno = EBADF;
+            return -1;
+        }
+        VirtualPakFile *vf = &g_vfiles[slot];
+        if ((uint64_t)vf->cur_offset >= vf->file_size) {
+            pthread_mutex_unlock(&g_vfile_mutex);
+            return 0; // EOF
+        }
+
+        size_t to_read = count;
+        if ((uint64_t)vf->cur_offset + to_read > vf->file_size) {
+            to_read = (size_t)(vf->file_size - (uint64_t)vf->cur_offset);
+        }
+
+        ssize_t ret = pread(vf->pak_fd, buf, to_read, (off_t)(vf->data_offset + (uint64_t)vf->cur_offset));
+        if (ret > 0) {
+            vf->cur_offset += ret;
+        }
+        pthread_mutex_unlock(&g_vfile_mutex);
+        return ret;
+    }
+    return read(fd, buf, count);
+}
+
+ssize_t ps4_vfs_pread(int fd, void *buf, size_t count, off_t offset) {
+    if (ps4_vfs_is_virtual_fd(fd)) {
+        int slot = fd - PS4_VFS_VIRTUAL_FD_BASE;
+        pthread_mutex_lock(&g_vfile_mutex);
+        if (slot < 0 || slot >= MAX_VIRTUAL_FILES || !g_vfiles[slot].active) {
+            pthread_mutex_unlock(&g_vfile_mutex);
+            errno = EBADF;
+            return -1;
+        }
+        VirtualPakFile *vf = &g_vfiles[slot];
+        if (offset < 0 || (uint64_t)offset >= vf->file_size) {
+            pthread_mutex_unlock(&g_vfile_mutex);
+            return 0;
+        }
+
+        size_t to_read = count;
+        if ((uint64_t)offset + to_read > vf->file_size) {
+            to_read = (size_t)(vf->file_size - (uint64_t)offset);
+        }
+
+        ssize_t ret = pread(vf->pak_fd, buf, to_read, (off_t)(vf->data_offset + (uint64_t)offset));
+        pthread_mutex_unlock(&g_vfile_mutex);
+        return ret;
+    }
+    return pread(fd, buf, count, offset);
+}
+
+off_t ps4_vfs_lseek(int fd, off_t offset, int whence) {
+    if (ps4_vfs_is_virtual_fd(fd)) {
+        int slot = fd - PS4_VFS_VIRTUAL_FD_BASE;
+        pthread_mutex_lock(&g_vfile_mutex);
+        if (slot < 0 || slot >= MAX_VIRTUAL_FILES || !g_vfiles[slot].active) {
+            pthread_mutex_unlock(&g_vfile_mutex);
+            errno = EBADF;
+            return -1;
+        }
+        VirtualPakFile *vf = &g_vfiles[slot];
+        off_t new_off = vf->cur_offset;
+        if (whence == SEEK_SET) {
+            new_off = offset;
+        } else if (whence == SEEK_CUR) {
+            new_off += offset;
+        } else if (whence == SEEK_END) {
+            new_off = (off_t)vf->file_size + offset;
+        } else {
+            pthread_mutex_unlock(&g_vfile_mutex);
+            errno = EINVAL;
+            return -1;
+        }
+
+        if (new_off < 0) {
+            pthread_mutex_unlock(&g_vfile_mutex);
+            errno = EINVAL;
+            return -1;
+        }
+
+        vf->cur_offset = new_off;
+        pthread_mutex_unlock(&g_vfile_mutex);
+        return new_off;
+    }
+    return lseek(fd, offset, whence);
+}
+
+int ps4_vfs_fstat(int fd, struct stat *st) {
+    if (!st) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (ps4_vfs_is_virtual_fd(fd)) {
+        int slot = fd - PS4_VFS_VIRTUAL_FD_BASE;
+        pthread_mutex_lock(&g_vfile_mutex);
+        if (slot < 0 || slot >= MAX_VIRTUAL_FILES || !g_vfiles[slot].active) {
+            pthread_mutex_unlock(&g_vfile_mutex);
+            errno = EBADF;
+            return -1;
+        }
+        VirtualPakFile *vf = &g_vfiles[slot];
+        memset(st, 0, sizeof(*st));
+        st->st_mode = S_IFREG | 0644;
+        st->st_nlink = 1;
+        st->st_size = (off_t)vf->file_size;
+        st->st_blksize = 4096;
+        st->st_blocks = (off_t)((vf->file_size + 511) / 512);
+        pthread_mutex_unlock(&g_vfile_mutex);
+        return 0;
+    }
+    return fstat(fd, st);
+}
+
+int ps4_vfs_stat(const char *guest_path, struct stat *st) {
+    if (!guest_path || !st) {
+        errno = EFAULT;
+        return -1;
+    }
+    char resolved[1024];
+    if (ps4_vfs_resolve(guest_path, resolved, sizeof(resolved)) == 0) {
+        if (stat(resolved, st) == 0) {
+            return 0;
+        }
+    }
+
+    const char *subpath = get_app0_subpath(guest_path);
+    if (subpath) {
+        ps4_pak_entry_t entry;
+        if (ps4_pak_lookup(subpath, &entry)) {
+            memset(st, 0, sizeof(*st));
+            st->st_mode = S_IFREG | 0644;
+            st->st_nlink = 1;
+            st->st_size = (off_t)entry.size;
+            st->st_blksize = 4096;
+            st->st_blocks = (off_t)((entry.size + 511) / 512);
+            return 0;
+        }
+        if (ps4_pak_dir_exists(subpath)) {
+            memset(st, 0, sizeof(*st));
+            st->st_mode = S_IFDIR | 0755;
+            st->st_nlink = 2;
+            st->st_size = 4096;
+            st->st_blksize = 4096;
+            return 0;
+        }
+    }
+
+    errno = ENOENT;
+    return -1;
+}
+
+int ps4_vfs_lstat(const char *guest_path, struct stat *st) {
+    return ps4_vfs_stat(guest_path, st);
+}
+
+int ps4_vfs_access(const char *guest_path, int mode) {
+    if (!guest_path) {
+        errno = EFAULT;
+        return -1;
+    }
+    char resolved[1024];
+    if (ps4_vfs_resolve(guest_path, resolved, sizeof(resolved)) == 0) {
+        if (access(resolved, mode) == 0) {
+            return 0;
+        }
+    }
+
+    const char *subpath = get_app0_subpath(guest_path);
+    if (subpath) {
+        if (ps4_pak_lookup(subpath, NULL) || ps4_pak_dir_exists(subpath)) {
+            if (mode & W_OK) {
+                errno = EACCES;
+                return -1;
+            }
+            return 0;
+        }
+    }
+
+    errno = ENOENT;
+    return -1;
+}
+
+void *ps4_vfs_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset) {
+    if (ps4_vfs_is_virtual_fd(fd)) {
+        int slot = fd - PS4_VFS_VIRTUAL_FD_BASE;
+        pthread_mutex_lock(&g_vfile_mutex);
+        if (slot < 0 || slot >= MAX_VIRTUAL_FILES || !g_vfiles[slot].active) {
+            pthread_mutex_unlock(&g_vfile_mutex);
+            errno = EBADF;
+            return MAP_FAILED;
+        }
+        VirtualPakFile *vf = &g_vfiles[slot];
+        void *mem = mmap(addr, len, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+        if (mem == MAP_FAILED) {
+            pthread_mutex_unlock(&g_vfile_mutex);
+            return MAP_FAILED;
+        }
+        if (offset >= 0 && (uint64_t)offset < vf->file_size) {
+            size_t to_read = len;
+            if ((uint64_t)offset + to_read > vf->file_size) {
+                to_read = (size_t)(vf->file_size - (uint64_t)offset);
+            }
+            pread(vf->pak_fd, mem, to_read, (off_t)(vf->data_offset + (uint64_t)offset));
+        }
+        pthread_mutex_unlock(&g_vfile_mutex);
+        mprotect(mem, len, prot);
+        return mem;
+    }
+    return mmap(addr, len, prot, flags, fd, offset);
 }
 
 void ps4_vfs_destroy(void) {
@@ -455,5 +770,12 @@ void ps4_vfs_destroy(void) {
     }
     memset(g_mounts, 0, sizeof(g_mounts));
     g_mount_count = 0;
+
+    pthread_mutex_lock(&g_vfile_mutex);
+    memset(g_vfiles, 0, sizeof(g_vfiles));
+    pthread_mutex_unlock(&g_vfile_mutex);
+
     pthread_mutex_unlock(&g_vfs_mutex);
+
+    ps4_pak_destroy();
 }

@@ -437,6 +437,7 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
   ctx->stack_alloc_size = low_mem_limit - stack_floor;
   ctx->rsp = (low_mem_limit - 0x1000ULL) & ~0xFFULL;
   ctx->rbp = ctx->rsp;
+  memset(ctx->mem_base + ctx->stack_base, 0, ctx->stack_alloc_size);
 
   // Register main thread stack extent in VM extents
   GuestVMExtent *stack_extent = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
@@ -636,9 +637,18 @@ void recomp_init_process_param(GuestContext *ctx, uint64_t proc_param_addr) {
       uint64_t init_func =
           *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x10ULL);
       uint64_t malloc_func = *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x20ULL);
-      printf("[ps4-mem] SceLibcMallocReplace at 0x%llx: size=0x%llx init=0x%llx malloc=0x%llx\n",
+      uint64_t free_func = (mr_size >= 0x30) ? *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x28ULL) : 0;
+      uint64_t calloc_func = (mr_size >= 0x38) ? *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x30ULL) : 0;
+      uint64_t realloc_func = (mr_size >= 0x40) ? *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x38ULL) : 0;
+      uint64_t memalign_func = (mr_size >= 0x48) ? *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x40ULL) : 0;
+      uint64_t reallocalign_func = (mr_size >= 0x50) ? *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x48ULL) : 0;
+      uint64_t posix_memalign_func = (mr_size >= 0x58) ? *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x50ULL) : 0;
+      printf("[ps4-mem] SceLibcMallocReplace at 0x%llx: size=0x%llx init=0x%llx malloc=0x%llx free=0x%llx calloc=0x%llx\n",
              (unsigned long long)malloc_replace_addr, (unsigned long long)mr_size,
-             (unsigned long long)init_func, (unsigned long long)malloc_func);
+             (unsigned long long)init_func, (unsigned long long)malloc_func,
+             (unsigned long long)free_func, (unsigned long long)calloc_func);
+
+
       if (init_func != 0 && init_func < ctx->mem_size) {
         printf("[ps4-recomp] Initializing custom memory allocator via "
                "SceLibcParam at 0x%llx...\n",
@@ -1297,6 +1307,9 @@ GuestContext *recomp_create_thread_context(GuestContext *parent,
     return NULL;
   }
   uint64_t tcb_base = stack_base + stack_size + tls_size;
+
+  // Zero the newly allocated thread stack
+  memset(parent->mem_base + stack_base, 0, stack_size);
 
   // Static TLS area for the new thread [tcb_base - tls_size, tcb_base): zeroed, with the
   // .tdata template at tcb_base - recomp_tls_block_offset() (variant II, see recomp_init_tls).

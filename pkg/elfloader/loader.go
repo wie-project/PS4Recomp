@@ -534,46 +534,29 @@ func parseInitArray(loaded *LoadedELF) {
 		}
 	}
 
-	// 3. Check DT_INIT_ARRAY from dynamic tags (used when ELF section headers are stripped, e.g. PS4 PRX/SELF)
+	// 3. Check DT_PREINIT_ARRAY and DT_INIT_ARRAY from dynamic tags (used when ELF section headers are stripped, e.g. PS4 PRX/SELF)
 	if loaded.DynamicTags != nil {
+		if preinitAddr, ok := loaded.DynamicTags[DT_PREINIT_ARRAY]; ok && preinitAddr != 0 {
+			sz := loaded.DynamicTags[DT_PREINIT_ARRAYSZ]
+			for i := uint64(0); i+8 <= sz; i += 8 {
+				addr := preinitAddr + i
+				if addr+8 <= uint64(len(loaded.MemoryImage)) {
+					fn := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
+					if fn != 0 {
+						loaded.InitArray = append(loaded.InitArray, fn)
+					}
+				}
+			}
+		}
+
 		if initArrayAddr, ok := loaded.DynamicTags[DT_INIT_ARRAY]; ok && initArrayAddr != 0 {
 			sz := loaded.DynamicTags[DT_INIT_ARRAYSZ]
-			if sz > 0 {
-				for i := uint64(0); i+8 <= sz; i += 8 {
-					addr := initArrayAddr + i
-					if addr+8 <= uint64(len(loaded.MemoryImage)) {
-						fn := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
-						if fn != 0 {
-							loaded.InitArray = append(loaded.InitArray, fn)
-						}
-					}
-				}
-			} else {
-				// DT_INIT_ARRAYSZ is 0: check for preceding .ctors table in GNU/Clang/Sony PRX
-				curr := initArrayAddr
-				for curr >= 8 && curr <= uint64(len(loaded.MemoryImage)) {
-					val := binary.LittleEndian.Uint64(loaded.MemoryImage[curr-8 : curr])
-					if val != 0 && val != ^uint64(0) {
-						break
-					}
-					curr -= 8
-				}
-				end := curr
-				start := end
-				for start >= 8 && start <= uint64(len(loaded.MemoryImage)) {
-					val := binary.LittleEndian.Uint64(loaded.MemoryImage[start-8 : start])
-					if val == ^uint64(0) || !loaded.InExecutable(val) {
-						break
-					}
-					start -= 8
-				}
-				if end > start {
-					// In .ctors, constructors are called in reverse order (from end down to start)
-					for addr := end - 8; addr >= start && addr < end; addr -= 8 {
-						fn := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
-						if fn != 0 && fn != ^uint64(0) && loaded.InExecutable(fn) {
-							loaded.InitArray = append(loaded.InitArray, fn)
-						}
+			for i := uint64(0); i+8 <= sz; i += 8 {
+				addr := initArrayAddr + i
+				if addr+8 <= uint64(len(loaded.MemoryImage)) {
+					fn := binary.LittleEndian.Uint64(loaded.MemoryImage[addr : addr+8])
+					if fn != 0 {
+						loaded.InitArray = append(loaded.InitArray, fn)
 					}
 				}
 			}
