@@ -381,6 +381,44 @@ void ps4_pak_init(const char *app_root) {
     pthread_mutex_unlock(&g_pak_mutex);
 }
 
+bool ps4_pak_get_parent_locale_path(const char *path, char *out_path, size_t out_sz) {
+    if (!path || !out_path || out_sz == 0) return false;
+
+    size_t len = strlen(path);
+    if (len < 5) return false;
+
+    // Must end with .res (case-insensitive)
+    if (strcasecmp(path + len - 4, ".res") != 0) {
+        return false;
+    }
+
+    const char *last_slash = strrchr(path, '/');
+    const char *fname = last_slash ? last_slash + 1 : path;
+
+    const char *dot = path + len - 4;
+    const char *last_us = NULL;
+    for (const char *p = dot - 1; p >= fname; p--) {
+        if (*p == '_') {
+            last_us = p;
+            break;
+        }
+    }
+
+    if (!last_us || last_us == fname) {
+        return false;
+    }
+
+    size_t prefix_len = (size_t)(last_us - path);
+    if (prefix_len + 4 >= out_sz) {
+        return false;
+    }
+
+    memcpy(out_path, path, prefix_len);
+    memcpy(out_path + prefix_len, path + len - 4, 4);
+    out_path[prefix_len + 4] = '\0';
+    return true;
+}
+
 bool ps4_pak_lookup(const char *subpath, ps4_pak_entry_t *out_entry) {
     if (!subpath || !*subpath) return false;
     while (*subpath == '/') subpath++;
@@ -391,6 +429,7 @@ bool ps4_pak_lookup(const char *subpath, ps4_pak_entry_t *out_entry) {
         return false;
     }
 
+    // 1. Exact match lookup
     uint64_t hash = fnv1a_64_lower(subpath);
     size_t idx = hash & (g_entry_capacity - 1);
     while (g_entries[idx].hash != 0) {
@@ -405,6 +444,35 @@ bool ps4_pak_lookup(const char *subpath, ps4_pak_entry_t *out_entry) {
             return true;
         }
         idx = (idx + 1) & (g_entry_capacity - 1);
+    }
+
+    // 2. ICU / CLDR Resource Bundle locale inheritance fallback (.res)
+    // If <name>_<sublocale>.res is not in the archive, traverse up the locale inheritance chain (e.g. en_US -> en)
+    char cur_path[1024];
+    strncpy(cur_path, subpath, sizeof(cur_path) - 1);
+    cur_path[sizeof(cur_path) - 1] = '\0';
+
+    char parent_path[1024];
+    while (ps4_pak_get_parent_locale_path(cur_path, parent_path, sizeof(parent_path))) {
+        uint64_t phash = fnv1a_64_lower(parent_path);
+        size_t pidx = phash & (g_entry_capacity - 1);
+        while (g_entries[pidx].hash != 0) {
+            if (g_entries[pidx].hash == phash) {
+                if (out_entry) {
+                    out_entry->pak_fd = g_entries[pidx].pak_fd;
+                    out_entry->data_offset = g_entries[pidx].data_offset;
+                    out_entry->size = g_entries[pidx].size;
+                    out_entry->compression = g_entries[pidx].compression;
+                }
+                pthread_mutex_unlock(&g_pak_mutex);
+                printf("[ps4-pak] Resource bundle locale fallback: '%s' -> '%s' (size=%llu)\n",
+                       subpath, parent_path, (unsigned long long)g_entries[pidx].size);
+                return true;
+            }
+            pidx = (pidx + 1) & (g_entry_capacity - 1);
+        }
+        strncpy(cur_path, parent_path, sizeof(cur_path) - 1);
+        cur_path[sizeof(cur_path) - 1] = '\0';
     }
 
     pthread_mutex_unlock(&g_pak_mutex);
