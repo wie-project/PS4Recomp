@@ -560,6 +560,39 @@ func parseInitArray(loaded *LoadedELF) {
 					}
 				}
 			}
+			// In stripped ELFs (e.g. PS4 SELF / Orbis PRX), legacy .ctors precedes DT_INIT_ARRAY
+			// and is terminated by (uint64)-1 at __CTOR_END__, preceded by function pointers
+			// back to __CTOR_LIST__ = (uint64)-1.
+			if initArrayAddr >= 16 {
+				var ctorEnd uint64
+				for off := uint64(8); off <= 64; off += 8 {
+					if initArrayAddr < off {
+						break
+					}
+					pos := initArrayAddr - off
+					if pos+8 <= uint64(len(loaded.MemoryImage)) {
+						val := binary.LittleEndian.Uint64(loaded.MemoryImage[pos : pos+8])
+						if val == ^uint64(0) {
+							ctorEnd = pos
+							break
+						}
+					}
+				}
+				if ctorEnd >= 8 {
+					for pos := ctorEnd - 8; pos >= 8; pos -= 8 {
+						if pos+8 > uint64(len(loaded.MemoryImage)) {
+							break
+						}
+						fn := binary.LittleEndian.Uint64(loaded.MemoryImage[pos : pos+8])
+						if fn == ^uint64(0) {
+							break
+						}
+						if fn != 0 && loaded.InExecutable(fn) {
+							loaded.InitArray = append(loaded.InitArray, fn)
+						}
+					}
+				}
+			}
 		}
 	}
 

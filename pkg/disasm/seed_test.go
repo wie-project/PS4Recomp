@@ -67,3 +67,4 @@ func TestNewDisassemblerWithoutTextSection(t *testing.T) {
 		t.Fatal("expected recovered functions from executable segments")
 	}
 }
+

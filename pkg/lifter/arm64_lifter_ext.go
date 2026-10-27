@@ -591,7 +591,8 @@ func (l *Arm64Lifter) liftLoop(inst disasm.Instruction, nextPC uint64, fn *disas
 	}
 	localLbl := localLabel(fn, target)
 	local := localLbl != ""
-	skip := fmt.Sprintf("L_%s_skip_%x", strings.ToLower(op.String()), inst.Address)
+	l.labelCounter++
+	skip := fmt.Sprintf("L_%s_skip_%x_%d", strings.ToLower(op.String()), inst.Address, l.labelCounter)
 	far := func() { lines = append(lines, l.branchTo(fn, target)...) }
 
 	switch op {

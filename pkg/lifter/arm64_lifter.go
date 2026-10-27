@@ -1132,7 +1132,7 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		// them) survive the dispatch: the range check saves and restores NZCV, the block compare
 		// chain uses EOR/CBZ.
 		emitLocalJumpTable := func(targetReg string) {
-			if fn != nil && len(fn.Blocks) > 1 && fn.EndAddr > fn.EntryAddr {
+			if fn != nil && len(fn.Blocks) > 1 && len(fn.Blocks) <= 512 && fn.EndAddr > fn.EntryAddr {
 				if !inst.CarryDead {
 					lines = append(lines, l.normalizeCarry()...)
 				}

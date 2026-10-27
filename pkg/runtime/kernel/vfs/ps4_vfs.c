@@ -1,5 +1,5 @@
 #include "ps4_vfs.h"
-#include "ps4_pak.c"
+#include "ps4_pak.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>

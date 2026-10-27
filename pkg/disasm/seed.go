@@ -108,6 +108,12 @@ func SeedEntryPoints(loaded *elfloader.LoadedELF, allSymbols bool) []uint64 {
 		}
 	}
 
+	if allSymbols && len(loaded.FuncBounds) > 0 {
+		for _, b := range loaded.FuncBounds {
+			add(b.Start)
+		}
+	}
+
 	return entries
 }
 
