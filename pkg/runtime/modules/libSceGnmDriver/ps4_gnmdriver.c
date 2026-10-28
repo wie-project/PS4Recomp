@@ -8,6 +8,7 @@
 #include "ps4_gnmdriver.h"
 #include "ps4_videoout.h"
 #include "ps4_gnm_metal.h"
+#include "ps4_equeue.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -402,16 +403,19 @@ int32_t sceGnmInsertThreadTraceMarker(void) {
 }
 
 int32_t sceGnmInsertWaitFlipDone(uint32_t *cmdbuf, uint32_t size, int32_t vo_handle, uint32_t buf_idx) {
-    (void)vo_handle;
-    (void)buf_idx;
-    if (!cmdbuf || size < 7) return -1;
-    cmdbuf[0] = PM4_TYPE3_HEADER(PM4_IT_WAIT_REG_MEM, 5, 0, 0);
-    cmdbuf[1] = 0x3; // MEM_SPACE_REGISTER | FUNCTION_EQUAL
-    cmdbuf[2] = 0;
-    cmdbuf[3] = 0;
-    cmdbuf[4] = 0;
-    cmdbuf[5] = 0;
-    cmdbuf[6] = 0;
+    if (!cmdbuf || size != 7) return -1;
+    uint64_t label_addr = 0;
+    if (sceVideoOutGetBufferLabelAddress(vo_handle, &label_addr) != 16) {
+        return -1;
+    }
+    uint64_t poll_addr = (label_addr + (uint64_t)buf_idx * sizeof(uint64_t)) & ~0x3ULL;
+    cmdbuf[0] = 0xc0053c00; // PM4Type3Header: Opcode 0x3C (WaitRegMem), count 5
+    cmdbuf[1] = 0x13;       // Memory space, equal function
+    cmdbuf[2] = (uint32_t)(poll_addr & 0xFFFFFFFF);
+    cmdbuf[3] = (uint32_t)(poll_addr >> 32);
+    cmdbuf[4] = 0;          // Reference value = 0 (wait until buffer is unlocked)
+    cmdbuf[5] = 0xFFFFFFFF; // Mask
+    cmdbuf[6] = 10;         // Poll interval
     return ORBIS_GNM_OK;
 }
 
@@ -678,22 +682,63 @@ int32_t sceGnmGetLastWaitedAddress(void) {
     return 0;
 }
 
+#define MAX_GNM_EQ_EVENTS 32
+
+typedef struct GnmEqEvent {
+    bool in_use;
+    int32_t eq;
+    uint64_t id;
+    void *udata;
+} GnmEqEvent;
+
+static GnmEqEvent g_gnm_eq_events[MAX_GNM_EQ_EVENTS];
+static pthread_mutex_t g_gnm_eq_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void ps4_gnm_trigger_eq_events(uint64_t event_id) {
+    pthread_mutex_lock(&g_gnm_eq_mutex);
+    for (int i = 0; i < MAX_GNM_EQ_EVENTS; i++) {
+        if (g_gnm_eq_events[i].in_use && g_gnm_eq_events[i].id == event_id) {
+            ps4_equeue_post_event((OrbisKernelEqueue)g_gnm_eq_events[i].eq,
+                                  event_id,
+                                  ORBIS_KERNEL_EVFILT_GRAPHICS_CORE,
+                                  (int64_t)event_id,
+                                  g_gnm_eq_events[i].udata);
+        }
+    }
+    pthread_mutex_unlock(&g_gnm_eq_mutex);
+}
+
 int32_t sceGnmAddEqEvent(uint64_t eq, uint64_t id, void *udata) {
-    (void)eq;
-    (void)id;
-    (void)udata;
+    pthread_mutex_lock(&g_gnm_eq_mutex);
+    for (int i = 0; i < MAX_GNM_EQ_EVENTS; i++) {
+        if (!g_gnm_eq_events[i].in_use) {
+            g_gnm_eq_events[i].in_use = true;
+            g_gnm_eq_events[i].eq = (int32_t)eq;
+            g_gnm_eq_events[i].id = id;
+            g_gnm_eq_events[i].udata = udata;
+            pthread_mutex_unlock(&g_gnm_eq_mutex);
+            return ORBIS_GNM_OK;
+        }
+    }
+    pthread_mutex_unlock(&g_gnm_eq_mutex);
     return ORBIS_GNM_OK;
 }
 
 int32_t sceGnmDeleteEqEvent(uint64_t eq, uint64_t id) {
-    (void)eq;
-    (void)id;
+    pthread_mutex_lock(&g_gnm_eq_mutex);
+    for (int i = 0; i < MAX_GNM_EQ_EVENTS; i++) {
+        if (g_gnm_eq_events[i].in_use && g_gnm_eq_events[i].eq == (int32_t)eq && g_gnm_eq_events[i].id == id) {
+            g_gnm_eq_events[i].in_use = false;
+        }
+    }
+    pthread_mutex_unlock(&g_gnm_eq_mutex);
     return ORBIS_GNM_OK;
 }
 
 int32_t sceGnmGetEqEventType(const void *ev) {
-    (void)ev;
-    return 0;
+    if (!ev) return 0;
+    const OrbisKernelEvent *ke = (const OrbisKernelEvent *)ev;
+    return (int32_t)ke->data;
 }
 
 // Diagnostics & validation
@@ -796,7 +841,9 @@ static int32_t ps4_gnm_process_command_buffers(GuestContext *ctx, uint32_t count
                                                const uint64_t *dcb_gpu_addrs, const uint32_t *dcb_sizes_in_bytes,
                                                const uint64_t *ccb_gpu_addrs, const uint32_t *ccb_sizes_in_bytes) {
     if (!ctx || count == 0) return ORBIS_GNM_OK;
-    return ps4_gnm_metal_process_command_buffers(ctx, count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes);
+    int32_t res = ps4_gnm_metal_process_command_buffers(ctx, count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes);
+    ps4_gnm_trigger_eq_events(0x40 /* GfxEop */);
+    return res;
 }
 
 int32_t sceGnmSubmitCommandBuffers(GuestContext *ctx, uint32_t count,
@@ -834,6 +881,85 @@ int32_t sceGnmSubmitCommandBuffersForWorkload(GuestContext *ctx, uint32_t worklo
     return sceGnmSubmitCommandBuffers(ctx, count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes);
 }
 
+static inline int32_t PatchFlipRequest(GuestContext *ctx, uint32_t *cmdbuf, uint32_t size,
+                                       uint32_t vo_handle, uint32_t buf_idx, uint32_t flip_mode,
+                                       int64_t flip_arg) {
+    (void)flip_mode;
+    (void)flip_arg;
+    if (size < 64 || !cmdbuf) return ORBIS_GNM_OK;
+    uint32_t *flip_packet = cmdbuf + size - 64;
+    if (flip_packet[0] != 0xc03e1000u && flip_packet[0] != 0xc03f1000u) {
+        return ORBIS_GNM_OK;
+    }
+    uint32_t backup[7];
+    memcpy(backup, flip_packet, sizeof(backup));
+
+    uint64_t label_addr = 0;
+    if (sceVideoOutGetBufferLabelAddress((int32_t)vo_handle, &label_addr) != 16) {
+        return -1;
+    }
+
+    // Write event to lock the VO surface: buffer_labels[buf_idx] = 1
+    uint64_t lock_addr = (label_addr + (uint64_t)buf_idx * sizeof(uint64_t)) & ~0x3ULL;
+    flip_packet[0] = 0xc0033700; // PM4 WriteData: count 3, opcode 0x37
+    flip_packet[1] = 0x500;
+    flip_packet[2] = (uint32_t)(lock_addr & 0xFFFFFFFF);
+    flip_packet[3] = (uint32_t)(lock_addr >> 32);
+    flip_packet[4] = 1;
+
+    // Immediately reflect lock in guest memory
+    if (ctx && ctx->mem_base) {
+        uint64_t *labels = (uint64_t *)(ctx->mem_base + label_addr);
+        labels[buf_idx] = 1;
+    }
+
+    uint32_t *nop = flip_packet + 5;
+    if (backup[1] == 0x68750777u /* PrepareFlip */) {
+        nop[0] = 0xc0391000;
+        nop[1] = 0x68750776u; /* PatchedFlip */
+    } else if (backup[1] == 0x68750778u /* PrepareFlipLabel */) {
+        nop[0] = 0xc0341000;
+        nop[1] = 0x68750776u; /* PatchedFlip */
+        uint32_t *write_label = flip_packet + 0x3b;
+        write_label[0] = 0xc0033700;
+        write_label[1] = 0x500;
+        write_label[2] = backup[2] & 0xFFFFFFFC;
+        write_label[3] = backup[3];
+        write_label[4] = backup[4];
+        if (ctx && ctx->mem_base) {
+            uint64_t uaddr = (uint64_t)(backup[2] & 0xFFFFFFFC) | ((uint64_t)backup[3] << 32);
+            if (uaddr) *(uint32_t *)(ctx->mem_base + uaddr) = backup[4];
+        }
+    } else if (backup[1] == 0x68750781u /* PrepareFlipInterruptLabel */) {
+        nop[0] = 0xc0331000;
+        nop[1] = 0x68750776u; /* PatchedFlip */
+        uint32_t *write_eop = flip_packet + 0x3a;
+        write_eop[0] = 0xc0044700; // PM4 EventWriteEop: count 4, opcode 0x47
+        write_eop[1] = (backup[5] & 0x3f) + 0x500u + (backup[6] & 0x3f) * 0x1000;
+        write_eop[2] = backup[2] & 0xFFFFFFFC;
+        write_eop[3] = (backup[3] & 0xffffu) | 0x22000000u;
+        write_eop[4] = backup[4];
+        write_eop[5] = 0;
+        if (ctx && ctx->mem_base) {
+            uint64_t uaddr = (uint64_t)(backup[2] & 0xFFFFFFFC) | ((uint64_t)(backup[3] & 0xffffu) << 32);
+            if (uaddr) *(uint32_t *)(ctx->mem_base + uaddr) = backup[4];
+        }
+        ps4_gnm_trigger_eq_events(0x40 /* GfxEop */);
+    } else if (backup[1] == 0x68750780u /* PrepareFlipInterrupt */) {
+        nop[0] = 0xc0331000;
+        nop[1] = 0x68750776u; /* PatchedFlip */
+        uint32_t *write_eop = flip_packet + 0x3a;
+        write_eop[0] = 0xc0044700; // PM4 EventWriteEop: count 4, opcode 0x47
+        write_eop[1] = (backup[5] & 0x3f) + 0x500u + (backup[6] & 0x3f) * 0x1000;
+        write_eop[2] = 0;
+        write_eop[3] = 0x01000000u;
+        write_eop[4] = 0;
+        write_eop[5] = 0;
+        ps4_gnm_trigger_eq_events(0x40 /* GfxEop */);
+    }
+    return ORBIS_GNM_OK;
+}
+
 int32_t sceGnmSubmitAndFlipCommandBuffers(GuestContext *ctx, uint32_t count,
                                           const uint64_t *dcb_gpu_addrs, const uint32_t *dcb_sizes_in_bytes,
                                           const uint64_t *ccb_gpu_addrs, const uint32_t *ccb_sizes_in_bytes,
@@ -854,6 +980,13 @@ int32_t sceGnmSubmitAndFlipCommandBuffers(GuestContext *ctx, uint32_t count,
         if (ccb_sizes_in_bytes && ccb_sizes_in_bytes[i] > 0x3ffffc) {
             return ORBIS_GNM_ERROR_INVALID_VALUE;
         }
+    }
+
+    if (count > 0 && dcb_gpu_addrs && dcb_sizes_in_bytes && ctx) {
+        uint32_t last_idx = count - 1;
+        uint32_t *cmdbuf = (uint32_t *)recomp_guest_to_host(ctx, dcb_gpu_addrs[last_idx]);
+        uint32_t size_dw = dcb_sizes_in_bytes[last_idx] / 4;
+        PatchFlipRequest(ctx, cmdbuf, size_dw, vo_handle, buf_idx, flip_mode, flip_arg);
     }
 
     pthread_mutex_lock(&g_gnm_mutex);
@@ -893,6 +1026,14 @@ int32_t sceGnmRequestFlipAndSubmitDone(GuestContext *ctx, uint64_t gpu_addr, uin
 
 int32_t sceGnmRequestFlipAndSubmitDoneForWorkload(GuestContext *ctx, uint64_t workload, uint64_t gpu_addr, uint32_t gpu_addr_size_in_bytes, uint32_t vo_handle, uint32_t buf_idx, uint32_t flip_mode, int64_t flip_arg) {
     (void)workload;
+
+    if (gpu_addr != 0 && gpu_addr_size_in_bytes >= 0x100 && ctx) {
+        uint32_t *cmdbuf = (uint32_t *)recomp_guest_to_host(ctx, gpu_addr);
+        uint32_t size_dw = gpu_addr_size_in_bytes / 4;
+        cmdbuf[0] = 0xc03e1000;
+        cmdbuf[1] = 0x68750777u;
+        PatchFlipRequest(ctx, cmdbuf, size_dw, vo_handle, buf_idx, flip_mode, flip_arg);
+    }
 
     if (gpu_addr != 0 && gpu_addr_size_in_bytes > 0) {
         pthread_mutex_lock(&g_gnm_mutex);

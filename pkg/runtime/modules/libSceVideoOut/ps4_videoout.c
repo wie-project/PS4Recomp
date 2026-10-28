@@ -18,6 +18,7 @@ __attribute__((weak)) int ps4_gnm_read_display_cpu(GuestContext *ctx, uint64_t a
 #include <errno.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/mman.h>
 #include <time.h>
 
 #define MAX_VIDEO_HANDLES 8
@@ -30,6 +31,9 @@ typedef struct {
     OrbisVideoOutBufferAttribute attr;
     int bufferCount;
     uint64_t buffers[MAX_FRAME_BUFFERS];
+    uint64_t bufferLabelsGuestVaddr;
+    uint64_t *bufferLabels;
+    int prevBufferIndex;
     OrbisKernelEqueue flipQueues[MAX_EQUEUES_PER_PORT];
     void *flipQueueUdatas[MAX_EQUEUES_PER_PORT];
     int flipQueueCount;
@@ -143,6 +147,9 @@ int32_t sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index, const vo
     memset(&vh->vblankStatus, 0, sizeof(vh->vblankStatus));
     memset(vh->vblankQueues, 0, sizeof(vh->vblankQueues));
     memset(vh->vblankUdatas, 0, sizeof(vh->vblankUdatas));
+    vh->bufferLabelsGuestVaddr = 0;
+    vh->bufferLabels = NULL;
+    vh->prevBufferIndex = -1;
     pthread_mutex_init(&vh->mutex, NULL);
     pthread_cond_init(&vh->vblankCond, NULL);
 
@@ -233,6 +240,11 @@ int32_t sceVideoOutRegisterBuffers(int32_t handle, int32_t startIndex, void * co
         }
     }
 
+    if (vh->bufferLabels) {
+        memset(vh->bufferLabels, 0, sizeof(uint64_t) * MAX_FRAME_BUFFERS);
+    }
+    vh->prevBufferIndex = -1;
+
     pthread_mutex_unlock(&vh->mutex);
     return 0;
 }
@@ -310,12 +322,19 @@ static void finish_flip(const PendingFlip *pf) {
         uint64_t time_12b = vh->flipStatus.stime & 0xfffULL;
         uint64_t counter_4b = (uint64_t)(vh->flipStatus.num & 0xfULL);
         uint64_t event_data = time_12b | (counter_4b << 12) | ((uint64_t)pf->flipArg << 16);
+        // Reset label for the previous buffer, releasing it for next frame's GPU rendering
+        if (vh->prevBufferIndex >= 0 && vh->prevBufferIndex < MAX_FRAME_BUFFERS && vh->bufferLabels) {
+            vh->bufferLabels[vh->prevBufferIndex] = 0;
+        }
+        vh->prevBufferIndex = pf->bufferIndex;
+
         for (int q = 0; q < vh->flipQueueCount; q++) {
             if (vh->flipQueues[q] > 0) {
                 ps4_equeue_post_event(vh->flipQueues[q], 0x6 /* Flip */, ORBIS_KERNEL_EVFILT_VIDEO_OUT,
                                       (int64_t)event_data, vh->flipQueueUdatas[q]);
             }
         }
+        pthread_cond_broadcast(&vh->vblankCond);
         pthread_mutex_unlock(&vh->mutex);
     }
     pthread_mutex_unlock(&g_video_table_mutex);
@@ -539,6 +558,52 @@ int32_t sceVideoOutIsFlipPending(int32_t handle) {
     pthread_mutex_unlock(&vh->mutex);
     pthread_mutex_unlock(&g_video_table_mutex);
     return pending;
+}
+
+int32_t sceVideoOutGetBufferLabelAddress(int32_t handle, uint64_t *label_addr) {
+    if (!label_addr) return -EINVAL;
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return -EINVAL;
+    }
+    pthread_mutex_lock(&vh->mutex);
+    if (vh->bufferLabelsGuestVaddr == 0) {
+        GuestContext *ctx = recomp_get_current_ctx();
+        if (ctx) {
+            vh->bufferLabelsGuestVaddr = recomp_vm_alloc_named_aligned(ctx, 4096, 4096, PROT_READ | PROT_WRITE, 0, "videoout_labels");
+            vh->bufferLabels = (uint64_t *)(ctx->mem_base + vh->bufferLabelsGuestVaddr);
+            memset(vh->bufferLabels, 0, 4096);
+        }
+    }
+    *label_addr = vh->bufferLabelsGuestVaddr;
+    pthread_mutex_unlock(&vh->mutex);
+    pthread_mutex_unlock(&g_video_table_mutex);
+    return 16;
+}
+
+int32_t sceVideoOutSubmitEopFlip(GuestContext *ctx, int32_t handle, uint32_t buf_id, uint32_t mode, int64_t flip_arg, void **unk) {
+    (void)unk;
+    return sceVideoOutSubmitFlip(ctx, handle, (int32_t)buf_id, mode, flip_arg);
+}
+
+void shim_sceVideoOutGetBufferLabelAddress(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    uint64_t labelAddrGuest = ctx->rsi;
+    uint64_t *labelAddrHost = labelAddrGuest ? (uint64_t *)(ctx->mem_base + labelAddrGuest) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceVideoOutGetBufferLabelAddress(handle, labelAddrHost);
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutSubmitEopFlip(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    uint32_t buf_id = (uint32_t)ctx->rsi;
+    uint32_t mode = (uint32_t)ctx->rdx;
+    int64_t flip_arg = (int64_t)ctx->rcx;
+    void **unk = ctx->r8 ? (void **)(ctx->mem_base + ctx->r8) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceVideoOutSubmitEopFlip(ctx, handle, buf_id, mode, flip_arg, unk);
+    SHIM_RETURN();
 }
 
 int32_t sceVideoOutUnregisterBuffers(int32_t handle, int32_t setIndex) {

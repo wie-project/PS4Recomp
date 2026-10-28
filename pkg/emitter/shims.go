@@ -351,6 +351,8 @@ var shimAliases = map[string]string{
 	"kGVLc3htQE8": "shim_sceVideoOutGetDeviceCapabilityInfo",
 	"U2JJtSqNKZI": "shim_sceVideoOutGetEventId",
 	"Mt4QHHkxkOc": "shim_sceVideoOutGetEventCount",
+	"OcQybQejHEY": "shim_sceVideoOutGetBufferLabelAddress",
+	"j8xl+92A0q4": "shim_sceVideoOutSubmitEopFlip",
 	// libkernel Equeue NIDs
 	"D0OdFMjp46I": "shim_sceKernelCreateEqueue",
 	"jpFjmgAC5AE": "shim_sceKernelDeleteEqueue",
@@ -1167,6 +1169,8 @@ var knownDirectShims = []string{
 	"sceVideoOutDeleteFlipEvent",
 	"sceVideoOutGetEventData",
 	"sceVideoOutModeSetAny_",
+	"sceVideoOutGetBufferLabelAddress",
+	"sceVideoOutSubmitEopFlip",
 	// Stack Protector
 	"__stack_chk_fail",
 	// Time & Resource

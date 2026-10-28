@@ -2,7 +2,10 @@
 
 A macOS Apple Silicon ahead-of-time (AOT) recompiler that translates PlayStation 4 (x86-64 ELF) binaries into native executables. No JIT, virtual machines, or MoltenVK required.
 
-![First Silksong screen](images/silk_test_01.png)
+> [!TIP]
+> This project is at a very early stage and not suitable for launching games. If you want to try to launch the game - we recommend trying the project fork **[ps4-native-mac](https://github.com/manjarqo/ps4-native-mac)**.
+
+![Graphics test](images/graphics_test_02.png)
 ---
 
 ## Features

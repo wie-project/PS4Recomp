@@ -346,6 +346,8 @@ void shim_sceGnmSubmitDone(GuestContext *ctx);
 void shim_sceGnmRequestFlipAndSubmitDone(GuestContext *ctx);
 void shim_sceGnmRequestFlipAndSubmitDoneForWorkload(GuestContext *ctx);
 
+void ps4_gnm_trigger_eq_events(uint64_t event_id);
+
 #ifdef __cplusplus
 }
 #endif

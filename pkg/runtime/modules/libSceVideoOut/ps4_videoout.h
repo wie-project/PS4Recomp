@@ -105,7 +105,11 @@ void shim_sceVideoOutGetEventId(GuestContext *ctx);
 void shim_sceVideoOutConfigureOutputMode_(GuestContext *ctx);
 void shim_sceVideoOutConfigureOptionsInitialize_(GuestContext *ctx);
 void shim_sceVideoOutDeleteFlipEvent(GuestContext *ctx);
-void shim_sceVideoOutGetEventData(GuestContext *ctx);
+int32_t sceVideoOutGetBufferLabelAddress(int32_t handle, uint64_t *label_addr);
+int32_t sceVideoOutSubmitEopFlip(GuestContext *ctx, int32_t handle, uint32_t buf_id, uint32_t mode, int64_t flip_arg, void **unk);
+
+void shim_sceVideoOutGetBufferLabelAddress(GuestContext *ctx);
+void shim_sceVideoOutSubmitEopFlip(GuestContext *ctx);
 void shim_sceVideoOutModeSetAny_(GuestContext *ctx);
 
 #ifdef __cplusplus

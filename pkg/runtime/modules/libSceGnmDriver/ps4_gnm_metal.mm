@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <vector>
 #include <string>
+#include <mach/mach_time.h>
 
 // PM4 Liverpool Opcode constants
 #define PM4_OP_NOP                         0x10
@@ -719,6 +720,51 @@ int32_t ps4_gnm_metal_process_command_buffers(GuestContext *ctx, uint32_t count,
                                     for (uint32_t w = 3; w < payload_dw; w++) {
                                         *dst_mem++ = payload[w];
                                     }
+                                }
+                            }
+                            break;
+                        }
+
+                        case PM4_OP_WAIT_REG_MEM: {
+                            if (payload_dw >= 5 && ctx && ctx->mem_base) {
+                                uint64_t poll_addr = (uint64_t)payload[1] | ((uint64_t)payload[2] << 32);
+                                uint32_t ref = payload[3];
+                                uint32_t mask = payload[4];
+                                if (poll_addr != 0) {
+                                    volatile uint32_t *ptr = (volatile uint32_t *)(ctx->mem_base + poll_addr);
+                                    int spins = 0;
+                                    while ((*ptr & mask) != ref && spins < 10000) {
+                                        spins++;
+                                        usleep(100);
+                                    }
+                                }
+                            }
+                            break;
+                        }
+
+                        case PM4_OP_EVENT_WRITE_EOP: {
+                            if (payload_dw >= 4) {
+                                uint32_t addr_lo = payload[1];
+                                uint32_t data_ctrl = payload[2];
+                                uint32_t data_lo = payload[3];
+                                uint32_t data_hi = (payload_dw >= 5) ? payload[4] : 0;
+                                uint64_t dst_addr = (uint64_t)addr_lo | ((uint64_t)(data_ctrl & 0xFFFF) << 32);
+                                uint32_t int_sel = (data_ctrl >> 24) & 3;
+                                uint32_t data_sel = (data_ctrl >> 29) & 7;
+
+                                if (dst_addr != 0 && ctx && ctx->mem_base) {
+                                    if (data_sel == 1 /* Data32Low */) {
+                                        *(uint32_t *)(ctx->mem_base + dst_addr) = data_lo;
+                                    } else if (data_sel == 2 /* Data64 */) {
+                                        uint64_t qword = (uint64_t)data_lo | ((uint64_t)data_hi << 32);
+                                        *(uint64_t *)(ctx->mem_base + dst_addr) = qword;
+                                    } else if (data_sel == 3 /* GpuClock64 */) {
+                                        *(uint64_t *)(ctx->mem_base + dst_addr) = (uint64_t)mach_absolute_time();
+                                    }
+                                }
+
+                                if (int_sel == 1 || int_sel == 2) {
+                                    ps4_gnm_trigger_eq_events(0x40 /* GfxEop */);
                                 }
                             }
                             break;
