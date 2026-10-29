@@ -20,6 +20,10 @@
 
 static void guest_dir_cache_drop_fd(int fd);
 
+static inline uint64_t sce_kernel_error(int err) {
+  return (uint64_t)(int64_t)(int32_t)(0x80020000 | (uint32_t)err);
+}
+
 // PS4 specific: sceKernelUsleep sleeps for microseconds
 void shim_sceKernelUsleep(GuestContext *ctx) {
   uint32_t usec = (uint32_t)ctx->rdi;
@@ -75,6 +79,56 @@ void shim_writev(GuestContext *ctx) {
     set_guest_errno(ctx, errno);
   }
   ctx->rax = (uint64_t)ret;
+  SHIM_RETURN();
+}
+
+// sceKernelWrite
+void shim_sceKernelWrite(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t buf_addr = ctx->rsi;
+  size_t count = (size_t)ctx->rdx;
+
+  const void *host_ptr = ctx->mem_base + buf_addr;
+  ssize_t ret = write(fd, host_ptr, count);
+  if (ret < 0) {
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
+  } else {
+    ctx->rax = (uint64_t)ret;
+  }
+  SHIM_RETURN();
+}
+
+// sceKernelWritev
+void shim_sceKernelWritev(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t iov_addr = ctx->rsi;
+  int iovcnt = (int)ctx->rdx;
+
+  if (iovcnt <= 0 || iovcnt > 1024) {
+    set_guest_errno(ctx, EINVAL);
+    ctx->rax = sce_kernel_error(EINVAL);
+    SHIM_RETURN();
+  }
+
+  struct guest_iovec *guest_iov =
+      (struct guest_iovec *)(ctx->mem_base + iov_addr);
+  struct iovec host_iov[iovcnt];
+
+  for (int i = 0; i < iovcnt; i++) {
+    host_iov[i].iov_base = ctx->mem_base + guest_iov[i].iov_base;
+    host_iov[i].iov_len = (size_t)guest_iov[i].iov_len;
+  }
+
+  ssize_t ret = writev(fd, host_iov, iovcnt);
+  if (ret < 0) {
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
+  } else {
+    ctx->rax = (uint64_t)ret;
+  }
   SHIM_RETURN();
 }
 
@@ -295,6 +349,55 @@ void shim_readv(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+// sceKernelRead
+void shim_sceKernelRead(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t buf_addr = ctx->rsi;
+  size_t count = (size_t)ctx->rdx;
+  ssize_t ret;
+  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = ps4_vfs_read(fd, ctx->mem_base + buf_addr, count));
+  if (ret < 0) {
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
+  } else {
+    ctx->rax = (uint64_t)ret;
+  }
+  SHIM_RETURN();
+}
+
+// sceKernelReadv
+void shim_sceKernelReadv(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t iov_addr = ctx->rsi;
+  int iovcnt = (int)ctx->rdx;
+
+  if (iovcnt <= 0 || iovcnt > 1024) {
+    set_guest_errno(ctx, EINVAL);
+    ctx->rax = sce_kernel_error(EINVAL);
+    SHIM_RETURN();
+  }
+
+  struct guest_iovec *guest_iov =
+      (struct guest_iovec *)(ctx->mem_base + iov_addr);
+  struct iovec host_iov[iovcnt];
+
+  for (int i = 0; i < iovcnt; i++) {
+    host_iov[i].iov_base = ctx->mem_base + guest_iov[i].iov_base;
+    host_iov[i].iov_len = (size_t)guest_iov[i].iov_len;
+  }
+
+  ssize_t ret = readv(fd, host_iov, iovcnt);
+  if (ret < 0) {
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
+  } else {
+    ctx->rax = (uint64_t)ret;
+  }
+  SHIM_RETURN();
+}
+
 // sceKernelPread(fd, buf, nbytes, offset)
 void shim_sceKernelPread(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
@@ -305,9 +408,12 @@ void shim_sceKernelPread(GuestContext *ctx) {
   ssize_t ret;
   PS4_HITCH_TIMED(PS4_HITCH_IO, ret = ps4_vfs_pread(fd, ctx->mem_base + buf_addr, nbytes, offset));
   if (ret < 0) {
-    set_guest_errno(ctx, errno);
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
+  } else {
+    ctx->rax = (uint64_t)ret;
   }
-  ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
 }
 
@@ -320,7 +426,7 @@ void shim_sceKernelPreadv(GuestContext *ctx) {
 
   if (iovcnt <= 0 || iovcnt > 1024) {
     set_guest_errno(ctx, EINVAL);
-    ctx->rax = (uint64_t)-1;
+    ctx->rax = sce_kernel_error(EINVAL);
     SHIM_RETURN();
   }
 
@@ -336,9 +442,12 @@ void shim_sceKernelPreadv(GuestContext *ctx) {
   ssize_t ret;
   PS4_HITCH_TIMED(PS4_HITCH_IO, ret = preadv(fd, host_iov, iovcnt, offset));
   if (ret < 0) {
-    set_guest_errno(ctx, errno);
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
+  } else {
+    ctx->rax = (uint64_t)ret;
   }
-  ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
 }
 
@@ -479,6 +588,66 @@ void shim_lseek(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+// sceKernelOpen
+void shim_sceKernelOpen(GuestContext *ctx) {
+  uint64_t path_addr = ctx->rdi;
+  int flags = (int)ctx->rsi;
+  mode_t mode = (mode_t)ctx->rdx;
+  const char *path = (const char *)(ctx->mem_base + path_addr);
+  bool is_direct = false;
+  int host_flags = ps4_open_flags_to_host(flags, &is_direct);
+  int ret = ps4_vfs_open(path, host_flags, mode);
+  if (ret < 0) {
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
+  } else {
+    if (!ps4_vfs_is_virtual_fd(ret)) {
+#if defined(__APPLE__) && defined(F_NOCACHE)
+      if (is_direct) {
+        fcntl(ret, F_NOCACHE, 1);
+      }
+#endif
+    }
+    ctx->rax = (uint64_t)ret;
+  }
+  printf("[ps4-sys] sceKernelOpen: '%s' (flags=0x%x, host_flags=0x%x) -> fd=%d (ret=0x%llx)\n",
+         path ? path : "(null)", flags, host_flags, ret, (unsigned long long)ctx->rax);
+  fflush(stdout);
+  SHIM_RETURN();
+}
+
+// sceKernelClose
+void shim_sceKernelClose(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  guest_dir_cache_drop_fd(fd);
+  int ret = ps4_vfs_close(fd);
+  if (ret < 0) {
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
+  } else {
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
+// sceKernelLseek
+void shim_sceKernelLseek(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  off_t offset = (off_t)ctx->rsi;
+  int whence = (int)ctx->rdx;
+  off_t ret = ps4_vfs_lseek(fd, offset, whence);
+  if (ret < 0) {
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
+  } else {
+    ctx->rax = (uint64_t)ret;
+  }
+  SHIM_RETURN();
+}
+
 // Exact 120-byte layout for PS4 Orbis OS / FreeBSD 9 64-bit struct stat
 struct ps4_stat {
   uint32_t st_dev;          // 0x00
@@ -570,6 +739,43 @@ void shim_fstat(GuestContext *ctx) {
   } else {
     set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)-1;
+  }
+  SHIM_RETURN();
+}
+
+// sceKernelStat
+void shim_sceKernelStat(GuestContext *ctx) {
+  uint64_t path_addr = ctx->rdi;
+  uint64_t statbuf_addr = ctx->rsi;
+  const char *path = (const char *)(ctx->mem_base + path_addr);
+  struct stat st;
+  int ret = ps4_vfs_stat(path, &st);
+  if (ret == 0) {
+    struct ps4_stat *gst = (struct ps4_stat *)(ctx->mem_base + statbuf_addr);
+    fill_ps4_stat(gst, &st);
+    ctx->rax = 0;
+  } else {
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
+  }
+  SHIM_RETURN();
+}
+
+// sceKernelFstat
+void shim_sceKernelFstat(GuestContext *ctx) {
+  int fd = (int)ctx->rdi;
+  uint64_t statbuf_addr = ctx->rsi;
+  struct stat st;
+  int ret = ps4_vfs_fstat(fd, &st);
+  if (ret == 0) {
+    struct ps4_stat *gst = (struct ps4_stat *)(ctx->mem_base + statbuf_addr);
+    fill_ps4_stat(gst, &st);
+    ctx->rax = 0;
+  } else {
+    int err = errno;
+    set_guest_errno(ctx, err);
+    ctx->rax = sce_kernel_error(err);
   }
   SHIM_RETURN();
 }

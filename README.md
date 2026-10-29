@@ -20,11 +20,12 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 
 > PS4Recomp operates **exclusively on decrypted and extracted game folders** (`eboot.bin` and assets). For dumping/extracting PKG files on macOS using **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)**
 
-| Title                         | Title ID    | Engine / Type      | Status                 | Notes                                                                   |
-| ----------------------------- | ----------- | ------------------ | ---------------------- | ----------------------------------------------------------------------- |
-| **The Last of Us Remastered** | `CUSA00557` | Naughty Dog Engine | **Bootable / In-Game** | Boots, renders 3D graphics and audio; gameplay verification in progress |
-| **Hollow Knight: Silksong**   | —           | Unity 6            | **Suspended**          | Paused pending guest C++ exception unwinding in ARM64 backend           |
-| **Hogwarts Legacy**           | `CUSA12824` | Unreal Engine 4    | **In Progress**        | Recompiles; halts during early engine startup                           |
+| Title                                    | Title ID    | Engine / Type       | Status                 | Notes                                                                   |
+| ---------------------------------------- | ----------- | ------------------- | ---------------------- | ----------------------------------------------------------------------- |
+| **Bloodborne: Game of the Year Edition** | `CUSA03173` | FromSoftware Engine | **In Progress**        | Recompiles; halts during early engine startup                           |
+| **The Last of Us Remastered**            | `CUSA00557` | Naughty Dog Engine  | **Bootable / In-Game** | Boots, renders 3D graphics and audio; gameplay verification in progress |
+| **Hollow Knight: Silksong**              | —           | Unity 6             | **Suspended**          | Paused pending guest C++ exception unwinding in ARM64 backend           |
+| **Hogwarts Legacy**                      | `CUSA12824` | Unreal Engine 4     | **In Progress**        | Recompiles; halts during early engine startup                           |
 
 ---
 

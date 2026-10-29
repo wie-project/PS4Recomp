@@ -941,6 +941,10 @@ int32_t sceGnmValidateDisableDiagnostics2(void) {
     return ORBIS_GNM_ERROR_VALIDATION_NOT_ENABLED;
 }
 
+int32_t sceGnmValidateCommandBuffers(void) {
+    return ORBIS_GNM_ERROR_VALIDATION_NOT_ENABLED;
+}
+
 int32_t sceGnmValidateDrawCommandBuffers(void) {
     return ORBIS_GNM_ERROR_VALIDATION_NOT_ENABLED;
 }
@@ -1570,6 +1574,12 @@ void shim_sceGnmValidateDisableDiagnostics(GuestContext *ctx) {
 void shim_sceGnmValidateDisableDiagnostics2(GuestContext *ctx) {
     (void)ctx;
     ctx->rax = (uint64_t)(int64_t)sceGnmValidateDisableDiagnostics2();
+    SHIM_RETURN();
+}
+
+void shim_sceGnmValidateCommandBuffers(GuestContext *ctx) {
+    (void)ctx;
+    ctx->rax = (uint64_t)(int64_t)sceGnmValidateCommandBuffers();
     SHIM_RETURN();
 }
 

@@ -599,6 +599,50 @@ func parseInitArray(loaded *LoadedELF) {
 				}
 			}
 		}
+
+		// 4. Scan DT_INIT function for references to legacy .ctors table (standard in PS4 Clang CRT).
+		if initAddr, ok := loaded.DynamicTags[DT_INIT]; ok && initAddr != 0 && initAddr < uint64(len(loaded.MemoryImage)) {
+			end := initAddr + 64
+			if end > uint64(len(loaded.MemoryImage)) {
+				end = uint64(len(loaded.MemoryImage))
+			}
+			code := loaded.MemoryImage[initAddr:end]
+			for i := 0; i+7 <= len(code); i++ {
+				// LEA r64, [rip + disp32] (REX.W 0x48..0x4f, 0x8d, ModRM with mod=00, rm=101)
+				if (code[i] >= 0x48 && code[i] <= 0x4f) && code[i+1] == 0x8d && (code[i+2]&0xc7) == 0x05 {
+					disp := int32(binary.LittleEndian.Uint32(code[i+3 : i+7]))
+					pc := initAddr + uint64(i)
+					target := uint64(int64(pc+7) + int64(disp))
+					if target+8 <= uint64(len(loaded.MemoryImage)) {
+						var ctors []uint64
+						for pos := target; pos >= 8; pos -= 8 {
+							if pos+8 > uint64(len(loaded.MemoryImage)) {
+								break
+							}
+							val := binary.LittleEndian.Uint64(loaded.MemoryImage[pos : pos+8])
+							if val == ^uint64(0) {
+								ctors = append(ctors, val)
+								break
+							}
+							if val != 0 && loaded.InExecutable(val) {
+								ctors = append(ctors, val)
+							} else if val == 0 {
+								continue
+							} else {
+								ctors = nil
+								break
+							}
+						}
+						if len(ctors) > 1 && ctors[len(ctors)-1] == ^uint64(0) {
+							// Found valid backwards ctors list terminated by __CTOR_LIST__ sentinel
+							for _, fn := range ctors[:len(ctors)-1] {
+								loaded.InitArray = append(loaded.InitArray, fn)
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Deduplicate entries while preserving execution order
