@@ -1,39 +1,41 @@
 #include "ps4_videoout.h"
 #include "ps4_metal_screen.h"
 
-__attribute__((weak)) int ps4_gnm_metal_present(GuestContext *ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch,
-                          uint32_t tiling_mode, uint32_t pixel_format, void (*on_done)(void *), void *arg) {
-    (void)ctx; (void)addr; (void)width; (void)height; (void)pitch; (void)tiling_mode; (void)pixel_format; (void)on_done; (void)arg;
-    return 0;
-}
-__attribute__((weak)) int ps4_gnm_read_display_cpu(GuestContext *ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch,
-                             uint32_t tiling_mode, uint32_t pixel_format, uint8_t *out_bgra) {
-    (void)ctx; (void)addr; (void)width; (void)height; (void)pitch; (void)tiling_mode; (void)pixel_format; (void)out_bgra;
-    return 0;
-}
+int ps4_gnm_metal_present(GuestContext *ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch,
+                          uint32_t tiling_mode, uint32_t pixel_format, void (*on_reached)(void *),
+                          void (*on_done)(void *), void *arg);
+int ps4_gnm_read_display_cpu(GuestContext *ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch,
+                             uint32_t tiling_mode, uint32_t pixel_format, uint8_t *out_bgra);
+// Wakes the command processor's wait thread (ps4_gnm_metal.mm); weak: not every test links it.
+void ps4_gnm_metal_flip_label_released(void) __attribute__((weak));
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
 #include <errno.h>
 #include <unistd.h>
-#include <sys/time.h>
 #include <sys/mman.h>
+#include <sys/time.h>
 #include <time.h>
 
 #define MAX_VIDEO_HANDLES 8
-#define MAX_FRAME_BUFFERS 16
+#define MAX_FRAME_BUFFERS PS4_VIDEO_OUT_MAX_BUFFERS
 #define MAX_EQUEUES_PER_PORT 16
+
+// One sceVideoOutRegisterBuffers call: buffers that share an attribute (a buffer set). Its index
+// is the call's return value and the argument of sceVideoOutUnregisterBuffers.
+typedef struct {
+    int count; // registered buffers of the set; 0 = free
+    OrbisVideoOutBufferAttribute attr;
+} VideoOutBufferSet;
 
 typedef struct {
     int in_use;
     int32_t handle;
-    OrbisVideoOutBufferAttribute attr;
-    int bufferCount;
+    OrbisVideoOutBufferAttribute attr; // of the latest registered set
     uint64_t buffers[MAX_FRAME_BUFFERS];
-    uint64_t bufferLabelsGuestVaddr;
-    uint64_t *bufferLabels;
-    int prevBufferIndex;
+    int8_t bufferSet[MAX_FRAME_BUFFERS]; // set of each buffer index, -1 = not registered
+    VideoOutBufferSet sets[PS4_VIDEO_OUT_MAX_BUFFER_SETS];
     OrbisKernelEqueue flipQueues[MAX_EQUEUES_PER_PORT];
     void *flipQueueUdatas[MAX_EQUEUES_PER_PORT];
     int flipQueueCount;
@@ -46,6 +48,16 @@ typedef struct {
     OrbisKernelEqueue vblankQueues[MAX_EQUEUES_PER_PORT];
     void *vblankUdatas[MAX_EQUEUES_PER_PORT];
     int vblankQueueCount;
+
+    // Flip labels (sceVideoOutGetBufferLabelAddress): one 64-bit word per buffer index, in guest
+    // memory so the command processor can poll them. A GPU flip (sceGnmSubmitAndFlipCommandBuffers)
+    // sets its buffer's label to 1 when the command processor reaches the flip; the next flip that
+    // completes clears the label of the buffer flipped before it (shadPS4: Flip clears prev_index).
+    // sceGnmInsertWaitFlipDone waits for a label to be 0. Allocated on first use and kept for the
+    // slot when the handle is closed.
+    uint64_t labelsGuest;
+    uint64_t *labels;
+    int32_t prevIndex; // buffer of the last completed flip, -1 = none
 } VideoOutHandle;
 
 static VideoOutHandle g_video_handles[MAX_VIDEO_HANDLES];
@@ -136,7 +148,9 @@ int32_t sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index, const vo
 
     vh->handle = g_next_video_handle++;
     vh->in_use = 1;
-    vh->bufferCount = 0;
+    memset(vh->buffers, 0, sizeof(vh->buffers));
+    memset(vh->bufferSet, -1, sizeof(vh->bufferSet));
+    memset(vh->sets, 0, sizeof(vh->sets));
     vh->flipQueueCount = 0;
     memset(vh->flipQueues, 0, sizeof(vh->flipQueues));
     memset(vh->flipQueueUdatas, 0, sizeof(vh->flipQueueUdatas));
@@ -147,9 +161,8 @@ int32_t sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index, const vo
     memset(&vh->vblankStatus, 0, sizeof(vh->vblankStatus));
     memset(vh->vblankQueues, 0, sizeof(vh->vblankQueues));
     memset(vh->vblankUdatas, 0, sizeof(vh->vblankUdatas));
-    vh->bufferLabelsGuestVaddr = 0;
-    vh->bufferLabels = NULL;
-    vh->prevBufferIndex = -1;
+    if (vh->labels) memset(vh->labels, 0, MAX_FRAME_BUFFERS * sizeof(uint64_t));
+    vh->prevIndex = -1;
     pthread_mutex_init(&vh->mutex, NULL);
     pthread_cond_init(&vh->vblankCond, NULL);
 
@@ -161,6 +174,8 @@ int32_t sceVideoOutOpen(int32_t userId, int32_t busType, int32_t index, const vo
 
     int32_t ret = vh->handle;
     pthread_mutex_unlock(&g_video_table_mutex);
+
+    ps4_stall_watchdog_arm();
 
     // Initialize native macOS Metal screen
     ps4_metal_screen_init(1920, 1080, "PS4Recomp - Native Metal Screen");
@@ -206,47 +221,66 @@ void ps4_videoout_destroy(void) {
 
 void sceVideoOutSetBufferAttribute(OrbisVideoOutBufferAttribute *attr, uint32_t pixelFormat, uint32_t tilingMode, uint32_t aspectRatio, uint32_t width, uint32_t height, uint32_t pitch) {
     if (!attr) return;
+    memset(attr, 0, sizeof *attr);
     attr->format = (int32_t)pixelFormat;
     attr->tmode = (int32_t)tilingMode;
     attr->aspect = (int32_t)aspectRatio;
     attr->width = width;
     attr->height = height;
     attr->pixelPitch = pitch;
-    attr->reserved[0] = 0;
-    attr->reserved[1] = 0;
+    attr->option = ORBIS_VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_NONE;
 }
 
 int32_t sceVideoOutRegisterBuffers(int32_t handle, int32_t startIndex, void * const *bufferArray, int32_t bufferCount, const OrbisVideoOutBufferAttribute *attr) {
+    if (!bufferArray || !attr) return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS;
     pthread_mutex_lock(&g_video_table_mutex);
     VideoOutHandle *vh = find_video_handle_locked(handle);
     if (!vh) {
         pthread_mutex_unlock(&g_video_table_mutex);
-        return -EINVAL;
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
-
     pthread_mutex_lock(&vh->mutex);
     pthread_mutex_unlock(&g_video_table_mutex);
 
-    if (attr) {
-        vh->attr = *attr;
+    // the checks in the order of the system library
+    uint32_t err = 0;
+    int set = -1;
+    for (int k = 0; k < PS4_VIDEO_OUT_MAX_BUFFER_SETS && set < 0; k++)
+        if (vh->sets[k].count == 0) set = k;
+    if (set < 0) {
+        err = ORBIS_VIDEO_OUT_ERROR_NO_EMPTY_SLOT;
+    } else if (startIndex < 0 || bufferCount <= 0 || startIndex >= MAX_FRAME_BUFFERS || bufferCount > MAX_FRAME_BUFFERS ||
+               startIndex + bufferCount > MAX_FRAME_BUFFERS) {
+        err = ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
+    } else {
+        for (int i = 0; i < bufferCount && !err; i++)
+            if (vh->bufferSet[startIndex + i] >= 0) err = ORBIS_VIDEO_OUT_ERROR_SLOT_OCCUPIED;
     }
-
-    if (bufferArray && bufferCount > 0) {
-        for (int i = 0; i < bufferCount && (startIndex + i) < MAX_FRAME_BUFFERS; i++) {
-            vh->buffers[startIndex + i] = (uint64_t)bufferArray[i];
-        }
-        if (startIndex + bufferCount > vh->bufferCount) {
-            vh->bufferCount = startIndex + bufferCount;
-        }
+    if (!err) {
+        if (attr->reserved0 || attr->reserved1) err = ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
+        else if (attr->aspect != 0) err = ORBIS_VIDEO_OUT_ERROR_INVALID_ASPECT_RATIO;
+        else if (attr->width > attr->pixelPitch) err = ORBIS_VIDEO_OUT_ERROR_INVALID_PITCH;
+        else if (attr->tmode < 0 || attr->tmode > 1) err = ORBIS_VIDEO_OUT_ERROR_INVALID_TILING_MODE;
     }
-
-    if (vh->bufferLabels) {
-        memset(vh->bufferLabels, 0, sizeof(uint64_t) * MAX_FRAME_BUFFERS);
+    if (err) {
+        pthread_mutex_unlock(&vh->mutex);
+        fprintf(stderr, "[videoout] RegisterBuffers(handle=%d, start=%d, count=%d) failed: 0x%08x\n", handle, startIndex,
+                bufferCount, err);
+        return (int32_t)err;
     }
-    vh->prevBufferIndex = -1;
-
+    for (int i = 0; i < bufferCount; i++) {
+        vh->buffers[startIndex + i] = (uint64_t)bufferArray[i];
+        vh->bufferSet[startIndex + i] = (int8_t)set;
+        if (vh->labels) __atomic_store_n(&vh->labels[startIndex + i], 0, __ATOMIC_RELEASE);
+    }
+    vh->sets[set].count = bufferCount;
+    vh->sets[set].attr = *attr;
+    vh->attr = *attr;
     pthread_mutex_unlock(&vh->mutex);
-    return 0;
+    fprintf(stderr, "[videoout] RegisterBuffers(handle=%d, start=%d, count=%d): set %d, %ux%u pitch %u, fmt 0x%x, tmode %d, option 0x%x\n",
+            handle, startIndex, bufferCount, set, attr->width, attr->height, attr->pixelPitch, (unsigned)attr->format,
+            attr->tmode, attr->option);
+    return set;
 }
 
 int32_t sceVideoOutSetFlipRate(int32_t handle, int32_t fliprate) {
@@ -304,7 +338,14 @@ typedef struct PendingFlip {
     int32_t handle;
     int32_t bufferIndex;
     int64_t flipArg;
+    uint64_t *lock; // flip label set to 1 when the command processor reaches the flip, or NULL
 } PendingFlip;
+
+// The command processor has reached a GPU flip: its buffer is locked until the next flip completes.
+static void lock_flip_label(void *arg) {
+    const PendingFlip *pf = (const PendingFlip *)arg;
+    if (pf->lock) __atomic_store_n(pf->lock, 1, __ATOMIC_RELEASE);
+}
 
 static void finish_flip(const PendingFlip *pf) {
     pthread_mutex_lock(&g_video_table_mutex);
@@ -318,23 +359,22 @@ static void finish_flip(const PendingFlip *pf) {
         if (vh->flipStatus.numGpuFlipPending > 0) vh->flipStatus.numGpuFlipPending--;
         vh->flipStatus.ptime = get_time_usec();
         vh->flipStatus.stime = get_fake_tsc();
+        // the flip of the buffer flipped before this one is over: clear its label
+        const int released = vh->labels && vh->prevIndex >= 0;
+        if (released) __atomic_store_n(&vh->labels[vh->prevIndex], 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&vh->prevIndex, pf->bufferIndex, __ATOMIC_RELAXED);
+        // a command processor waiting for that label continues now, not at its next poll
+        if (released && ps4_gnm_metal_flip_label_released) ps4_gnm_metal_flip_label_released();
         // Event data: low 12 bits of the timestamp, 4-bit flip counter, flip argument above.
         uint64_t time_12b = vh->flipStatus.stime & 0xfffULL;
         uint64_t counter_4b = (uint64_t)(vh->flipStatus.num & 0xfULL);
         uint64_t event_data = time_12b | (counter_4b << 12) | ((uint64_t)pf->flipArg << 16);
-        // Reset label for the previous buffer, releasing it for next frame's GPU rendering
-        if (vh->prevBufferIndex >= 0 && vh->prevBufferIndex < MAX_FRAME_BUFFERS && vh->bufferLabels) {
-            vh->bufferLabels[vh->prevBufferIndex] = 0;
-        }
-        vh->prevBufferIndex = pf->bufferIndex;
-
         for (int q = 0; q < vh->flipQueueCount; q++) {
             if (vh->flipQueues[q] > 0) {
                 ps4_equeue_post_event(vh->flipQueues[q], 0x6 /* Flip */, ORBIS_KERNEL_EVFILT_VIDEO_OUT,
                                       (int64_t)event_data, vh->flipQueueUdatas[q]);
             }
         }
-        pthread_cond_broadcast(&vh->vblankCond);
         pthread_mutex_unlock(&vh->mutex);
     }
     pthread_mutex_unlock(&g_video_table_mutex);
@@ -345,8 +385,77 @@ static void complete_flip(void *arg) {
     free(arg);
 }
 
+// A rejected flip is logged in full the first time per error code, then at powers of two.
+static void log_rejected_flip(int32_t handle, int32_t bufferIndex, uint32_t err, uint32_t *counter) {
+    const uint32_t n = __atomic_add_fetch(counter, 1, __ATOMIC_RELAXED);
+    if (n == 1)
+        fprintf(stderr, "[videoout] SubmitFlip(handle=%d, index=%d) rejected: 0x%08x\n", handle, bufferIndex, err);
+    else if ((n & (n - 1)) == 0)
+        fprintf(stderr, "[videoout] SubmitFlip(handle=%d, index=%d) rejected: 0x%08x (x%u)\n", handle, bufferIndex, err, n);
+}
+
+// Under vh->mutex: the handle's flip labels, allocated in guest memory on first use (NULL if that
+// fails or there is no context to allocate with).
+static uint64_t *flip_labels_locked(GuestContext *ctx, VideoOutHandle *vh) {
+    if (vh->labels || !ctx) return vh->labels;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    const size_t size = 4096; // MAX_FRAME_BUFFERS words, rounded up to a page
+    const uint64_t addr = recomp_vm_alloc_named_aligned(proc, size, 4096, PROT_READ | PROT_WRITE, 0, "videoout_labels");
+    if (addr == 0 || addr == (uint64_t)-1) { // the allocator reports failure as -1
+        static uint32_t s_failures;
+        const uint32_t n = __atomic_add_fetch(&s_failures, 1, __ATOMIC_RELAXED);
+        if ((n & (n - 1)) == 0)
+            fprintf(stderr, "[videoout] flip labels of handle %d: no guest memory (x%u)\n", vh->handle, n);
+        return NULL;
+    }
+    memset(proc->mem_base + addr, 0, size);
+    vh->labels = (uint64_t *)(proc->mem_base + addr);
+    __atomic_store_n(&vh->labelsGuest, addr, __ATOMIC_RELEASE);
+    return vh->labels;
+}
+
+int ps4_videoout_flip_label_info(uint64_t addr, int32_t *handle, int32_t *index, int32_t *prev_index) {
+    for (int i = 0; i < MAX_VIDEO_HANDLES; i++) {
+        VideoOutHandle *vh = &g_video_handles[i];
+        const uint64_t base = __atomic_load_n(&vh->labelsGuest, __ATOMIC_ACQUIRE);
+        if (!base || addr < base || addr >= base + MAX_FRAME_BUFFERS * sizeof(uint64_t)) continue;
+        if (handle) *handle = __atomic_load_n(&vh->handle, __ATOMIC_RELAXED);
+        if (index) *index = (int32_t)((addr - base) / sizeof(uint64_t));
+        if (prev_index) *prev_index = __atomic_load_n(&vh->prevIndex, __ATOMIC_RELAXED);
+        return 1;
+    }
+    return 0;
+}
+
+int ps4_videoout_is_flip_label(uint64_t addr) {
+    return ps4_videoout_flip_label_info(addr, NULL, NULL, NULL);
+}
+
+int32_t sceVideoOutGetBufferLabelAddress(GuestContext *ctx, int32_t handle, uint64_t *label_addr) {
+    if (!label_addr) return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS;
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+    pthread_mutex_lock(&vh->mutex);
+    pthread_mutex_unlock(&g_video_table_mutex);
+    const uint64_t *labels = flip_labels_locked(ctx, vh);
+    *label_addr = vh->labelsGuest;
+    pthread_mutex_unlock(&vh->mutex);
+    // the system library returns the number of labels
+    return labels ? MAX_FRAME_BUFFERS : (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
+}
+
 int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferIndex, uint32_t flipMode, int64_t flipArg) {
+    return ps4_videoout_submit_flip(ctx, handle, bufferIndex, flipMode, flipArg, 0);
+}
+
+int32_t ps4_videoout_submit_flip(GuestContext *ctx, int32_t handle, int32_t bufferIndex, uint32_t flipMode,
+                                 int64_t flipArg, int gpu_flip) {
     static uint32_t s_last_mode = ~0u;
+    static uint32_t s_rejected_handle, s_rejected_index;
     if (__atomic_exchange_n(&s_last_mode, flipMode, __ATOMIC_RELAXED) != flipMode)
         fprintf(stderr, "[videoout] SubmitFlip flip mode %u\n", flipMode);
     ps4_metal_screen_set_guest_flip_mode((int)flipMode);
@@ -355,27 +464,37 @@ int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferI
     VideoOutHandle *vh = find_video_handle_locked(handle);
     if (!vh) {
         pthread_mutex_unlock(&g_video_table_mutex);
-        return -EINVAL;
+        log_rejected_flip(handle, bufferIndex, ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE, &s_rejected_handle);
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
     pthread_mutex_lock(&vh->mutex);
     // bufferIndex -1 is a flip without a display buffer (blank frame): it only completes the flip.
-    if (bufferIndex != -1 && (bufferIndex < 0 || bufferIndex >= vh->bufferCount)) {
+    if (bufferIndex != -1 && (bufferIndex < 0 || bufferIndex >= MAX_FRAME_BUFFERS || vh->bufferSet[bufferIndex] < 0)) {
         pthread_mutex_unlock(&vh->mutex);
         pthread_mutex_unlock(&g_video_table_mutex);
-        return -EINVAL;
+        log_rejected_flip(handle, bufferIndex, ORBIS_VIDEO_OUT_ERROR_INVALID_INDEX, &s_rejected_index);
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_INDEX;
     }
     const uint64_t guest_buf_vaddr = bufferIndex >= 0 ? vh->buffers[bufferIndex] : 0;
-    const OrbisVideoOutBufferAttribute attr = vh->attr;
+    const VideoOutBufferSet *bset = bufferIndex >= 0 ? &vh->sets[vh->bufferSet[bufferIndex]] : NULL;
+    const OrbisVideoOutBufferAttribute attr = bset ? bset->attr : vh->attr;
+    // the frames the display may hold follow the flipped buffer's own set
+    const int set_buffers = bset ? bset->count : 0;
+    uint64_t *lock = NULL;
+    if (gpu_flip && bufferIndex >= 0 && flip_labels_locked(ctx, vh)) lock = &vh->labels[bufferIndex];
     vh->flipStatus.numFlipPending++;
     vh->flipStatus.numGpuFlipPending++;
     pthread_mutex_unlock(&vh->mutex);
     pthread_mutex_unlock(&g_video_table_mutex);
+
+    if (set_buffers > 0) ps4_metal_screen_set_hold_depth(set_buffers);
 
     PendingFlip *pf = (PendingFlip *)malloc(sizeof(PendingFlip));
     if (pf) {
         pf->handle = handle;
         pf->bufferIndex = bufferIndex;
         pf->flipArg = flipArg;
+        pf->lock = lock;
     }
     // No VideoOut lock is held while presenting: the completion may run on the GPU completion
     // thread at any time and takes the locks itself.
@@ -391,7 +510,8 @@ int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferI
                     bufferIndex, width, height, attr.tmode, (unsigned)attr.format);
         // GPU-rendered display buffer: present straight from the Metal render target.
         if (pf && ps4_gnm_metal_present(ctx, guest_buf_vaddr, (uint32_t)width, (uint32_t)height, pitch_px,
-                                        (uint32_t)attr.tmode, (uint32_t)attr.format, complete_flip, pf)) {
+                                        (uint32_t)attr.tmode, (uint32_t)attr.format, lock_flip_label, complete_flip,
+                                        pf)) {
             queued = 1;
         } else {
             // Otherwise detile the guest memory on the CPU.
@@ -412,7 +532,8 @@ int32_t sceVideoOutSubmitFlip(GuestContext *ctx, int32_t handle, int32_t bufferI
         }
     }
     if (!queued) {
-        const PendingFlip now = {handle, bufferIndex, flipArg};
+        const PendingFlip now = {handle, bufferIndex, flipArg, lock};
+        lock_flip_label((void *)&now); // no command processor in between (or it has run it already)
         finish_flip(&now);
         free(pf);
     }
@@ -560,55 +681,27 @@ int32_t sceVideoOutIsFlipPending(int32_t handle) {
     return pending;
 }
 
-int32_t sceVideoOutGetBufferLabelAddress(int32_t handle, uint64_t *label_addr) {
-    if (!label_addr) return -EINVAL;
+int32_t sceVideoOutUnregisterBuffers(int32_t handle, int32_t setIndex) {
     pthread_mutex_lock(&g_video_table_mutex);
     VideoOutHandle *vh = find_video_handle_locked(handle);
     if (!vh) {
         pthread_mutex_unlock(&g_video_table_mutex);
-        return -EINVAL;
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
     }
     pthread_mutex_lock(&vh->mutex);
-    if (vh->bufferLabelsGuestVaddr == 0) {
-        GuestContext *ctx = recomp_get_current_ctx();
-        if (ctx) {
-            vh->bufferLabelsGuestVaddr = recomp_vm_alloc_named_aligned(ctx, 4096, 4096, PROT_READ | PROT_WRITE, 0, "videoout_labels");
-            vh->bufferLabels = (uint64_t *)(ctx->mem_base + vh->bufferLabelsGuestVaddr);
-            memset(vh->bufferLabels, 0, 4096);
-        }
-    }
-    *label_addr = vh->bufferLabelsGuestVaddr;
-    pthread_mutex_unlock(&vh->mutex);
     pthread_mutex_unlock(&g_video_table_mutex);
-    return 16;
-}
-
-int32_t sceVideoOutSubmitEopFlip(GuestContext *ctx, int32_t handle, uint32_t buf_id, uint32_t mode, int64_t flip_arg, void **unk) {
-    (void)unk;
-    return sceVideoOutSubmitFlip(ctx, handle, (int32_t)buf_id, mode, flip_arg);
-}
-
-void shim_sceVideoOutGetBufferLabelAddress(GuestContext *ctx) {
-    int32_t handle = (int32_t)ctx->rdi;
-    uint64_t labelAddrGuest = ctx->rsi;
-    uint64_t *labelAddrHost = labelAddrGuest ? (uint64_t *)(ctx->mem_base + labelAddrGuest) : NULL;
-    ctx->rax = (uint64_t)(int64_t)sceVideoOutGetBufferLabelAddress(handle, labelAddrHost);
-    SHIM_RETURN();
-}
-
-void shim_sceVideoOutSubmitEopFlip(GuestContext *ctx) {
-    int32_t handle = (int32_t)ctx->rdi;
-    uint32_t buf_id = (uint32_t)ctx->rsi;
-    uint32_t mode = (uint32_t)ctx->rdx;
-    int64_t flip_arg = (int64_t)ctx->rcx;
-    void **unk = ctx->r8 ? (void **)(ctx->mem_base + ctx->r8) : NULL;
-    ctx->rax = (uint64_t)(int64_t)sceVideoOutSubmitEopFlip(ctx, handle, buf_id, mode, flip_arg, unk);
-    SHIM_RETURN();
-}
-
-int32_t sceVideoOutUnregisterBuffers(int32_t handle, int32_t setIndex) {
-    (void)handle;
-    (void)setIndex;
+    if (setIndex < 0 || setIndex >= PS4_VIDEO_OUT_MAX_BUFFER_SETS || vh->sets[setIndex].count == 0) {
+        pthread_mutex_unlock(&vh->mutex);
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
+    }
+    for (int i = 0; i < MAX_FRAME_BUFFERS; i++)
+        if (vh->bufferSet[i] == setIndex) {
+            vh->bufferSet[i] = -1;
+            vh->buffers[i] = 0;
+        }
+    vh->sets[setIndex].count = 0;
+    pthread_mutex_unlock(&vh->mutex);
+    fprintf(stderr, "[videoout] UnregisterBuffers(handle=%d, set=%d)\n", handle, setIndex);
     return 0;
 }
 
@@ -618,6 +711,15 @@ void shim_sceVideoOutGetResolutionStatus(GuestContext *ctx) {
     OrbisVideoOutResolutionStatus *status = statusGuest ? (OrbisVideoOutResolutionStatus *)(ctx->mem_base + statusGuest) : NULL;
 
     ctx->rax = (uint64_t)(int64_t)sceVideoOutGetResolutionStatus(handle, status);
+    SHIM_RETURN();
+}
+
+// int sceVideoOutGetBufferLabelAddress(int handle, uintptr_t *label_addr)
+void shim_sceVideoOutGetBufferLabelAddress(GuestContext *ctx) {
+    uint64_t addr = 0;
+    const int32_t rc = sceVideoOutGetBufferLabelAddress(ctx, (int32_t)ctx->rdi, ctx->rsi ? &addr : NULL);
+    if (rc >= 0) *(uint64_t *)(ctx->mem_base + ctx->rsi) = addr;
+    ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 
@@ -952,9 +1054,6 @@ typedef struct {
     float gamma[3];
     uint32_t reserved[3];
 } OrbisVideoOutColorSettings;
-
-#define ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE 0x80290001u
-#define ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS 0x80290002u
 
 void shim_sceVideoOutColorSettingsSetGamma_(GuestContext *ctx) {
     const uint64_t guest = ctx->rdi;

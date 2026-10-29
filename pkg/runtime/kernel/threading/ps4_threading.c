@@ -1,5 +1,6 @@
 #include "recomp_runtime.h"
 #include "ps4_threading.h"
+#include <inttypes.h>
 #include <errno.h>
 #include <sched.h>
 #include <signal.h>
@@ -134,8 +135,8 @@ static pthread_mutex_t g_detach_mutex = PTHREAD_MUTEX_INITIALIZER;
 // scePthreadExit: TLS destructors, then release the guest stack and context
 // of detached threads (joinable ones are released by join).
 static void recomp_thread_epilogue(RecompThread *t, GuestContext *ctx) {
-  fprintf(stderr, "[ps4-thread] Thread exited: id=%llu, name='%s', ret=0x%llx\n",
-          (unsigned long long)ctx->thread_id, t->name[0] ? t->name : "unnamed", (unsigned long long)t->ret_val);
+  fprintf(stderr, "[ps4-thread] Thread exited: id=%" PRIu64 ", name='%s', ret=0x%llx\n",
+          ctx->thread_id, t->name[0] ? t->name : "unnamed", (unsigned long long)t->ret_val);
 
   // Run registered pthread TLS key destructors
   GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
@@ -219,8 +220,8 @@ static void *recomp_host_thread_runner(void *arg) {
 #endif
   }
 
-  fprintf(stderr, "[ps4-thread] Thread started: id=%llu, name='%s', entry=0x%llx, arg=0x%llx\n",
-          (unsigned long long)ctx->thread_id, t->name[0] ? t->name : "unnamed", (unsigned long long)t->start_routine, (unsigned long long)t->arg);
+  fprintf(stderr, "[ps4-thread] Thread started: id=%" PRIu64 ", name='%s', entry=0x%llx, arg=0x%llx\n",
+          ctx->thread_id, t->name[0] ? t->name : "unnamed", (unsigned long long)t->start_routine, (unsigned long long)t->arg);
 
   // Push dummy return address on guest stack
   ctx->rsp -= 8;
@@ -1157,11 +1158,17 @@ void shim_scePthreadGetspecific(GuestContext *ctx) {
 void shim___tls_get_addr(GuestContext *ctx) {
   uint64_t ti_addr = ctx->rdi;
   if (ti_addr) {
-    // tls_index {module, offset}. Only the eboot's static TLS block exists; it ends at fs base
-    // (variant II, recomp_tls_block_offset). Without a PT_TLS segment the offset stays fs-relative.
-    uint64_t offset = *(uint64_t *)(ctx->mem_base + ti_addr + 8);
-    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-    ctx->rax = ctx->fs_base - recomp_tls_block_offset(proc) + offset;
+    // tls_index {module, offset}: every module's block is in the static TLS area, at
+    // FS - recomp_tls_module_offset(module) (variant II).
+    const uint64_t module = *(uint64_t *)(ctx->mem_base + ti_addr);
+    const uint64_t offset = *(uint64_t *)(ctx->mem_base + ti_addr + 8);
+    const uint64_t block = recomp_tls_module_offset(module);
+    if (block == 0) {
+      fprintf(stderr, "[ps4-thread] FATAL: __tls_get_addr: TLS module %llu (tls_index at 0x%llx) has no static TLS block\n",
+              (unsigned long long)module, (unsigned long long)ti_addr);
+      abort();
+    }
+    ctx->rax = ctx->fs_base - block + offset;
   } else {
     ctx->rax = ctx->fs_base;
   }
@@ -1180,6 +1187,7 @@ void shim___tls_get_addr(GuestContext *ctx) {
 #include <mach/mach_vm.h>
 #include <pthread/qos.h>
 #include "ps4_stall_profile.h"
+#include <stdatomic.h>
 
 static StallProfile *g_stall_prof;
 static uint64_t g_prof_for; // present time of the stall being profiled (0: none)
@@ -1365,23 +1373,32 @@ static void *stall_watchdog_main(void *arg) {
   return NULL;
 }
 
-void ps4_stall_watchdog_note_present(void) {
-  static int started = 0;
-  g_last_present_ns = stall_now_ns();
-  if (!started) {
-    started = 1;
-    const char *e = getenv("PS4_STALL_WATCHDOG");
-    const char *p = getenv("PS4_STALL_PROFILE");
-    g_stall_dump_ms = e ? atol(e) : 0;
-    g_stall_prof_ms = p ? atol(p) : 0;
-    if (g_stall_dump_ms < 0) g_stall_dump_ms = 0;
-    if (g_stall_prof_ms < 0) g_stall_prof_ms = 0;
-    if (g_stall_prof_ms > 0) g_stall_prof = stall_profile_create(stall_symbolize);
-    if (g_stall_prof_ms > 0 && !g_stall_prof) g_stall_prof_ms = 0;
-    if (g_stall_dump_ms > 0 || g_stall_prof_ms > 0) {
-      pthread_t th;
-      pthread_create(&th, NULL, stall_watchdog_main, NULL);
-      pthread_detach(th);
-    }
+static pthread_once_t g_stall_once = PTHREAD_ONCE_INIT;
+
+static void stall_watchdog_start_once(void) {
+  const char *e = getenv("PS4_STALL_WATCHDOG");
+  const char *p = getenv("PS4_STALL_PROFILE");
+  g_stall_dump_ms = e ? atol(e) : 0;
+  g_stall_prof_ms = p ? atol(p) : 0;
+  if (g_stall_dump_ms < 0) g_stall_dump_ms = 0;
+  if (g_stall_prof_ms < 0) g_stall_prof_ms = 0;
+  if (g_stall_prof_ms > 0) g_stall_prof = stall_profile_create(stall_symbolize);
+  if (g_stall_prof_ms > 0 && !g_stall_prof) g_stall_prof_ms = 0;
+  if (g_stall_dump_ms > 0 || g_stall_prof_ms > 0) {
+    pthread_t th;
+    pthread_create(&th, NULL, stall_watchdog_main, NULL);
+    pthread_detach(th);
   }
+}
+
+// VideoOut opened: a boot that never presents is stalled from here on.
+void ps4_stall_watchdog_arm(void) {
+  pthread_once(&g_stall_once, stall_watchdog_start_once);
+  uint64_t zero = 0;
+  atomic_compare_exchange_strong(&g_last_present_ns, &zero, stall_now_ns());
+}
+
+void ps4_stall_watchdog_note_present(void) {
+  pthread_once(&g_stall_once, stall_watchdog_start_once);
+  g_last_present_ns = stall_now_ns();
 }

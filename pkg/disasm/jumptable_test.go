@@ -650,3 +650,358 @@ func TestUnboundedSwitchStopsInsideInstruction(t *testing.T) {
 		}
 	}
 }
+
+// farSliceSwitch assembles a switch whose table load and add are scheduled far from the jmp:
+// the compiler moved 38 unrelated SIMD instructions between `add rax, rdx` and `jmp rax`
+// (inFAMOUS Second Son, eboot 0x23dab7..0x23db8e). It returns the image, the entry, the jmp,
+// the five case targets (the first is the instruction after the jmp), the default and the end.
+func farSliceSwitch() (img []byte, entry, jmpPC uint64, cases []uint64, def, end uint64) {
+	img = make([]byte, 0x400)
+	entry = 0x100
+	pc := entry
+	put := func(b ...byte) {
+		copy(img[pc:], b)
+		pc += uint64(len(b))
+	}
+	put(0x89, 0xc8)       // mov eax, ecx
+	put(0x83, 0xf9, 0x04) // cmp ecx, 4
+	jaPC := pc
+	put(0x0f, 0x87, 0, 0, 0, 0) // ja default (rel32 patched)
+	leaPC := pc
+	put(0x48, 0x8d, 0x15, 0, 0, 0, 0) // lea rdx, [rip+table]
+	put(0x48, 0x63, 0x04, 0x82)       // movsxd rax, [rdx+rax*4]
+	put(0x48, 0x01, 0xd0)             // add rax, rdx
+	for i := 0; i < 38; i++ {
+		put(0xc5, 0xf8, 0x59, 0xc0) // vmulps xmm0, xmm0, xmm0
+	}
+	jmpPC = pc
+	put(0xff, 0xe0) // jmp rax
+	for i := 0; i < 5; i++ {
+		cases = append(cases, pc)
+		put(0xc3)
+	}
+	def = pc
+	put(0xc3)
+	end = pc
+	binary.LittleEndian.PutUint32(img[jaPC+2:], uint32(int32(int64(def)-int64(jaPC+6))))
+	table := uint64(0x300)
+	binary.LittleEndian.PutUint32(img[leaPC+3:], uint32(int32(int64(table)-int64(leaPC+7))))
+	for i, c := range cases {
+		binary.LittleEndian.PutUint32(img[table+uint64(4*i):], uint32(int32(int64(c)-int64(table))))
+	}
+	return img, entry, jmpPC, cases, def, end
+}
+
+// checkFarSliceSwitch recovers the function at entry and checks its table and leaders.
+func checkFarSliceSwitch(t *testing.T, loaded *elfloader.LoadedELF, entry, jmpPC uint64, cases []uint64, def uint64) {
+	t.Helper()
+	d, err := NewDisassembler(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AnalyzeReachable([]uint64{entry}); err != nil {
+		t.Fatal(err)
+	}
+	fn := d.Functions[entry]
+	if fn == nil {
+		t.Fatal("function not recovered")
+	}
+	if got := fn.JumpTables[jmpPC]; len(got) != len(cases) {
+		t.Fatalf("jump table at 0x%x: targets %#x, want %#x", jmpPC, got, cases)
+	}
+	for _, c := range append(cases, def) {
+		if _, ok := fn.Blocks[c]; !ok {
+			t.Errorf("missing block leader 0x%x (blocks=%v)", c, fn.BlockOrder)
+		}
+	}
+}
+
+// The table is found however far back in the straight-line run before the jmp it is: through
+// the branch-following decoder (no symbol) ...
+func TestJumpTableSliceFarFromJmp(t *testing.T) {
+	img, entry, jmpPC, cases, def, _ := farSliceSwitch()
+	checkFarSliceSwitch(t, switchTestELF(img), entry, jmpPC, cases, def)
+}
+
+// ... and through the linear decoder of a function with a symbol size (disasmLinearFunction).
+func TestJumpTableSliceFarFromJmpLinear(t *testing.T) {
+	img, entry, jmpPC, cases, def, end := farSliceSwitch()
+	loaded := switchTestELF(img)
+	loaded.SymbolByAddr[entry] = elfloader.Symbol{Name: "far_switch", Address: entry, Size: end - entry, Type: elf.STT_FUNC}
+	checkFarSliceSwitch(t, loaded, entry, jmpPC, cases, def)
+}
+
+// TestSwitchBoundOnTakenEdgeDoesNotCountTable: two switches on one index (inFAMOUS Second Son,
+// eboot 0x202130 and 0x202251). The first `cmp eax, 7; ja second` bounds the index only on its
+// fall-through edge; its taken edge leads to the second switch, whose 13-entry table is indexed
+// with values above 7 (the first switch's cases also flow into it, where the index is at most
+// 7: a bound found on one path is not a bound on all of them). Taking 8 from the first check
+// dropped the second table's case 9, and the game stopped on "Unresolved indirect jump/call to
+// 0x20233d".
+func TestSwitchBoundOnTakenEdgeDoesNotCountTable(t *testing.T) {
+	img := make([]byte, 0x400)
+	pc := uint64(0x100)
+	entry := pc
+	put := func(b ...byte) {
+		copy(img[pc:], b)
+		pc += uint64(len(b))
+	}
+	lea := func(table uint64) {
+		at := pc
+		put(0x48, 0x8d, 0x05, 0, 0, 0, 0) // lea rax, [rip+table]
+		binary.LittleEndian.PutUint32(img[at+3:], uint32(int32(int64(table)-int64(at+7))))
+	}
+	const table1, table2 = 0x300, 0x340
+
+	put(0x41, 0x89, 0xc5) // mov r13d, eax
+	put(0x83, 0xf8, 0x07) // cmp eax, 7
+	ja1 := pc
+	put(0x77, 0x00) // ja second (patched)
+	lea(table1)
+	put(0x4a, 0x63, 0x0c, 0xa8) // movsxd rcx, [rax+r13*4]
+	put(0x48, 0x01, 0xc1)       // add rcx, rax
+	put(0xff, 0xe1)             // jmp rcx
+	low := pc
+	put(0x90) // nop: the first switch's cases fall into the second
+	second := pc
+	img[ja1+1] = byte(int8(int64(second) - int64(ja1+2)))
+	put(0x8b, 0x85, 0xe0, 0xfe, 0xff, 0xff) // mov eax, [rbp-0x120] (a spilled copy of the index)
+	put(0x83, 0xf8, 0x0c)                   // cmp eax, 12
+	ja2 := pc
+	put(0x77, 0x00) // ja def (patched)
+	lea(table2)
+	put(0x4a, 0x63, 0x0c, 0xa8) // movsxd rcx, [rax+r13*4]
+	put(0x48, 0x01, 0xc1)       // add rcx, rax
+	put(0xff, 0xe1)             // jmp rcx
+	common := pc
+	put(0xc3)
+	case9 := pc
+	put(0xc3)
+	def := pc
+	put(0xc3)
+	img[ja2+1] = byte(int8(int64(def) - int64(ja2+2)))
+
+	for i := 0; i < 8; i++ {
+		binary.LittleEndian.PutUint32(img[table1+4*uint64(i):], uint32(int32(int64(low)-int64(table1))))
+	}
+	for i := 0; i < 13; i++ {
+		target := common
+		if i == 9 {
+			target = case9
+		}
+		binary.LittleEndian.PutUint32(img[table2+4*uint64(i):], uint32(int32(int64(target)-int64(table2))))
+	}
+
+	d, err := NewDisassembler(switchTestELF(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AnalyzeReachable([]uint64{entry}); err != nil {
+		t.Fatal(err)
+	}
+	fn := d.Functions[entry]
+	if fn == nil {
+		t.Fatal("function not recovered")
+	}
+	for _, addr := range []uint64{low, second, common, case9, def} {
+		if _, ok := fn.Blocks[addr]; !ok {
+			t.Errorf("missing block 0x%x (blocks %v)", addr, fn.BlockOrder)
+		}
+	}
+}
+
+// switchAsm assembles small x86-64 functions for the predecessor-count tests.
+type switchAsm struct {
+	img []byte
+	pc  uint64
+}
+
+func (a *switchAsm) put(b ...byte) uint64 {
+	at := a.pc
+	copy(a.img[a.pc:], b)
+	a.pc += uint64(len(b))
+	return at
+}
+
+// jcc8 emits a short conditional or unconditional jump (opcode op) and returns where to patch it.
+func (a *switchAsm) jcc8(op byte) uint64 { return a.put(op, 0) }
+
+func (a *switchAsm) patch8(at, target uint64) {
+	a.img[at+1] = byte(int8(int64(target) - int64(at+2)))
+}
+
+// dispatch emits `lea rcx, [rip+table]; movsxd rax, [rcx+4*rax]; add rax, rcx; jmp rax` and
+// returns the jmp's address.
+func (a *switchAsm) dispatch(table uint64) uint64 {
+	at := a.put(0x48, 0x8d, 0x0d, 0, 0, 0, 0)
+	binary.LittleEndian.PutUint32(a.img[at+3:], uint32(int32(int64(table)-int64(at+7))))
+	a.put(0x48, 0x63, 0x04, 0x81) // movsxd rax, [rcx+rax*4]
+	a.put(0x48, 0x01, 0xc8)       // add rax, rcx
+	return a.put(0xff, 0xe0)      // jmp rax
+}
+
+func (a *switchAsm) table(at uint64, targets ...uint64) {
+	for i, t := range targets {
+		binary.LittleEndian.PutUint32(a.img[at+4*uint64(i):], uint32(int32(int64(t)-int64(at))))
+	}
+}
+
+func analyzeSwitch(t *testing.T, img []byte, entry, jmp uint64) map[uint64]bool {
+	t.Helper()
+	d, err := NewDisassembler(switchTestELF(img))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AnalyzeReachable([]uint64{entry}); err != nil {
+		t.Fatal(err)
+	}
+	fn := d.Functions[entry]
+	if fn == nil {
+		t.Fatal("function not recovered")
+	}
+	got := map[uint64]bool{}
+	for _, tg := range fn.JumpTables[jmp] {
+		got[tg] = true
+	}
+	return got
+}
+
+// TestSwitchCountFollowsCopyBeforeJcc: inFAMOUS Second Son fn 0x23cef0 checks the index in
+// another register and copies it between the check and the jump (`cmp ebx, 7; mov eax, [..];
+// mov [..], eax; mov eax, ebx; ja`). The check bounds eax: the count is 8. A write of the
+// checked register that is not a copy ends the search.
+func TestSwitchCountFollowsCopyBeforeJcc(t *testing.T) {
+	dec := func(b ...byte) []Instruction {
+		var w []Instruction
+		for pc := 0; pc < len(b); {
+			inst, err := x86asm.Decode(b[pc:], 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w = append(w, Instruction{Address: uint64(0x1000 + pc), Inst: inst})
+			pc += inst.Len
+		}
+		return w
+	}
+	w := dec(0x83, 0xfb, 0x07, // cmp ebx, 7
+		0x8b, 0x07, // mov eax, [rdi]
+		0x89, 0x07, // mov [rdi], eax
+		0x89, 0xd8, // mov eax, ebx
+		0x77, 0x00) // ja
+	if n, killed, _ := switchTableCountKill(w, x86asm.RAX); n != 8 || killed {
+		t.Errorf("count %d killed %v, want 8 from the check on ebx", n, killed)
+	}
+	w = dec(0x83, 0xfb, 0x07, // cmp ebx, 7
+		0x8b, 0x1f, // mov ebx, [rdi]  (not the value checked)
+		0x89, 0xd8, // mov eax, ebx
+		0x77, 0x00) // ja
+	if n, _, _ := switchTableCountKill(w, x86asm.RAX); n != 0 {
+		t.Errorf("count %d after ebx was reloaded, want none", n)
+	}
+}
+
+// TestSwitchCountSearchesPredecessorsForTheCopiedRegister: the index is copied (`mov eax, ebx`)
+// after the block that checks ebx; the predecessor search must look for ebx there. The table
+// has 8 entries; the word after it is not one.
+func TestSwitchCountSearchesPredecessorsForTheCopiedRegister(t *testing.T) {
+	a := &switchAsm{img: make([]byte, 0x400), pc: 0x100}
+	entry := a.put(0x83, 0xfb, 0x07) // cmp ebx, 7
+	jaDef := a.jcc8(0x77)            // ja def
+	a.put(0x89, 0xd8)                // mov eax, ebx
+	const table = 0x300
+	jmp := a.dispatch(table)
+	c0 := a.put(0xc3)
+	c7 := a.put(0xc3)
+	extra := a.put(0xc3)
+	def := a.put(0xc3)
+	a.patch8(jaDef, def)
+	a.table(table, c0, c0, c0, c0, c0, c0, c0, c7, extra)
+
+	got := analyzeSwitch(t, a.img, entry, jmp)
+	if !got[c0] || !got[c7] || got[extra] || len(got) != 2 {
+		t.Errorf("targets %v, want 0x%x and 0x%x only (count 8 from the check on ebx)", got, c0, c7)
+	}
+}
+
+// TestSwitchCountFromJbTakenEdge: `cmp ecx, 5; jb switch; jmp def` bounds the index on the jb's
+// taken edge. The table has 5 entries; the word after it is not one.
+func TestSwitchCountFromJbTakenEdge(t *testing.T) {
+	a := &switchAsm{img: make([]byte, 0x400), pc: 0x100}
+	entry := a.put(0x89, 0xc8) // mov eax, ecx
+	a.put(0x83, 0xf9, 0x05)    // cmp ecx, 5
+	jb := a.jcc8(0x72)         // jb switch
+	jmpDef := a.jcc8(0xeb)     // jmp def
+	const table = 0x300
+	sw := a.pc
+	a.patch8(jb, sw)
+	jmp := a.dispatch(table)
+	c0 := a.put(0xc3)
+	c1 := a.put(0xc3)
+	extra := a.put(0xc3)
+	def := a.put(0xc3)
+	a.patch8(jmpDef, def)
+	a.table(table, c0, c1, c0, c1, c0, extra)
+
+	got := analyzeSwitch(t, a.img, entry, jmp)
+	if !got[c0] || !got[c1] || got[extra] || len(got) != 2 {
+		t.Errorf("targets %v, want 0x%x and 0x%x only (count 5 from jb)", got, c0, c1)
+	}
+}
+
+// TestSwitchCountLargestOverPaths: two paths reach the switch, bounded at 4 and at 7; the
+// table has 7 entries.
+func TestSwitchCountLargestOverPaths(t *testing.T) {
+	a := &switchAsm{img: make([]byte, 0x400), pc: 0x100}
+	entry := a.put(0x85, 0xd2) // test edx, edx
+	je := a.jcc8(0x74)         // je other
+	a.put(0x83, 0xf8, 0x03)    // cmp eax, 3
+	ja1 := a.jcc8(0x77)        // ja def
+	jmpSw := a.jcc8(0xeb)      // jmp switch
+	other := a.put(0x83, 0xf8, 0x06)
+	a.patch8(je, other)
+	ja2 := a.jcc8(0x77) // ja def (falls into switch)
+	sw := a.pc
+	a.patch8(jmpSw, sw)
+	const table = 0x300
+	jmp := a.dispatch(table)
+	c0 := a.put(0xc3)
+	c6 := a.put(0xc3)
+	extra := a.put(0xc3)
+	def := a.put(0xc3)
+	a.patch8(ja1, def)
+	a.patch8(ja2, def)
+	a.table(table, c0, c0, c0, c0, c0, c0, c6, extra)
+
+	got := analyzeSwitch(t, a.img, entry, jmp)
+	if !got[c0] || !got[c6] || got[extra] || len(got) != 2 {
+		t.Errorf("targets %v, want 0x%x and 0x%x only (count 7, the larger bound)", got, c0, c6)
+	}
+}
+
+// TestSwitchCountUnprovenWhenIndexWrittenOnOnePath: one path checks the index, the other loads
+// it from memory without a check. The length is unproven, so the table is scanned (bounded by
+// the scan's own rules) instead of being cut at the checked path's 4.
+func TestSwitchCountUnprovenWhenIndexWrittenOnOnePath(t *testing.T) {
+	a := &switchAsm{img: make([]byte, 0x400), pc: 0x100}
+	entry := a.put(0x85, 0xd2) // test edx, edx
+	je := a.jcc8(0x74)         // je other
+	a.put(0x83, 0xf8, 0x03)    // cmp eax, 3
+	ja1 := a.jcc8(0x77)        // ja def
+	jmpSw := a.jcc8(0xeb)      // jmp switch
+	other := a.put(0x8b, 0x06) // mov eax, [rsi]
+	a.patch8(je, other)
+	sw := a.pc
+	a.patch8(jmpSw, sw)
+	const table = 0x300
+	jmp := a.dispatch(table)
+	c0 := a.put(0xc3)
+	c4 := a.put(0xc3)
+	def := a.put(0xc3)
+	a.patch8(ja1, def)
+	a.table(table, c0, c0, c0, c0, c4)
+
+	got := analyzeSwitch(t, a.img, entry, jmp)
+	if !got[c0] || !got[c4] {
+		t.Errorf("targets %v, want 0x%x and 0x%x (the count of one path is not proven)", got, c0, c4)
+	}
+}

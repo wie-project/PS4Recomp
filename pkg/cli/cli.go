@@ -1,26 +1,34 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ps4-recomp/pkg/analyzer"
 	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
 	"ps4-recomp/pkg/emitter"
+	"ps4-recomp/pkg/events"
 	"ps4-recomp/pkg/lifter"
+	"ps4-recomp/pkg/sfo"
 )
 
 // Config contains runtime configuration parameters parsed from CLI arguments.
@@ -40,6 +48,8 @@ type Config struct {
 	Asan          bool
 	// TSO: acquire loads and release stores for non-stack guest memory (x86 memory ordering).
 	TSO bool
+	// JSON emits progress as JSON lines on stdout; the human log goes to stderr.
+	JSON bool
 }
 
 const banner = `
@@ -50,7 +60,9 @@ const banner = `
 const usageText = `
 Usage:
   ps4-recomp [flags] <input.elf>
+  ps4-recomp build [flags] <eboot.bin | input.elf>
   ps4-recomp analyze <eboot.bin | input.elf | module.prx>
+  ps4-recomp version [--json]
 
 Options:
   -o, -out <dir>          Output directory for generated code and binaries (default: "build")
@@ -66,6 +78,7 @@ Options:
       -app-dir <dir>      Host directory mapping to /app0 for game assets (auto-detected if omitted)
       -copy-resources     Copy all game assets/resources into macOS .app bundle Resources/ (default: false)
       -asan               Compile with AddressSanitizer and LeakSanitizer (default: false)
+      -json               Emit progress as JSON lines on stdout (the log goes to stderr)
       -tso                x86 memory ordering: acquire/release for non-stack guest memory (default: true)
   -h, -help               Show this help message
 `
@@ -140,6 +153,7 @@ func ParseArgs(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.CopyResources, "bundle-resources", false, "Copy all game assets/resources into macOS .app bundle Resources/ (alias)")
 	fs.BoolVar(&cfg.Asan, "asan", false, "Compile with AddressSanitizer and LeakSanitizer")
 	fs.BoolVar(&cfg.TSO, "tso", cfg.TSO, "x86 memory ordering: acquire/release for non-stack guest memory")
+	fs.BoolVar(&cfg.JSON, "json", false, "Emit progress as JSON lines on stdout")
 	fs.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "Verbose logging")
 	fs.BoolVar(&cfg.Verbose, "v", cfg.Verbose, "Verbose logging (short)")
 	fs.BoolVar(&help, "help", false, "Show help message")
@@ -156,6 +170,11 @@ func ParseArgs(args []string) (*Config, error) {
 	if help {
 		fmt.Print(banner + usageText)
 		return nil, flag.ErrHelp
+	}
+
+	// "build" is an alias of the default command.
+	if len(posArgs) > 0 && posArgs[0] == "build" {
+		posArgs = posArgs[1:]
 	}
 
 	// Positional arguments override if -elf was not explicitly passed
@@ -216,8 +235,27 @@ func ParseArgs(args []string) (*Config, error) {
 	return cfg, nil
 }
 
+// Version is the ps4-recomp release string, reported as "built_with" by build --json.
+const Version = "0.4.0"
+
+// stdout is where machine-readable output (JSON events) goes; tests replace it.
+var stdout io.Writer = os.Stdout
+
+// logw receives the human-readable build log. With --json it is stderr, so stdout stays pure
+// JSON lines.
+var logw io.Writer = os.Stdout
+
 // Execute runs the complete recompilation and optional execution pipeline.
-func Execute(args []string) error {
+func Execute(args []string) (err error) {
+	if len(args) > 0 && (args[0] == "version" || args[0] == "-version" || args[0] == "--version") {
+		if slices.Contains(args, "-json") || slices.Contains(args, "--json") {
+			ev := events.New(stdout, "version", true)
+			ev.Done(map[string]string{"version": Version, "go": runtime.Version()})
+			return nil
+		}
+		fmt.Fprintf(stdout, "ps4-recomp %s\n", Version)
+		return nil
+	}
 	if len(args) > 0 && args[0] == "analyze" {
 		if len(args) < 2 {
 			return errors.New("usage: ps4-recomp analyze <binary.elf | eboot.bin | module.prx>")
@@ -235,28 +273,74 @@ func Execute(args []string) error {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
+		if slices.Contains(args, "-json") || slices.Contains(args, "--json") {
+			return events.New(stdout, "build", true).Error("bad_input", err.Error())
+		}
 		return err
 	}
 
+	logw = os.Stdout
+	var ev *events.Writer
+	if cfg.JSON {
+		logw = os.Stderr
+		ev = events.New(stdout, "build", true)
+	} else {
+		ev = events.New(io.Discard, "build", false)
+	}
+	defer func() { logw = os.Stdout }()
+	// Every failure of the build path is reported as an error event before it is returned.
+	defer func() {
+		if err != nil && cfg.JSON {
+			code := "build_failed"
+			switch {
+			case errors.Is(err, errBuildCancelled):
+				code = "cancelled"
+			case errors.Is(err, fs.ErrNotExist):
+				code = "bad_input"
+			}
+			ev.Error(code, err.Error())
+		}
+	}()
+	// SIGINT or SIGTERM cancels the build: the ninja or clang process groups are stopped,
+	// and the build ends at the next stage boundary with errBuildCancelled.
+	ctx, stopSignals := buildSignalContext()
+	defer stopSignals()
+
 	totalStart := time.Now()
-	fmt.Println(banner)
+	fmt.Fprintln(logw, banner)
 
 	// Step 1: Load ELF
 	stepStart := time.Now()
-	fmt.Printf("[ps4-recomp] [1/4] Loading ELF: %s\n", cfg.ElfPath)
+	ev.Progress("load", 1, 4, "stages", "loading the ELF")
+	fmt.Fprintf(logw, "[ps4-recomp] [1/4] Loading ELF: %s\n", cfg.ElfPath)
 	loaded, err := elfloader.LoadELF(cfg.ElfPath)
 	if err != nil {
 		return fmt.Errorf("failed to load ELF '%s': %w", cfg.ElfPath, err)
 	}
-	fmt.Printf("             Entry point: 0x%x | Segments: %d | Relocations: %d | Unwind functions: %d | Time: %v\n",
+	fmt.Fprintf(logw, "             Entry point: 0x%x | Segments: %d | Relocations: %d | Unwind functions: %d | Time: %v\n",
 		loaded.EntryPoint, len(loaded.Segments), len(loaded.Relocations), len(loaded.FuncBounds), time.Since(stepStart).Round(time.Millisecond))
+
+	if ctx.Err() != nil {
+		return errBuildCancelled
+	}
 
 	// Step 2: Disassembly and CFG Analysis
 	stepStart = time.Now()
-	fmt.Printf("[ps4-recomp] [2/4] Analyzing CFG and discovering reachable code...\n")
+	ev.Progress("cfg", 2, 4, "stages", "analyzing the control flow")
+	fmt.Fprintf(logw, "[ps4-recomp] [2/4] Analyzing CFG and discovering reachable code...\n")
+	for _, p := range elfloader.AddTLSModule(loaded, loaded) {
+		fmt.Fprintf(os.Stderr, "             Warning: %s\n", p)
+	}
 	moduleInfos, err := loadCompanionModules(cfg, loaded)
 	if err != nil {
 		return err
+	}
+	elfloader.LayoutStaticTLS(loaded.TLSModules)
+	for _, p := range elfloader.ApplyTLSOffsets(loaded) {
+		fmt.Fprintf(os.Stderr, "             Warning: %s\n", p)
+	}
+	if n := len(loaded.TLSModules); n > 0 {
+		fmt.Fprintf(logw, "             Static TLS: %d modules, 0x%x bytes\n", n, loaded.TLSModules[n-1].Offset)
 	}
 	var allCompanionExports []elfloader.Symbol
 	for _, m := range moduleInfos {
@@ -266,7 +350,7 @@ func Execute(args []string) error {
 		return fmt.Errorf("failed resolving module relocations: %w", err)
 	}
 	hle := emitter.NewHLEReport(loaded, moduleInfos)
-	fmt.Print(hle.ImportSummary())
+	fmt.Fprint(logw, hle.ImportSummary())
 
 	d, err := disasm.NewDisassembler(loaded)
 	if err != nil {
@@ -277,7 +361,7 @@ func Execute(args []string) error {
 	lastReport := time.Now()
 	funcs, err := d.DiscoverReachable(entries, func(nFn, nInst int) {
 		if time.Since(lastReport) >= 2*time.Second {
-			fmt.Printf("             ... %d functions, %d instructions\n", nFn, nInst)
+			fmt.Fprintf(logw, "             ... %d functions, %d instructions\n", nFn, nInst)
 			lastReport = time.Now()
 		}
 	})
@@ -289,7 +373,7 @@ func Execute(args []string) error {
 	for _, f := range funcs {
 		totalInsts += f.Insts
 	}
-	fmt.Printf("             Discovered %d functions, %d instructions | cap hits: %d | privileged stops: %d | Time: %v\n",
+	fmt.Fprintf(logw, "             Discovered %d functions, %d instructions | cap hits: %d | privileged stops: %d | Time: %v\n",
 		len(funcs), totalInsts, d.CapHits, d.PrivilegedStops, time.Since(stepStart).Round(time.Millisecond))
 	if d.CapHits > 0 {
 		fmt.Fprintf(os.Stderr, "             Warning: %d function(s) hit decode caps:\n", d.CapHits)
@@ -303,9 +387,14 @@ func Execute(args []string) error {
 		}
 	}
 
+	if ctx.Err() != nil {
+		return errBuildCancelled
+	}
+
 	// Step 3: C Source Code Generation
 	stepStart = time.Now()
-	fmt.Printf("[ps4-recomp] [3/4] Emitting C source files to '%s/'...\n", cfg.OutDir)
+	ev.Progress("emit", 3, 4, "stages", "emitting C sources")
+	fmt.Fprintf(logw, "[ps4-recomp] [3/4] Emitting C source files to '%s/'...\n", cfg.OutDir)
 	if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create output directory '%s': %w", cfg.OutDir, err)
 	}
@@ -337,8 +426,7 @@ func Execute(args []string) error {
 			}
 			return nil
 		}
-		ext := filepath.Ext(path)
-		if ext == ".c" || ext == ".m" || ext == ".mm" || ext == ".cpp" {
+		if isRuntimeSource(info.Name()) {
 			runtimeCFiles = append(runtimeCFiles, path)
 		}
 		return nil
@@ -346,7 +434,14 @@ func Execute(args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed scanning runtime files: %w", err)
 	}
-	if gcnInc, _ := findGcnRecompiler(); gcnInc != "" && !seenInc[gcnInc] {
+	gcnInc, gcnLib := findGcnRecompiler()
+	if gcnLib != "" {
+		// the runtime is compiled against these headers: the library must be their build
+		if err := checkGcnLibrary(gcnLib); err != nil {
+			return err
+		}
+	}
+	if gcnInc != "" && !seenInc[gcnInc] {
 		seenInc[gcnInc] = true
 		runtimeIncludeDirs = append(runtimeIncludeDirs, gcnInc)
 	}
@@ -394,16 +489,16 @@ func Execute(args []string) error {
 	if err := hle.WriteFile(hlePath); err != nil {
 		return fmt.Errorf("failed to write HLE report: %w", err)
 	}
-	fmt.Print(hle.SyscallSummary())
-	fmt.Printf("             Unresolved imports bound to the abort stub: %d calls, %d data (GLOB_DAT/R_64)\n",
+	fmt.Fprint(logw, hle.SyscallSummary())
+	fmt.Fprintf(logw, "             Unresolved imports bound to the abort stub: %d calls, %d data (GLOB_DAT/R_64)\n",
 		em.UnresolvedFuncImports, em.UnresolvedDataImports)
 	if len(em.UnresolvedDataNames) > 0 {
-		fmt.Printf("             Unresolved data imports: %s\n", strings.Join(em.UnresolvedDataNames, ", "))
+		fmt.Fprintf(logw, "             Unresolved data imports: %s\n", strings.Join(em.UnresolvedDataNames, ", "))
 	}
 	for _, w := range em.Warnings {
-		fmt.Printf("             Warning: %s\n", w)
+		fmt.Fprintf(logw, "             Warning: %s\n", w)
 	}
-	fmt.Printf("             Wrote %s\n", hlePath)
+	fmt.Fprintf(logw, "             Wrote %s\n", hlePath)
 
 	if cfg.AppDir != "" {
 		srcAssets := filepath.Join(cfg.AppDir, "assets")
@@ -425,19 +520,27 @@ func Execute(args []string) error {
 			nAsm++
 		}
 	}
-	fmt.Printf("             Emitted %d source files (%d assembly, %d C) | TSO: %s | Time: %v\n",
+	fmt.Fprintf(logw, "             Emitted %d source files (%d assembly, %d C) | TSO: %s | Time: %v\n",
 		len(cFiles), nAsm, len(cFiles)-nAsm, tso, time.Since(stepStart).Round(time.Millisecond))
+
+	if ctx.Err() != nil {
+		return errBuildCancelled
+	}
 
 	// Step 4: Compile with Clang
 	targetBin := filepath.Join(cfg.OutDir, "ps4_app")
+	appBundle := ""
 	if cfg.Compile {
 		stepStart = time.Now()
-		fmt.Printf("[ps4-recomp] [4/4] Compiling native ARM64 binary with clang (-O%s, %d workers)...\n",
+		ev.Progress("compile", 0, int64(len(cFiles)), "files", "compiling")
+		fmt.Fprintf(logw, "[ps4-recomp] [4/4] Compiling native ARM64 binary with clang (-O%s, %d workers)...\n",
 			cfg.OptLevel, cfg.Jobs)
-		if err := compileParallel(cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.Jobs, cfg.OptLevel, cfg.Asan); err != nil {
+		if err := compileParallel(ctx, cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.Jobs, cfg.OptLevel, cfg.Asan, func(done, total int64) {
+			ev.Progress("compile", done, total, "files", "compiling")
+		}); err != nil {
 			return fmt.Errorf("compilation failed: %w", err)
 		}
-		fmt.Printf("             Compiled binary: %s | Time: %v\n",
+		fmt.Fprintf(logw, "             Compiled binary: %s | Time: %v\n",
 			targetBin, time.Since(stepStart).Round(time.Millisecond))
 
 		appName := strings.TrimSuffix(filepath.Base(cfg.ElfPath), filepath.Ext(cfg.ElfPath))
@@ -450,43 +553,45 @@ func Execute(args []string) error {
 				return fmt.Errorf("failed to package macOS app bundle: %w", err)
 			}
 			targetBin = filepath.Join(bundleDir, "Contents", "MacOS", appName)
-			fmt.Printf("             Packaged macOS App Bundle: %s\n", bundleDir)
+			fmt.Fprintf(logw, "             Packaged macOS App Bundle: %s\n", bundleDir)
+			appBundle = bundleDir
 		}
 	} else {
-		fmt.Println("[ps4-recomp] [4/4] Clang compilation skipped (--compile=false). Generating build.ninja...")
+		fmt.Fprintln(logw, "[ps4-recomp] [4/4] Clang compilation skipped (--compile=false). Generating build.ninja...")
 		if err := generateNinjaBuild(cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.OptLevel, cfg.Asan); err != nil {
-			fmt.Printf("             Warning: failed to generate build.ninja: %v\n", err)
+			fmt.Fprintf(logw, "             Warning: failed to generate build.ninja: %v\n", err)
 		} else {
-			fmt.Printf("             Generated %s\n", filepath.Join(cfg.OutDir, "build.ninja"))
+			fmt.Fprintf(logw, "             Generated %s\n", filepath.Join(cfg.OutDir, "build.ninja"))
 		}
 	}
 
-	fmt.Printf("[ps4-recomp] All tasks completed successfully in %v\n", time.Since(totalStart).Round(time.Millisecond))
+	fmt.Fprintf(logw, "[ps4-recomp] All tasks completed successfully in %v\n", time.Since(totalStart).Round(time.Millisecond))
 
-	// Step 5: Optional Run
+	if ctx.Err() != nil {
+		return errBuildCancelled
+	}
+	return finishBuild(ctx, ev, cfg, targetBin, appBundle)
+}
+
+// finishBuild runs the optional run step and then reports the build as done, so that with
+// --json the last event of the stream is "done" only if the whole command succeeded.
+func finishBuild(ctx context.Context, ev *events.Writer, cfg *Config, targetBin, appBundle string) error {
 	if cfg.Run && cfg.Compile {
-		fmt.Println("===================================================================")
-		if err := runBinary(targetBin, cfg.TimeoutSec, cfg.AppDir); err != nil {
-			return fmt.Errorf("execution failed: %w", err)
+		fmt.Fprintln(logw, "===================================================================")
+		if err := runBinary(ctx, targetBin, cfg.TimeoutSec, cfg.AppDir); err != nil {
+			return fmt.Errorf("execution failed: %w", cancelledOr(ctx, err))
 		}
 	}
-
+	if appBundle != "" {
+		ev.Done(buildResult{App: appBundle, TitleID: titleIDOf(cfg.AppDir), BuiltWith: Version})
+	} else {
+		ev.Done(buildResult{BuiltWith: Version})
+	}
 	return nil
 }
 
 func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, targetBin string, optLevel string, asan bool) error {
-	var ftCflags []string
-	var ftLibs []string
-	if out, err := exec.Command("pkg-config", "--cflags", "freetype2").Output(); err == nil {
-		ftCflags = strings.Fields(string(out))
-	} else if _, err := os.Stat("/opt/homebrew/opt/freetype/include/freetype2"); err == nil {
-		ftCflags = []string{"-I/opt/homebrew/opt/freetype/include/freetype2"}
-	}
-	if out, err := exec.Command("pkg-config", "--libs", "freetype2").Output(); err == nil {
-		ftLibs = strings.Fields(string(out))
-	} else if _, err := os.Stat("/opt/homebrew/opt/freetype/lib"); err == nil {
-		ftLibs = []string{"-L/opt/homebrew/opt/freetype/lib", "-lfreetype"}
-	}
+	ftCflags, ftLibs := findFreeType()
 
 	var sb strings.Builder
 	sb.WriteString("ninja_required_version = 1.5\n\n")
@@ -525,8 +630,7 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		cflags = append(darwinFlags, cflags...)
 	}
 
-	cflagsStr := strings.Join(append(cflags, incFlags...), " ")
-	fmt.Fprintf(&sb, "cflags = %s\n\n", cflagsStr)
+	fmt.Fprintf(&sb, "cflags = %s\n\n", ninjaShellArgs(append(cflags, incFlags...)))
 
 	sb.WriteString("rule compile_c\n")
 	sb.WriteString("  command = clang -MD -MF $out.d $cflags -c $in -o $out\n")
@@ -568,21 +672,24 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	} else {
 		ldflags = append(ldflags, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
 	}
+	var staticLibs []string // the link's implicit inputs: a rebuilt library relinks the game
 	if _, gcnLib := findGcnRecompiler(); gcnLib != "" {
 		ldflags = append(ldflags, gcnLib)
+		staticLibs = append(staticLibs, gcnLib)
 	}
 	_, spirvLib := findSpirvCross()
 	if spirvLib != "" {
 		ldflags = append(ldflags, spirvLib, "-lc++")
+		staticLibs = append(staticLibs, spirvLib)
 	}
 	_, atracLib, _ := findLibAtrac9()
 	if atracLib != "" {
 		ldflags = append(ldflags, atracLib)
+		staticLibs = append(staticLibs, atracLib)
 	}
 	ldflags = append(ldflags, ftLibs...)
-	ldflagsStr := strings.Join(ldflags, " ")
 
-	fmt.Fprintf(&sb, "ldflags = %s\n\n", ldflagsStr)
+	fmt.Fprintf(&sb, "ldflags = %s\n\n", ninjaShellArgs(ldflags))
 	sb.WriteString("rule link_bin\n")
 	sb.WriteString("  command = clang $in $ldflags -o $out\n")
 	sb.WriteString("  description = LINK $out\n\n")
@@ -606,7 +713,7 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		} else if ext == ".cpp" {
 			rule = "compile_cpp"
 		}
-		fmt.Fprintf(&sb, "build %s: %s %s\n", objFile, rule, relCFile)
+		fmt.Fprintf(&sb, "build %s: %s %s\n", ninjaEscape(objFile), rule, ninjaEscape(relCFile))
 	}
 
 	relTargetBin, err := filepath.Rel(outDir, targetBin)
@@ -614,8 +721,8 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		relTargetBin = filepath.Base(targetBin)
 	}
 
-	fmt.Fprintf(&sb, "\nbuild %s: link_bin %s\n", relTargetBin, strings.Join(objFiles, " "))
-	fmt.Fprintf(&sb, "default %s\n", relTargetBin)
+	sb.WriteString(ninjaLinkBuild(relTargetBin, objFiles, staticLibs))
+	fmt.Fprintf(&sb, "default %s\n", ninjaEscape(relTargetBin))
 
 	ninjaPath := filepath.Join(outDir, "build.ninja")
 	existing, err := os.ReadFile(ninjaPath)
@@ -626,30 +733,128 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	return os.WriteFile(ninjaPath, content, 0o644)
 }
 
-func compileParallel(cFiles []string, outDir string, includeDirs []string, targetBin string, numWorkers int, optLevel string, asan bool) error {
-	// Try building with Ninja first if available
-	if ninjaPath, err := exec.LookPath("ninja"); err == nil {
-		if err := generateNinjaBuild(cFiles, outDir, includeDirs, targetBin, optLevel, asan); err == nil {
-			cmd := exec.Command(ninjaPath, "-C", outDir, fmt.Sprintf("-j%d", numWorkers))
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			if err := cmd.Run(); err == nil {
-				return nil
-			}
+// buildResult is the result object of the final "done" event of build --json.
+type buildResult struct {
+	App       string `json:"app,omitempty"`
+	TitleID   string `json:"title_id,omitempty"`
+	BuiltWith string `json:"built_with"`
+}
+
+// ninjaStatus matches the "[done/total]" prefix of a ninja status line.
+var ninjaStatus = regexp.MustCompile(`^\[(\d+)/(\d+)\]`)
+
+// runNinja runs ninja in outDir, forwarding its output to the build log and reporting each
+// "[done/total]" status line to progress. When ctx ends, ninja's process group is stopped
+// (groupCommand) and errBuildCancelled is returned.
+func runNinja(ctx context.Context, ninjaPath, outDir string, numWorkers int, progress func(done, total int64)) error {
+	cmd := groupCommand(ctx, ninjaPath, "-C", outDir, fmt.Sprintf("-j%d", numWorkers))
+	cmd.Stderr = os.Stderr
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	sc := bufio.NewScanner(pipe)
+	for sc.Scan() {
+		line := sc.Bytes()
+		fmt.Fprintf(logw, "%s\n", line)
+		if m := ninjaStatus.FindSubmatch(line); m != nil && progress != nil {
+			done, _ := strconv.ParseInt(string(m[1]), 10, 64)
+			total, _ := strconv.ParseInt(string(m[2]), 10, 64)
+			progress(done, total)
 		}
 	}
+	io.Copy(io.Discard, pipe) // drain, so a very long line cannot block ninja
+	return cancelledOr(ctx, cmd.Wait())
+}
 
-	var ftCflags []string
-	var ftLibs []string
-	if out, err := exec.Command("pkg-config", "--cflags", "freetype2").Output(); err == nil {
-		ftCflags = strings.Fields(string(out))
-	} else if _, err := os.Stat("/opt/homebrew/opt/freetype/include/freetype2"); err == nil {
-		ftCflags = []string{"-I/opt/homebrew/opt/freetype/include/freetype2"}
+// shellQuote quotes arg for /bin/sh, which runs ninja's commands: an argument with any
+// character outside a safe set is put in single quotes, an embedded quote being closed, escaped
+// with a backslash and reopened. Paths such as
+// ".../PS4Recomp.app/Contents/Resources/3rdparty/..." may contain a space.
+func shellQuote(arg string) string {
+	if arg != "" && strings.IndexFunc(arg, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_./=,+:@%", r))
+	}) < 0 {
+		return arg
 	}
-	if out, err := exec.Command("pkg-config", "--libs", "freetype2").Output(); err == nil {
-		ftLibs = strings.Fields(string(out))
-	} else if _, err := os.Stat("/opt/homebrew/opt/freetype/lib"); err == nil {
-		ftLibs = []string{"-L/opt/homebrew/opt/freetype/lib", "-lfreetype"}
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+}
+
+// ninjaShellArgs is the value of a ninja variable expanded into a command line: each argument
+// shell-quoted, then ninja's "$" escaped.
+func ninjaShellArgs(args []string) string {
+	var b strings.Builder
+	for i, a := range args {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(strings.ReplaceAll(shellQuote(a), "$", "$$"))
+	}
+	return b.String()
+}
+
+// ninjaEscape escapes a path in a ninja build line.
+func ninjaEscape(p string) string {
+	return strings.NewReplacer("$", "$$", " ", "$ ", ":", "$:").Replace(p)
+}
+
+// ninjaLinkBuild is the build line of the game binary: the objects are its inputs, the static
+// libraries it links (the shader translator, SPIRV-Cross, LibAtrac9) implicit inputs, so a
+// library copied in after a rebuild relinks the game.
+func ninjaLinkBuild(target string, objs, libs []string) string {
+	var b strings.Builder
+	b.WriteString("\nbuild ")
+	b.WriteString(ninjaEscape(target))
+	b.WriteString(": link_bin")
+	for _, o := range objs {
+		b.WriteByte(' ')
+		b.WriteString(ninjaEscape(o))
+	}
+	if len(libs) > 0 {
+		b.WriteString(" |")
+		for _, l := range libs {
+			b.WriteByte(' ')
+			b.WriteString(ninjaEscape(l))
+		}
+	}
+	b.WriteByte('\n')
+	return b.String()
+}
+
+// compileParallel compiles cFiles and links targetBin. progress, when non-nil, is called with
+// the number of files compiled so far and the total, as files complete. When ctx ends, the
+// running ninja or clang process groups are stopped and errBuildCancelled is returned.
+func compileParallel(ctx context.Context, cFiles []string, outDir string, includeDirs []string, targetBin string, numWorkers int, optLevel string, asan bool, progress func(done, total int64)) error {
+	ftCflags, ftLibs := findFreeType()
+	if len(ftCflags)+len(ftLibs) == 0 {
+		fmt.Fprintln(logw, "             FreeType: not found")
+	} else {
+		fmt.Fprintf(logw, "             FreeType: %s\n", strings.Join(append(slices.Clone(ftCflags), ftLibs...), " "))
+	}
+	// Try building with Ninja first if available
+	if ninjaPath := findNinja(); ninjaPath != "" {
+		fmt.Fprintf(logw, "             ninja: %s\n", ninjaPath)
+		if err := generateNinjaBuild(cFiles, outDir, includeDirs, targetBin, optLevel, asan); err != nil {
+			fmt.Fprintf(logw, "             ninja: cannot write build.ninja (%v); compiling with clang directly\n", err)
+		} else {
+			err := runNinja(ctx, ninjaPath, outDir, numWorkers, progress)
+			if err == nil || errors.Is(err, errBuildCancelled) {
+				return err
+			}
+			fmt.Fprintf(logw, "             ninja: build failed (%v); compiling with clang directly\n", err)
+		}
+	} else {
+		fmt.Fprintln(logw, "             ninja: not found; compiling with clang directly")
+	}
+	total := int64(len(cFiles))
+	var finished atomic.Int64
+	fileDone := func() {
+		if progress != nil {
+			progress(finished.Add(1), total)
+		}
 	}
 
 	// Build a flags fingerprint: any flag change (opt level, asan, includes)
@@ -678,6 +883,9 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 	for range numWorkers {
 		wg.Go(func() {
 			for idx := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
 				cFile := cFiles[idx]
 				ext := filepath.Ext(cFile)
 				objFile := strings.TrimSuffix(cFile, ext) + ".o"
@@ -696,6 +904,7 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 					}
 				}
 				if upToDate {
+					fileDone()
 					continue
 				}
 
@@ -728,14 +937,15 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 					clangArgs = append([]string{"-target", "arm64-apple-darwin", "-mcpu=apple-m1", "-DRECOMP_ARM64_ASM=1"}, clangArgs...)
 				}
 
-				cmd := exec.Command(compilerBin, clangArgs...)
+				cmd := groupCommand(ctx, compilerBin, clangArgs...)
 				if out, err := cmd.CombinedOutput(); err != nil {
-					errChan <- fmt.Errorf("error compiling %s: %w\n%s", filepath.Base(cFile), err, string(out))
+					errChan <- cancelledOr(ctx, fmt.Errorf("error compiling %s: %w\n%s", filepath.Base(cFile), err, string(out)))
 					return
 				}
 
 				// Write flags sidecar so the next run can detect flag changes.
 				_ = os.WriteFile(flagsFile, []byte(flagsFingerprint), 0o644)
+				fileDone()
 			}
 		})
 	}
@@ -748,6 +958,9 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 	wg.Wait()
 	close(errChan)
 
+	if ctx.Err() != nil {
+		return errBuildCancelled
+	}
 	for err := range errChan {
 		if err != nil {
 			return err
@@ -778,15 +991,15 @@ func compileParallel(cFiles []string, outDir string, includeDirs []string, targe
 	linkArgs = append(linkArgs, ftLibs...)
 	linkArgs = append(linkArgs, objFiles...)
 
-	cmd := exec.Command("clang", linkArgs...)
+	cmd := groupCommand(ctx, "clang", linkArgs...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("link error: %w\n%s", err, string(out))
+		return cancelledOr(ctx, fmt.Errorf("link error: %w\n%s", err, string(out)))
 	}
 	return nil
 }
 
-func runBinary(targetBin string, timeoutSec int, appDir string) error {
-	ctx := context.Background()
+// runBinary runs the built game for --run; ending ctx kills it.
+func runBinary(ctx context.Context, targetBin string, timeoutSec int, appDir string) error {
 	var cancel context.CancelFunc
 	if timeoutSec > 0 {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
@@ -794,7 +1007,7 @@ func runBinary(targetBin string, timeoutSec int, appDir string) error {
 	}
 
 	cmd := exec.CommandContext(ctx, targetBin)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = logw // stderr in JSON mode: the game must not write into the event stream
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
 	if appDir != "" {
@@ -802,14 +1015,14 @@ func runBinary(targetBin string, timeoutSec int, appDir string) error {
 	}
 
 	if timeoutSec > 0 {
-		fmt.Printf("[ps4-recomp] Running %s (watchdog timeout: %ds)...\n", targetBin, timeoutSec)
+		fmt.Fprintf(logw, "[ps4-recomp] Running %s (watchdog timeout: %ds)...\n", targetBin, timeoutSec)
 	} else {
-		fmt.Printf("[ps4-recomp] Running %s...\n", targetBin)
+		fmt.Fprintf(logw, "[ps4-recomp] Running %s...\n", targetBin)
 	}
 
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		fmt.Printf("[ps4-recomp] Watchdog timeout of %ds reached. Terminated cleanly.\n", timeoutSec)
+		fmt.Fprintf(logw, "[ps4-recomp] Watchdog timeout of %ds reached. Terminated cleanly.\n", timeoutSec)
 		return nil
 	}
 	return err
@@ -833,7 +1046,7 @@ func loadCompanionModules(cfg *Config, main *elfloader.LoadedELF) ([]emitter.Gue
 		if _, ok := found[strings.ToLower(filepath.Base(cleanName))]; ok {
 			continue
 		}
-		fmt.Printf("             Referenced module %s was not found for AOT linking\n", name)
+		fmt.Fprintf(logw, "             Referenced module %s was not found for AOT linking\n", name)
 	}
 	if len(refs) == 0 {
 		return nil, nil
@@ -847,13 +1060,16 @@ func loadCompanionModules(cfg *Config, main *elfloader.LoadedELF) ([]emitter.Gue
 	for _, ref := range refs {
 		mod, err := elfloader.LoadELF(ref.Path)
 		if err != nil {
-			fmt.Printf("             Skipping module %s: %v\n", filepath.Base(ref.Path), err)
+			fmt.Fprintf(logw, "             Skipping module %s: %v\n", filepath.Base(ref.Path), err)
 			continue
 		}
 		if elfloader.Overlaps(main, mod) {
 			if err := mod.ApplyBias(nextBase - mod.MinVAddr); err != nil {
 				return nil, fmt.Errorf("failed to relocate module %s: %w", filepath.Base(ref.Path), err)
 			}
+		}
+		for _, p := range elfloader.AddTLSModule(main, mod) {
+			fmt.Fprintf(os.Stderr, "             Warning: %s\n", p)
 		}
 		if err := elfloader.MergeImages(main, mod); err != nil {
 			return nil, fmt.Errorf("failed to merge module %s: %w", filepath.Base(ref.Path), err)
@@ -875,7 +1091,7 @@ func loadCompanionModules(cfg *Config, main *elfloader.LoadedELF) ([]emitter.Gue
 			EHFrameSize:    mod.EHFrameSize,
 			Segments:       mod.Segments,
 		})
-		fmt.Printf("             Linked module %s (%d exports, load 0x%x-0x%x)\n",
+		fmt.Fprintf(logw, "             Linked module %s (%d exports, load 0x%x-0x%x)\n",
 			mod.FileName, len(exports), mod.MinVAddr, mod.MaxVAddr)
 	}
 	return modules, nil
@@ -966,6 +1182,20 @@ func copyFile(src, dst string) error {
 	}
 	_ = os.Chmod(dst, mode)
 	return nil
+}
+
+// isRuntimeSource reports whether a file of the copied runtime is compiled. AppleDouble
+// sidecars ("._<name>", which macOS writes next to each file with extended attributes on a
+// volume that has none, such as exFAT) carry a source extension but are not sources.
+func isRuntimeSource(name string) bool {
+	if strings.HasPrefix(name, "._") {
+		return false
+	}
+	switch filepath.Ext(name) {
+	case ".c", ".m", ".mm", ".cpp":
+		return true
+	}
+	return false
 }
 
 func copyDir(src, dst string) error {
@@ -1125,28 +1355,93 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 	}
 
 	// 5. Generate Contents/Info.plist
-	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(appInfoPlist(appName, hasIcon)), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(appInfoPlist(appName, hasIcon, bundleMetaFor(cfg.AppDir, appName))), 0o644); err != nil {
 		return "", fmt.Errorf("failed to write Info.plist: %w", err)
 	}
 
 	// 6. Sign the bundle ad hoc: binds Info.plist and seals the resources, so the system (Game
 	// Mode, Metal shader cache, Gatekeeper on a local build) sees one consistent app identity.
-	// A failure is reported but does not fail the build: the unsigned-bundle state of older
-	// builds still runs.
+	// A signing or verification failure fails the build (build_failed with --json).
 	if err := signAppBundle(bundleDir); err != nil {
-		// a seal of an earlier build no longer matches: drop it, so the bundle is plainly
-		// linker-signed instead of carrying an invalid signature
-		_ = os.RemoveAll(filepath.Join(contentsDir, "_CodeSignature"))
-		fmt.Printf("             Warning: %v; the bundle is unsigned (Game Mode keys are not bound)\n", err)
+		return "", fmt.Errorf("ad-hoc signing failed: %w", err)
 	}
 
 	return bundleDir, nil
 }
 
+// bundleMeta is the identity a game bundle presents to macOS.
+type bundleMeta struct{ BundleID, DisplayName, Version string }
+
+// readSFO loads <appDir>/sce_sys/param.sfo, or returns nil when there is none.
+func readSFO(appDir string) *sfo.File {
+	if appDir == "" {
+		return nil
+	}
+	f, err := sfo.Load(filepath.Join(appDir, "sce_sys", "param.sfo"))
+	if err != nil {
+		return nil
+	}
+	return f
+}
+
+// titleIDOf returns TITLE_ID from the app dir's param.sfo, or "".
+func titleIDOf(appDir string) string {
+	if f := readSFO(appDir); f != nil {
+		id, _ := f.String("TITLE_ID")
+		return id
+	}
+	return ""
+}
+
+// bundleMetaFor derives the bundle identity from <appDir>/sce_sys/param.sfo: bundle id
+// org.ps4recomp.<TITLE_ID>, TITLE as the display name and APP_VER as the version (real dumps
+// often carry only VERSION, which is the fallback). Missing values keep the generic defaults.
+func bundleMetaFor(appDir, appName string) bundleMeta {
+	m := bundleMeta{BundleID: "org.ps4recomp." + appName, DisplayName: appName, Version: "1.0"}
+	f := readSFO(appDir)
+	if f == nil {
+		return m
+	}
+	if id, ok := f.String("TITLE_ID"); ok {
+		if id = sanitizeBundleID(id); id != "" {
+			m.BundleID = "org.ps4recomp." + id
+		}
+	}
+	if t, ok := f.String("TITLE"); ok && strings.TrimSpace(t) != "" {
+		m.DisplayName = t
+	}
+	for _, key := range []string{"APP_VER", "VERSION"} {
+		if v, ok := f.String(key); ok && strings.TrimSpace(v) != "" {
+			m.Version = v
+			break
+		}
+	}
+	return m
+}
+
+// sanitizeBundleID keeps only the characters a bundle identifier allows.
+func sanitizeBundleID(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' {
+			return r
+		}
+		return -1
+	}, s)
+}
+
+// xmlEscape escapes s for use as plist string content.
+func xmlEscape(s string) string {
+	var b strings.Builder
+	if err := xml.EscapeText(&b, []byte(s)); err != nil {
+		return ""
+	}
+	return b.String()
+}
+
 // appInfoPlist is the Contents/Info.plist of a generated game bundle. LSSupportsGameMode and the
 // games category let macOS run it in Game Mode (CPU and GPU priority, lower Bluetooth latency for
 // controllers) when it is full screen.
-func appInfoPlist(appName string, hasIcon bool) string {
+func appInfoPlist(appName string, hasIcon bool, meta bundleMeta) string {
 	iconXML := ""
 	if hasIcon {
 		iconXML = "    <key>CFBundleIconFile</key>\n    <string>AppIcon</string>\n"
@@ -1160,7 +1455,7 @@ func appInfoPlist(appName string, hasIcon bool) string {
     <key>CFBundleExecutable</key>
     <string>%s</string>
     <key>CFBundleIdentifier</key>
-    <string>org.ps4recomp.%s</string>
+    <string>%s</string>
     <key>CFBundleName</key>
     <string>%s</string>
     <key>CFBundleDisplayName</key>
@@ -1168,9 +1463,9 @@ func appInfoPlist(appName string, hasIcon bool) string {
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>%s</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>%s</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>LSApplicationCategoryType</key>
@@ -1181,7 +1476,8 @@ func appInfoPlist(appName string, hasIcon bool) string {
     <true/>
 %s</dict>
 </plist>
-`, appName, appName, appName, appName, iconXML)
+`, xmlEscape(appName), xmlEscape(meta.BundleID), xmlEscape(meta.DisplayName), xmlEscape(meta.DisplayName),
+		xmlEscape(meta.Version), xmlEscape(meta.Version), iconXML)
 }
 
 // signAppBundle signs the bundle ad hoc and verifies the signature strictly.

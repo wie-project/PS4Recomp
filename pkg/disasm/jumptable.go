@@ -40,14 +40,6 @@ type picSwitch struct {
 	count     int    // exact length if taken from cmp/ja; 0 = scan with bounds
 }
 
-func isIndirectJump(inst x86asm.Inst) bool {
-	if inst.Op != x86asm.JMP {
-		return false
-	}
-	_, isRel := inst.Args[0].(x86asm.Rel)
-	return !isRel
-}
-
 func sameGPR(a, b x86asm.Reg) bool {
 	fa, fb := gprFamily(a), gprFamily(b)
 	return fa != 0 && fa == fb
@@ -144,22 +136,7 @@ func traceLEA(window []Instruction, before int, reg x86asm.Reg) (uint64, bool, x
 	return 0, false, cur
 }
 
-// matchPICSwitch recognizes the Clang/GCC x86-64 PIC switch idiom ending at
-// the last instruction of window (an indirect JMP):
-//
-//	cmp/sub index, N
-//	ja/jae default
-//	lea tableReg, table(%rip)
-//	movsxd jmpReg, [tableReg + index*4]
-//	add jmpReg, baseReg
-//	jmp jmpReg
-//
-// matchPICSwitch recognizes the Clang/GCC x86-64 PIC switch idiom ending at
-// window[len-1], which must be an indirect JMP.
-//
-// If tableAddr or switch count is not found in window (e.g. when the switch
-// spans across multiple basic blocks), findTableAddr and findCount are queried
-// as fallbacks (tracing predecessor basic blocks).
+// modifiesReg reports whether inst writes reg; a call counts as writing every register.
 func modifiesReg(inst x86asm.Inst, reg x86asm.Reg) bool {
 	if reg == 0 {
 		return false
@@ -188,18 +165,46 @@ func modifiesReg(inst x86asm.Inst, reg x86asm.Reg) bool {
 	}
 }
 
-// matchPICSwitch recognizes the Clang/GCC x86-64 PIC switch idiom ending at
-// window[len-1], which must be an indirect JMP.
+// endsStraightLine reports whether op ends a straight-line run of instructions: a branch, a
+// jump or a terminator.
+func endsStraightLine(op x86asm.Op) bool {
+	if isJcc(op) {
+		return true
+	}
+	switch op {
+	case x86asm.JMP, x86asm.LJMP, x86asm.RET, x86asm.LRET, x86asm.IRET, x86asm.IRETD, x86asm.IRETQ,
+		x86asm.UD1, x86asm.UD2, x86asm.HLT:
+		return true
+	}
+	return false
+}
+
+// straightLineStart is the index of the first instruction of the straight-line run that ends
+// at window[len-1]: the one after the last branch or terminator before it.
+func straightLineStart(window []Instruction) int {
+	for i := len(window) - 2; i >= 0; i-- {
+		if endsStraightLine(window[i].Inst.Op) {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// matchJumpTable recovers the indirect jump table of the jmp at window[len-1] (Clang/GCC
+// PIC switches and absolute tables) by backward data-flow slicing. When the table address or
+// the switch count is not in window (a switch spread over several blocks), findTableAddr and
+// findCount look for them in the predecessor blocks.
 //
-// If tableAddr or switch count is not found in window (e.g. when the switch
-// spans across multiple basic blocks), findTableAddr and findCount are queried
-// as fallbacks (tracing predecessor basic blocks).
-// matchJumpTable recovers indirect jump tables using backward data-flow slicing.
+// The backward searches for the jmp's source, the add and the table load cover
+// window[lo:len-1]. The caller makes that straight-line code ending at the jmp, so the
+// instructions searched lie on a real execution path to it; each search stops at the first
+// write of its register (a call counts as one).
 func matchJumpTable(
 	window []Instruction,
 	findTableAddr func(reg x86asm.Reg) (uint64, bool),
 	findCount func(idxReg x86asm.Reg) (int, bool),
 	findCap func(idxReg x86asm.Reg) int,
+	lo int,
 ) (ResolvedJumpTable, bool) {
 	// capOf caps the scan of an unproven table by the source of its index (byteIndexCap), in
 	// window or, through findCap, in the predecessor blocks.
@@ -226,9 +231,9 @@ func matchJumpTable(
 		if mem.Scale == 8 && mem.Index != 0 {
 			tableAddr, foundTable := resolveMemTableAddr(window[:n-1], mem, jmp.Address+uint64(jmp.Inst.Len), findTableAddr)
 			if foundTable {
-				count := switchTableCount(window[:n-1], mem.Index)
+				count, killed, from := switchTableCountKill(window[:n-1], mem.Index)
 				if count <= 0 && findCount != nil {
-					if c, ok := findCount(mem.Index); ok {
+					if c, ok := findCount(predReg(killed, mem.Index, from)); ok {
 						count = c
 					}
 				}
@@ -250,16 +255,16 @@ func matchJumpTable(
 
 	// Case 2A: Check for 64-bit absolute table load directly into jmpReg:
 	// mov jmpReg, [tableReg + idxReg*8]
-	for i := n - 2; i >= 0 && i >= n-32; i-- {
+	for i := n - 2; i >= lo; i-- {
 		inst := window[i].Inst
 		if inst.Op == x86asm.MOV {
 			if dst, ok := inst.Args[0].(x86asm.Reg); ok && sameGPR(dst, jmpReg) {
 				if mem, ok := inst.Args[1].(x86asm.Mem); ok && mem.Scale == 8 && mem.Index != 0 {
 					tableAddr, foundTable := resolveMemTableAddr(window[:i], mem, window[i].Address+uint64(inst.Len), findTableAddr)
 					if foundTable {
-						count := switchTableCount(window[:i], mem.Index)
+						count, killed, from := switchTableCountKill(window[:i], mem.Index)
 						if count <= 0 && findCount != nil {
-							if c, ok := findCount(mem.Index); ok {
+							if c, ok := findCount(predReg(killed, mem.Index, from)); ok {
 								count = c
 							}
 						}
@@ -282,7 +287,7 @@ func matchJumpTable(
 	// add jmpReg, baseReg  (or lea jmpReg, [jmpReg + baseReg])
 	addIdx := -1
 	var baseReg, offReg x86asm.Reg
-	for i := n - 2; i >= 0 && i >= n-32; i-- {
+	for i := n - 2; i >= lo; i-- {
 		inst := window[i].Inst
 		if inst.Op == x86asm.ADD {
 			dst, ok0 := inst.Args[0].(x86asm.Reg)
@@ -329,7 +334,7 @@ func matchJumpTable(
 	loadIdx := -1
 	var tableReg, idxReg x86asm.Reg
 	var format JumpTableFormat
-	for i := addIdx - 1; i >= 0 && i >= addIdx-32; i-- {
+	for i := addIdx - 1; i >= lo; i-- {
 		inst := window[i].Inst
 		if inst.Op == x86asm.MOVSXD || inst.Op == x86asm.MOVSX || inst.Op == x86asm.MOVZX || inst.Op == x86asm.MOV {
 			if dst, ok := inst.Args[0].(x86asm.Reg); ok && sameGPR(dst, offReg) {
@@ -382,9 +387,9 @@ func matchJumpTable(
 		return none, false
 	}
 
-	count := switchTableCount(window[:loadIdx], idxReg)
+	count, killed, from := switchTableCountKill(window[:loadIdx], idxReg)
 	if count <= 0 && findCount != nil {
-		if c, ok := findCount(idxReg); ok {
+		if c, ok := findCount(predReg(killed, idxReg, from)); ok {
 			count = c
 		}
 	}
@@ -436,7 +441,7 @@ func matchPICSwitch(
 	findCount func(idxReg x86asm.Reg) (int, bool),
 ) (picSwitch, bool) {
 	var none picSwitch
-	table, ok := matchJumpTable(window, findTableAddr, findCount, nil)
+	table, ok := matchJumpTable(window, findTableAddr, findCount, nil, straightLineStart(window))
 	if !ok || table.Format != TableFormatRel32 {
 		return none, false
 	}
@@ -476,16 +481,70 @@ func copiedFrom(window []Instruction, at int, idxReg, src x86asm.Reg) bool {
 	return false
 }
 
+// boundHoldsOnEdge reports whether the bounds check that a conditional jump `last` makes
+// (switchTableCountKill: ja/jae jump when the index is out of range, jb/jbe when it is in range)
+// holds on the edge from its block to the block at child. Other instructions bound nothing by
+// their edges and report true. A jump whose taken and fall-through edges both lead to child
+// bounds nothing on it.
+func boundHoldsOnEdge(last Instruction, child uint64) bool {
+	op := last.Inst.Op
+	if op != x86asm.JA && op != x86asm.JAE && op != x86asm.JB && op != x86asm.JBE {
+		return true
+	}
+	rel, ok := last.Inst.Args[0].(x86asm.Rel)
+	if !ok {
+		return false
+	}
+	next := last.Address + uint64(last.Inst.Len)
+	taken := uint64(int64(next) + int64(rel))
+	if taken == next {
+		return false
+	}
+	if op == x86asm.JA || op == x86asm.JAE {
+		return child == next
+	}
+	return child == taken
+}
+
+// predReg is the register to look for in the predecessor blocks after a scan of the jmp's own
+// block: the one the index was copied from (from), or, when the index was written by something
+// else there (killed, typically a reload of a spilled index), the index register itself, whose
+// check before the spill still bounds the reloaded value in compiled code.
+func predReg(killed bool, idx, from x86asm.Reg) x86asm.Reg {
+	if killed {
+		return idx
+	}
+	return from
+}
+
 // switchTableCount discovers table length from bounds checks (cmp/sub/and/bextr/bzhi).
 func switchTableCount(window []Instruction, idxReg x86asm.Reg) int {
-	n, _ := switchTableCountKill(window, idxReg)
+	n, _, _ := switchTableCountKill(window, idxReg)
 	return n
+}
+
+// copyInto reports, for an instruction between a bounds check and its conditional jump, whether
+// it writes reg and, if it is a register copy (`mov reg, src`), the source: a check on src then
+// bounds reg. A write that is not a copy replaces the value the check tested.
+func copyInto(inst x86asm.Inst, reg x86asm.Reg) (writes bool, src x86asm.Reg) {
+	if !modifiesReg(inst, reg) {
+		return false, 0
+	}
+	switch inst.Op {
+	case x86asm.MOV, x86asm.MOVSXD, x86asm.MOVZX, x86asm.MOVSX:
+		if r, ok := inst.Args[1].(x86asm.Reg); ok && gprFamily(r) != 0 {
+			return true, r
+		}
+	}
+	return true, 0
 }
 
 // switchTableCountKill is switchTableCount that also reports whether the scan
 // stopped at a write to the index register; bounds checks in blocks before
-// such a write test an obsolete value and must not be used.
-func switchTableCountKill(window []Instruction, idxReg x86asm.Reg) (int, bool) {
+// such a write test an obsolete value and must not be used. With no count and no
+// such write, it also returns the register the index came from at window[0] (after
+// register copies), which is the one to look for in the predecessor blocks.
+func switchTableCountKill(window []Instruction, idxReg x86asm.Reg) (int, bool, x86asm.Reg) {
 	i := len(window) - 1
 	for ; i >= 0; i-- {
 		inst := window[i].Inst
@@ -502,7 +561,7 @@ func switchTableCountKill(window []Instruction, idxReg x86asm.Reg) (int, bool) {
 								if imm, ok := instImm(prev.Args[1]); ok {
 									length := (uint64(imm) >> 8) & 0xff
 									if length > 0 && length <= 12 {
-										return 1 << length, false
+										return 1 << length, false, idxReg
 									}
 								}
 								break
@@ -524,7 +583,7 @@ func switchTableCountKill(window []Instruction, idxReg x86asm.Reg) (int, bool) {
 						if prev.Op == x86asm.MOV {
 							if pDst, ok := prev.Args[0].(x86asm.Reg); ok && sameGPR(pDst, idxR) {
 								if imm, ok := instImm(prev.Args[1]); ok && imm > 0 && imm <= 12 {
-									return 1 << imm, false
+									return 1 << imm, false, idxReg
 								}
 								break
 							}
@@ -540,7 +599,7 @@ func switchTableCountKill(window []Instruction, idxReg x86asm.Reg) (int, bool) {
 			if dst, ok := inst.Args[0].(x86asm.Reg); ok && sameGPR(dst, idxReg) {
 				if imm, ok := instImm(inst.Args[1]); ok && imm > 0 && imm < maxJumpTableEntries {
 					if (imm & (imm + 1)) == 0 {
-						return int(imm + 1), false
+						return int(imm + 1), false, idxReg
 					}
 				}
 				break
@@ -548,49 +607,40 @@ func switchTableCountKill(window []Instruction, idxReg x86asm.Reg) (int, bool) {
 		}
 
 		// 4. Conditional jump bounds checks (CMP/SUB + JA/JAE/JB/JBE)
-		if inst.Op == x86asm.JA || inst.Op == x86asm.JAE {
+		// The instructions between the check and the jump may copy the checked register into the
+		// index (`cmp ebx, 7; mov eax, ebx; ja`): cand follows those copies back to the register
+		// the check must test. Any other write of cand ends the search.
+		if inst.Op == x86asm.JA || inst.Op == x86asm.JAE || inst.Op == x86asm.JB || inst.Op == x86asm.JBE {
+			above := inst.Op == x86asm.JA || inst.Op == x86asm.JAE
+			cand := idxReg
 			for j := i - 1; j >= 0; j-- {
 				prev := window[j].Inst
 				if prev.Op == x86asm.MOV || prev.Op == x86asm.LEA || prev.Op == x86asm.NOP ||
-					prev.Op == x86asm.MOVZX || prev.Op == x86asm.MOVSX {
+					prev.Op == x86asm.MOVZX || prev.Op == x86asm.MOVSX || prev.Op == x86asm.MOVSXD {
+					writes, src := copyInto(prev, cand)
+					if writes {
+						if src == 0 {
+							break
+						}
+						cand = src
+					}
 					continue
 				}
-				if prev.Op != x86asm.CMP && prev.Op != x86asm.SUB {
+				if prev.Op != x86asm.CMP && !(above && prev.Op == x86asm.SUB) {
 					break
 				}
-				if dst, ok := prev.Args[0].(x86asm.Reg); ok && (sameGPR(dst, idxReg) || copiedFrom(window, j, idxReg, dst)) {
+				if r, ok := prev.Args[0].(x86asm.Reg); ok && (sameGPR(r, cand) || copiedFrom(window, j, cand, r)) {
 					if imm, ok := instImm(prev.Args[1]); ok && imm >= 0 && imm < maxJumpTableEntries {
 						n := int(imm)
-						if inst.Op == x86asm.JA {
+						if inst.Op == x86asm.JA || inst.Op == x86asm.JBE {
 							n++
 						}
 						if n > 0 && n <= maxJumpTableEntries {
-							return n, false
+							return n, false, idxReg
 						}
 					}
 				}
-			}
-		} else if inst.Op == x86asm.JB || inst.Op == x86asm.JBE {
-			for j := i - 1; j >= 0; j-- {
-				prev := window[j].Inst
-				if prev.Op == x86asm.MOV || prev.Op == x86asm.LEA || prev.Op == x86asm.NOP ||
-					prev.Op == x86asm.MOVZX || prev.Op == x86asm.MOVSX {
-					continue
-				}
-				if prev.Op != x86asm.CMP {
-					break
-				}
-				if src, ok := prev.Args[0].(x86asm.Reg); ok && (sameGPR(src, idxReg) || copiedFrom(window, j, idxReg, src)) {
-					if imm, ok := instImm(prev.Args[1]); ok && imm >= 0 && imm < maxJumpTableEntries {
-						n := int(imm)
-						if inst.Op == x86asm.JBE {
-							n++
-						}
-						if n > 0 && n <= maxJumpTableEntries {
-							return n, false
-						}
-					}
-				}
+				break
 			}
 		}
 
@@ -608,7 +658,7 @@ func switchTableCountKill(window []Instruction, idxReg x86asm.Reg) (int, bool) {
 		}
 	}
 
-	return 0, i >= 0
+	return 0, i >= 0, idxReg
 }
 
 // byteIndexCap returns 256 when the index register of a jump table was last written by a
@@ -747,26 +797,30 @@ func (d *Disassembler) readResolvedTargets(sw ResolvedJumpTable, fnStart, fnEnd 
 	return targets
 }
 
-// ResolveJumpTable resolves jump table metadata and returns target addresses.
+// ResolveJumpTable resolves jump table metadata and returns target addresses. window is the
+// linear decode of the function up to the jmp; the searches cover the straight-line run that
+// ends at the jmp.
 func (d *Disassembler) ResolveJumpTable(
 	window []Instruction,
 	findTableAddr func(reg x86asm.Reg) (uint64, bool),
 	findCount func(idxReg x86asm.Reg) (int, bool),
 	fnStart, fnEnd uint64,
 ) (ResolvedJumpTable, bool) {
-	return d.resolveJumpTableCapped(window, findTableAddr, findCount, nil, fnStart, fnEnd)
+	return d.resolveJumpTableCapped(window, findTableAddr, findCount, nil, straightLineStart(window), fnStart, fnEnd)
 }
 
 // resolveJumpTableCapped is ResolveJumpTable with findCap, which looks for the source of the
-// index register in the predecessor blocks (see byteIndexCap) when window has none.
+// index register in the predecessor blocks (see byteIndexCap) when window has none, and with
+// the first index of the backward searches (lo, see matchJumpTable).
 func (d *Disassembler) resolveJumpTableCapped(
 	window []Instruction,
 	findTableAddr func(reg x86asm.Reg) (uint64, bool),
 	findCount func(idxReg x86asm.Reg) (int, bool),
 	findCap func(idxReg x86asm.Reg) int,
+	lo int,
 	fnStart, fnEnd uint64,
 ) (ResolvedJumpTable, bool) {
-	table, ok := matchJumpTable(window, findTableAddr, findCount, findCap)
+	table, ok := matchJumpTable(window, findTableAddr, findCount, findCap, lo)
 	if !ok {
 		return ResolvedJumpTable{}, false
 	}

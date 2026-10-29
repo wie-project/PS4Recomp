@@ -107,7 +107,7 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 
 	for head := 0; head < len(queue); head++ {
 		if head == 0 || head%10000 == 0 || head == len(queue)-1 {
-			fmt.Printf("[*] Progress: %d / %d functions analyzed (Queue capacity: %d)\n",
+			fmt.Fprintf(os.Stderr, "[*] Progress: %d / %d functions analyzed (Queue capacity: %d)\n",
 				head, functionCount, len(queue))
 		}
 		fn, calls, err := d.DisasmFunction(queue[head])

@@ -35,6 +35,10 @@ func (l *Arm64Lifter) liftMxcsr(inst disasm.Instruction, nextPC uint64, lines []
 // mxcsrToFpcr applies the MXCSR value in register w (rounding mode and flush-to-zero) to FPCR.
 // x86 RC (bits 14:13: 00 nearest, 01 down, 10 up, 11 zero) is ARM RMode (bits 23:22: 00 RN,
 // 01 RP, 10 RM, 11 RZ) with the two bits swapped; MXCSR.FZ (bit 15) is FPCR.FZ (bit 24).
+// Without FEAT_AFP (Apple M1) FPCR.FZ also flushes denormal inputs, so a guest that sets FTZ
+// alone gets DAZ as well, and MXCSR.DAZ (bit 6) has no separate effect. TLOU and Uncharted 4
+// set FTZ and DAZ together, which this matches; inFAMOUS sets FTZ alone, where results are
+// already flushed and only a denormal loaded from memory differs.
 // Scratch: x1, x2.
 func mxcsrToFpcr(w string) []string {
 	return []string{
@@ -591,8 +595,7 @@ func (l *Arm64Lifter) liftLoop(inst disasm.Instruction, nextPC uint64, fn *disas
 	}
 	localLbl := localLabel(fn, target)
 	local := localLbl != ""
-	l.labelCounter++
-	skip := fmt.Sprintf("L_%s_skip_%x_%d", strings.ToLower(op.String()), inst.Address, l.labelCounter)
+	skip := fmt.Sprintf("L_%s_skip_%x", strings.ToLower(op.String()), inst.Address)
 	far := func() { lines = append(lines, l.branchTo(fn, target)...) }
 
 	switch op {

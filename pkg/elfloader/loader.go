@@ -107,11 +107,16 @@ type LoadedELF struct {
 	// CanaryAddr tracks the guest virtual address allocated for the stack canary value.
 	CanaryAddr uint64
 
-	// TLSVaddr, TLSFilesz, TLSMemsz, and TLSAlign store PT_TLS template metadata.
+	// TLSVaddr, TLSFilesz, TLSMemsz, and TLSAlign store this image's own PT_TLS template.
 	TLSVaddr  uint64
 	TLSFilesz uint64
 	TLSMemsz  uint64
 	TLSAlign  uint64
+	// TLSModules is the process's static TLS: the executable's and every linked module's
+	// PT_TLS, by TLS module index (AddTLSModule, LayoutStaticTLS).
+	TLSModules []TLSModule
+	// tlsTPOFF holds the TPOFF64 slots AddTLSModule queued for ApplyTLSOffsets.
+	tlsTPOFF []pendingTPOFF
 
 	// MemoryImage holds the pre-mapped guest memory image with relative relocs applied.
 	MemoryImage []byte

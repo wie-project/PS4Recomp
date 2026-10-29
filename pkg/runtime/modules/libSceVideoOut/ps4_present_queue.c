@@ -54,23 +54,37 @@ static int oldest_queued(const ps4_present_queue *q, bool skip_keep) {
     return best;
 }
 
-int ps4_pq_try_acquire_locked(ps4_present_queue *q, int *superseded) {
-    if (superseded) *superseded = 0;
+// The slot a producer would get now (*replaces: it is a queued frame replaced by mailbox); -1
+// when none. Shared by the acquire and the query so the two cannot disagree.
+static int acquirable(const ps4_present_queue *q, bool *replaces) {
+    *replaces = false;
     if (!q->mailbox && q->credits <= 0) return -1;
-    for (int i = 0; i < q->n; i++) {
-        if (q->state[i] == PS4_PQ_FREE) {
-            q->state[i] = PS4_PQ_RENDERING;
-            if (!q->mailbox) q->credits--;
-            return i;
-        }
-    }
+    for (int i = 0; i < q->n; i++)
+        if (q->state[i] == PS4_PQ_FREE) return i;
     if (!q->mailbox) return -1;
     const int i = oldest_queued(q, true);
+    *replaces = i >= 0;
+    return i;
+}
+
+int ps4_pq_try_acquire_locked(ps4_present_queue *q, int *superseded) {
+    if (superseded) *superseded = 0;
+    bool replaces;
+    const int i = acquirable(q, &replaces);
     if (i < 0) return -1;
     q->state[i] = PS4_PQ_RENDERING;
-    q->superseded++;
-    if (superseded) *superseded = 1;
+    if (replaces) {
+        q->superseded++;
+        if (superseded) *superseded = 1;
+    } else if (!q->mailbox) {
+        q->credits--;
+    }
     return i;
+}
+
+bool ps4_pq_can_acquire_locked(const ps4_present_queue *q) {
+    bool replaces;
+    return acquirable(q, &replaces) >= 0;
 }
 
 bool ps4_pq_submit_locked(ps4_present_queue *q, int slot, bool keep) {
@@ -104,6 +118,13 @@ bool ps4_pq_release_locked(ps4_present_queue *q, int slot) {
 
 void ps4_pq_grant_locked(ps4_present_queue *q) {
     if (q->credits < 1) q->credits++;
+}
+
+bool ps4_pq_claim_drawable_locked(ps4_present_queue *q) {
+    for (int i = 0; i < q->n; i++)
+        if (q->state[i] == PS4_PQ_RENDERING || q->state[i] == PS4_PQ_QUEUED) return false;
+    if (!q->mailbox && q->credits > 0) q->credits--;
+    return true;
 }
 
 bool ps4_pq_idle_locked(const ps4_present_queue *q) {

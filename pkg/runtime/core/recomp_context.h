@@ -114,11 +114,7 @@ typedef struct GuestContext {
   // Active exception unwinding frame stack
   UnwindFrame *unwind_frame;
 
-  // ELF PT_TLS and Static TLS Layout
-  uint64_t tls_vaddr;
-  uint64_t tls_filesz;
-  uint64_t tls_memsz;
-  uint64_t tls_align;
+  // Size of the static TLS area below the TCB (recomp_init_tls_modules)
   uint64_t static_tls_size;
 } GuestContext;
 

@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+// libSceAjm HLE: ATRAC9 (libatrac9) and MP3 (minimp3) decoding on a worker thread per context.
+//
+// Debug env var:
+//   PS4_AJM_LOG=1   log codec registration, instance creation and, every ~2 s (from the worker,
+//                   after a batch), each live instance's jobs, frames, samples and errors.
+// The destroy line with an instance's totals is always printed.
+
 #include "ps4_ajm.h"
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/time.h>
 #include <stdbool.h>
@@ -140,6 +148,8 @@ typedef struct {
     // Common PCM intermediate buffer (one decoded frame)
     uint8_t *pcm_buffer;
     size_t pcm_buffer_cap;
+
+    PS4AjmInstanceStats stats; // see ps4_ajm.h
 } AjmInstance;
 
 #define MAX_AJM_OUTPUT_BUFS 16
@@ -157,6 +167,8 @@ typedef struct {
     void *control_out_buf;
     size_t control_out_size;
     void *return_addr;
+    const void *chunk_addr;  // the job chunk inside the batch buffer
+    uint32_t cmd_offset;     // its byte offset from the start of the batch buffer
 } AjmParsedJob;
 
 typedef struct AjmBatch {
@@ -170,6 +182,13 @@ typedef struct AjmBatch {
     AjmParsedJob *jobs;
     size_t num_jobs;
     size_t cap_jobs;
+    // First job the engine could not run; written by the worker before `finished` is set and
+    // read by sceAjmBatchWait after it, so the batch mutex orders both.
+    bool has_error;
+    int32_t error_code;
+    const void *error_job_addr;
+    uint32_t error_cmd_offset;
+    const void *error_job_ra;
     struct AjmBatch *next;
 } AjmBatch;
 
@@ -191,6 +210,67 @@ static AjmContext g_ajm_contexts[MAX_AJM_CONTEXTS];
 static AjmInstance g_ajm_instances[MAX_AJM_INSTANCES];
 static AjmBatch g_ajm_batches[MAX_AJM_BATCHES];
 static uint32_t g_next_batch_id = 1;
+
+// Result bits that make a job an error (see PS4AjmInstanceStats).
+#define AJM_RESULT_ERROR_MASK                                                                   \
+    (ORBIS_AJM_RESULT_NOT_INITIALIZED | ORBIS_AJM_RESULT_INVALID_DATA |                         \
+     ORBIS_AJM_RESULT_INVALID_PARAM | ORBIS_AJM_RESULT_TOO_MANY_CHANS |                         \
+     ORBIS_AJM_RESULT_UNSUPP_FLAG | ORBIS_AJM_RESULT_CODEC_ERROR | ORBIS_AJM_RESULT_FATAL)
+
+#define AJM_LOG_PERIOD_US 2000000ULL
+static int g_ajm_log = -1;
+static uint64_t g_ajm_last_log_us = 0; // guarded by g_ajm_lock
+
+static bool ajm_log_enabled(void) {
+    if (g_ajm_log < 0) {
+        const char *e = getenv("PS4_AJM_LOG");
+        g_ajm_log = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return g_ajm_log == 1;
+}
+
+static uint64_t ajm_now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
+
+// The guest-visible id of an instance slot: slot | codec << 14.
+static uint32_t ajm_instance_full_id(const AjmInstance *inst) {
+    return inst->id | ((uint32_t)inst->codec_type << 14);
+}
+
+// Called with g_ajm_lock held.
+static void ajm_log_destroyed(const AjmInstance *inst) {
+    fprintf(stderr, "[AJM] instance 0x%x destroyed: jobs %llu, frames %llu, errors %llu\n",
+            ajm_instance_full_id(inst), (unsigned long long)inst->stats.jobs,
+            (unsigned long long)inst->stats.frames_decoded, (unsigned long long)inst->stats.errors);
+}
+
+// Called by the worker after a batch, without locks held: every AJM_LOG_PERIOD_US, one line per
+// live instance.
+static void ajm_log_maybe(void) {
+    if (!ajm_log_enabled()) {
+        return;
+    }
+    uint64_t now = ajm_now_us();
+    pthread_mutex_lock(&g_ajm_lock);
+    if (g_ajm_last_log_us != 0 && now - g_ajm_last_log_us < AJM_LOG_PERIOD_US) {
+        pthread_mutex_unlock(&g_ajm_lock);
+        return;
+    }
+    g_ajm_last_log_us = now;
+    for (int i = 1; i < MAX_AJM_INSTANCES; i++) {
+        const AjmInstance *inst = &g_ajm_instances[i];
+        if (!inst->in_use) continue;
+        fprintf(stderr, "[AJM] instance 0x%x: jobs %llu, frames %llu, samples %llu, errors %llu (last 0x%x)\n",
+                ajm_instance_full_id(inst), (unsigned long long)inst->stats.jobs,
+                (unsigned long long)inst->stats.frames_decoded,
+                (unsigned long long)inst->stats.samples_out, (unsigned long long)inst->stats.errors,
+                (uint32_t)inst->stats.last_error);
+    }
+    pthread_mutex_unlock(&g_ajm_lock);
+}
 
 static inline void *guest_to_host(GuestContext *ctx, uint64_t gaddr) {
     if (!ctx || !ctx->mem_base || gaddr == 0) return NULL;
@@ -539,7 +619,9 @@ static int32_t mp3_decode(AjmInstance *inst, uint8_t **pin, size_t *prem, AjmOut
         }                                                 \
     } while (0)
 
-static void process_single_job(AjmParsedJob *job) {
+// Runs one job. Returns 0, or the ORBIS_AJM_ERROR_* code for a job the engine could not run at
+// all (decode problems are not errors here: they are reported in the job's result sideband).
+static int32_t process_single_job(AjmParsedJob *job) {
     const uint32_t run_flags = AJM_JOB_RUN_FLAGS(job->flags);
     const uint32_t control_flags = AJM_JOB_CONTROL_FLAGS(job->flags);
     const uint32_t sideband_flags = AJM_JOB_SIDEBAND_FLAGS(job->flags);
@@ -577,7 +659,7 @@ static void process_single_job(AjmParsedJob *job) {
 
     if (job->instance_id == AJM_INSTANCE_STATISTICS) {
         // Statistics sidebands are not modelled; result is already zeroed.
-        return;
+        return 0;
     }
 
     pthread_mutex_lock(&g_ajm_lock);
@@ -585,11 +667,13 @@ static void process_single_job(AjmParsedJob *job) {
     if (!inst) {
         pthread_mutex_unlock(&g_ajm_lock);
         if (p_result) p_result->result = ORBIS_AJM_RESULT_INVALID_PARAM | ORBIS_AJM_RESULT_FATAL;
-        return;
+        return ORBIS_AJM_ERROR_INVALID_INSTANCE;
     }
 
     int32_t result_code = 0;
     int32_t internal_result = 0;
+    uint32_t frames_run = 0;
+    uint64_t samples_run = 0;
 
     // Control flags
     if (control_flags & AJM_CONTROL_RESET) {
@@ -646,11 +730,16 @@ static void process_single_job(AjmParsedJob *job) {
         }
 
         if (p_mframe) p_mframe->num_frames = frames;
+        const size_t written = out_total - ajm_out_remaining(&out);
         if (p_stream) {
             p_stream->input_consumed = (int32_t)(job->input_size - in_rem);
-            p_stream->output_written = (int32_t)(out_total - ajm_out_remaining(&out));
+            p_stream->output_written = (int32_t)written;
             p_stream->total_decoded_samples = inst->total_samples;
         }
+        const uint32_t out_ch = inst->codec_type == AJM_CODEC_AT9_DEC ? (uint32_t)inst->at9_info.channels
+                                                                       : inst->mp3_channels;
+        frames_run = frames;
+        if (out_ch > 0) samples_run = written / (out_ch * ajm_sample_size(inst->format));
     } else if (p_stream) {
         p_stream->total_decoded_samples = inst->total_samples;
     }
@@ -690,6 +779,13 @@ static void process_single_job(AjmParsedJob *job) {
             }
         }
     }
+    inst->stats.jobs++;
+    inst->stats.frames_decoded += frames_run;
+    inst->stats.samples_out += samples_run;
+    if (result_code & AJM_RESULT_ERROR_MASK) {
+        inst->stats.errors++;
+        inst->stats.last_error = result_code;
+    }
     pthread_mutex_unlock(&g_ajm_lock);
 
     if (truncated) {
@@ -708,6 +804,7 @@ static void process_single_job(AjmParsedJob *job) {
         p_result->result = result_code;
         p_result->internal_result = internal_result;
     }
+    return 0;
 }
 
 #undef SB_TAKE
@@ -731,7 +828,15 @@ static void *ajm_worker_thread(void *arg) {
 
         if (!batch->canceled) {
             for (size_t i = 0; i < batch->num_jobs; i++) {
-                process_single_job(&batch->jobs[i]);
+                AjmParsedJob *job = &batch->jobs[i];
+                const int32_t err = process_single_job(job);
+                if (err != 0 && !batch->has_error) {
+                    batch->has_error = true;
+                    batch->error_code = err;
+                    batch->error_job_addr = job->chunk_addr;
+                    batch->error_cmd_offset = job->cmd_offset;
+                    batch->error_job_ra = job->return_addr;
+                }
             }
         }
 
@@ -739,6 +844,7 @@ static void *ajm_worker_thread(void *arg) {
         batch->finished = true;
         pthread_cond_broadcast(&batch->cond);
         pthread_mutex_unlock(&batch->mutex);
+        ajm_log_maybe();
     }
     return NULL;
 }
@@ -839,6 +945,9 @@ void shim_sceAjmModuleRegister(GuestContext *ctx) {
 
     ajm_ctx->registered_codecs[codec_type] = true;
     pthread_mutex_unlock(&g_ajm_lock);
+    if (ajm_log_enabled()) {
+        fprintf(stderr, "[AJM] register codec %u\n", codec_type);
+    }
 
     ctx->rax = 0;
     SHIM_RETURN();
@@ -929,9 +1038,13 @@ void shim_sceAjmInstanceCreate(GuestContext *ctx) {
         inst->mp3_inited = true;
     }
 
-    uint32_t full_id = (uint32_t)slot | (codec_type << 14);
+    uint32_t full_id = ajm_instance_full_id(inst);
     *p_out_instance = full_id;
     pthread_mutex_unlock(&g_ajm_lock);
+    if (ajm_log_enabled()) {
+        fprintf(stderr, "[AJM] instance 0x%x created: codec %u flags 0x%llx\n", full_id, codec_type,
+                (unsigned long long)flags);
+    }
 
     ctx->rax = 0;
     SHIM_RETURN();
@@ -949,6 +1062,7 @@ void shim_sceAjmInstanceDestroy(GuestContext *ctx) {
         SHIM_RETURN();
     }
 
+    ajm_log_destroyed(inst);
     if (inst->at9_handle) {
         Atrac9ReleaseHandle(inst->at9_handle);
         inst->at9_handle = NULL;
@@ -962,6 +1076,21 @@ void shim_sceAjmInstanceDestroy(GuestContext *ctx) {
 
     ctx->rax = 0;
     SHIM_RETURN();
+}
+
+int ps4_ajm_instance_stats(uint32_t context, uint32_t instance, PS4AjmInstanceStats *out) {
+    if (!out) {
+        return (int)ORBIS_AJM_ERROR_INVALID_PARAMETER;
+    }
+    pthread_mutex_lock(&g_ajm_lock);
+    const AjmInstance *inst = get_instance_locked(instance);
+    if (!inst || inst->context_id != context || ajm_instance_full_id(inst) != instance) {
+        pthread_mutex_unlock(&g_ajm_lock);
+        return (int)ORBIS_AJM_ERROR_INVALID_INSTANCE;
+    }
+    *out = inst->stats;
+    pthread_mutex_unlock(&g_ajm_lock);
+    return 0;
 }
 
 void shim_sceAjmInstanceCodecType(GuestContext *ctx) {
@@ -1207,6 +1336,35 @@ void shim_sceAjmBatchJobRunSplitBufferRa(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+// SceAjmBatchError: the BatchError argument of sceAjmBatchStartBuffer / sceAjmBatchWait, which
+// the inFAMOUS call site at 0x872e4d hands to sceAjmBatchErrorDump. The layout is shadPS4's
+// (AjmBatchError). Filling it is this runtime's own choice: shadPS4 never writes it. Addresses
+// in it are guest addresses, 0 when outside guest memory.
+static uint64_t ajm_host_to_guest(const GuestContext *ctx, const void *p) {
+    const uint8_t *b = (const uint8_t *)p;
+    if (b && ctx->mem_base && b >= ctx->mem_base && b < ctx->mem_base + ctx->mem_size) {
+        return (uint64_t)(b - ctx->mem_base);
+    }
+    return 0; // never hand a host pointer to the guest
+}
+
+static void ajm_write_batch_error(GuestContext *ctx, uint64_t record_gaddr, int32_t code,
+                                  const void *job, uint32_t cmd_offset, const void *job_ra) {
+    OrbisAjmBatchError *rec = (OrbisAjmBatchError *)guest_to_host(ctx, record_gaddr);
+    if (!rec) return;
+    memset(rec, 0, sizeof(*rec));
+    rec->error_code = code;
+    rec->job_addr = (const void *)(uintptr_t)ajm_host_to_guest(ctx, job);
+    rec->cmd_offset = cmd_offset;
+    rec->job_ra = (const void *)(uintptr_t)ajm_host_to_guest(ctx, job_ra);
+}
+
+// Fails sceAjmBatchStartBuffer with `code`, recording it for the caller's sceAjmBatchErrorDump.
+static uint64_t ajm_start_fail(GuestContext *ctx, uint64_t record_gaddr, int32_t code) {
+    ajm_write_batch_error(ctx, record_gaddr, code, NULL, 0, NULL);
+    return (uint64_t)(uint32_t)code;
+}
+
 void shim_sceAjmBatchStartBuffer(GuestContext *ctx) {
     uint32_t context_id = (uint32_t)ctx->rdi;
     uint64_t batch_gaddr = ctx->rsi;
@@ -1215,24 +1373,23 @@ void shim_sceAjmBatchStartBuffer(GuestContext *ctx) {
     uint64_t batch_err_gaddr = ctx->r8;
     uint64_t out_batch_id_gaddr = ctx->r9;
     (void)priority;
-    (void)batch_err_gaddr;
 
     if ((batch_size & 7) != 0 || out_batch_id_gaddr == 0) {
-        ctx->rax = ORBIS_AJM_ERROR_MALFORMED_BATCH;
+        ctx->rax = ajm_start_fail(ctx, batch_err_gaddr, ORBIS_AJM_ERROR_MALFORMED_BATCH);
         SHIM_RETURN();
     }
 
     uint8_t *p_batch = (uint8_t *)guest_to_host(ctx, batch_gaddr);
     uint32_t *p_out_batch_id = (uint32_t *)guest_to_host(ctx, out_batch_id_gaddr);
     if (!p_batch || !p_out_batch_id) {
-        ctx->rax = ORBIS_AJM_ERROR_INVALID_PARAMETER;
+        ctx->rax = ajm_start_fail(ctx, batch_err_gaddr, ORBIS_AJM_ERROR_INVALID_PARAMETER);
         SHIM_RETURN();
     }
 
     pthread_mutex_lock(&g_ajm_lock);
     if (context_id >= MAX_AJM_CONTEXTS || !g_ajm_contexts[context_id].in_use) {
         pthread_mutex_unlock(&g_ajm_lock);
-        ctx->rax = ORBIS_AJM_ERROR_INVALID_CONTEXT;
+        ctx->rax = ajm_start_fail(ctx, batch_err_gaddr, ORBIS_AJM_ERROR_INVALID_CONTEXT);
         SHIM_RETURN();
     }
 
@@ -1247,7 +1404,7 @@ void shim_sceAjmBatchStartBuffer(GuestContext *ctx) {
 
     if (slot < 0) {
         pthread_mutex_unlock(&g_ajm_lock);
-        ctx->rax = ORBIS_AJM_ERROR_OUT_OF_MEMORY;
+        ctx->rax = ajm_start_fail(ctx, batch_err_gaddr, ORBIS_AJM_ERROR_OUT_OF_MEMORY);
         SHIM_RETURN();
     }
 
@@ -1286,6 +1443,8 @@ void shim_sceAjmBatchStartBuffer(GuestContext *ctx) {
             AjmParsedJob *pj = &b->jobs[b->num_jobs++];
             memset(pj, 0, sizeof(*pj));
             pj->instance_id = chunk_payload(job_chunk->header);
+            pj->chunk_addr = job_chunk;
+            pj->cmd_offset = (uint32_t)((const uint8_t *)job_chunk - p_batch);
 
             AjmStream sub = { .cur = stream.cur, .end = stream.cur + job_chunk->size };
             while (stream_has(&sub, sizeof(AjmChunkHeader))) {
@@ -1325,6 +1484,7 @@ void shim_sceAjmBatchStartBuffer(GuestContext *ctx) {
     }
 
     *p_out_batch_id = b->id;
+    ajm_write_batch_error(ctx, batch_err_gaddr, 0, NULL, 0, NULL);
 
     // Queue batch to worker
     pthread_mutex_lock(&ajm_ctx->queue_mutex);
@@ -1349,7 +1509,6 @@ void shim_sceAjmBatchWait(GuestContext *ctx) {
     uint32_t timeout_ms = (uint32_t)ctx->rdx;
     uint64_t batch_err_gaddr = ctx->rcx;
     (void)context_id;
-    (void)batch_err_gaddr;
 
     pthread_mutex_lock(&g_ajm_lock);
     AjmBatch *b = NULL;
@@ -1388,7 +1547,34 @@ void shim_sceAjmBatchWait(GuestContext *ctx) {
         }
     }
     bool was_canceled = b->canceled;
+    const bool finished = b->finished;
+    // The worker wrote these before it set `finished`; they mean nothing before that.
+    bool failed = false;
+    int32_t error_code = 0;
+    const void *error_job = NULL;
+    uint32_t error_cmd_offset = 0;
+    const void *error_job_ra = NULL;
+    if (finished) {
+        failed = b->has_error;
+        error_code = b->error_code;
+        error_job = b->error_job_addr;
+        error_cmd_offset = b->error_cmd_offset;
+        error_job_ra = b->error_job_ra;
+    }
     pthread_mutex_unlock(&b->mutex);
+
+    if (finished && !was_canceled) {
+        // Fill the record for the caller's sceAjmBatchErrorDump: the first job the engine could
+        // not run, or a cleared record. The call itself still returns 0 (as shadPS4's does): the
+        // failure is also in that job's result sideband, and a batch that lost its instance to a
+        // racing destroy must not turn into a fatal error for the game.
+        if (failed) {
+            ajm_write_batch_error(ctx, batch_err_gaddr, error_code, error_job, error_cmd_offset,
+                                  error_job_ra);
+        } else {
+            ajm_write_batch_error(ctx, batch_err_gaddr, 0, NULL, 0, NULL);
+        }
+    }
 
     if (ret == 0) {
         pthread_mutex_lock(&g_ajm_lock);
@@ -1434,12 +1620,135 @@ void shim_sceAjmBatchCancel(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+// SceAjmBatchInfo, the builder state of a batch: the buffer, the bytes used so far and its size.
+typedef struct {
+    uint64_t p_buffer;
+    uint64_t offset;
+    uint64_t size;
+} AjmBatchInfo;
+
+static const char *ajm_error_name(int32_t code) {
+    switch ((uint32_t)code) {
+    case ORBIS_AJM_ERROR_UNKNOWN: return "UNKNOWN";
+    case ORBIS_AJM_ERROR_INVALID_CONTEXT: return "INVALID_CONTEXT";
+    case ORBIS_AJM_ERROR_INVALID_INSTANCE: return "INVALID_INSTANCE";
+    case ORBIS_AJM_ERROR_INVALID_BATCH: return "INVALID_BATCH";
+    case ORBIS_AJM_ERROR_INVALID_PARAMETER: return "INVALID_PARAMETER";
+    case ORBIS_AJM_ERROR_OUT_OF_MEMORY: return "OUT_OF_MEMORY";
+    case ORBIS_AJM_ERROR_OUT_OF_RESOURCES: return "OUT_OF_RESOURCES";
+    case ORBIS_AJM_ERROR_CODEC_NOT_SUPPORTED: return "CODEC_NOT_SUPPORTED";
+    case ORBIS_AJM_ERROR_CODEC_ALREADY_REGISTERED: return "CODEC_ALREADY_REGISTERED";
+    case ORBIS_AJM_ERROR_CODEC_NOT_REGISTERED: return "CODEC_NOT_REGISTERED";
+    case ORBIS_AJM_ERROR_WRONG_REVISION_FLAG: return "WRONG_REVISION_FLAG";
+    case ORBIS_AJM_ERROR_FLAG_NOT_SUPPORTED: return "FLAG_NOT_SUPPORTED";
+    case ORBIS_AJM_ERROR_BUSY: return "BUSY";
+    case ORBIS_AJM_ERROR_BAD_PRIORITY: return "BAD_PRIORITY";
+    case ORBIS_AJM_ERROR_IN_PROGRESS: return "IN_PROGRESS";
+    case ORBIS_AJM_ERROR_RETRY: return "RETRY";
+    case ORBIS_AJM_ERROR_MALFORMED_BATCH: return "MALFORMED_BATCH";
+    case ORBIS_AJM_ERROR_JOB_CREATION: return "JOB_CREATION";
+    case ORBIS_AJM_ERROR_INVALID_OPCODE: return "INVALID_OPCODE";
+    case ORBIS_AJM_ERROR_PRIORITY_VIOLATION: return "PRIORITY_VIOLATION";
+    case ORBIS_AJM_ERROR_BUFFER_TOO_BIG: return "BUFFER_TOO_BIG";
+    case ORBIS_AJM_ERROR_INVALID_ADDRESS: return "INVALID_ADDRESS";
+    case ORBIS_AJM_ERROR_CANCELLED: return "CANCELLED";
+    default: return "?";
+    }
+}
+
+// sceAjmBatchErrorDump(const SceAjmBatchInfo *batch, const SceAjmBatchError *error).
+// Evidence: the inFAMOUS call site at 0x872e4d passes a 24-byte SceAjmBatchInfo (shadPS4's
+// AjmBatchInfo: buffer, offset, size) and the 32-byte record that sceAjmBatchStartBuffer just
+// failed to fill, in that order. Everything else is this runtime's own choice: the stderr
+// print, INVALID_PARAMETER for a NULL argument and INVALID_BATCH for a batch whose named
+// command lies outside its used bytes (shadPS4 stubs the function, so there is no console
+// reference for the codes). An empty record (error_code 0) prints nothing; a record without a
+// job (a StartBuffer failure) prints the code only.
 void shim_sceAjmBatchErrorDump(GuestContext *ctx) {
+    const AjmBatchInfo *info = (const AjmBatchInfo *)guest_to_host(ctx, ctx->rdi);
+    const OrbisAjmBatchError *err = (const OrbisAjmBatchError *)guest_to_host(ctx, ctx->rsi);
+    if (!info || !err) {
+        ctx->rax = ORBIS_AJM_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+    if (err->error_code == 0) {
+        ctx->rax = 0;
+        SHIM_RETURN();
+    }
+    char hex[32 * 3 + 1];
+    hex[0] = 0;
+    if (err->job_addr) {
+        // The failing command must lie inside the part of the buffer the builder has filled.
+        const uint8_t *buf = (const uint8_t *)guest_to_host(ctx, info->p_buffer);
+        if (!buf || info->offset > info->size || err->cmd_offset >= info->offset) {
+            ctx->rax = ORBIS_AJM_ERROR_INVALID_BATCH;
+            SHIM_RETURN();
+        }
+        const size_t room = (size_t)(info->offset - err->cmd_offset);
+        const size_t n = room < 32 ? room : 32;
+        for (size_t i = 0; i < n; i++) {
+            snprintf(hex + i * 3, 4, "%02x ", buf[err->cmd_offset + i]);
+        }
+        hex[n * 3] = 0;
+    }
+    fprintf(stderr, "[AJM] batch error 0x%08x (%s)", (uint32_t)err->error_code,
+            ajm_error_name(err->error_code));
+    if (err->job_addr) {
+        fprintf(stderr, ": command at offset 0x%x, job %p, return address %p\n[AJM]   command bytes: %s",
+                err->cmd_offset, err->job_addr, err->job_ra, hex);
+    }
+    fprintf(stderr, "\n");
     ctx->rax = 0;
     SHIM_RETURN();
 }
 
+// sceAjmDecAt9ParseConfigData(config, info). Evidence: the config word layout is libatrac9's
+// (decinit.c ReadConfigData: header 0xFE, 4-bit rate index, 3-bit channel config, a 0 bit,
+// 11-bit frame bytes - 1, 2-bit superframe index) and the output fields are shadPS4's
+// AjmSidebandDecAt9CodecInfo. inFAMOUS does not import this function, and no reference gives
+// its signature: taking a pointer to the 4 config bytes (the start of
+// AjmDecAt9InitializeParameters) and a pointer to the 16-byte codec info, and returning
+// INVALID_PARAMETER for a config the decoder refuses, are this runtime's own choices.
 void shim_sceAjmDecAt9ParseConfigData(GuestContext *ctx) {
+    const uint8_t *config = (const uint8_t *)guest_to_host(ctx, ctx->rdi);
+    OrbisAjmSidebandDecAt9CodecInfo *out = (OrbisAjmSidebandDecAt9CodecInfo *)guest_to_host(ctx, ctx->rsi);
+    if (!config || !out) {
+        ctx->rax = ORBIS_AJM_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+    unsigned char cfg[ORBIS_AT9_CONFIG_DATA_SIZE];
+    memcpy(cfg, config, sizeof(cfg));
+    // Check what libatrac9 indexes tables with before handing it the word: header, the validation
+    // bit, and a channel config below the 6 entries of its ChannelConfigs[]. All 16 rate indices
+    // have entries in its sample-rate, frame-samples-power and band-count tables.
+    const uint32_t word = ((uint32_t)cfg[0] << 24) | ((uint32_t)cfg[1] << 16) | ((uint32_t)cfg[2] << 8) | cfg[3];
+    const uint32_t channel_config = (word >> 17) & 0x7;
+    const uint32_t validation_bit = (word >> 16) & 0x1;
+    if (cfg[0] != 0xFE || validation_bit != 0 || channel_config >= 6) {
+        ctx->rax = ORBIS_AJM_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+    void *handle = Atrac9GetHandle();
+    if (!handle) {
+        ctx->rax = ORBIS_AJM_ERROR_OUT_OF_MEMORY;
+        SHIM_RETURN();
+    }
+    // Atrac9InitDecoder rebuilds the library's global tables, which the worker reads while it
+    // decodes under g_ajm_lock.
+    Atrac9CodecInfo info;
+    pthread_mutex_lock(&g_ajm_lock);
+    const bool ok = Atrac9InitDecoder(handle, cfg) == 0 && Atrac9GetCodecInfo(handle, &info) == 0 &&
+                    info.superframeSize > 0 && info.framesInSuperframe > 0 && info.frameSamples > 0;
+    pthread_mutex_unlock(&g_ajm_lock);
+    Atrac9ReleaseHandle(handle);
+    if (!ok) {
+        ctx->rax = ORBIS_AJM_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+    out->super_frame_size = (uint32_t)info.superframeSize;
+    out->frames_in_super_frame = (uint32_t)info.framesInSuperframe;
+    out->next_frame_size = (uint32_t)info.superframeSize; // a fresh stream starts at a superframe
+    out->frame_samples = (uint32_t)info.frameSamples;
     ctx->rax = 0;
     SHIM_RETURN();
 }
@@ -1471,6 +1780,7 @@ void ps4_ajm_destroy(void) {
     }
     for (int i = 1; i < MAX_AJM_INSTANCES; i++) {
         if (g_ajm_instances[i].in_use) {
+            ajm_log_destroyed(&g_ajm_instances[i]);
             if (g_ajm_instances[i].at9_handle) {
                 Atrac9ReleaseHandle(g_ajm_instances[i].at9_handle);
                 g_ajm_instances[i].at9_handle = NULL;

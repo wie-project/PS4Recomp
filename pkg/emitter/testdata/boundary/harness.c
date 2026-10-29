@@ -479,12 +479,14 @@ void shim_test_record_ctx(GuestContext *ctx) {
 static uint64_t res_word(uint64_t off, int i) { return gmem64(D + 0x1000 + off)[i]; }
 
 // A guest thread created with pthread_create starts with a fresh context: its own TCB at its
-// FS base, the TCB slot naming its GuestContext, the default MXCSR, and its static TLS laid out
+// FS base, the TCB slot naming its GuestContext, its creator's MXCSR and x87 control word (FreeBSD
+// cpu_copy_thread), and its static TLS laid out
 // as the eboot's PT_TLS expects (variant II: the block ends at FS), which FS-relative accesses
 // and __tls_get_addr agree on. The creating thread is unaffected.
 static void test_thread(void) {
   memcpy(g_proc->mem_base + TLS_TEMPLATE, "TLS-TEMPLATE-OK!", 16);
-  recomp_init_tls(g_proc, TLS_TEMPLATE, 16, 32, 16);
+  static const RecompTlsModule tls_eboot[] = {{1, TLS_TEMPLATE, 16, 32, 16, 32}};
+  recomp_init_tls_modules(g_proc, tls_eboot, 1);
   gmem64(TLS_INDEX)[0] = 1;
   gmem64(TLS_INDEX)[1] = 8;
   uint64_t tdata0, tdata1;
@@ -501,7 +503,7 @@ static void test_thread(void) {
   expect("new thread g_current_ctx = its ctx", (uint64_t)(uintptr_t)g_child_seen.current_ctx,
          (uint64_t)(uintptr_t)g_child_seen.ctx);
   expect("new thread ctx->fs_base", g_child_seen.fs_base, fs2);
-  expect("new thread FPCR (default MXCSR)", res_word(RES_THR_CHILD, 3), 0);
+  expect("new thread FPCR (the creator's MXCSR)", res_word(RES_THR_CHILD, 3), FPCR_RM);
   expect("new thread .tdata word at FS - 32", res_word(RES_THR_CHILD, 4), tdata0);
   expect("new thread .tbss word at FS - 16", res_word(RES_THR_CHILD, 5), 0);
   expect("new thread argument", res_word(RES_THR_CHILD, 6), 0x1234);

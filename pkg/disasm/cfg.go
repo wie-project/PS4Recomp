@@ -470,7 +470,7 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			break
 		}
 
-		inst, err := x86asm.Decode(d.elf.MemoryImage[pc:], 64)
+		inst, err := Decode(d.elf.MemoryImage[pc:])
 		if err != nil || inst.Len == 0 {
 			// Do not truncate the rest of the function on an unexpected byte or decode failure.
 			// Insert a 1-byte UD2 placeholder so execution traps if reached, and continue
@@ -541,6 +541,16 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 					// Tail call to another function
 					discoveredCalls = append(discoveredCalls, target)
 				}
+			} else if sw, ok := d.ResolveJumpTable(insts[:i+1], nil, nil, entryAddr, fnEnd); ok && len(sw.Targets) > 0 {
+				// An indirect jmp through a jump table.
+				fn.JumpTables[inst.Address] = sw.Targets
+				for _, target := range sw.Targets {
+					if target >= entryAddr && target < fnEnd {
+						leaders[target] = true
+					} else {
+						discoveredCalls = append(discoveredCalls, target)
+					}
+				}
 			}
 			if nextPC < fnEnd {
 				leaders[nextPC] = true
@@ -576,17 +586,6 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 				leaders[nextPC] = true
 			}
 
-		case isIndirectJump(inst.Inst):
-			if sw, ok := d.ResolveJumpTable(insts[:i+1], nil, nil, entryAddr, fnEnd); ok && len(sw.Targets) > 0 {
-				fn.JumpTables[inst.Address] = sw.Targets
-				for _, target := range sw.Targets {
-					if target >= entryAddr && target < fnEnd {
-						leaders[target] = true
-					} else {
-						discoveredCalls = append(discoveredCalls, target)
-					}
-				}
-			}
 		}
 	}
 
@@ -746,7 +745,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 					break
 				}
 
-				inst, err := x86asm.Decode(d.elf.MemoryImage[pc:], 64)
+				inst, err := Decode(d.elf.MemoryImage[pc:])
 				if err != nil || inst.Len == 0 {
 					break
 				}
@@ -807,35 +806,69 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 							return 0, false
 						}
 
+						// findCount looks for the bounds check of the index (idxReg: the register
+						// it is in at this block's start) in the predecessor blocks. It must bound
+						// the index on every path to this jmp: the count is the largest one found,
+						// and a path that reaches the function entry, a write of the index or the
+						// search depth without a check gives none. "Every path" means every
+						// predecessor decoded so far: a predecessor found after the table is
+						// resolved is not checked again. Register copies (`mov idx, src`) are
+						// followed into the predecessors with the register they came from. A
+						// check that ends a block bounds the index only on one of its edges (ja:
+						// the fall-through, jb: the taken edge); on the other edge the index is
+						// out of that range and may still reach this jmp (a second switch on the
+						// same index), so the search goes on past it there.
 						findCount := func(idxReg x86asm.Reg) (int, bool) {
-							visited := make(map[uint64]bool)
-							queue := append([]uint64(nil), blockPreds[blockStart]...)
-							for _, q := range queue {
-								visited[q] = true
+							type edgeTo struct {
+								pred, child uint64
+								reg         x86asm.Reg
 							}
-							depth := 0
-							for len(queue) > 0 && depth < 16 {
-								depth++
-								var nextQueue []uint64
-								for _, pred := range queue {
-									insts := blockInsts[pred]
-									c, killed := switchTableCountKill(insts, idxReg)
-									if c > 0 {
-										return c, true
+							visited := make(map[edgeTo]bool)
+							var queue []edgeTo
+							for _, p := range blockPreds[blockStart] {
+								e := edgeTo{p, blockStart, idxReg}
+								if !visited[e] {
+									visited[e] = true
+									queue = append(queue, e)
+								}
+							}
+							if len(queue) == 0 {
+								return 0, false
+							}
+							found := 0
+							for depth := 0; len(queue) > 0 && depth < 16; depth++ {
+								var nextQueue []edgeTo
+								for _, e := range queue {
+									insts := blockInsts[e.pred]
+									if n := len(insts); n > 0 && !boundHoldsOnEdge(insts[n-1], e.child) {
+										insts = insts[:n-1]
 									}
-									if killed {
+									c, killed, from := switchTableCountKill(insts, e.reg)
+									if c > 0 {
+										found = max(found, c)
 										continue
 									}
-									for _, p := range blockPreds[pred] {
-										if !visited[p] {
-											visited[p] = true
-											nextQueue = append(nextQueue, p)
+									if killed {
+										return 0, false
+									}
+									preds := blockPreds[e.pred]
+									if len(preds) == 0 {
+										return 0, false
+									}
+									for _, p := range preds {
+										ne := edgeTo{p, e.pred, from}
+										if !visited[ne] {
+											visited[ne] = true
+											nextQueue = append(nextQueue, ne)
 										}
 									}
 								}
 								queue = nextQueue
 							}
-							return 0, false
+							if len(queue) > 0 || found == 0 {
+								return 0, false
+							}
+							return found, true
 						}
 
 						// findCap follows the index register back through the predecessors to its
@@ -884,7 +917,10 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 							return found
 						}
 
-						if sw, ok := d.resolveJumpTableCapped(curBlock, findTableAddr, findCount, findCap, entryAddr, fnEnd); ok && len(sw.Targets) > 0 && sw.Count <= 0 {
+						// curBlock is the decode run that ends at the jmp: straight-line code, so
+						// a real execution path to it (another path may join inside it), and
+						// the backward searches cover all of it.
+						if sw, ok := d.resolveJumpTableCapped(curBlock, findTableAddr, findCount, findCap, 0, entryAddr, fnEnd); ok && len(sw.Targets) > 0 && sw.Count <= 0 {
 							weak = append(weak, weakSwitch{pc: pc, from: blockStart, targets: sw.Targets})
 						} else if ok && len(sw.Targets) > 0 {
 							fn.JumpTables[pc] = sw.Targets

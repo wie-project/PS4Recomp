@@ -161,6 +161,23 @@ void shim_sceAjmStrError(GuestContext *ctx);
 
 void ps4_ajm_destroy(void);
 
+// Per-instance counts since sceAjmInstanceCreate, kept by the batch worker under the Ajm lock.
+// A job counts once it reached its instance (control and run jobs alike). An error is a job whose
+// result sideband has an error bit (NOT_INITIALIZED, INVALID_DATA, INVALID_PARAM, TOO_MANY_CHANS,
+// UNSUPP_FLAG, CODEC_ERROR, FATAL); PARTIAL_INPUT and NOT_ENOUGH_ROOM are flow control, not
+// errors. last_error is the result word of the last such job (0 = none).
+typedef struct {
+    uint64_t jobs;
+    uint64_t frames_decoded;
+    uint64_t samples_out; // per channel
+    uint64_t errors;
+    int32_t last_error;
+} PS4AjmInstanceStats;
+
+// Returns 0, ORBIS_AJM_ERROR_INVALID_INSTANCE (no such instance in that context) or
+// ORBIS_AJM_ERROR_INVALID_PARAMETER (out is NULL).
+int ps4_ajm_instance_stats(uint32_t context, uint32_t instance, PS4AjmInstanceStats *out);
+
 #ifdef __cplusplus
 }
 #endif

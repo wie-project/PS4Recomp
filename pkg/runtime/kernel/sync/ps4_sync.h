@@ -59,11 +59,12 @@ void shim_scePthreadCondWait(GuestContext *ctx);
 void shim_scePthreadCondTimedwait(GuestContext *ctx);
 void shim_scePthreadCondattrInit(GuestContext *ctx);
 void shim_scePthreadCondattrDestroy(GuestContext *ctx);
-void shim_pthread_mutex_isowned_np(GuestContext *ctx);
-void shim_scePthreadMutexIsownedNp(GuestContext *ctx);
 
 // Prints guest mutex statistics gathered over the last `frames` frames.
 void ps4_sync_print_stats(int frames);
+// Relocks of a mutex by its owner since start, by mutex type: out[0..4] for types 0..4,
+// out[5] for any other value.
+void ps4_sync_relocks_by_type(uint64_t out[6]);
 
 // C++ ABI guard shims
 void shim_cxa_guard_acquire(GuestContext *ctx);

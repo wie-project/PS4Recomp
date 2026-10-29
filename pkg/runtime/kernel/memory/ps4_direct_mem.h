@@ -4,100 +4,48 @@
 #include "recomp_runtime.h"
 #include <stdint.h>
 #include <stddef.h>
-#include <stdbool.h>
 #include <sys/types.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Memory totals defined according to PS4 hardware / shadPS4 specifications
-#define ORBIS_KERNEL_TOTAL_MEM          (5248ULL * 1024 * 1024)
-#define ORBIS_KERNEL_TOTAL_MEM_PRO      (5888ULL * 1024 * 1024)
-#define ORBIS_KERNEL_TOTAL_MEM_DEV      (6656ULL * 1024 * 1024)
-#define ORBIS_KERNEL_TOTAL_MEM_DEV_PRO  (7936ULL * 1024 * 1024)
+// Memory the kernel gives a game process, in MiB. The direct memory size is derived from the
+// process's SceKernelMemParam (see ps4_direct_mem_size_rule); the values are the ones shadPS4
+// uses (linker.cpp, memory.cpp SetupMemoryRegions). The Naughty Dog engine of The Last of Us
+// Remastered and Uncharted 4 tells a retail console from a development kit by comparing
+// sceKernelGetDirectMemorySize() with exactly 4608 MiB (base) and 5120 MiB (Neo), the rule's
+// values for their parameters.
+#define PS4_MEM_TOTAL_MIB 5248ULL                // base mode, flexible memory included
+#define PS4_MEM_TOTAL_NEO_MIB 5888ULL            // Neo (PS4 Pro) mode
+#define PS4_MEM_FLEXIBLE_DEFAULT_MIB 512ULL      // flexible memory without flexible_memory_size
+#define PS4_MEM_FLEXIBLE_BASE_MIB 64ULL          // added to flexible_memory_size
+#define PS4_MEM_NO_EXTENDED_2_BASE_MIB 128ULL    // taken in base mode without extended memory 2
+#define PS4_MEM_NO_EXTENDED_1_NEO_MIB 256ULL     // taken in Neo mode without extended memory 1
+#define PS4_MEM_SDK_EXTENDED_ALWAYS 0x05000000u  // from SDK 5.00 on, both extended memories are on
 
-#define ORBIS_KERNEL_FLEXIBLE_MEMORY_BASE (64ULL * 1024 * 1024)
-#define ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE (512ULL * 1024 * 1024)
-
-#define GUEST_PAGE_BITS 14
-#define GUEST_PAGE_SIZE (1ULL << GUEST_PAGE_BITS) // 16 KB (0x4000)
-#define DEFAULT_MAPPING_BASE 0x200000000ULL       // 8 GB
-
-// Physical Memory Type
-typedef enum PhysicalMemoryType {
-    PHYS_MEM_TYPE_FREE = 0,
-    PHYS_MEM_TYPE_ALLOCATED = 1,
-    PHYS_MEM_TYPE_MAPPED = 2,
-    PHYS_MEM_TYPE_POOLED = 3,
-    PHYS_MEM_TYPE_COMMITTED = 4,
-    PHYS_MEM_TYPE_FLEXIBLE = 5,
-} PhysicalMemoryType;
-
-// Virtual Memory Area Type
-typedef enum VMAType {
-    VMA_TYPE_FREE = 0,
-    VMA_TYPE_RESERVED = 1,
-    VMA_TYPE_DIRECT = 2,
-    VMA_TYPE_FLEXIBLE = 3,
-    VMA_TYPE_POOLED = 4,
-    VMA_TYPE_POOL_RESERVED = 5,
-    VMA_TYPE_STACK = 6,
-    VMA_TYPE_CODE = 7,
-    VMA_TYPE_FILE = 8,
-    VMA_TYPE_SYSTEM = 9,
-} VMAType;
-
-// Memory Protection Flags
-typedef enum MemoryProt {
-    MEM_PROT_NO_ACCESS = 0,
-    MEM_PROT_CPU_READ = 1,
-    MEM_PROT_CPU_WRITE = 2,
-    MEM_PROT_CPU_READ_WRITE = 3,
-    MEM_PROT_CPU_EXEC = 4,
-    MEM_PROT_GPU_READ = 16,
-    MEM_PROT_GPU_WRITE = 32,
-    MEM_PROT_GPU_READ_WRITE = 48,
-} MemoryProt;
-
-// Memory Map Flags
-typedef enum MemoryMapFlags {
-    MEM_MAP_NO_FLAGS = 0,
-    MEM_MAP_SHARED = 1,
-    MEM_MAP_PRIVATE = 2,
-    MEM_MAP_FIXED = 0x10,
-    MEM_MAP_NO_OVERWRITE = 0x80,
-    MEM_MAP_VOID = 0x100,
-    MEM_MAP_STACK = 0x400,
-    MEM_MAP_NO_SYNC = 0x800,
-    MEM_MAP_ANON = 0x1000,
-    MEM_MAP_SYSTEM = 0x2000,
-    MEM_MAP_NO_CORE = 0x20000,
-    MEM_MAP_NO_COALESCE = 0x400000,
-} MemoryMapFlags;
-
-// Matches shadPS4 OrbisVirtualQueryInfo (72 bytes)
 typedef struct OrbisKernelVirtualQueryInfo {
     void *start;
     void *end;
     off_t offset;
     int32_t prot;
-    int32_t memory_type;
-    uint8_t isFlexibleMemory : 1;
-    uint8_t isDirectMemory : 1;
-    uint8_t isStack : 1;
-    uint8_t isPooledMemory : 1;
-    uint8_t isCommitted : 1;
+    int32_t flags;
+    unsigned isFlexibleMemory : 1;
+    unsigned isDirectMemory : 1;
+    unsigned isStack : 1;
+    unsigned isPooledMemory : 1;
+    unsigned isCommitted : 1;
     char name[32];
 } OrbisKernelVirtualQueryInfo;
 
-// SceKernelBatchMapEntry (32 bytes), the element of sceKernelBatchMap's array.
+// SceKernelBatchMapEntry (32 bytes), the element of sceKernelBatchMap's array. `start` holds a
+// guest address and is written back by the map operations.
 typedef enum OrbisKernelBatchMapOp {
-    ORBIS_KERNEL_BATCH_MAP_DIRECT = 0,
-    ORBIS_KERNEL_BATCH_MAP_UNMAP = 1,
-    ORBIS_KERNEL_BATCH_MAP_PROTECT = 2,
-    ORBIS_KERNEL_BATCH_MAP_FLEXIBLE = 3,
-    ORBIS_KERNEL_BATCH_MAP_TYPE_PROTECT = 4
+    ORBIS_KERNEL_BATCH_MAP_DIRECT = 0,        // sceKernelMapDirectMemory(start, length, protection, offset)
+    ORBIS_KERNEL_BATCH_MAP_UNMAP = 1,         // sceKernelMunmap(start, length)
+    ORBIS_KERNEL_BATCH_MAP_PROTECT = 2,       // sceKernelMprotect(start, length, protection)
+    ORBIS_KERNEL_BATCH_MAP_FLEXIBLE = 3,      // sceKernelMapFlexibleMemory(start, length, protection)
+    ORBIS_KERNEL_BATCH_MAP_TYPE_PROTECT = 4   // sceKernelMtypeprotect(start, length, type, protection)
 } OrbisKernelBatchMapOp;
 
 typedef struct OrbisKernelBatchMapEntry {
@@ -116,7 +64,17 @@ typedef struct OrbisDirectMemoryQueryInfo {
     int32_t memoryType;
 } OrbisDirectMemoryQueryInfo;
 
-// Lifecycle
+// Direct memory size of a process with SDK version `sdk` in Neo mode `neo`. `has_flex` says
+// whether the SceKernelMemParam holds a flexible_memory_size pointer, `flex` is its value in
+// bytes; `ext1` and `ext2` are the param's extended memory flags (used before SDK 5.00 only).
+// Returns bytes; 0 when the flexible memory leaves no direct memory.
+uint64_t ps4_direct_mem_size_rule(uint32_t sdk, int neo, int has_flex, uint64_t flex, int ext1, int ext2);
+// Sets the direct memory size from the guest SceProcParam at `proc_param_addr` (0: none): its size,
+// sdk_version (+0x10) and mem_param (+0x40), and the SceKernelMemParam fields within its size:
+// flexible_memory_size (+0x10), extended_memory_1 (+0x18), extended_memory_2 (+0x28).
+// PS4_DIRECT_MEM_SIZE=<n>[k|m|g] overrides the result; that is a debugging aid, not console
+// behaviour. Runs at process start, before the game allocates direct memory.
+void ps4_direct_mem_configure(GuestContext *ctx, uint64_t proc_param_addr);
 int ps4_direct_mem_init(void);
 void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size);
 void ps4_direct_mem_destroy(void);
@@ -126,7 +84,6 @@ int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t len
 int sceKernelAllocateMainDirectMemory(size_t length, size_t alignment, int type, off_t *physAddrOut);
 size_t sceKernelGetDirectMemorySize(void);
 size_t sceKernelAvailableDirectMemorySize(void);
-int sceKernelAvailableDirectMemorySizeExact(off_t searchStart, off_t searchEnd, size_t alignment, off_t *physAddrOut, size_t *sizeOut);
 int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, off_t physAddr, size_t alignment);
 int sceKernelReleaseDirectMemory(off_t physAddr, size_t length);
 int sceKernelCheckedReleaseDirectMemory(off_t physAddr, size_t length);

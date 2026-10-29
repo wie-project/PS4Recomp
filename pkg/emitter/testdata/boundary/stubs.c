@@ -10,6 +10,10 @@ volatile uint64_t g_ps4_videoout_flip_count;
 void ps4_aio_destroy(void) {}
 void ps4_ajm_destroy(void) {}
 void ps4_direct_mem_destroy(void) {}
+void ps4_direct_mem_configure(GuestContext *ctx, uint64_t proc_param_addr) {
+  (void)ctx;
+  (void)proc_param_addr;
+}
 void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size) {
   (void)ctx;
   (void)addr;

@@ -66,9 +66,9 @@ typedef struct OrbisPadData {
     stick rightStick;
     analog analogButtons;
     uint16_t padding;
-    vec_float4 quat;
-    vec_float3 vel;
-    vec_float3 acell;
+    vec_float4 quat;  // orientation, 0x0C
+    vec_float3 acell; // acceleration (g), 0x1C
+    vec_float3 vel;   // angular velocity (rad/s), 0x28
     OrbisPadTouchData touch;
     uint8_t connected;
     uint64_t timestamp;

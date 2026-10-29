@@ -28,6 +28,8 @@ typedef struct ps4_present_stats {
     double last_presented_s;   // presentedTime of the previous shown frame, 0 = none yet
     uint32_t dropped;          // drawables that never reached the screen (presentedTime 0)
     uint32_t superseded;       // frames replaced by a newer one before they got a drawable
+    uint32_t held;             // frames the renderer held for a present slot (none was free)
+    uint32_t held_dropped;     // held frames that had to be dropped
     // presenter side: time blocked in -[CAMetalLayer nextDrawable]
     double acquire_ms_sum, acquire_ms_max;
     uint32_t acquire_n, acquire_over_4ms, acquire_over_16ms;
@@ -38,7 +40,7 @@ typedef struct ps4_present_stats {
     double last_submit_s;
     uint32_t submits, bursts;
     // lifetime totals
-    uint64_t total_presented, total_dropped, total_superseded;
+    uint64_t total_presented, total_dropped, total_superseded, total_held, total_held_dropped;
 } ps4_present_stats;
 
 void ps4_present_stats_init(ps4_present_stats *s);
@@ -47,19 +49,28 @@ void ps4_present_stats_init(ps4_present_stats *s);
 void ps4_present_stats_on_presented(ps4_present_stats *s, double presented_time_s);
 // A frame was dropped by the presenter itself because a newer one replaced it.
 void ps4_present_stats_on_superseded(ps4_present_stats *s);
+// A frame held for a present slot was dropped: more frames were held than the presenter has
+// slots, or none became free within the timeout (back-pressure, not a mailbox replacement).
+void ps4_present_stats_on_held_dropped(ps4_present_stats *s);
+// A frame was held for a present slot (the display was behind).
+void ps4_present_stats_on_held(ps4_present_stats *s);
 // The presenter got a drawable after waiting wait_ms.
 void ps4_present_stats_on_acquire(ps4_present_stats *s, double wait_ms);
-// The producer waited wait_ms for a free present slot.
+// A frame waited wait_ms for a free present slot (held by the renderer meanwhile; 0 if it got one at once).
 void ps4_present_stats_on_backpressure(ps4_present_stats *s, double wait_ms);
 // A present was submitted at now_s (any monotonic clock in seconds).
 void ps4_present_stats_on_submit(ps4_present_stats *s, double now_s);
 
+// Interval histogram buckets: upper bounds in ms (inclusive), the last bucket has none.
+#define PS4_PRESENT_HIST_BUCKETS 8
+extern const float ps4_present_hist_upper_ms[PS4_PRESENT_HIST_BUCKETS - 1];
 // Summary of one window of the display-side intervals.
 typedef struct ps4_present_summary {
     int frames;     // intervals in the window
     float p50, p95, p99, max;
     int over33, over50, over100;
     int under6;     // intervals shorter than 6 ms: frames shown faster than a 120 Hz display can
+    int hist[PS4_PRESENT_HIST_BUCKETS]; // intervals per bucket (ps4_present_hist_upper_ms)
 } ps4_present_summary;
 
 // Percentiles of `n` intervals (sorted in place). Index q*n, clamped: the same convention as the

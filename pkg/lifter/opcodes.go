@@ -1,6 +1,8 @@
 package lifter
 
 import (
+	"ps4-recomp/pkg/disasm"
+
 	"golang.org/x/arch/x86/x86asm"
 )
 
@@ -55,6 +57,7 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.SHL, x86asm.SHR, x86asm.SAR, x86asm.XCHG, x86asm.XADD,
 		x86asm.CMPXCHG, x86asm.IMUL, x86asm.MUL, x86asm.CALL, x86asm.RET,
 		x86asm.JMP, x86asm.UD2, x86asm.INT, x86asm.FWAIT,
+		disasm.OpEXTRQ, disasm.OpINSERTQ,
 		x86asm.MOVUPS, x86asm.MOVAPS, x86asm.MOVDQU, x86asm.MOVDQA,
 		x86asm.MOVUPD, x86asm.MOVAPD,
 		x86asm.PXOR, x86asm.XORPS, x86asm.XORPD, x86asm.POR, x86asm.ORPD, x86asm.ORPS,

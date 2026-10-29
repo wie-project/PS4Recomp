@@ -1,5 +1,6 @@
 #include "ps4_direct_mem.h"
 #include "ps4_hitch.h"
+#include "ps4_kernel_sys.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,98 +12,53 @@
 #include <mach/mach_vm.h>
 #endif
 
-// External NEO mode query
-extern int32_t sceKernelIsNeoMode(void);
+typedef struct DirectMemBlock {
+    off_t phys_offset;
+    size_t size;
+    int is_free;
+    uint64_t mapped_guest_vaddr;
+    struct DirectMemBlock *next;
+    struct DirectMemBlock *prev;
+} DirectMemBlock;
+
+static DirectMemBlock *g_direct_blocks = NULL;
+static pthread_mutex_t g_direct_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // ---------------------------------------------------------------------------------
-// Data Structures for shadPS4-style Physical & Virtual Memory Management
+// Physical backing for direct memory. Every direct-memory page lives at
+// g_phys_base + physAddr (a lazily committed host region); sceKernelMapDirectMemory
+// aliases guest virtual ranges onto it (mach_vm_remap, shared), so the same physical
+// pages can be mapped at several guest addresses, unmapped and re-mapped elsewhere
+// with their contents intact (Naughty Dog's memory linearizer relies on this).
 // ---------------------------------------------------------------------------------
-
-typedef struct PhysicalMemoryArea {
-    uint64_t base;
+typedef struct DirectMapping {
+    uint64_t vaddr;
     uint64_t size;
-    int32_t memory_type;
-    PhysicalMemoryType dma_type;
-} PhysicalMemoryArea;
+    uint64_t phys;
+    struct DirectMapping *next;
+} DirectMapping;
 
-typedef struct PhysAreaNode {
-    PhysicalMemoryArea area;
-    struct PhysAreaNode *prev;
-    struct PhysAreaNode *next;
-} PhysAreaNode;
-
-typedef struct PhysMap {
-    PhysAreaNode *head;
-    PhysAreaNode *tail;
-} PhysMap;
-
-typedef struct VMANode {
-    uint64_t base;
-    uint64_t size;
-    VMAType type;
-    MemoryProt prot;
-    char name[32];
-    int32_t fd;
-    bool disallow_merge;
-    PhysMap phys_areas;
-    struct VMANode *prev;
-    struct VMANode *next;
-} VMANode;
-
-typedef struct VMAMap {
-    VMANode *head;
-    VMANode *tail;
-} VMAMap;
-
-// Global Memory Manager State
-static pthread_mutex_t g_mem_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int g_mem_inited = 0;
-
-static uint64_t g_total_direct_size = 0;
-static uint64_t g_total_flexible_size = 0;
-static uint64_t g_flexible_usage = 0;
-static uint64_t g_pool_budget = 0;
-
-static PhysMap g_dmem_map = {0};
-static PhysMap g_fmem_map = {0};
-static VMAMap  g_vma_map = {0};
-
+static DirectMapping *g_dmaps = NULL; // protected by g_direct_mutex
 static uint8_t *g_phys_base = NULL;
-static size_t   g_phys_size = 0;
+static size_t g_phys_size = 0;
 
-__attribute__((weak)) void ps4_gnm_guest_remapped(uint64_t addr, uint64_t size) {
-    (void)addr; (void)size;
-}
+void ps4_gnm_guest_remapped(uint64_t addr, uint64_t size) __attribute__((weak));
 
-static inline uint64_t align_up(uint64_t val, uint64_t align) {
-    if (align == 0) return val;
-    return (val + align - 1) & ~(align - 1);
-}
-
-static inline uint64_t align_down(uint64_t val, uint64_t align) {
-    if (align == 0) return val;
-    return val & ~(align - 1);
-}
-
-// ---------------------------------------------------------------------------------
-// Physical Backing (mach_vm_remap on Apple Silicon)
-// ---------------------------------------------------------------------------------
 static void dm_phys_init(void) {
     if (g_phys_base || getenv("PS4_NO_PHYS_ALIAS")) return;
-    size_t sz = 128ULL << 30; // 128 GB virtual reservation (demand-paged)
+    size_t sz = 128ULL << 30; // virtual only; pages are committed on first touch
     void *p = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
     if (p == MAP_FAILED) {
-        fprintf(stderr, "[ps4-mem] WARNING: cannot reserve physical backing (%d); aliasing disabled\n", errno);
+        fprintf(stderr, "[ps4-mem] WARNING: cannot reserve physical backing (%d); direct memory aliasing disabled\n", errno);
         return;
     }
     g_phys_base = (uint8_t *)p;
     g_phys_size = sz;
 }
 
-// Map guest [vaddr, vaddr+len) onto physical [phys, phys+len)
+// Map guest [vaddr, vaddr+len) onto physical [phys, phys+len). Caller holds g_direct_mutex.
 static int dm_alias(GuestContext *ctx, uint64_t vaddr, uint64_t phys, size_t len) {
 #if defined(__APPLE__)
-    if (!ctx) return -1;
     GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
     if (!g_phys_base || ((vaddr | phys | len) & 0x3fffULL) || phys + len > g_phys_size ||
         vaddr + len > proc->mem_size)
@@ -119,6 +75,14 @@ static int dm_alias(GuestContext *ctx, uint64_t vaddr, uint64_t phys, size_t len
                 (unsigned long long)vaddr, (unsigned long long)phys, len, kr);
         return -1;
     }
+    DirectMapping *m = (DirectMapping *)calloc(1, sizeof(*m));
+    if (m) {
+        m->vaddr = vaddr;
+        m->size = len;
+        m->phys = phys;
+        m->next = g_dmaps;
+        g_dmaps = m;
+    }
     if (ps4_gnm_guest_remapped) ps4_gnm_guest_remapped(vaddr, len);
     return 0;
 #else
@@ -127,681 +91,430 @@ static int dm_alias(GuestContext *ctx, uint64_t vaddr, uint64_t phys, size_t len
 #endif
 }
 
-// ---------------------------------------------------------------------------------
-// PhysMap Interval List Operations
-// ---------------------------------------------------------------------------------
+// Called by recomp_vm_free (without vm_mutex held): detach guest [addr, addr+size) from
+// physical memory so the virtual range no longer aliases it.
+void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size) {
+    if (!ctx || size == 0) return;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    uint64_t end = addr + size;
+    pthread_mutex_lock(&g_direct_mutex);
+    DirectMapping **pp = &g_dmaps;
+    while (*pp) {
+        DirectMapping *m = *pp;
+        uint64_t mend = m->vaddr + m->size;
+        if (m->vaddr >= end || mend <= addr) { pp = &m->next; continue; }
+        uint64_t ostart = m->vaddr > addr ? m->vaddr : addr;
+        uint64_t oend = mend < end ? mend : end;
+        // Replace the overlap with fresh private zero pages.
+        PS4_HITCH_TIMED(PS4_HITCH_VM, mmap(proc->mem_base + ostart, oend - ostart, PROT_READ | PROT_WRITE,
+                                           MAP_FIXED | MAP_ANON | MAP_PRIVATE, -1, 0));
+        if (ps4_gnm_guest_remapped) ps4_gnm_guest_remapped(ostart, oend - ostart);
+        if (ostart > m->vaddr && oend < mend) {
+            DirectMapping *tail = (DirectMapping *)calloc(1, sizeof(*tail));
+            if (tail) {
+                tail->vaddr = oend;
+                tail->size = mend - oend;
+                tail->phys = m->phys + (oend - m->vaddr);
+                tail->next = m->next;
+                m->next = tail;
+            }
+            m->size = ostart - m->vaddr;
+            pp = &m->next;
+        } else if (ostart > m->vaddr) {
+            m->size = ostart - m->vaddr;
+            pp = &m->next;
+        } else if (oend < mend) {
+            m->phys += oend - m->vaddr;
+            m->size = mend - oend;
+            m->vaddr = oend;
+            pp = &m->next;
+        } else {
+            *pp = m->next;
+            free(m);
+        }
+    }
+    pthread_mutex_unlock(&g_direct_mutex);
+}
 
-static bool can_merge_phys(const PhysicalMemoryArea *a, const PhysicalMemoryArea *b) {
-    if (a->base + a->size != b->base) return false;
-    if (a->memory_type != b->memory_type) return false;
-    if (a->dma_type != b->dma_type) return false;
+// Physical address backing guest address `addr`, if it is mapped direct memory.
+static bool dm_lookup(uint64_t addr, uint64_t *start, uint64_t *end, uint64_t *phys) {
+    bool ok = false;
+    pthread_mutex_lock(&g_direct_mutex);
+    for (DirectMapping *m = g_dmaps; m; m = m->next) {
+        if (addr >= m->vaddr && addr < m->vaddr + m->size) {
+            *start = m->vaddr;
+            *end = m->vaddr + m->size;
+            *phys = m->phys;
+            ok = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_direct_mutex);
+    return ok;
+}
+static int g_direct_inited = 0;
+static size_t g_direct_size;       // set by ps4_direct_mem_configure
+static bool g_direct_configured;  // ps4_direct_mem_configure ran
+
+// Flexible memory of a process: its flexible_memory_size plus the base, or the default.
+static uint64_t flexible_mem_size(int has_flex, uint64_t flex) {
+    return has_flex ? flex + (PS4_MEM_FLEXIBLE_BASE_MIB << 20) : (PS4_MEM_FLEXIBLE_DEFAULT_MIB << 20);
+}
+
+uint64_t ps4_direct_mem_size_rule(uint32_t sdk, int neo, int has_flex, uint64_t flex, int ext1, int ext2) {
+    const uint64_t mib = 1ULL << 20;
+    uint64_t total = (neo ? PS4_MEM_TOTAL_NEO_MIB : PS4_MEM_TOTAL_MIB) * mib;
+    const uint64_t flexible = flexible_mem_size(has_flex, flex);
+    if (sdk >= PS4_MEM_SDK_EXTENDED_ALWAYS) {
+        ext1 = 1;
+        ext2 = 1;
+    }
+    if (neo && !ext1) total -= PS4_MEM_NO_EXTENDED_1_NEO_MIB * mib;
+    if (!neo && !ext2) total -= PS4_MEM_NO_EXTENDED_2_BASE_MIB * mib;
+    return flexible < total ? total - flexible : 0;
+}
+
+// PS4_DIRECT_MEM_SIZE=<n>[k|m|g]: an explicit size in place of the process's (not console behaviour).
+static size_t direct_mem_size_override(void) {
+    const char *env = getenv("PS4_DIRECT_MEM_SIZE");
+    if (!env || !*env) return 0;
+    char *end = NULL;
+    unsigned long long val = strtoull(env, &end, 0);
+    if (end && *end) {
+        if (*end == 'g' || *end == 'G') val *= 1024ULL * 1024 * 1024;
+        else if (*end == 'm' || *end == 'M') val *= 1024ULL * 1024;
+        else if (*end == 'k' || *end == 'K') val *= 1024ULL;
+    }
+    return (size_t)val;
+}
+
+// The size before ps4_direct_mem_configure ran is the one of a process without parameters.
+static size_t get_total_direct_mem_size(void) {
+    if (g_direct_configured) return g_direct_size;
+    size_t over = direct_mem_size_override();
+    if (over) return over;
+    return (size_t)ps4_direct_mem_size_rule(0, sceKernelIsNeoMode() != 0, 0, 0, 0, 0);
+}
+
+// Reads `n` bytes of guest memory at `addr` into `out`; false when the range is outside it.
+static bool guest_read(const GuestContext *proc, uint64_t addr, void *out, size_t n) {
+    if (!proc || !proc->mem_base || addr == 0 || addr > proc->mem_size || n > proc->mem_size - addr) return false;
+    memcpy(out, proc->mem_base + addr, n);
     return true;
 }
 
-static PhysAreaNode *find_phys_area(PhysMap *map, uint64_t addr) {
-    PhysAreaNode *curr = map->head;
-    PhysAreaNode *found = NULL;
-    while (curr) {
-        if (curr->area.base <= addr) {
-            found = curr;
-        } else {
-            break;
-        }
-        curr = curr->next;
+void ps4_direct_mem_configure(GuestContext *ctx, uint64_t proc_param_addr) {
+    const GuestContext *proc = ctx ? (ctx->process_ctx ? ctx->process_ctx : ctx) : NULL;
+    uint64_t pp_size = 0, sdk = 0, mp_addr = 0, mp_size = 0, flex_ptr = 0, flex = 0, ext1_ptr = 0, ext2_ptr = 0;
+    uint8_t ext1 = 0, ext2 = 0;
+    int has_flex = 0;
+    if (guest_read(proc, proc_param_addr, &pp_size, 8)) {
+        if (pp_size >= 0x18) guest_read(proc, proc_param_addr + 0x10, &sdk, 8);
+        if (pp_size >= 0x48) guest_read(proc, proc_param_addr + 0x40, &mp_addr, 8);
     }
-    return found;
-}
-
-static PhysAreaNode *split_phys_area(PhysMap *map, PhysAreaNode *node, uint64_t offset_in_area) {
-    if (!node || offset_in_area == 0 || offset_in_area >= node->area.size) return node;
-
-    PhysAreaNode *new_node = (PhysAreaNode *)calloc(1, sizeof(PhysAreaNode));
-    if (!new_node) return node;
-
-    new_node->area = node->area;
-    node->area.size = offset_in_area;
-    new_node->area.base += offset_in_area;
-    new_node->area.size -= offset_in_area;
-
-    new_node->prev = node;
-    new_node->next = node->next;
-    if (node->next) node->next->prev = new_node;
-    else map->tail = new_node;
-    node->next = new_node;
-
-    return new_node;
-}
-
-static PhysAreaNode *merge_phys_adjacent(PhysMap *map, PhysAreaNode *node) {
-    if (!node) return NULL;
-    // Try merge with next
-    if (node->next && can_merge_phys(&node->area, &node->next->area)) {
-        PhysAreaNode *next = node->next;
-        node->area.size += next->area.size;
-        node->next = next->next;
-        if (next->next) next->next->prev = node;
-        else map->tail = node;
-        free(next);
+    if (guest_read(proc, mp_addr, &mp_size, 8)) {
+        if (mp_size >= 0x18 && guest_read(proc, mp_addr + 0x10, &flex_ptr, 8))
+            has_flex = guest_read(proc, flex_ptr, &flex, 8);
+        if (mp_size >= 0x20 && guest_read(proc, mp_addr + 0x18, &ext1_ptr, 8)) guest_read(proc, ext1_ptr, &ext1, 1);
+        if (mp_size >= 0x30 && guest_read(proc, mp_addr + 0x28, &ext2_ptr, 8)) guest_read(proc, ext2_ptr, &ext2, 1);
     }
-    // Try merge with prev
-    if (node->prev && can_merge_phys(&node->prev->area, &node->area)) {
-        PhysAreaNode *prev = node->prev;
-        prev->area.size += node->area.size;
-        prev->next = node->next;
-        if (node->next) node->next->prev = prev;
-        else map->tail = prev;
-        free(node);
-        node = prev;
+    const int neo = sceKernelIsNeoMode() != 0;
+    const int sdk_ext = (uint32_t)sdk >= PS4_MEM_SDK_EXTENDED_ALWAYS;
+    const int use_ext1 = sdk_ext || ext1 != 0, use_ext2 = sdk_ext || ext2 != 0;
+    const uint64_t size = ps4_direct_mem_size_rule((uint32_t)sdk, neo, has_flex, flex, ext1 != 0, ext2 != 0);
+    const uint64_t flexible = flexible_mem_size(has_flex, flex);
+    printf("[ps4-mem] direct memory %llu MiB (sdk 0x%llx, flexible %llu MiB, ext1 %d, ext2 %d)\n",
+           (unsigned long long)(size >> 20), (unsigned long long)sdk, (unsigned long long)(flexible >> 20), use_ext1,
+           use_ext2);
+    size_t total = (size_t)size;
+    const size_t over = direct_mem_size_override();
+    if (over) {
+        printf("[ps4-mem] PS4_DIRECT_MEM_SIZE: direct memory %zu MiB instead (not console behaviour)\n", over >> 20);
+        total = over;
     }
-    return node;
-}
-
-static PhysAreaNode *carve_phys_area(PhysMap *map, uint64_t addr, uint64_t size) {
-    PhysAreaNode *node = find_phys_area(map, addr);
-    if (!node) return NULL;
-
-    uint64_t start_in_area = addr - node->area.base;
-    uint64_t end_in_area = start_in_area + size;
-
-    if (end_in_area < node->area.size) {
-        split_phys_area(map, node, end_in_area);
-    }
-    if (start_in_area > 0) {
-        node = split_phys_area(map, node, start_in_area);
-    }
-    return node;
-}
-
-static void append_phys_area(PhysMap *map, uint64_t base, uint64_t size, int32_t mtype, PhysicalMemoryType dtype) {
-    PhysAreaNode *node = (PhysAreaNode *)calloc(1, sizeof(PhysAreaNode));
-    if (!node) return;
-    node->area.base = base;
-    node->area.size = size;
-    node->area.memory_type = mtype;
-    node->area.dma_type = dtype;
-    if (map->tail) {
-        map->tail->next = node;
-        node->prev = map->tail;
-        map->tail = node;
-    } else {
-        map->head = node;
-        map->tail = node;
-    }
-}
-
-static void clear_phys_map(PhysMap *map) {
-    PhysAreaNode *curr = map->head;
-    while (curr) {
-        PhysAreaNode *next = curr->next;
-        free(curr);
-        curr = next;
-    }
-    map->head = NULL;
-    map->tail = NULL;
-}
-
-// ---------------------------------------------------------------------------------
-// VMAMap Interval List Operations
-// ---------------------------------------------------------------------------------
-
-static bool can_merge_vma(const VMANode *a, const VMANode *b) {
-    if (a->disallow_merge || b->disallow_merge) return false;
-    if (a->base + a->size != b->base) return false;
-    if (a->prot != b->prot || a->type != b->type) return false;
-    if (strncmp(a->name, b->name, sizeof(a->name)) != 0) return false;
-    if (a->type == VMA_TYPE_DIRECT && b->type == VMA_TYPE_DIRECT) {
-        if (!a->phys_areas.tail || !b->phys_areas.head) return false;
-        const PhysicalMemoryArea *last_phys = &a->phys_areas.tail->area;
-        const PhysicalMemoryArea *first_next = &b->phys_areas.head->area;
-        if (last_phys->base + last_phys->size != first_next->base ||
-            last_phys->memory_type != first_next->memory_type) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static VMANode *find_vma(VMAMap *map, uint64_t addr) {
-    VMANode *curr = map->head;
-    VMANode *found = NULL;
-    while (curr) {
-        if (curr->base <= addr) {
-            found = curr;
-        } else {
-            break;
-        }
-        curr = curr->next;
-    }
-    return found;
-}
-
-static VMANode *split_vma(VMAMap *map, VMANode *node, uint64_t offset_in_vma) {
-    if (!node || offset_in_vma == 0 || offset_in_vma >= node->size) return node;
-
-    VMANode *new_node = (VMANode *)calloc(1, sizeof(VMANode));
-    if (!new_node) return node;
-
-    *new_node = *node;
-    node->size = offset_in_vma;
-    new_node->base = node->base + offset_in_vma;
-    new_node->size -= offset_in_vma;
-
-    memset(&new_node->phys_areas, 0, sizeof(PhysMap));
-    PhysAreaNode *curr = node->phys_areas.head;
-    while (curr) {
-        PhysAreaNode *next = curr->next;
-        uint64_t off = curr->area.base; // offset in VMA
-        if (off + curr->area.size <= offset_in_vma) {
-            // stays in old VMA
-        } else if (off < offset_in_vma && off + curr->area.size > offset_in_vma) {
-            uint64_t size_in_old = offset_in_vma - off;
-            uint64_t size_in_new = curr->area.size - size_in_old;
-            append_phys_area(&new_node->phys_areas, 0, size_in_new, curr->area.memory_type, curr->area.dma_type);
-            curr->area.size = size_in_old;
-        } else {
-            // moves to new VMA
-            if (curr->prev) curr->prev->next = curr->next;
-            else node->phys_areas.head = curr->next;
-            if (curr->next) curr->next->prev = curr->prev;
-            else node->phys_areas.tail = curr->prev;
-
-            curr->prev = NULL;
-            curr->next = NULL;
-            curr->area.base = off - offset_in_vma;
-            if (new_node->phys_areas.tail) {
-                new_node->phys_areas.tail->next = curr;
-                curr->prev = new_node->phys_areas.tail;
-                new_node->phys_areas.tail = curr;
-            } else {
-                new_node->phys_areas.head = curr;
-                new_node->phys_areas.tail = curr;
-            }
-        }
-        curr = next;
-    }
-
-    new_node->prev = node;
-    new_node->next = node->next;
-    if (node->next) node->next->prev = new_node;
-    else map->tail = new_node;
-    node->next = new_node;
-
-    return new_node;
-}
-
-static VMANode *merge_vma_adjacent(VMAMap *map, VMANode *node) {
-    if (!node) return NULL;
-    // Try merge with next
-    if (node->next && can_merge_vma(node, node->next)) {
-        VMANode *next = node->next;
-        node->size += next->size;
-        // Merge physical areas
-        PhysAreaNode *p = next->phys_areas.head;
-        while (p) {
-            PhysAreaNode *p_next = p->next;
-            append_phys_area(&node->phys_areas, p->area.base, p->area.size, p->area.memory_type, p->area.dma_type);
-            free(p);
-            p = p_next;
-        }
-        node->next = next->next;
-        if (next->next) next->next->prev = node;
-        else map->tail = node;
-        free(next);
-    }
-    // Try merge with prev
-    if (node->prev && can_merge_vma(node->prev, node)) {
-        VMANode *prev = node->prev;
-        prev->size += node->size;
-        PhysAreaNode *p = node->phys_areas.head;
-        while (p) {
-            PhysAreaNode *p_next = p->next;
-            append_phys_area(&prev->phys_areas, p->area.base, p->area.size, p->area.memory_type, p->area.dma_type);
-            free(p);
-            p = p_next;
-        }
-        prev->next = node->next;
-        if (node->next) node->next->prev = prev;
-        else map->tail = prev;
-        free(node);
-        node = prev;
-    }
-    return node;
-}
-
-static VMANode *carve_vma(VMAMap *map, uint64_t addr, uint64_t size) {
-    VMANode *node = find_vma(map, addr);
-    if (!node) return NULL;
-
-    uint64_t start_in_vma = addr - node->base;
-    uint64_t end_in_vma = start_in_vma + size;
-
-    if (end_in_vma < node->size) {
-        split_vma(map, node, end_in_vma);
-    }
-    if (start_in_vma > 0) {
-        node = split_vma(map, node, start_in_vma);
-    }
-    return node;
-}
-
-static uint64_t search_free_vma(VMAMap *map, uint64_t virtual_addr, uint64_t size, uint64_t alignment) {
-    if (alignment == 0) alignment = GUEST_PAGE_SIZE;
-    uint64_t min_search = DEFAULT_MAPPING_BASE;
-    uint64_t max_search = 0x8000000000ULL; // 512 GB limit
-
-    if (virtual_addr < min_search) virtual_addr = min_search;
-    virtual_addr = align_up(virtual_addr, alignment);
-
-    VMANode *node = find_vma(map, virtual_addr);
-    while (node) {
-        if (node->type == VMA_TYPE_FREE) {
-            uint64_t cand = align_up(node->base > virtual_addr ? node->base : virtual_addr, alignment);
-            if (cand < max_search && cand + size <= node->base + node->size) {
-                return cand;
-            }
-        }
-        node = node->next;
-    }
-    return (uint64_t)-1;
-}
-
-// ---------------------------------------------------------------------------------
-// SetupMemoryRegions (Mirroring shadPS4 linker.cpp & memory.cpp)
-// ---------------------------------------------------------------------------------
-static void setup_memory_regions_locked(void) {
-    const bool is_neo = (sceKernelIsNeoMode() != 0);
-    // DevKit Pro memory limit: 7936 MB. Base PS4: 5248 MB.
-    uint64_t total_size = is_neo ? ORBIS_KERNEL_TOTAL_MEM_DEV_PRO : ORBIS_KERNEL_TOTAL_MEM_DEV;
-
-    const char *env_direct = getenv("PS4_DIRECT_MEM_SIZE");
-    if (env_direct && *env_direct) {
-        char *end = NULL;
-        unsigned long long val = strtoull(env_direct, &end, 0);
-        if (end && *end) {
-            if (*end == 'g' || *end == 'G') val *= 1024ULL * 1024 * 1024;
-            else if (*end == 'm' || *end == 'M') val *= 1024ULL * 1024;
-            else if (*end == 'k' || *end == 'K') val *= 1024ULL;
-        }
-        if (val > 0) total_size = val + ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE;
-    }
-
-    uint64_t fmem_size = ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE; // 512 MB default
-    const char *env_fmem = getenv("PS4_FLEXIBLE_MEM_SIZE");
-    if (env_fmem && *env_fmem) {
-        char *end = NULL;
-        unsigned long long val = strtoull(env_fmem, &end, 0);
-        if (end && *end) {
-            if (*end == 'g' || *end == 'G') val *= 1024ULL * 1024 * 1024;
-            else if (*end == 'm' || *end == 'M') val *= 1024ULL * 1024;
-            else if (*end == 'k' || *end == 'K') val *= 1024ULL;
-        }
-        if (val > 0) fmem_size = val;
-    }
-
-    g_total_flexible_size = fmem_size - ORBIS_KERNEL_FLEXIBLE_MEMORY_BASE;
-    g_total_direct_size = total_size - fmem_size;
-    g_flexible_usage = 0;
-    g_pool_budget = 0;
-
-    clear_phys_map(&g_dmem_map);
-    append_phys_area(&g_dmem_map, 0, g_total_direct_size, 0, PHYS_MEM_TYPE_FREE);
-
-    clear_phys_map(&g_fmem_map);
-    append_phys_area(&g_fmem_map, g_total_direct_size, g_total_flexible_size, 0, PHYS_MEM_TYPE_FREE);
-
-    // Initialize virtual memory area covering 256MB up to 512GB
-    if (!g_vma_map.head) {
-        VMANode *root = (VMANode *)calloc(1, sizeof(VMANode));
-        if (root) {
-            root->base = 0x10000000ULL;
-            root->size = 0x8000000000ULL - root->base;
-            root->type = VMA_TYPE_FREE;
-            root->prot = MEM_PROT_NO_ACCESS;
-            g_vma_map.head = root;
-            g_vma_map.tail = root;
-        }
-    }
-
-    printf("[ps4-mem] SetupMemoryRegions: Neo=%d Total=%.2f MB Direct=%.2f MB Flexible=%.2f MB\n",
-           is_neo, (double)total_size / (1024.0 * 1024.0),
-           (double)g_total_direct_size / (1024.0 * 1024.0),
-           (double)g_total_flexible_size / (1024.0 * 1024.0));
     fflush(stdout);
+
+    pthread_mutex_lock(&g_direct_mutex);
+    const size_t old_total = get_total_direct_mem_size();
+    if (g_direct_inited && total != old_total) {
+        // Direct memory already exists: resize its free end, as the kernel does when it sets up
+        // the process's regions. When the end is in use, the size stays what the blocks cover.
+        DirectMemBlock *last = g_direct_blocks;
+        while (last && last->next) last = last->next;
+        if (last && last->is_free && (size_t)last->phys_offset + last->size == old_total &&
+            (total > old_total || last->size >= old_total - total)) {
+            last->size = total - (size_t)last->phys_offset;
+        } else {
+            fprintf(stderr, "[ps4-mem] ERROR: cannot resize direct memory from %zu to %zu MiB: its end is in use\n",
+                    old_total >> 20, total >> 20);
+            total = old_total;
+        }
+    }
+    g_direct_size = total;
+    g_direct_configured = true;
+    pthread_mutex_unlock(&g_direct_mutex);
 }
 
 int ps4_direct_mem_init(void) {
-    pthread_mutex_lock(&g_mem_mutex);
-    if (!g_mem_inited) {
+    pthread_mutex_lock(&g_direct_mutex);
+    if (!g_direct_inited) {
+        g_direct_blocks = (DirectMemBlock *)calloc(1, sizeof(DirectMemBlock));
+        if (!g_direct_blocks) {
+            pthread_mutex_unlock(&g_direct_mutex);
+            return -1;
+        }
+        g_direct_blocks->phys_offset = 0;
+        g_direct_blocks->size = get_total_direct_mem_size();
+        g_direct_blocks->is_free = 1;
+        g_direct_blocks->mapped_guest_vaddr = 0;
+        g_direct_blocks->next = NULL;
+        g_direct_blocks->prev = NULL;
+        g_direct_inited = 1;
         dm_phys_init();
-        setup_memory_regions_locked();
-        g_mem_inited = 1;
     }
-    pthread_mutex_unlock(&g_mem_mutex);
+    pthread_mutex_unlock(&g_direct_mutex);
     return 0;
 }
 
 void ps4_direct_mem_destroy(void) {
-    pthread_mutex_lock(&g_mem_mutex);
-    clear_phys_map(&g_dmem_map);
-    clear_phys_map(&g_fmem_map);
-    VMANode *curr = g_vma_map.head;
+    pthread_mutex_lock(&g_direct_mutex);
+    DirectMemBlock *curr = g_direct_blocks;
     while (curr) {
-        VMANode *next = curr->next;
-        clear_phys_map(&curr->phys_areas);
+        DirectMemBlock *next = curr->next;
         free(curr);
         curr = next;
     }
-    g_vma_map.head = NULL;
-    g_vma_map.tail = NULL;
-    g_mem_inited = 0;
-    pthread_mutex_unlock(&g_mem_mutex);
+    g_direct_blocks = NULL;
+    g_direct_inited = 0;
+    pthread_mutex_unlock(&g_direct_mutex);
 }
-
-void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size) {
-    (void)ctx;
-    if (size == 0) return;
-    sceKernelReleaseDirectMemory((off_t)addr, size);
-}
-
-// ---------------------------------------------------------------------------------
-// Direct Memory Query & Allocation
-// ---------------------------------------------------------------------------------
 
 size_t sceKernelGetDirectMemorySize(void) {
-    ps4_direct_mem_init();
-    return g_total_direct_size;
-}
-
-// Mirroring shadPS4 MemoryManager::DirectQueryAvailable (memory.cpp lines 1262-1307)
-int sceKernelAvailableDirectMemorySizeExact(off_t searchStart, off_t searchEnd, size_t alignment, off_t *physAddrOut, size_t *sizeOut) {
-    ps4_direct_mem_init();
-    if (!physAddrOut || !sizeOut) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-
-    pthread_mutex_lock(&g_mem_mutex);
-
-    PhysAreaNode *node = find_phys_area(&g_dmem_map, (uint64_t)searchStart);
-    uint64_t best_paddr = 0;
-    uint64_t max_size = 0;
-
-    while (node) {
-        if (node->area.dma_type == PHYS_MEM_TYPE_FREE) {
-            uint64_t aligned_base = alignment > 0 ? align_up(node->area.base, alignment) : node->area.base;
-            uint64_t align_pad = aligned_base - node->area.base;
-            uint64_t rem = node->area.size >= align_pad ? node->area.size - align_pad : 0;
-
-            if (node->area.base < (uint64_t)searchStart) {
-                uint64_t cut = (uint64_t)searchStart - node->area.base;
-                rem = rem > cut ? rem - cut : 0;
-                aligned_base = alignment > 0 ? align_up((uint64_t)searchStart, alignment) : (uint64_t)searchStart;
-            }
-
-            uint64_t area_end = node->area.base + node->area.size;
-            if (searchEnd > 0 && area_end > (uint64_t)searchEnd) {
-                uint64_t cut = area_end - (uint64_t)searchEnd;
-                rem = rem > cut ? rem - cut : 0;
-            }
-
-            if (rem > max_size) {
-                best_paddr = aligned_base;
-                max_size = rem;
-            }
-        }
-        node = node->next;
-    }
-
-    pthread_mutex_unlock(&g_mem_mutex);
-
-    if (max_size == 0) {
-        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
-    }
-
-    *physAddrOut = (off_t)best_paddr;
-    *sizeOut = (size_t)max_size;
-    return 0; // ORBIS_OK
+    return get_total_direct_mem_size();
 }
 
 size_t sceKernelAvailableDirectMemorySize(void) {
-    off_t paddr = 0;
-    size_t sz = 0;
-    if (sceKernelAvailableDirectMemorySizeExact(0, (off_t)g_total_direct_size, 0, &paddr, &sz) == 0) {
-        return sz;
+    ps4_direct_mem_init();
+    pthread_mutex_lock(&g_direct_mutex);
+    size_t free_total = 0;
+    DirectMemBlock *curr = g_direct_blocks;
+    while (curr) {
+        if (curr->is_free) {
+            free_total += curr->size;
+        }
+        curr = curr->next;
     }
-    return 0;
+    pthread_mutex_unlock(&g_direct_mutex);
+    return free_total;
 }
 
-// Mirroring shadPS4 MemoryManager::Allocate (memory.cpp lines 245-282)
+// Direct memory covers [0, sceKernelGetDirectMemorySize()) and never grows. An allocation is the
+// lowest aligned range of `length` bytes in a free block within [searchStart, searchEnd), as in
+// shadPS4's MemoryManager::Allocate. Errors as shadPS4's sceKernelAllocateDirectMemory: EINVAL for
+// a negative bound, EAGAIN for a range smaller than the length or when nothing fits.
 int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t length, size_t alignment, int type, off_t *physAddrOut) {
+    (void)type;
+    printf("[ps4-mem] sceKernelAllocateDirectMemory: start=0x%llx end=0x%llx len=%zu (%.2f MB) align=%zu type=%d\n",
+           (unsigned long long)searchStart, (unsigned long long)searchEnd, length, (double)length / (1024.0 * 1024.0), alignment, type);
+    fflush(stdout);
+
+    if (!physAddrOut || length == 0 || searchStart < 0 || searchEnd < 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    if (alignment == 0) alignment = 4096;
+    const size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
+    if (searchEnd <= searchStart || (size_t)(searchEnd - searchStart) < aligned_len)
+        return 0x80020023; // ORBIS_KERNEL_ERROR_EAGAIN
+
     ps4_direct_mem_init();
-    if (!physAddrOut || length == 0 || (length & 0x3fffULL)) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    if (searchStart < 0 || searchEnd < 0) return 0x80020016;
-    if (alignment == 0) alignment = GUEST_PAGE_SIZE;
 
-    pthread_mutex_lock(&g_mem_mutex);
-
-    PhysAreaNode *node = find_phys_area(&g_dmem_map, (uint64_t)searchStart);
-    uint64_t mapping_start = align_up(node ? (node->area.base > (uint64_t)searchStart ? node->area.base : (uint64_t)searchStart) : (uint64_t)searchStart, alignment);
-    uint64_t mapping_end = mapping_start + length;
-
-    while (node && (node->area.dma_type != PHYS_MEM_TYPE_FREE || (node->area.base + node->area.size) < mapping_end)) {
-        node = node->next;
-        if (!node) break;
-        mapping_start = align_up(node->area.base, alignment);
-        mapping_end = mapping_start + length;
+    pthread_mutex_lock(&g_direct_mutex);
+    DirectMemBlock *best = NULL;
+    size_t alloc_start = 0;
+    for (DirectMemBlock *curr = g_direct_blocks; curr; curr = curr->next) {
+        if (!curr->is_free) continue;
+        const size_t block_start = (size_t)curr->phys_offset, block_end = block_start + curr->size;
+        const size_t from = block_start > (size_t)searchStart ? block_start : (size_t)searchStart;
+        const size_t start = (from + alignment - 1) & ~(alignment - 1);
+        if (start < from || start + aligned_len > block_end) continue;
+        if (start + aligned_len > (size_t)searchEnd) break; // blocks are in address order
+        best = curr;
+        alloc_start = start;
+        break;
     }
 
-    if (!node || (searchEnd > 0 && mapping_end > (uint64_t)searchEnd)) {
-        pthread_mutex_unlock(&g_mem_mutex);
+    // Bookkeeping for the split: a leading free block and a trailing one, made before any change.
+    const size_t front_pad = best ? alloc_start - (size_t)best->phys_offset : 0;
+    DirectMemBlock *pad_block = best && front_pad ? (DirectMemBlock *)calloc(1, sizeof(DirectMemBlock)) : NULL;
+    DirectMemBlock *tail = best && best->size - front_pad > aligned_len ? (DirectMemBlock *)calloc(1, sizeof(DirectMemBlock)) : NULL;
+    if (!best || (front_pad && !pad_block) || (best->size - front_pad > aligned_len && !tail)) {
+        pthread_mutex_unlock(&g_direct_mutex);
+        free(pad_block);
+        free(tail);
+        fprintf(stderr, "[ps4-mem] sceKernelAllocateDirectMemory: no free %zu MiB in [0x%llx, 0x%llx) of %zu MiB\n",
+                aligned_len >> 20, (unsigned long long)searchStart, (unsigned long long)searchEnd,
+                get_total_direct_mem_size() >> 20);
         return 0x80020023; // ORBIS_KERNEL_ERROR_EAGAIN
     }
 
-    PhysAreaNode *carved = carve_phys_area(&g_dmem_map, mapping_start, length);
-    if (!carved) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x80020023;
+    if (pad_block) {
+        pad_block->phys_offset = best->phys_offset;
+        pad_block->size = front_pad;
+        pad_block->is_free = 1;
+        pad_block->prev = best->prev;
+        pad_block->next = best;
+        if (best->prev) best->prev->next = pad_block;
+        else g_direct_blocks = pad_block;
+        best->prev = pad_block;
+        best->phys_offset = (off_t)alloc_start;
+        best->size -= front_pad;
+    }
+    if (tail) {
+        tail->phys_offset = best->phys_offset + (off_t)aligned_len;
+        tail->size = best->size - aligned_len;
+        tail->is_free = 1;
+        tail->prev = best;
+        tail->next = best->next;
+        if (best->next) best->next->prev = tail;
+        best->next = tail;
+        best->size = aligned_len;
     }
 
-    carved->area.memory_type = type;
-    carved->area.dma_type = PHYS_MEM_TYPE_ALLOCATED;
-    merge_phys_adjacent(&g_dmem_map, carved);
+    best->is_free = 0;
+    *physAddrOut = best->phys_offset;
+    pthread_mutex_unlock(&g_direct_mutex);
 
-    *physAddrOut = (off_t)mapping_start;
-    pthread_mutex_unlock(&g_mem_mutex);
-    return 0; // ORBIS_OK
-}
-
-int sceKernelAllocateMainDirectMemory(size_t length, size_t alignment, int type, off_t *physAddrOut) {
-    const off_t searchEnd = (off_t)sceKernelGetDirectMemorySize();
-    return sceKernelAllocateDirectMemory(0, searchEnd, length, alignment, type, physAddrOut);
-}
-
-// Mirroring shadPS4 MemoryManager::Free (memory.cpp lines 284-376)
-int sceKernelReleaseDirectMemory(off_t physAddr, size_t length) {
-    ps4_direct_mem_init();
-    if ((physAddr & 0x3fffULL) || (length & 0x3fffULL)) return 0x80020016;
-    if (length == 0) return 0;
-
-    pthread_mutex_lock(&g_mem_mutex);
-    if ((uint64_t)physAddr > g_total_direct_size) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0;
-    }
-
-    uint64_t remaining = length;
-    PhysAreaNode *curr = find_phys_area(&g_dmem_map, (uint64_t)physAddr);
-    while (curr && remaining > 0) {
-        if (curr->area.dma_type != PHYS_MEM_TYPE_FREE) {
-            uint64_t cur_phys = curr->area.base > (uint64_t)physAddr ? curr->area.base : (uint64_t)physAddr;
-            uint64_t offset = cur_phys - curr->area.base;
-            uint64_t sz = remaining < (curr->area.size - offset) ? remaining : (curr->area.size - offset);
-
-            PhysAreaNode *carved = carve_phys_area(&g_dmem_map, cur_phys, sz);
-            if (carved) {
-                carved->area.dma_type = PHYS_MEM_TYPE_FREE;
-                carved->area.memory_type = 0;
-                curr = merge_phys_adjacent(&g_dmem_map, carved);
-            }
-            remaining -= sz;
-        }
-        if (curr) curr = curr->next;
-    }
-
-    pthread_mutex_unlock(&g_mem_mutex);
     return 0;
 }
-
-int sceKernelCheckedReleaseDirectMemory(off_t physAddr, size_t length) {
-    return sceKernelReleaseDirectMemory(physAddr, length);
-}
-
-int sceKernelDirectMemoryQuery(off_t offset, int flags, OrbisDirectMemoryQueryInfo *info, size_t infoSize) {
-    (void)flags;
-    if (!info || infoSize < sizeof(OrbisDirectMemoryQueryInfo)) return 0x80020016;
-    ps4_direct_mem_init();
-
-    pthread_mutex_lock(&g_mem_mutex);
-    PhysAreaNode *node = find_phys_area(&g_dmem_map, (uint64_t)offset);
-    if (!node || node->area.dma_type == PHYS_MEM_TYPE_FREE) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000d; // ORBIS_KERNEL_ERROR_EACCES
-    }
-
-    info->start = node->area.base;
-    info->end = node->area.base + node->area.size;
-    info->memoryType = node->area.memory_type;
-    pthread_mutex_unlock(&g_mem_mutex);
-    return 0;
-}
-
-// ---------------------------------------------------------------------------------
-// Virtual Memory Allocation & Mapping (Mirroring shadPS4 MapMemory)
-// ---------------------------------------------------------------------------------
 
 int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, off_t physAddr, size_t alignment) {
-    if (!ctx || !addrInOut || length == 0 || (length & 0x3fffULL) || (physAddr & 0x3fffULL)) {
-        return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    }
+    printf("[ps4-mem] sceKernelMapDirectMemory: in=%p len=%zu (%.2f MB) prot=0x%x flags=0x%x phys=0x%llx align=%zu\n",
+           addrInOut ? *addrInOut : NULL, length, (double)length / (1024.0 * 1024.0), prot, flags, (unsigned long long)physAddr, alignment);
+    fflush(stdout);
+
+    if (!ctx || !addrInOut || length == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    if (alignment == 0) alignment = 4096;
+    size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
+
     ps4_direct_mem_init();
 
-    pthread_mutex_lock(&g_mem_mutex);
-
-    uint64_t virtual_addr = (uint64_t)*addrInOut;
-    if (flags & MEM_MAP_FIXED) {
-        if (virtual_addr == 0) {
-            pthread_mutex_unlock(&g_mem_mutex);
-            return 0x80020016;
+    pthread_mutex_lock(&g_direct_mutex);
+    DirectMemBlock *curr = g_direct_blocks;
+    DirectMemBlock *found = NULL;
+    while (curr) {
+        // Any sub-range of an allocated block may be mapped (not only its start).
+        if (!curr->is_free && physAddr >= curr->phys_offset &&
+            (uint64_t)physAddr + length <= (uint64_t)curr->phys_offset + curr->size) {
+            found = curr;
+            break;
         }
-    } else {
-        virtual_addr = search_free_vma(&g_vma_map, virtual_addr, length, alignment);
-        if (virtual_addr == (uint64_t)-1) {
-            pthread_mutex_unlock(&g_mem_mutex);
-            return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
-        }
+        curr = curr->next;
     }
 
-    VMANode *vma = carve_vma(&g_vma_map, virtual_addr, length);
-    if (!vma) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000c;
+    if (!found) {
+        fprintf(stderr, "[ps4-mem] ERROR: sceKernelMapDirectMemory: physAddr 0x%llx (len 0x%zx) not in an allocated block!\n", (unsigned long long)physAddr, length);
+        pthread_mutex_unlock(&g_direct_mutex);
+        return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     }
 
-    vma->type = VMA_TYPE_DIRECT;
-    vma->prot = (MemoryProt)prot;
-    strncpy(vma->name, "direct_mem", sizeof(vma->name) - 1);
-    clear_phys_map(&vma->phys_areas);
+    uint64_t vaddr = (uint64_t)-1;
+    // Check if fixed address was requested
+    if (*addrInOut != NULL) {
+        uint64_t req_vaddr = (uint64_t)*addrInOut;
+        vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_len, prot, flags, "direct_mem");
+    }
 
-    // Carve physical areas in dmem_map and attach to VMA
-    uint64_t current_phys = (uint64_t)physAddr;
-    uint64_t rem = length;
-    while (rem > 0) {
-        PhysAreaNode *dma = find_phys_area(&g_dmem_map, current_phys);
-        if (!dma) break;
-        uint64_t offset = current_phys - dma->area.base;
-        uint64_t sz = rem < (dma->area.size - offset) ? rem : (dma->area.size - offset);
+    // If no fixed address requested or fixed mapping failed, allocate dynamically with alignment
+    if (vaddr == (uint64_t)-1) {
+        vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_len, alignment, prot, flags, "direct_mem");
+    }
 
-        PhysAreaNode *carved = carve_phys_area(&g_dmem_map, current_phys, sz);
-        if (carved) {
-            carved->area.dma_type = PHYS_MEM_TYPE_MAPPED;
-            append_phys_area(&vma->phys_areas, current_phys - (uint64_t)physAddr, sz, carved->area.memory_type, PHYS_MEM_TYPE_MAPPED);
-            merge_phys_adjacent(&g_dmem_map, carved);
+    if (vaddr == (uint64_t)-1) {
+        fprintf(stderr, "[ps4-mem] ERROR: sceKernelMapDirectMemory failed to allocate VM extent! len=%zu align=%zu\n", aligned_len, alignment);
+        pthread_mutex_unlock(&g_direct_mutex);
+        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
+    }
+
+    found->mapped_guest_vaddr = vaddr;
+    *addrInOut = (void *)vaddr;
+    if (dm_alias(ctx, vaddr, (uint64_t)physAddr, (length + 0x3fffULL) & ~0x3fffULL) != 0 && g_phys_base) {
+        fprintf(stderr, "[ps4-mem] WARNING: direct mapping 0x%llx (phys 0x%llx) is not physically aliased\n",
+                (unsigned long long)vaddr, (unsigned long long)physAddr);
+    }
+
+    printf("[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=%p\n", (void *)vaddr);
+    fflush(stdout);
+
+    pthread_mutex_unlock(&g_direct_mutex);
+    return 0;
+}
+
+int sceKernelReleaseDirectMemory(off_t physAddr, size_t length) {
+    (void)length;
+    ps4_direct_mem_init();
+
+    pthread_mutex_lock(&g_direct_mutex);
+    DirectMemBlock *curr = g_direct_blocks;
+    while (curr) {
+        if (!curr->is_free && curr->phys_offset == physAddr) {
+            curr->is_free = 1;
+            curr->mapped_guest_vaddr = 0;
+
+            // Merge with next if free
+            if (curr->next && curr->next->is_free) {
+                DirectMemBlock *next = curr->next;
+                curr->size += next->size;
+                curr->next = next->next;
+                if (next->next) next->next->prev = curr;
+                free(next);
+            }
+            // Merge with prev if free
+            if (curr->prev && curr->prev->is_free) {
+                DirectMemBlock *prev = curr->prev;
+                prev->size += curr->size;
+                prev->next = curr->next;
+                if (curr->next) curr->next->prev = prev;
+                free(curr);
+            }
+            pthread_mutex_unlock(&g_direct_mutex);
+            return 0;
         }
-        current_phys += sz;
-        rem -= sz;
+        curr = curr->next;
     }
-
-    merge_vma_adjacent(&g_vma_map, vma);
-
-    // Remap guest virtual address onto physical backing
-    dm_alias(ctx, virtual_addr, (uint64_t)physAddr, length);
-
-    *addrInOut = (void *)virtual_addr;
-    pthread_mutex_unlock(&g_mem_mutex);
-    return 0; // ORBIS_OK
+    pthread_mutex_unlock(&g_direct_mutex);
+    return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
 }
 
 int sceKernelMapNamedFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, const char *name) {
-    if (!ctx || !addrInOut || length == 0) return 0x80020016;
-    ps4_direct_mem_init();
+    printf("[ps4-mem] sceKernelMapNamedFlexibleMemory (%s): in=%p len=%zu (%.2f MB) prot=0x%x flags=0x%x\n",
+           name ? name : "null", addrInOut ? *addrInOut : NULL, length, (double)length / (1024.0 * 1024.0), prot, flags);
+    fflush(stdout);
 
-    pthread_mutex_lock(&g_mem_mutex);
-    if (g_flexible_usage + length > g_total_flexible_size) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL (Out of flexible memory)
+    if (!ctx || !addrInOut || length == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    const char *tag = (name && *name) ? name : "flexible_mem";
+
+    // In Orbis OS, flexible memory allocations are aligned to 64KB (0x10000)
+    size_t alignment = 65536;
+    size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
+
+    uint64_t vaddr = (uint64_t)-1;
+    if (*addrInOut != NULL) {
+        uint64_t req_vaddr = (uint64_t)*addrInOut;
+        vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_len, prot, flags, tag);
     }
 
-    uint64_t virtual_addr = (uint64_t)*addrInOut;
-    size_t alignment = 65536; // 64 KB alignment for flexible memory
-    size_t aligned_len = align_up(length, alignment);
-
-    if (flags & MEM_MAP_FIXED) {
-        if (virtual_addr == 0) {
-            pthread_mutex_unlock(&g_mem_mutex);
-            return 0x80020016;
-        }
-    } else {
-        virtual_addr = search_free_vma(&g_vma_map, virtual_addr, aligned_len, alignment);
-        if (virtual_addr == (uint64_t)-1) {
-            pthread_mutex_unlock(&g_mem_mutex);
-            return 0x8002000c;
-        }
+    if (vaddr == (uint64_t)-1) {
+        vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_len, alignment, prot, flags, tag);
     }
 
-    VMANode *vma = carve_vma(&g_vma_map, virtual_addr, aligned_len);
-    if (!vma) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000c;
+    if (vaddr == (uint64_t)-1) {
+        fprintf(stderr, "[vmm] sceKernelMapNamedFlexibleMemory FAILED: tag=%s, len=%zu (0x%zx), in_addr=%p\n",
+                tag, length, length, *addrInOut);
+        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
     }
 
-    vma->type = VMA_TYPE_FLEXIBLE;
-    vma->prot = (MemoryProt)prot;
-    strncpy(vma->name, name ? name : "flexible_mem", sizeof(vma->name) - 1);
-    clear_phys_map(&vma->phys_areas);
-
-    // Carve physical blocks from fmem_map
-    uint64_t rem = aligned_len;
-    uint64_t cur_va = virtual_addr;
-    PhysAreaNode *fnode = g_fmem_map.head;
-    while (fnode && rem > 0) {
-        if (fnode->area.dma_type == PHYS_MEM_TYPE_FREE) {
-            uint64_t sz = rem < fnode->area.size ? rem : fnode->area.size;
-            PhysAreaNode *carved = carve_phys_area(&g_fmem_map, fnode->area.base, sz);
-            if (carved) {
-                carved->area.dma_type = PHYS_MEM_TYPE_FLEXIBLE;
-                append_phys_area(&vma->phys_areas, cur_va - virtual_addr, sz, 0, PHYS_MEM_TYPE_FLEXIBLE);
-                dm_alias(ctx, cur_va, carved->area.base, sz);
-                merge_phys_adjacent(&g_fmem_map, carved);
-            }
-            cur_va += sz;
-            rem -= sz;
-            g_flexible_usage += sz;
-        }
-        fnode = fnode->next;
-    }
-
-    merge_vma_adjacent(&g_vma_map, vma);
-
-    *addrInOut = (void *)virtual_addr;
-    pthread_mutex_unlock(&g_mem_mutex);
-    return 0; // ORBIS_OK
+    *addrInOut = (void *)vaddr;
+    printf("[ps4-mem] sceKernelMapNamedFlexibleMemory SUCCESS: out=%p\n", (void *)vaddr);
+    fflush(stdout);
+    return 0;
 }
 
 int sceKernelMapFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags) {
@@ -809,401 +522,216 @@ int sceKernelMapFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t lengt
 }
 
 int sceKernelReserveVirtualRange(GuestContext *ctx, void **addrInOut, size_t length, int flags, size_t alignment) {
-    if (!ctx || !addrInOut || length == 0) return 0x80020016;
-    ps4_direct_mem_init();
+    printf("[ps4-mem] sceKernelReserveVirtualRange: in=%p len=%zu (%.2f MB) flags=0x%x align=%zu\n",
+           addrInOut ? *addrInOut : NULL, length, (double)length / (1024.0 * 1024.0), flags, alignment);
+    fflush(stdout);
 
+    if (!ctx || !addrInOut || length == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     if (alignment == 0) alignment = 65536;
-    size_t aligned_len = align_up(length, alignment);
-    uint64_t virtual_addr = (uint64_t)*addrInOut;
+    size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
 
-    pthread_mutex_lock(&g_mem_mutex);
-    if (flags & MEM_MAP_FIXED) {
-        if (virtual_addr == 0) {
-            pthread_mutex_unlock(&g_mem_mutex);
-            return 0x80020016;
-        }
-    } else {
-        virtual_addr = search_free_vma(&g_vma_map, virtual_addr, aligned_len, alignment);
-        if (virtual_addr == (uint64_t)-1) {
-            pthread_mutex_unlock(&g_mem_mutex);
-            return 0x8002000c;
-        }
+    uint64_t vaddr = (uint64_t)-1;
+    if (*addrInOut != NULL) {
+        uint64_t req_vaddr = (uint64_t)*addrInOut;
+        vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_len, PROT_NONE, flags, "reserved");
     }
 
-    VMANode *vma = carve_vma(&g_vma_map, virtual_addr, aligned_len);
-    if (!vma) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000c;
+    if (vaddr == (uint64_t)-1) {
+        vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_len, alignment, PROT_NONE, flags, "reserved");
     }
 
-    vma->type = VMA_TYPE_RESERVED;
-    vma->prot = MEM_PROT_NO_ACCESS;
-    strncpy(vma->name, "reserved", sizeof(vma->name) - 1);
-    clear_phys_map(&vma->phys_areas);
-    merge_vma_adjacent(&g_vma_map, vma);
-
-    *addrInOut = (void *)virtual_addr;
-    pthread_mutex_unlock(&g_mem_mutex);
-    return 0; // ORBIS_OK
-}
-
-int sceKernelSetVirtualRangeName(GuestContext *ctx, const void *addr, size_t len, const char *name) {
-    (void)ctx;
-    if (!name) return -0x80020014;
-    ps4_direct_mem_init();
-
-    pthread_mutex_lock(&g_mem_mutex);
-    VMANode *node = find_vma(&g_vma_map, (uint64_t)addr);
-    if (node && node->type != VMA_TYPE_FREE) {
-        strncpy(node->name, name, sizeof(node->name) - 1);
+    if (vaddr == (uint64_t)-1) {
+        fprintf(stderr, "[ps4-mem] ERROR: sceKernelReserveVirtualRange FAILED! in=%p len=%zu align=%zu\n",
+                addrInOut ? *addrInOut : NULL, length, alignment);
+        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
     }
-    pthread_mutex_unlock(&g_mem_mutex);
+
+    *addrInOut = (void *)vaddr;
+    printf("[ps4-mem] sceKernelReserveVirtualRange SUCCESS: out=%p\n", (void *)vaddr);
+    fflush(stdout);
     return 0;
 }
 
 int sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx, uint64_t *sizeOut) {
-    (void)ctx;
-    if (!sizeOut) return 0x80020016;
-    ps4_direct_mem_init();
-    *sizeOut = g_total_flexible_size;
+    if (!sizeOut) return -EINVAL;
+    uint64_t min_fmem = 4ULL * 1024 * 1024 * 1024; // 4 GB minimum flexible memory budget for 64-bit recompiled titles
+    uint64_t from_param = 0;
+    if (ctx && ctx->mem_base) {
+        GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+        if (proc->proc_param_addr != 0 && proc->proc_param_addr + 0x48 <= proc->mem_size) {
+            // OrbisProcParam has mem_param pointer at offset +0x40
+            uint64_t mem_param_addr = *(uint64_t *)(proc->mem_base + proc->proc_param_addr + 0x40ULL);
+            if (mem_param_addr != 0 && mem_param_addr + 0x18 <= proc->mem_size) {
+                // OrbisKernelMemParam has flexible_memory_size pointer at offset +0x10
+                uint64_t flex_ptr = *(uint64_t *)(proc->mem_base + mem_param_addr + 0x10ULL);
+                if (flex_ptr != 0 && flex_ptr + 8 <= proc->mem_size) {
+                    uint64_t flex_extra = *(uint64_t *)(proc->mem_base + flex_ptr);
+                    if (flex_extra > 0 && flex_extra < 32ULL * 1024 * 1024 * 1024) {
+                        // Base flexible memory is 272MB (0x11000000)
+                        from_param = flex_extra + (272ULL * 1024 * 1024);
+                    }
+                }
+            }
+        }
+    }
+    if (from_param > min_fmem) {
+        *sizeOut = from_param;
+    } else {
+        *sizeOut = min_fmem;
+    }
+    printf("[ps4-mem] sceKernelConfiguredFlexibleMemorySize: %llu (%.2f MB)\n",
+           (unsigned long long)*sizeOut, (double)*sizeOut / (1024.0 * 1024.0));
+    fflush(stdout);
     return 0;
 }
 
 size_t sceKernelAvailableFlexibleMemorySize(GuestContext *ctx) {
-    (void)ctx;
-    ps4_direct_mem_init();
-    pthread_mutex_lock(&g_mem_mutex);
-    size_t avail = g_total_flexible_size > g_flexible_usage ? (size_t)(g_total_flexible_size - g_flexible_usage) : 0;
-    pthread_mutex_unlock(&g_mem_mutex);
-    return avail;
-}
+    if (!ctx) return 0;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    uint64_t total_fmem = 4ULL * 1024 * 1024 * 1024;
+    sceKernelConfiguredFlexibleMemorySize(ctx, &total_fmem);
 
-int sceKernelMprotect(GuestContext *ctx, const void *addr, size_t size, int prot) {
-    (void)ctx;
-    if (size == 0) return 0;
-    ps4_direct_mem_init();
-
-    pthread_mutex_lock(&g_mem_mutex);
-    VMANode *node = find_vma(&g_vma_map, (uint64_t)addr);
-    if (node && node->type != VMA_TYPE_FREE) {
-        node->prot = (MemoryProt)prot;
+    pthread_mutex_lock(&proc->vm_mutex);
+    size_t used = 0;
+    GuestVMExtent *curr = proc->vm_extents;
+    while (curr) {
+        if (!curr->is_free && strstr(curr->name, "flexible")) {
+            used += curr->size;
+        }
+        curr = curr->next;
     }
-    pthread_mutex_unlock(&g_mem_mutex);
-    return 0;
-}
+    pthread_mutex_unlock(&proc->vm_mutex);
 
-int sceKernelMtypeprotect(GuestContext *ctx, const void *addr, size_t size, int mtype, int prot) {
-    (void)mtype;
-    return sceKernelMprotect(ctx, addr, size, prot);
+    if (used >= total_fmem) return 0;
+    return (size_t)(total_fmem - used);
 }
 
 int sceKernelVirtualQuery(GuestContext *ctx, const void *addr, int flags, OrbisKernelVirtualQueryInfo *info, size_t infoSize) {
-    (void)ctx;
     (void)flags;
-    if (!info || infoSize < sizeof(OrbisKernelVirtualQueryInfo)) return 0x80020016;
-    ps4_direct_mem_init();
-
-    pthread_mutex_lock(&g_mem_mutex);
-    VMANode *node = find_vma(&g_vma_map, (uint64_t)addr);
-    if (!node || node->type == VMA_TYPE_FREE) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000d; // ORBIS_KERNEL_ERROR_EACCES
+    if (!ctx || !info || infoSize < sizeof(OrbisKernelVirtualQueryInfo)) {
+        return -EINVAL;
+    }
+    uint64_t vaddr = (uint64_t)addr;
+    GuestVMExtent *extent = recomp_vm_find(ctx, vaddr);
+    if (!extent) {
+        return -EFAULT;
     }
 
     memset(info, 0, infoSize);
-    info->start = (void *)node->base;
-    info->end = (void *)(node->base + node->size);
-    info->prot = (int32_t)node->prot;
-    info->isFlexibleMemory = (node->type == VMA_TYPE_FLEXIBLE) ? 1 : 0;
-    info->isDirectMemory = (node->type == VMA_TYPE_DIRECT) ? 1 : 0;
-    info->isStack = (node->type == VMA_TYPE_STACK) ? 1 : 0;
-    info->isPooledMemory = (node->type == VMA_TYPE_POOLED || node->type == VMA_TYPE_POOL_RESERVED) ? 1 : 0;
-    info->isCommitted = (node->type != VMA_TYPE_FREE && node->type != VMA_TYPE_RESERVED && node->type != VMA_TYPE_POOL_RESERVED) ? 1 : 0;
-    strncpy(info->name, node->name, sizeof(info->name) - 1);
-
-    if (node->type == VMA_TYPE_DIRECT && node->phys_areas.head) {
-        info->offset = (off_t)node->phys_areas.head->area.base;
-        info->memory_type = node->phys_areas.head->area.memory_type;
+    info->start = (void *)extent->addr;
+    info->end = (void *)(extent->addr + extent->size);
+    info->prot = extent->prot ? extent->prot : (PROT_READ | PROT_WRITE);
+    info->flags = extent->flags;
+    info->isCommitted = extent->is_free ? 0 : 1;
+    info->isFlexibleMemory = (strstr(extent->name, "flexible") != NULL) ? 1 : 0;
+    info->isDirectMemory = (strstr(extent->name, "direct") != NULL) ? 1 : 0;
+    info->isPooledMemory = (strstr(extent->name, "pool") != NULL) ? 1 : 0;
+    strncpy(info->name, extent->name, sizeof(info->name) - 1);
+    uint64_t ds, de, dp;
+    if (dm_lookup(vaddr, &ds, &de, &dp)) {
+        info->start = (void *)ds;
+        info->end = (void *)de;
+        info->offset = (off_t)dp;
+        info->isDirectMemory = 1;
+        info->isFlexibleMemory = 0;
+        info->isCommitted = 1;
     }
-    if (node->type == VMA_TYPE_RESERVED || node->type == VMA_TYPE_POOL_RESERVED) {
-        info->prot = 0;
-    }
 
-    pthread_mutex_unlock(&g_mem_mutex);
-    return 0; // ORBIS_OK
-}
-
-int sceKernelQueryMemoryProtection(GuestContext *ctx, const void *addr, void **start, void **end, int *prot) {
-    (void)ctx;
-    ps4_direct_mem_init();
-
-    pthread_mutex_lock(&g_mem_mutex);
-    VMANode *node = find_vma(&g_vma_map, (uint64_t)addr);
-    if (!node || node->type == VMA_TYPE_FREE) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000d;
-    }
-    if (start) *start = (void *)node->base;
-    if (end) *end = (void *)(node->base + node->size);
-    if (prot) *prot = (int)node->prot;
-    pthread_mutex_unlock(&g_mem_mutex);
     return 0;
 }
 
-int sceKernelBatchMap(GuestContext *ctx, OrbisKernelBatchMapEntry *entries, int numEntries, int *numEntriesOut) {
-    if (!entries || numEntries <= 0) return 0x80020016;
-    int processed = 0;
-    int rc = 0;
-    for (int i = 0; i < numEntries; i++) {
-        OrbisKernelBatchMapEntry *e = &entries[i];
-        void *addr = (void *)e->start;
-        switch (e->operation) {
-            case ORBIS_KERNEL_BATCH_MAP_DIRECT:
-                rc = sceKernelMapDirectMemory(ctx, &addr, e->length, e->protection, 0, (off_t)e->offset, 0);
-                e->start = (uint64_t)addr;
-                break;
-            case ORBIS_KERNEL_BATCH_MAP_UNMAP:
-                rc = sceKernelReleaseDirectMemory((off_t)e->start, e->length);
-                break;
-            case ORBIS_KERNEL_BATCH_MAP_PROTECT:
-                rc = sceKernelMprotect(ctx, addr, e->length, e->protection);
-                break;
-            case ORBIS_KERNEL_BATCH_MAP_FLEXIBLE:
-                rc = sceKernelMapFlexibleMemory(ctx, &addr, e->length, e->protection, 0);
-                e->start = (uint64_t)addr;
-                break;
-            case ORBIS_KERNEL_BATCH_MAP_TYPE_PROTECT:
-                rc = sceKernelMtypeprotect(ctx, addr, e->length, e->type, e->protection);
-                break;
-            default:
-                rc = 0x80020016;
-                break;
-        }
-        if (rc != 0) break;
-        processed++;
+int sceKernelQueryMemoryProtection(GuestContext *ctx, const void *addr, void **start, void **end, int *prot) {
+    if (!ctx) return -EINVAL;
+    uint64_t vaddr = (uint64_t)addr;
+    GuestVMExtent *extent = recomp_vm_find(ctx, vaddr);
+    if (!extent) {
+        return -EFAULT;
     }
-    if (numEntriesOut) *numEntriesOut = processed;
-    return rc;
+    if (start) *start = (void *)extent->addr;
+    if (end) *end = (void *)(extent->addr + extent->size);
+    if (prot) *prot = extent->prot ? extent->prot : (PROT_READ | PROT_WRITE);
+    return 0;
 }
 
-// ---------------------------------------------------------------------------------
-// Memory Pools (Mirroring shadPS4 PoolExpand, PoolReserve, PoolCommit, PoolDecommit)
-// ---------------------------------------------------------------------------------
+int sceKernelAllocateMainDirectMemory(size_t length, size_t alignment, int type, off_t *physAddrOut) {
+    printf("[ps4-mem] sceKernelAllocateMainDirectMemory: len=%zu (%.2f MB) align=%zu type=%d\n",
+           length, (double)length / (1024.0 * 1024.0), alignment, type);
+    fflush(stdout);
+    // shadPS4 (and the SDK's description): the whole direct memory is the search range.
+    return sceKernelAllocateDirectMemory(0, (off_t)sceKernelGetDirectMemorySize(), length, alignment, type, physAddrOut);
+}
+
+// Memory Pool implementation
+int sceKernelMemoryPoolReserve(GuestContext *ctx, void *addrIn, size_t len, size_t alignment, int flags, void **addrOut) {
+    printf("[ps4-mem] sceKernelMemoryPoolReserve: in=%p len=%zu (%.2f MB) align=%zu flags=0x%x\n",
+           addrIn, len, (double)len / (1024.0 * 1024.0), alignment, flags);
+    fflush(stdout);
+
+    if (!ctx || !addrOut || len == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    if (alignment == 0) alignment = 2ULL * 1024 * 1024; // 2MB default alignment
+    size_t aligned_size = (len + alignment - 1) & ~(alignment - 1);
+
+    uint64_t vaddr = (uint64_t)-1;
+    if (addrIn != NULL) {
+        uint64_t req_vaddr = (uint64_t)addrIn;
+        vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_size, PROT_READ | PROT_WRITE, flags, "pool_reserved");
+        if (vaddr == (uint64_t)-1) {
+            // In case the guest requested a fixed virtual reservation that is outside
+            // the initial linear window, accept the requested virtual base.
+            vaddr = req_vaddr;
+        }
+    } else {
+        vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_size, alignment, PROT_READ | PROT_WRITE, flags, "pool_reserved");
+    }
+
+    if (vaddr == (uint64_t)-1) {
+        fprintf(stderr, "[ps4-mem] ERROR: sceKernelMemoryPoolReserve FAILED: in=%p len=%zu align=%zu\n",
+                addrIn, len, alignment);
+        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
+    }
+
+    *addrOut = (void *)vaddr;
+    printf("[ps4-mem] sceKernelMemoryPoolReserve SUCCESS: out=%p\n", (void *)vaddr);
+    fflush(stdout);
+    return 0; // ORBIS_OK
+}
 
 int sceKernelMemoryPoolExpand(GuestContext *ctx, off_t searchStart, off_t searchEnd, size_t len, size_t alignment, off_t *physAddrOut) {
     (void)ctx;
-    ps4_direct_mem_init();
-    if (!physAddrOut || len == 0 || (len & 0xffffULL)) return 0x80020016; // Length must be 64KB aligned
-    if (searchStart < 0 || (searchEnd > 0 && searchEnd <= searchStart)) return 0x80020016;
-    if (alignment == 0) alignment = 65536; // 64 KB alignment
-
-    pthread_mutex_lock(&g_mem_mutex);
-
-    PhysAreaNode *node = find_phys_area(&g_dmem_map, (uint64_t)searchStart);
-    uint64_t mapping_start = align_up(node ? (node->area.base > (uint64_t)searchStart ? node->area.base : (uint64_t)searchStart) : (uint64_t)searchStart, alignment);
-    uint64_t mapping_end = mapping_start + len;
-
-    while (node && (node->area.dma_type != PHYS_MEM_TYPE_FREE || (node->area.base + node->area.size) < mapping_end)) {
-        node = node->next;
-        if (!node) break;
-        mapping_start = align_up(node->area.base, alignment);
-        mapping_end = mapping_start + len;
-    }
-
-    if (!node || (searchEnd > 0 && mapping_end > (uint64_t)searchEnd)) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
-    }
-
-    PhysAreaNode *carved = carve_phys_area(&g_dmem_map, mapping_start, len);
-    if (!carved) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000c;
-    }
-
-    carved->area.dma_type = PHYS_MEM_TYPE_POOLED;
-    carved->area.memory_type = 3;
-    g_pool_budget += len;
-
-    *physAddrOut = (off_t)mapping_start;
-
-    printf("[ps4-mem] sceKernelMemoryPoolExpand SUCCESS: start=0x%llx len=%zu (%.2f MB) pool_budget=%.2f MB\n",
-           (unsigned long long)mapping_start, len, (double)len / (1024.0 * 1024.0),
-           (double)g_pool_budget / (1024.0 * 1024.0));
+    printf("[ps4-mem] sceKernelMemoryPoolExpand: start=0x%llx end=0x%llx len=%zu (%.2f MB) align=%zu\n",
+           (unsigned long long)searchStart, (unsigned long long)searchEnd, len, (double)len / (1024.0 * 1024.0), alignment);
     fflush(stdout);
-
-    pthread_mutex_unlock(&g_mem_mutex);
-    return 0; // ORBIS_OK
-}
-
-int sceKernelMemoryPoolReserve(GuestContext *ctx, void *addrIn, size_t len, size_t alignment, int flags, void **addrOut) {
-    (void)ctx;
-    if (!addrOut || len == 0 || (len & 0x1fffffULL)) return 0x80020016; // Must be 2MB aligned
-    ps4_direct_mem_init();
-
-    if (alignment == 0) alignment = 2ULL * 1024 * 1024; // 2 MB alignment
-    size_t aligned_size = align_up(len, alignment);
-    uint64_t virtual_addr = (uint64_t)addrIn;
-
-    pthread_mutex_lock(&g_mem_mutex);
-    if (flags & MEM_MAP_FIXED) {
-        if (virtual_addr == 0) {
-            pthread_mutex_unlock(&g_mem_mutex);
-            return 0x80020016;
-        }
-    } else {
-        virtual_addr = search_free_vma(&g_vma_map, virtual_addr, aligned_size, alignment);
-        if (virtual_addr == (uint64_t)-1) {
-            pthread_mutex_unlock(&g_mem_mutex);
-            return 0x8002000c;
-        }
-    }
-
-    VMANode *vma = carve_vma(&g_vma_map, virtual_addr, aligned_size);
-    if (!vma) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000c;
-    }
-
-    vma->type = VMA_TYPE_POOL_RESERVED;
-    vma->prot = MEM_PROT_NO_ACCESS;
-    strncpy(vma->name, "pool_reserved", sizeof(vma->name) - 1);
-    clear_phys_map(&vma->phys_areas);
-    merge_vma_adjacent(&g_vma_map, vma);
-
-    *addrOut = (void *)virtual_addr;
-
-    printf("[ps4-mem] sceKernelMemoryPoolReserve SUCCESS: out=%p len=%zu (%.2f MB)\n",
-           *addrOut, aligned_size, (double)aligned_size / (1024.0 * 1024.0));
-    fflush(stdout);
-
-    pthread_mutex_unlock(&g_mem_mutex);
-    return 0; // ORBIS_OK
+    // Errors as shadPS4's sceKernelMemoryPoolExpand: EINVAL for a bad range, ENOMEM when nothing fits.
+    if (len == 0 || !physAddrOut || searchStart < 0 || searchEnd <= searchStart) return 0x80020016;
+    if (alignment == 0) alignment = 64ULL * 1024; // 64KB default alignment
+    const int rc = sceKernelAllocateDirectMemory(searchStart, searchEnd, len, alignment, 3 /* POOLED */, physAddrOut);
+    return rc == (int)0x80020023 ? (int)0x8002000c : rc; // EAGAIN -> ORBIS_KERNEL_ERROR_ENOMEM
 }
 
 int sceKernelMemoryPoolCommit(GuestContext *ctx, void *addr, size_t len, int type, int prot, int flags) {
+    (void)ctx;
+    (void)type;
+    (void)prot;
     (void)flags;
-    if (!addr) return 0x80020016;
-    if (len == 0) return 0;
-    if (len & 0xffffULL) return 0x80020016; // 64KB aligned
-    ps4_direct_mem_init();
-
-    uint64_t virtual_addr = align_up((uint64_t)addr, 65536);
-
-    pthread_mutex_lock(&g_mem_mutex);
-    VMANode *vma = find_vma(&g_vma_map, virtual_addr);
-    if (!vma || vma->type != VMA_TYPE_POOL_RESERVED) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x80020016;
-    }
-
-    if (g_pool_budget < len) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
-    }
-    g_pool_budget -= len;
-
-    VMANode *carved_vma = carve_vma(&g_vma_map, virtual_addr, len);
-    if (!carved_vma) {
-        g_pool_budget += len;
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x8002000c;
-    }
-
-    carved_vma->type = VMA_TYPE_POOLED;
-    carved_vma->prot = (MemoryProt)prot;
-    strncpy(carved_vma->name, "pool_committed", sizeof(carved_vma->name) - 1);
-    clear_phys_map(&carved_vma->phys_areas);
-
-    // Carve physical areas from dmem_map that are marked PHYS_MEM_TYPE_POOLED
-    uint64_t rem = len;
-    uint64_t cur_va = virtual_addr;
-    PhysAreaNode *pnode = g_dmem_map.head;
-    while (pnode && rem > 0) {
-        if (pnode->area.dma_type == PHYS_MEM_TYPE_POOLED) {
-            uint64_t sz = rem < pnode->area.size ? rem : pnode->area.size;
-            PhysAreaNode *carved = carve_phys_area(&g_dmem_map, pnode->area.base, sz);
-            if (carved) {
-                carved->area.dma_type = PHYS_MEM_TYPE_COMMITTED;
-                carved->area.memory_type = type;
-                append_phys_area(&carved_vma->phys_areas, cur_va - virtual_addr, sz, type, PHYS_MEM_TYPE_COMMITTED);
-                dm_alias(ctx, cur_va, carved->area.base, sz);
-                merge_phys_adjacent(&g_dmem_map, carved);
-            }
-            cur_va += sz;
-            rem -= sz;
-        }
-        pnode = pnode->next;
-    }
-
-    merge_vma_adjacent(&g_vma_map, carved_vma);
-    pthread_mutex_unlock(&g_mem_mutex);
+    if (!addr) return -EINVAL;
+    if (len == 0) return 0; // ORBIS_OK for zero-length commit
     return 0; // ORBIS_OK
 }
 
 int sceKernelMemoryPoolDecommit(GuestContext *ctx, void *addr, size_t len, int flags) {
     (void)flags;
-    if (!addr || len == 0) return 0;
-    ps4_direct_mem_init();
-
-    pthread_mutex_lock(&g_mem_mutex);
-    uint64_t virtual_addr = (uint64_t)addr;
-    VMANode *vma = find_vma(&g_vma_map, virtual_addr);
-    if (!vma) {
-        pthread_mutex_unlock(&g_mem_mutex);
-        return 0x80020016;
-    }
-
-    uint64_t rem = len;
-    uint64_t cur_va = virtual_addr;
-    while (vma && rem > 0) {
-        uint64_t offset = cur_va - vma->base;
-        uint64_t sz = rem < (vma->size - offset) ? rem : (vma->size - offset);
-
-        if (vma->type == VMA_TYPE_POOLED) {
-            g_pool_budget += sz;
-            // Restore physical blocks to PHYS_MEM_TYPE_POOLED
-            PhysAreaNode *pa = vma->phys_areas.head;
-            while (pa) {
-                PhysAreaNode *dma = carve_phys_area(&g_dmem_map, pa->area.base, pa->area.size);
-                if (dma) {
-                    dma->area.dma_type = PHYS_MEM_TYPE_POOLED;
-                    merge_phys_adjacent(&g_dmem_map, dma);
-                }
-                pa = pa->next;
-            }
-        }
-
-        VMANode *carved = carve_vma(&g_vma_map, cur_va, sz);
-        if (carved) {
-            carved->type = VMA_TYPE_POOL_RESERVED;
-            carved->prot = MEM_PROT_NO_ACCESS;
-            clear_phys_map(&carved->phys_areas);
-            merge_vma_adjacent(&g_vma_map, carved);
-        }
-
-        if (ctx && ctx->mem_base) {
-            GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-            if (cur_va + sz <= proc->mem_size) {
+    if (!ctx || !addr || len == 0) return -EINVAL;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    uint64_t vaddr = (uint64_t)addr;
+    if (proc->mem_base && vaddr + len <= proc->mem_size) {
 #if defined(__APPLE__) || defined(__linux__)
-                madvise(proc->mem_base + cur_va, sz, MADV_DONTNEED);
+        madvise(proc->mem_base + vaddr, len, MADV_DONTNEED);
 #endif
-            }
-        }
-
-        cur_va += sz;
-        rem -= sz;
-        vma = find_vma(&g_vma_map, cur_va);
     }
-
-    pthread_mutex_unlock(&g_mem_mutex);
     return 0; // ORBIS_OK
 }
 
-// ---------------------------------------------------------------------------------
-// Guest Execution Shims (SysV AMD64 ABI: RDI, RSI, RDX, RCX, R8, R9)
-// ---------------------------------------------------------------------------------
-
+// Shims for guest execution
 void shim_sceKernelAllocateDirectMemory(GuestContext *ctx) {
     off_t searchStart = (off_t)ctx->rdi;
     off_t searchEnd = (off_t)ctx->rsi;
@@ -1214,7 +742,7 @@ void shim_sceKernelAllocateDirectMemory(GuestContext *ctx) {
 
     off_t physAddr = 0;
     int rc = sceKernelAllocateDirectMemory(searchStart, searchEnd, length, alignment, type, &physAddr);
-    if (rc == 0 && physAddrOutGuest != 0 && ctx->mem_base && physAddrOutGuest + sizeof(off_t) <= ctx->mem_size) {
+    if (rc == 0 && physAddrOutGuest != 0) {
         *(off_t *)(ctx->mem_base + physAddrOutGuest) = physAddr;
     }
     ctx->rax = (uint64_t)(int64_t)rc;
@@ -1229,7 +757,7 @@ void shim_sceKernelAllocateMainDirectMemory(GuestContext *ctx) {
 
     off_t physAddr = 0;
     int rc = sceKernelAllocateMainDirectMemory(length, alignment, type, &physAddr);
-    if (rc == 0 && physAddrOutGuest != 0 && ctx->mem_base && physAddrOutGuest + sizeof(off_t) <= ctx->mem_size) {
+    if (rc == 0 && physAddrOutGuest != 0) {
         *(off_t *)(ctx->mem_base + physAddrOutGuest) = physAddr;
     }
     ctx->rax = (uint64_t)(int64_t)rc;
@@ -1242,61 +770,41 @@ void shim_sceKernelGetDirectMemorySize(GuestContext *ctx) {
 }
 
 void shim_sceKernelAvailableDirectMemorySize(GuestContext *ctx) {
-    // PS4 SysV ABI: sceKernelAvailableDirectMemorySize(searchStart, searchEnd, alignment, physAddrOut, sizeOut)
-    // RDI: searchStart, RSI: searchEnd, RDX: alignment, RCX: physAddrOut, R8: sizeOut
-    off_t searchStart = (off_t)ctx->rdi;
-    off_t searchEnd = (off_t)ctx->rsi;
-    size_t alignment = (size_t)ctx->rdx;
-    uint64_t physAddrOutGuest = ctx->rcx;
+    uint64_t startOutGuest = ctx->rcx;
     uint64_t sizeOutGuest = ctx->r8;
 
-    if (physAddrOutGuest != 0 || sizeOutGuest != 0) {
-        off_t physAddr = 0;
-        size_t size = 0;
-        int rc = sceKernelAvailableDirectMemorySizeExact(searchStart, searchEnd, alignment, &physAddr, &size);
-        if (rc == 0) {
-            if (physAddrOutGuest != 0 && ctx->mem_base && physAddrOutGuest + sizeof(off_t) <= ctx->mem_size) {
-                *(off_t *)(ctx->mem_base + physAddrOutGuest) = physAddr;
+    if (startOutGuest != 0 || sizeOutGuest != 0) {
+        // PS4 SDK convention:
+        // int sceKernelAvailableDirectMemorySize(off_t searchStart, off_t searchEnd, int flags, off_t *startOut, size_t *sizeOut)
+        // Returns 0 on success, writes free block start and size.
+        off_t searchStart = (off_t)ctx->rdi;
+        off_t searchEnd = (off_t)ctx->rsi;
+        (void)searchEnd;
+
+        ps4_direct_mem_init();
+        pthread_mutex_lock(&g_direct_mutex);
+        size_t free_total = 0;
+        off_t best_start = searchStart;
+        DirectMemBlock *curr = g_direct_blocks;
+        while (curr) {
+            if (curr->is_free) {
+                free_total += curr->size;
+                if (best_start == 0) best_start = curr->phys_offset;
             }
-            if (sizeOutGuest != 0 && ctx->mem_base && sizeOutGuest + sizeof(size_t) <= ctx->mem_size) {
-                *(size_t *)(ctx->mem_base + sizeOutGuest) = size;
-            }
+            curr = curr->next;
         }
-        ctx->rax = (uint64_t)(int64_t)rc;
+        pthread_mutex_unlock(&g_direct_mutex);
+
+        if (startOutGuest && startOutGuest < ctx->mem_size) {
+            *(off_t *)(ctx->mem_base + startOutGuest) = best_start;
+        }
+        if (sizeOutGuest && sizeOutGuest < ctx->mem_size) {
+            *(size_t *)(ctx->mem_base + sizeOutGuest) = free_total;
+        }
+        ctx->rax = 0; // SCE_OK
     } else {
-        // Fallback: 0-arg call returning total free size
         ctx->rax = (uint64_t)sceKernelAvailableDirectMemorySize();
     }
-    SHIM_RETURN();
-}
-
-void shim_sceKernelReleaseDirectMemory(GuestContext *ctx) {
-    off_t physAddr = (off_t)ctx->rdi;
-    size_t length = (size_t)ctx->rsi;
-    ctx->rax = (uint64_t)(int64_t)sceKernelReleaseDirectMemory(physAddr, length);
-    SHIM_RETURN();
-}
-
-void shim_sceKernelCheckedReleaseDirectMemory(GuestContext *ctx) {
-    off_t physAddr = (off_t)ctx->rdi;
-    size_t length = (size_t)ctx->rsi;
-    ctx->rax = (uint64_t)(int64_t)sceKernelCheckedReleaseDirectMemory(physAddr, length);
-    SHIM_RETURN();
-}
-
-void shim_sceKernelDirectMemoryQuery(GuestContext *ctx) {
-    off_t offset = (off_t)ctx->rdi;
-    int flags = (int)ctx->rsi;
-    uint64_t infoGuest = ctx->rdx;
-    size_t infoSize = (size_t)ctx->rcx;
-
-    OrbisDirectMemoryQueryInfo info = {0};
-    int rc = sceKernelDirectMemoryQuery(offset, flags, &info, sizeof(info));
-    if (rc == 0 && infoGuest != 0 && ctx->mem_base && infoGuest + sizeof(info) <= ctx->mem_size) {
-        size_t copy_sz = infoSize < sizeof(info) ? infoSize : sizeof(info);
-        memcpy(ctx->mem_base + infoGuest, &info, copy_sz);
-    }
-    ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 
@@ -1309,14 +817,21 @@ void shim_sceKernelMapDirectMemory(GuestContext *ctx) {
     size_t alignment = (size_t)ctx->r9;
 
     void *mappedAddr = NULL;
-    if (addrInOutGuest != 0 && ctx->mem_base && addrInOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+    if (addrInOutGuest != 0) {
         mappedAddr = (void *)*(uint64_t *)(ctx->mem_base + addrInOutGuest);
     }
     int rc = sceKernelMapDirectMemory(ctx, &mappedAddr, length, prot, flags, physAddr, alignment);
-    if (rc == 0 && addrInOutGuest != 0 && ctx->mem_base && addrInOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+    if (rc == 0 && addrInOutGuest != 0) {
         *(uint64_t *)(ctx->mem_base + addrInOutGuest) = (uint64_t)mappedAddr;
     }
     ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelReleaseDirectMemory(GuestContext *ctx) {
+    off_t physAddr = (off_t)ctx->rdi;
+    size_t length = (size_t)ctx->rsi;
+    ctx->rax = (uint64_t)(int64_t)sceKernelReleaseDirectMemory(physAddr, length);
     SHIM_RETURN();
 }
 
@@ -1343,13 +858,18 @@ void shim_sceKernelMapNamedFlexibleMemory(GuestContext *ctx) {
     size_t length = (size_t)ctx->rsi;
     int prot = (int)ctx->rdx;
     int flags = (int)ctx->rcx;
-    const char *name = (ctx->r8 && ctx->mem_base && ctx->r8 < ctx->mem_size) ? (const char *)(ctx->mem_base + ctx->r8) : "flexible_mem";
+    uint64_t nameGuest = ctx->r8;
+
+    char name[32] = {0};
+    if (nameGuest != 0 && ctx->mem_base && nameGuest < ctx->mem_size) {
+        strncpy(name, (const char *)(ctx->mem_base + nameGuest), sizeof(name) - 1);
+    }
 
     void *mappedAddr = NULL;
     if (addrInOutGuest != 0 && ctx->mem_base && addrInOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
         mappedAddr = (void *)*(uint64_t *)(ctx->mem_base + addrInOutGuest);
     }
-    int rc = sceKernelMapNamedFlexibleMemory(ctx, &mappedAddr, length, prot, flags, name);
+    int rc = sceKernelMapNamedFlexibleMemory(ctx, &mappedAddr, length, prot, flags, name[0] ? name : "flexible_mem");
     if (rc == 0 && addrInOutGuest != 0 && ctx->mem_base && addrInOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
         *(uint64_t *)(ctx->mem_base + addrInOutGuest) = (uint64_t)mappedAddr;
     }
@@ -1375,59 +895,18 @@ void shim_sceKernelReserveVirtualRange(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-void shim_sceKernelSetVirtualRangeName(GuestContext *ctx) {
-    const void *addr = (const void *)ctx->rdi;
-    size_t len = (size_t)ctx->rsi;
-    const char *name = (ctx->rdx && ctx->mem_base && ctx->rdx < ctx->mem_size) ? (const char *)(ctx->mem_base + ctx->rdx) : NULL;
-    ctx->rax = (uint64_t)(int64_t)sceKernelSetVirtualRangeName(ctx, addr, len, name);
-    SHIM_RETURN();
-}
-
-void shim_sceKernelMprotect(GuestContext *ctx) {
-    const void *addr = (const void *)ctx->rdi;
-    size_t size = (size_t)ctx->rsi;
-    int prot = (int)ctx->rdx;
-    ctx->rax = (uint64_t)(int64_t)sceKernelMprotect(ctx, addr, size, prot);
-    SHIM_RETURN();
-}
-
-void shim_sceKernelMtypeprotect(GuestContext *ctx) {
-    const void *addr = (const void *)ctx->rdi;
-    size_t size = (size_t)ctx->rsi;
-    int mtype = (int)ctx->rdx;
-    int prot = (int)ctx->rcx;
-    ctx->rax = (uint64_t)(int64_t)sceKernelMtypeprotect(ctx, addr, size, mtype, prot);
-    SHIM_RETURN();
-}
-
-void shim_sceKernelBatchMap(GuestContext *ctx) {
-    uint64_t entriesGuest = ctx->rdi;
-    int numEntries = (int)ctx->rsi;
-    uint64_t numEntriesOutGuest = ctx->rdx;
-
-    if (!entriesGuest || !ctx->mem_base || entriesGuest + (uint64_t)numEntries * sizeof(OrbisKernelBatchMapEntry) > ctx->mem_size) {
-        ctx->rax = (uint64_t)(int64_t)0x80020016;
-        SHIM_RETURN();
-    }
-
-    OrbisKernelBatchMapEntry *entries = (OrbisKernelBatchMapEntry *)(ctx->mem_base + entriesGuest);
-    int numOut = 0;
-    int rc = sceKernelBatchMap(ctx, entries, numEntries, &numOut);
-    if (numEntriesOutGuest != 0 && ctx->mem_base && numEntriesOutGuest + sizeof(int) <= ctx->mem_size) {
-        *(int *)(ctx->mem_base + numEntriesOutGuest) = numOut;
-    }
-    ctx->rax = (uint64_t)(int64_t)rc;
-    SHIM_RETURN();
-}
-
 void shim_sceKernelConfiguredFlexibleMemorySize(GuestContext *ctx) {
     uint64_t sizeOutGuest = ctx->rdi;
-    uint64_t cfg_size = 0;
+    uint64_t cfg_size = 512ULL * 1024 * 1024;
     int rc = sceKernelConfiguredFlexibleMemorySize(ctx, &cfg_size);
-    if (sizeOutGuest != 0 && ctx->mem_base && sizeOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+    if (sizeOutGuest == 0) {
+        ctx->rax = (uint64_t)(int64_t)-EINVAL;
+    } else if (ctx->mem_base && sizeOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
         *(uint64_t *)(ctx->mem_base + sizeOutGuest) = cfg_size;
+        ctx->rax = (uint64_t)(int64_t)rc;
+    } else {
+        ctx->rax = (uint64_t)(int64_t)-EFAULT;
     }
-    ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 
@@ -1436,7 +915,7 @@ void shim_sceKernelAvailableFlexibleMemorySize(GuestContext *ctx) {
     uint64_t sizeOutGuest = ctx->rdi;
     if (sizeOutGuest != 0 && ctx->mem_base && sizeOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
         *(uint64_t *)(ctx->mem_base + sizeOutGuest) = (uint64_t)avail;
-        ctx->rax = 0;
+        ctx->rax = 0; // ORBIS_OK
     } else {
         ctx->rax = (uint64_t)avail;
     }
@@ -1449,8 +928,8 @@ void shim_sceKernelVirtualQuery(GuestContext *ctx) {
     uint64_t infoGuest = ctx->rdx;
     size_t infoSize = (size_t)ctx->rcx;
 
-    if (!infoGuest || !ctx->mem_base || infoGuest + infoSize > ctx->mem_size) {
-        ctx->rax = (uint64_t)(int64_t)0x80020016;
+    if (!infoGuest) {
+        ctx->rax = (uint64_t)(int64_t)-EINVAL;
         SHIM_RETURN();
     }
 
@@ -1475,29 +954,33 @@ void shim_sceKernelQueryMemoryProtection(GuestContext *ctx) {
     int prot = 0;
     int rc = sceKernelQueryMemoryProtection(ctx, (const void *)addr, &start, &end, &prot);
     if (rc == 0) {
-        if (startGuest && ctx->mem_base && startGuest + sizeof(uint64_t) <= ctx->mem_size)
-            *(uint64_t *)(ctx->mem_base + startGuest) = (uint64_t)start;
-        if (endGuest && ctx->mem_base && endGuest + sizeof(uint64_t) <= ctx->mem_size)
-            *(uint64_t *)(ctx->mem_base + endGuest) = (uint64_t)end;
-        if (protGuest && ctx->mem_base && protGuest + sizeof(int) <= ctx->mem_size)
-            *(int *)(ctx->mem_base + protGuest) = prot;
+        if (startGuest) *(uint64_t *)(ctx->mem_base + startGuest) = (uint64_t)start;
+        if (endGuest) *(uint64_t *)(ctx->mem_base + endGuest) = (uint64_t)end;
+        if (protGuest) *(int *)(ctx->mem_base + protGuest) = prot;
     }
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 
 void shim_sceKernelMemoryPoolReserve(GuestContext *ctx) {
-    // PS4 SysV ABI: sceKernelMemoryPoolReserve(addrIn, len, alignment, flags, addrOut)
-    // RDI: addrIn, RSI: len, RDX: alignment, RCX: flags, R8: addrOut
-    void *addrIn = (void *)ctx->rdi;
+    // PS4 ABI: sceKernelMemoryPoolReserve(void* addr_in, u64 len, u64 alignment, s32 flags, void** addr_out)
+    // RDI: addr_in, RSI: len, RDX: alignment, RCX: flags, R8: addr_out
+    void *addr_in = (void *)ctx->rdi;
     size_t len = (size_t)ctx->rsi;
     size_t alignment = (size_t)ctx->rdx;
     int flags = (int)ctx->rcx;
     uint64_t addrOutGuest = ctx->r8;
 
+    // Handle compatibility with old 3-arg stub (addr_out in RDI) if R8 == 0
+    if (addrOutGuest == 0 && ctx->rdi != 0 && ctx->rsi != 0 && ctx->rdx != 0 && ctx->rcx == 0) {
+        addrOutGuest = ctx->rdi;
+        addr_in = NULL;
+        flags = (int)ctx->rdx;
+    }
+
     void *addrOut = NULL;
-    int rc = sceKernelMemoryPoolReserve(ctx, addrIn, len, alignment, flags, &addrOut);
-    if (rc == 0 && addrOutGuest != 0 && ctx->mem_base && addrOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+    int rc = sceKernelMemoryPoolReserve(ctx, addr_in, len, alignment, flags, &addrOut);
+    if (rc == 0 && addrOutGuest != 0 && addrOutGuest < ctx->mem_size) {
         *(uint64_t *)(ctx->mem_base + addrOutGuest) = (uint64_t)addrOut;
     }
     ctx->rax = (uint64_t)(int64_t)rc;
@@ -1505,7 +988,7 @@ void shim_sceKernelMemoryPoolReserve(GuestContext *ctx) {
 }
 
 void shim_sceKernelMemoryPoolExpand(GuestContext *ctx) {
-    // PS4 SysV ABI: sceKernelMemoryPoolExpand(searchStart, searchEnd, len, alignment, physAddrOut)
+    // PS4 ABI: sceKernelMemoryPoolExpand(u64 searchStart, u64 searchEnd, u64 len, u64 alignment, u64* physAddrOut)
     // RDI: searchStart, RSI: searchEnd, RDX: len, RCX: alignment, R8: physAddrOut
     off_t searchStart = (off_t)ctx->rdi;
     off_t searchEnd = (off_t)ctx->rsi;
@@ -1515,35 +998,310 @@ void shim_sceKernelMemoryPoolExpand(GuestContext *ctx) {
 
     off_t physAddr = 0;
     int rc = sceKernelMemoryPoolExpand(ctx, searchStart, searchEnd, len, alignment, &physAddr);
-    if (rc == 0 && physAddrOutGuest != 0 && ctx->mem_base && physAddrOutGuest + sizeof(off_t) <= ctx->mem_size) {
-        *(off_t *)(ctx->mem_base + physAddrOutGuest) = physAddr;
+    if (rc == 0 && physAddrOutGuest != 0 && physAddrOutGuest < ctx->mem_size) {
+        *(uint64_t *)(ctx->mem_base + physAddrOutGuest) = (uint64_t)physAddr;
     }
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 
 void shim_sceKernelMemoryPoolCommit(GuestContext *ctx) {
-    // PS4 SysV ABI: sceKernelMemoryPoolCommit(addr, len, type, prot, flags)
+    // PS4 ABI: sceKernelMemoryPoolCommit(void* addr, u64 len, s32 type, s32 prot, s32 flags)
     // RDI: addr, RSI: len, RDX: type, RCX: prot, R8: flags
     void *addr = (void *)ctx->rdi;
     size_t len = (size_t)ctx->rsi;
     int type = (int)ctx->rdx;
     int prot = (int)ctx->rcx;
     int flags = (int)ctx->r8;
-
     int rc = sceKernelMemoryPoolCommit(ctx, addr, len, type, prot, flags);
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
 
 void shim_sceKernelMemoryPoolDecommit(GuestContext *ctx) {
-    // PS4 SysV ABI: sceKernelMemoryPoolDecommit(addr, len, flags)
+    // PS4 ABI: sceKernelMemoryPoolDecommit(void* addr, u64 len, s32 flags)
     // RDI: addr, RSI: len, RDX: flags
     void *addr = (void *)ctx->rdi;
     size_t len = (size_t)ctx->rsi;
     int flags = (int)ctx->rdx;
-
     int rc = sceKernelMemoryPoolDecommit(ctx, addr, len, flags);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+int sceKernelSetVirtualRangeName(GuestContext *ctx, const void *addr, size_t len, const char *name) {
+    if (!name) return 0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
+    if (strlen(name) >= 32) return 0x8002003f; // ORBIS_KERNEL_ERROR_ENAMETOOLONG
+    if (!ctx) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    uint64_t vaddr = (uint64_t)addr;
+    uint64_t vend = vaddr + len;
+
+    pthread_mutex_lock(&proc->vm_mutex);
+    GuestVMExtent *curr = proc->vm_extents;
+    while (curr) {
+        uint64_t cstart = curr->addr;
+        uint64_t cend = curr->addr + curr->size;
+        if (!curr->is_free && cstart < vend && cend > vaddr) {
+            strncpy(curr->name, name, sizeof(curr->name) - 1);
+            curr->name[sizeof(curr->name) - 1] = '\0';
+        }
+        curr = curr->next;
+    }
+    recomp_vm_note_change(); // a renamed reservation is no longer one (recomp_vm_unmapped_ranges)
+    pthread_mutex_unlock(&proc->vm_mutex);
+
+    printf("[ps4-mem] sceKernelSetVirtualRangeName: addr=%p len=%zu name='%s'\n", addr, len, name);
+    fflush(stdout);
+    return 0;
+}
+
+void shim_sceKernelSetVirtualRangeName(GuestContext *ctx) {
+    void *addr = (void *)ctx->rdi;
+    size_t len = (size_t)ctx->rsi;
+    uint64_t nameGuest = ctx->rdx;
+    const char *name = (nameGuest && ctx->mem_base) ? (const char *)(ctx->mem_base + nameGuest) : NULL;
+    int rc = sceKernelSetVirtualRangeName(ctx, addr, len, name);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+int sceKernelDirectMemoryQuery(off_t offset, int flags, OrbisDirectMemoryQueryInfo *info, size_t infoSize) {
+    if (!info || infoSize < sizeof(OrbisDirectMemoryQueryInfo)) {
+        return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    }
+    ps4_direct_mem_init();
+
+    pthread_mutex_lock(&g_direct_mutex);
+    DirectMemBlock *curr = g_direct_blocks;
+    DirectMemBlock *target = NULL;
+
+    while (curr) {
+        off_t bstart = curr->phys_offset;
+        off_t bend = curr->phys_offset + curr->size;
+        if (flags == 1) { // find_next allocated region
+            if (!curr->is_free && bend > offset) {
+                target = curr;
+                break;
+            }
+        } else {
+            if (offset >= bstart && offset < bend) {
+                target = curr;
+                break;
+            }
+        }
+        curr = curr->next;
+    }
+
+    if (!target || target->is_free) {
+        pthread_mutex_unlock(&g_direct_mutex);
+        return 0x8002000d; // ORBIS_KERNEL_ERROR_EACCES
+    }
+
+    info->start = (uint64_t)target->phys_offset;
+    info->end = (uint64_t)(target->phys_offset + target->size);
+    info->memoryType = 0; // Standard direct memory
+    pthread_mutex_unlock(&g_direct_mutex);
+
+    return 0;
+}
+
+void shim_sceKernelDirectMemoryQuery(GuestContext *ctx) {
+    off_t offset = (off_t)ctx->rdi;
+    int flags = (int)ctx->rsi;
+    uint64_t infoGuest = ctx->rdx;
+    size_t infoSize = (size_t)ctx->rcx;
+
+    if (!infoGuest) {
+        ctx->rax = (uint64_t)0x80020016;
+        SHIM_RETURN();
+    }
+
+    OrbisDirectMemoryQueryInfo info = {0};
+    int rc = sceKernelDirectMemoryQuery(offset, flags, &info, sizeof(info));
+    if (rc == 0) {
+        size_t copy_sz = infoSize < sizeof(info) ? infoSize : sizeof(info);
+        memcpy(ctx->mem_base + infoGuest, &info, copy_sz);
+    }
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+int sceKernelCheckedReleaseDirectMemory(off_t physAddr, size_t length) {
+    printf("[ps4-mem] sceKernelCheckedReleaseDirectMemory: phys=0x%llx len=%zu\n",
+           (unsigned long long)physAddr, length);
+    fflush(stdout);
+    if ((physAddr & 0x3fff) != 0 || (length & 0x3fff) != 0) {
+        return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    }
+    if (length == 0) return 0;
+    return sceKernelReleaseDirectMemory(physAddr, length);
+}
+
+void shim_sceKernelCheckedReleaseDirectMemory(GuestContext *ctx) {
+    off_t physAddr = (off_t)ctx->rdi;
+    size_t length = (size_t)ctx->rsi;
+    int rc = sceKernelCheckedReleaseDirectMemory(physAddr, length);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+int sceKernelMprotect(GuestContext *ctx, const void *addr, size_t size, int prot) {
+    if (!ctx) return 0x80020016;
+    if (size == 0) return 0;
+
+    uint64_t vaddr = (uint64_t)addr;
+    uint64_t aligned_addr = vaddr & ~0x3fffULL; // 16KB align down
+    size_t aligned_size = ((size + (vaddr - aligned_addr)) + 0x3fffULL) & ~0x3fffULL;
+
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    pthread_mutex_lock(&proc->vm_mutex);
+    GuestVMExtent *curr = proc->vm_extents;
+    while (curr) {
+        uint64_t cstart = curr->addr;
+        uint64_t cend = curr->addr + curr->size;
+        if (!curr->is_free && cstart < (aligned_addr + aligned_size) && cend > aligned_addr) {
+            curr->prot = prot;
+        }
+        curr = curr->next;
+    }
+    pthread_mutex_unlock(&proc->vm_mutex);
+
+    return 0;
+}
+
+void shim_sceKernelMprotect(GuestContext *ctx) {
+    const void *addr = (const void *)ctx->rdi;
+    size_t size = (size_t)ctx->rsi;
+    int prot = (int)ctx->rdx;
+    int rc = sceKernelMprotect(ctx, addr, size, prot);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+
+// ---------------------------------------------------------------------------------
+// sceKernelMtypeprotect / sceKernelBatchMap
+// ---------------------------------------------------------------------------------
+
+void ps4_gnm_notify_cpu_write(uint64_t addr, uint64_t size) __attribute__((weak));
+
+// int sceKernelMtypeprotect(void *addr, size_t len, int mtype, int prot)
+//
+// Changes the protection and the memory type (cache attribute: 0 WB_ONION, 3 WC_GARLIC,
+// 10 WB_GARLIC ...) of the mapped part of [addr, addr+len). Behaviour follows shadPS4
+// (libraries/kernel/memory.cpp sceKernelMtypeprotect): the range is widened to 16 KiB pages,
+// the protection is applied, the type is recorded, GPU-visible copies are invalidated. A range
+// without any mapping fails with EINVAL. The host maps guest memory once with full rights
+// (there is no per-range host mprotect, see sceKernelMprotect), so protection and type are
+// bookkeeping that sceKernelVirtualQuery and later calls observe; extents are split at the
+// range edges so a small range inside a large mapping does not retag the whole mapping.
+int sceKernelMtypeprotect(GuestContext *ctx, const void *addr, size_t size, int mtype, int prot) {
+    if (!ctx) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    if (size == 0) return 0;
+
+    uint64_t vaddr = (uint64_t)addr;
+    uint64_t start = vaddr & ~0x3fffULL;
+    uint64_t span = (size + (vaddr - start) + 0x3fffULL) & ~0x3fffULL;
+    uint64_t end = start + span;
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    if (end < start || end > proc->mem_size) return 0x80020016;
+
+    uint64_t covered = 0;
+    pthread_mutex_lock(&proc->vm_mutex);
+    for (GuestVMExtent *e = proc->vm_extents; e; e = e->next) {
+        if (!e->is_free && e->addr < end && e->addr + e->size > start) covered++;
+    }
+    if (covered) {
+        if (!recomp_vm_split_extent_at(proc, start) || !recomp_vm_split_extent_at(proc, end)) {
+            pthread_mutex_unlock(&proc->vm_mutex);
+            return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM: bookkeeping for the split is unavailable
+        }
+        for (GuestVMExtent *e = proc->vm_extents; e; e = e->next) {
+            if (e->is_free || e->addr < start || e->addr + e->size > end) continue;
+            e->prot = prot;
+            e->mtype = mtype;
+        }
+    }
+    pthread_mutex_unlock(&proc->vm_mutex);
+    if (!covered) return 0x80020016;
+
+    if (ps4_gnm_notify_cpu_write) ps4_gnm_notify_cpu_write(start, span);
+    return 0;
+}
+
+void shim_sceKernelMtypeprotect(GuestContext *ctx) {
+    int rc = sceKernelMtypeprotect(ctx, (const void *)ctx->rdi, (size_t)ctx->rsi, (int)ctx->rdx, (int)ctx->rcx);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+// int sceKernelBatchMap(SceKernelBatchMapEntry *entries, int numEntries, int *numEntriesOut)
+//
+// Runs the entries in order until the first failure. *numEntriesOut (may be NULL) receives the
+// number of entries that completed, written on failure too; the failed entry is not counted.
+// The result is the failed entry's error, or 0. Entry layout, operation numbers and the
+// failure rules follow shadPS4 (libraries/kernel/memory.cpp sceKernelBatchMap2, SDK struct
+// SceKernelBatchMapEntry): length == 0 or an unknown operation fails with EINVAL, a NULL
+// array with a positive count too. The map operations pass MAP_FIXED (0x10), exactly like
+// sceKernelBatchMap does on the console; `start` is the requested address (0 = anywhere) and
+// receives the mapped address.
+// The map operations pass MAP_FIXED. When an address was requested and the allocator placed the
+// mapping elsewhere (it falls back to any free range when the requested one is taken) the
+// console fails the entry; undo the stray mapping and fail it too.
+static int batch_fixed_result(GuestContext *ctx, int result, uint64_t requested, void *mapped, uint64_t length) {
+    if (result != 0 || requested == 0 || (uint64_t)mapped == requested) return result;
+    recomp_vm_free(ctx, (uint64_t)mapped, (size_t)length);
+    return 0x8002000c; // ORBIS_KERNEL_ERROR_ENOMEM
+}
+
+int sceKernelBatchMap(GuestContext *ctx, OrbisKernelBatchMapEntry *entries, int numEntries, int *numEntriesOut) {
+    const int kFlagsMapFixed = 0x10;
+    int result = 0;
+    int processed = 0;
+    for (int i = 0; i < numEntries; i++) {
+        OrbisKernelBatchMapEntry *e = entries ? &entries[i] : NULL;
+        if (!e || e->length == 0 || (uint32_t)e->operation > ORBIS_KERNEL_BATCH_MAP_TYPE_PROTECT) {
+            result = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+            break;
+        }
+        const int prot = (uint8_t)e->protection;
+        void *mapped = (void *)e->start;
+        switch (e->operation) {
+        case ORBIS_KERNEL_BATCH_MAP_DIRECT:
+            result = sceKernelMapDirectMemory(ctx, &mapped, (size_t)e->length, prot, kFlagsMapFixed,
+                                              (off_t)e->offset, 0);
+            result = batch_fixed_result(ctx, result, e->start, mapped, e->length);
+            if (result == 0) e->start = (uint64_t)mapped;
+            break;
+        case ORBIS_KERNEL_BATCH_MAP_UNMAP:
+            result = recomp_vm_free(ctx, e->start, (size_t)e->length) == 0 ? 0 : 0x80020016;
+            break;
+        case ORBIS_KERNEL_BATCH_MAP_PROTECT:
+            result = sceKernelMprotect(ctx, (const void *)e->start, (size_t)e->length, prot);
+            break;
+        case ORBIS_KERNEL_BATCH_MAP_FLEXIBLE:
+            result = sceKernelMapNamedFlexibleMemory(ctx, &mapped, (size_t)e->length, prot, kFlagsMapFixed, "anon");
+            result = batch_fixed_result(ctx, result, e->start, mapped, e->length);
+            if (result == 0) e->start = (uint64_t)mapped;
+            break;
+        case ORBIS_KERNEL_BATCH_MAP_TYPE_PROTECT:
+            result = sceKernelMtypeprotect(ctx, (const void *)e->start, (size_t)e->length, (uint8_t)e->type, prot);
+            break;
+        }
+        if (result != 0) break;
+        processed++;
+    }
+    if (numEntriesOut) *numEntriesOut = processed;
+    return result;
+}
+
+void shim_sceKernelBatchMap(GuestContext *ctx) {
+    OrbisKernelBatchMapEntry *entries =
+        ctx->rdi ? (OrbisKernelBatchMapEntry *)(ctx->mem_base + ctx->rdi) : NULL;
+    int *out = ctx->rdx ? (int *)(ctx->mem_base + ctx->rdx) : NULL;
+    int rc = sceKernelBatchMap(ctx, entries, (int)ctx->rsi, out);
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }

@@ -104,7 +104,7 @@ func liftSeq(t *testing.T, l *Arm64Lifter, c execCase, pc uint64) ([]string, *di
 		if err != nil {
 			t.Fatalf("%s: bad hex %q", c.name, h)
 		}
-		inst, err := x86asm.Decode(b, 64)
+		inst, err := disasm.Decode(b)
 		if err != nil {
 			t.Fatalf("%s: decode %s: %v", c.name, h, err)
 		}
@@ -125,6 +125,30 @@ func liftSeq(t *testing.T, l *Arm64Lifter, c execCase, pc uint64) ([]string, *di
 func runExecCases(t *testing.T, cases []execCase) {
 	t.Helper()
 	execSkip(t)
+	runExec(t, cases, nil)
+}
+
+// runExecExpect runs the lifted side only and compares the memory window with hand-computed
+// bytes (want[i]: offset -> bytes for case i), for instructions Rosetta 2 does not execute
+// (AMD SSE4A raises SIGILL there).
+func runExecExpect(t *testing.T, cases []execCase, want []map[int][]byte) {
+	t.Helper()
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		t.Skip("needs an arm64 Mac (host lowering)")
+	}
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not found")
+	}
+	if len(want) != len(cases) {
+		t.Fatalf("%d cases, %d expectations", len(cases), len(want))
+	}
+	runExec(t, cases, want)
+}
+
+// runExec builds and runs the cases: against the x86 reference under Rosetta 2 when want is
+// nil, against want otherwise.
+func runExec(t *testing.T, cases []execCase, want []map[int][]byte) {
+	t.Helper()
 	dir := t.TempDir()
 	if k := os.Getenv("EXEC_KEEP"); k != "" {
 		dir = k
@@ -290,7 +314,10 @@ int main(int argc, char **argv) {
 		return bin
 	}
 	hostBin := build("arm64", "host", write("host.c", driver("lifted", true)), write("lifted.s", host.String()))
-	x86Bin := build("x86_64", "x86", write("x86.c", driver("native", false)), write("native.s", native.String()))
+	x86Bin := ""
+	if want == nil {
+		x86Bin = build("x86_64", "x86", write("x86.c", driver("native", false)), write("native.s", native.String()))
+	}
 
 	var in bytes.Buffer
 	for _, c := range cases {
@@ -334,13 +361,27 @@ int main(int argc, char **argv) {
 		return b
 	}
 	got := run("host.out", hostBin)
-	want := run("x86.out", "arch", "-x86_64", x86Bin)
 	rec := stSize + execMemSize
-	if len(got) != n*rec || len(want) != n*rec {
-		t.Fatalf("output sizes: host %d, x86 %d, want %d", len(got), len(want), n*rec)
+	if want != nil {
+		if len(got) != n*rec {
+			t.Fatalf("output size: host %d, want %d", len(got), n*rec)
+		}
+		for i, c := range cases {
+			gm := got[i*rec+stSize : (i+1)*rec]
+			for off, wb := range want[i] {
+				if !bytes.Equal(gm[off:off+len(wb)], wb) {
+					t.Errorf("%s: memory at +%#x: lifted % x, want % x", c.name, off, gm[off:off+len(wb)], wb)
+				}
+			}
+		}
+		return
+	}
+	ref := run("x86.out", "arch", "-x86_64", x86Bin)
+	if len(got) != n*rec || len(ref) != n*rec {
+		t.Fatalf("output sizes: host %d, x86 %d, want %d", len(got), len(ref), n*rec)
 	}
 	for i, c := range cases {
-		g, w := got[i*rec:(i+1)*rec], want[i*rec:(i+1)*rec]
+		g, w := got[i*rec:(i+1)*rec], ref[i*rec:(i+1)*rec]
 		for k, r := range execRegs {
 			gv := binary.LittleEndian.Uint64(g[stRegs+8*k:])
 			wv := binary.LittleEndian.Uint64(w[stRegs+8*k:])

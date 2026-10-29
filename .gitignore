@@ -3,3 +3,4 @@ tools/
 .DS_Store
 /ps4-recomp
 /ps4recomp
+libgcn_recompiler.a

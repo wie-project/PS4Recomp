@@ -79,6 +79,8 @@ void ps4_pq_init(ps4_present_queue *q, int n, bool mailbox);
 // Producer: a FREE slot (lowest index), or with mailbox the oldest QUEUED slot that is not
 // `keep` (then *superseded = 1). FIFO also needs a drawable credit (consumed). -1 when none.
 int ps4_pq_try_acquire_locked(ps4_present_queue *q, int *superseded);
+// Would ps4_pq_try_acquire_locked return a slot now? Changes nothing.
+bool ps4_pq_can_acquire_locked(const ps4_present_queue *q);
 // Producer: RENDERING -> QUEUED. Returns false for a slot it does not own.
 bool ps4_pq_submit_locked(ps4_present_queue *q, int slot, bool keep);
 // Producer: RENDERING -> FREE (the frame was abandoned); FIFO returns the drawable credit.
@@ -89,6 +91,11 @@ int ps4_pq_try_take_locked(ps4_present_queue *q);
 bool ps4_pq_release_locked(ps4_present_queue *q, int slot);
 // Presenter (FIFO): it holds a drawable for the next frame. Credits do not accumulate past one.
 void ps4_pq_grant_locked(ps4_present_queue *q);
+// Presenter: may its drawable go to a frame from outside the slots (a held frame, see
+// ps4_metal_screen.m)? Only when no slot frame is ahead of it, i.e. no slot is RENDERING or
+// QUEUED: an acquired slot is an older frame that the drawable was granted for. On true the
+// FIFO credit for the drawable, if not yet claimed, is consumed (the drawable is used up).
+bool ps4_pq_claim_drawable_locked(ps4_present_queue *q);
 // No slot is QUEUED or PRESENTING.
 bool ps4_pq_idle_locked(const ps4_present_queue *q);
 

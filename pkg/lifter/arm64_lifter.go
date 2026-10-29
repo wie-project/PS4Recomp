@@ -400,7 +400,7 @@ func (l *Arm64Lifter) emitUnsupported(inst disasm.Instruction, reason string) []
 	}
 	msg := reason
 	if msg == "" {
-		msg = inst.Inst.String()
+		msg = disasm.InstString(inst.Inst)
 	}
 	l.unsuppCounter++
 	strLabel := fmt.Sprintf("L_unsupp_str_0x%x_%d", inst.Address, l.unsuppCounter)
@@ -937,7 +937,7 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 	args := inst.Inst.Args
 	lines := dst
 
-	comment := fmt.Sprintf("    // 0x%x: %s", inst.Address, inst.Inst.String())
+	comment := fmt.Sprintf("    // 0x%x: %s", inst.Address, disasm.InstString(inst.Inst))
 	lines = append(lines, comment)
 
 	if reason := unsupportedAddressing(inst.Inst); reason != "" {
@@ -1132,7 +1132,7 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		// them) survive the dispatch: the range check saves and restores NZCV, the block compare
 		// chain uses EOR/CBZ.
 		emitLocalJumpTable := func(targetReg string) {
-			if fn != nil && len(fn.Blocks) > 1 && len(fn.Blocks) <= 512 && fn.EndAddr > fn.EntryAddr {
+			if fn != nil && len(fn.Blocks) > 1 && fn.EndAddr > fn.EntryAddr {
 				if !inst.CarryDead {
 					lines = append(lines, l.normalizeCarry()...)
 				}
@@ -1728,6 +1728,9 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		x86asm.CVTDQ2PD, x86asm.VCVTDQ2PD,
 		x86asm.VCVTPH2PS, x86asm.VCVTPS2PH:
 		return l.liftCvtdq(inst, nextPC, lines)
+
+	case disasm.OpEXTRQ, disasm.OpINSERTQ:
+		return l.liftSSE4A(inst, lines)
 
 	case x86asm.MOVNTPS, x86asm.VMOVNTPS,
 		x86asm.MOVNTDQ, x86asm.VMOVNTDQ,

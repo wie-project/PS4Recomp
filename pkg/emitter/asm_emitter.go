@@ -605,7 +605,9 @@ static void *guest_main(void *p) {
         exit(1);
     }
 
-    recomp_init_tls(ctx, 0x%xULL, 0x%xULL, 0x%xULL, 0x%xULL);
+    // Static TLS first: rtld allocates the initial TLS before any guest code runs, and
+    // recomp_init_process_param runs the game's malloc replacement init.
+%s
 
     recomp_init_process_param(ctx, 0x%xULL);
 
@@ -645,9 +647,27 @@ int main(int argc, char **argv) {
     ps4_host_run_main_loop();
     return 0;
 }
-`, vfsInitArg, e.elf.TLSVaddr, e.elf.TLSFilesz, e.elf.TLSMemsz, e.elf.TLSAlign, e.elf.ProcParamAddr, entryAddr, entryName, entryAddr, entryAddr, entryAddr, vfsInitArg)
+`, vfsInitArg, tlsInitSource(e.elf.TLSModules), e.elf.ProcParamAddr, entryAddr, entryName, entryAddr, entryAddr, entryAddr, vfsInitArg)
 
 	return writeFileIfChanged(path, []byte(content))
+}
+
+// tlsInitSource returns the main.c statements that hand the process's static TLS layout
+// (elfloader.LayoutStaticTLS) to the runtime.
+func tlsInitSource(mods []elfloader.TLSModule) string {
+	if len(mods) == 0 {
+		return "    recomp_init_tls_modules(ctx, NULL, 0);"
+	}
+	var b strings.Builder
+	b.WriteString("    // Static TLS by module index: id, template vaddr, filesz, memsz, align, offset below FS.\n")
+	b.WriteString("    static const RecompTlsModule tls_modules[] = {\n")
+	for _, m := range mods {
+		fmt.Fprintf(&b, "        {%d, 0x%xULL, 0x%xULL, 0x%xULL, 0x%xULL, 0x%xULL}, // %s\n",
+			m.ID, m.Vaddr, m.Filesz, m.Memsz, m.Align, m.Offset, m.Name)
+	}
+	b.WriteString("    };\n")
+	fmt.Fprintf(&b, "    recomp_init_tls_modules(ctx, tls_modules, %d);", len(mods))
+	return b.String()
 }
 
 // ownSegments returns the segments of the main image itself. MergeImages appends the

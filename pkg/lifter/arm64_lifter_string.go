@@ -72,9 +72,8 @@ func (l *Arm64Lifter) liftMovs(inst disasm.Instruction, width int, lines []strin
 	}
 
 	if instHasRep(inst.Inst) {
-		l.labelCounter++
-		lblLoop := fmt.Sprintf("L_rep_movs_loop_%x_%d", inst.Address, l.labelCounter)
-		lblDone := fmt.Sprintf("L_rep_movs_done_%x_%d", inst.Address, l.labelCounter)
+		lblLoop := fmt.Sprintf("L_rep_movs_loop_%x", inst.Address)
+		lblDone := fmt.Sprintf("L_rep_movs_done_%x", inst.Address)
 		lines = append(lines,
 			fmt.Sprintf("    cbz x21, %s", lblDone),
 			fmt.Sprintf("%s:", lblLoop),
@@ -117,9 +116,8 @@ func (l *Arm64Lifter) liftStos(inst disasm.Instruction, width int, lines []strin
 	}
 
 	if instHasRep(inst.Inst) {
-		l.labelCounter++
-		lblLoop := fmt.Sprintf("L_rep_stos_loop_%x_%d", inst.Address, l.labelCounter)
-		lblDone := fmt.Sprintf("L_rep_stos_done_%x_%d", inst.Address, l.labelCounter)
+		lblLoop := fmt.Sprintf("L_rep_stos_loop_%x", inst.Address)
+		lblDone := fmt.Sprintf("L_rep_stos_done_%x", inst.Address)
 		lines = append(lines,
 			fmt.Sprintf("    cbz x21, %s", lblDone),
 			fmt.Sprintf("%s:", lblLoop),
@@ -140,11 +138,8 @@ func (l *Arm64Lifter) liftStos(inst disasm.Instruction, width int, lines []strin
 }
 
 func (l *Arm64Lifter) liftLods(inst disasm.Instruction, width int, lines []string) ([]string, error) {
-	hasRep := instHasRep(inst.Inst)
-	var lblDone string
-	if hasRep {
-		l.labelCounter++
-		lblDone = fmt.Sprintf("L_rep_lods_done_%x_%d", inst.Address, l.labelCounter)
+	if instHasRep(inst.Inst) {
+		lblDone := fmt.Sprintf("L_rep_lods_done_%x", inst.Address)
 		lines = append(lines,
 			fmt.Sprintf("    cbz x21, %s", lblDone),
 			"    sub x16, x21, #1",
@@ -179,7 +174,8 @@ func (l *Arm64Lifter) liftLods(inst disasm.Instruction, width int, lines []strin
 		)
 	}
 
-	if hasRep {
+	if instHasRep(inst.Inst) {
+		lblDone := fmt.Sprintf("L_rep_lods_done_%x", inst.Address)
 		lines = append(lines,
 			"    mov x21, #0",
 			fmt.Sprintf("%s:", lblDone),
@@ -245,9 +241,8 @@ func (l *Arm64Lifter) liftRepCompare(inst disasm.Instruction, name string, body,
 		l.cpol = carrySub
 		return lines
 	}
-	l.labelCounter++
-	lblLoop := fmt.Sprintf("L_rep_%s_loop_%x_%d", name, inst.Address, l.labelCounter)
-	lblDone := fmt.Sprintf("L_rep_%s_done_%x_%d", name, inst.Address, l.labelCounter)
+	lblLoop := fmt.Sprintf("L_rep_%s_loop_%x", name, inst.Address)
+	lblDone := fmt.Sprintf("L_rep_%s_done_%x", name, inst.Address)
 	stopBranch := "b.ne" // REPE stops when not equal
 	if stopOnMatch {
 		stopBranch = "b.eq" // REPNE stops when equal

@@ -293,7 +293,7 @@ GUEST_FN _guest_fpcr
 
 GUEST_FN _guest_thread_main
     SET_PATTERN 0x7000
-    SET_MXCSR 0x3f80                // round down: a new thread starts with the default
+    SET_MXCSR 0x3f80                // round down: the new thread inherits this MXCSR
     STORE_REGS RES_THR_PRE
     LI   x24, THREAD_HANDLE
     movz x23, #0
@@ -322,7 +322,7 @@ GUEST_FN _guest_thread_entry
     ldr  x2, [x28, x2]
     stp  x27, x1, [x16, #0]
     stp  x2, x0, [x16, #16]
-    sub  x3, x27, #32               // recomp_tls_block_offset: memsz 32, align 16
+    sub  x3, x27, #32               // the eboot TLS block: memsz 32, align 16
     ldr  x4, [x28, x3]
     add  x3, x3, #16
     ldr  x5, [x28, x3]

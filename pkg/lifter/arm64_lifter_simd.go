@@ -4034,3 +4034,93 @@ func (l *Arm64Lifter) liftPmaddwd(inst disasm.Instruction, nextPC uint64, lines 
 	}
 	return lines, nil
 }
+
+// liftSSE4A lowers AMD's EXTRQ and INSERTQ (see disasm.OpEXTRQ for the operands): a bit field of
+// the destination's low quadword is extracted (shifted down to bit 0, the bits above it zeroed)
+// or replaced. A length of 0 means 64. Bits 127:64 of the destination are undefined in the AMD
+// manual and are left as they were; these are legacy SSE instructions, so a YMM upper half is
+// not written either. The flags are not affected.
+//
+// A field with index + length > 64 is undefined as well; the lowering keeps the bits that fit
+// below bit 64 (the register forms and the immediate forms agree on this).
+func (l *Arm64Lifter) liftSSE4A(inst disasm.Instruction, lines []string) ([]string, error) {
+	args := inst.Inst.Args
+	dst, okD := args[0].(x86asm.Reg)
+	_, _, _, dV, _, _, dD, okDV := getVectorDesc(dst)
+	if !okD || !okDV || dst > x86asm.X15 {
+		return append(lines, l.emitUnsupported(inst, "SSE4A destination is not an XMM register")...), nil
+	}
+	if inst.Inst.Op == disasm.OpEXTRQ {
+		if length, ok := args[1].(x86asm.Imm); ok {
+			idx, w := sse4aField(length, args[2].(x86asm.Imm))
+			if idx == 0 && w == 64 {
+				return lines, nil // the whole quadword: nothing changes
+			}
+			return append(lines,
+				fmt.Sprintf("    fmov x16, %s", dD),
+				fmt.Sprintf("    ubfx x16, x16, #%d, #%d", idx, w),
+				fmt.Sprintf("    mov %s.d[0], x16", dV),
+			), nil
+		}
+	}
+	src, okS := args[1].(x86asm.Reg)
+	_, _, _, sV, _, _, sD, okSV := getVectorDesc(src)
+	if !okS || !okSV || src > x86asm.X15 {
+		return append(lines, l.emitUnsupported(inst, "SSE4A source is not an XMM register")...), nil
+	}
+	if inst.Inst.Op == disasm.OpEXTRQ {
+		// Length in xmm2[5:0], index in xmm2[13:8]. LSRV takes its count mod 64, so the
+		// control word needs no masking: (-length) mod 64 is 64 - length, or 0 for length 0.
+		return append(lines,
+			fmt.Sprintf("    fmov x17, %s", sD),
+			fmt.Sprintf("    fmov x16, %s", dD),
+			"    lsr x6, x17, #8",
+			"    lsr x16, x16, x6",
+			"    neg x7, x17",
+			"    mov x6, #-1",
+			"    lsr x6, x6, x7",
+			"    and x16, x16, x6",
+			fmt.Sprintf("    mov %s.d[0], x16", dV),
+		), nil
+	}
+	if length, ok := args[2].(x86asm.Imm); ok {
+		idx, w := sse4aField(length, args[3].(x86asm.Imm))
+		return append(lines,
+			fmt.Sprintf("    fmov x16, %s", sD),
+			fmt.Sprintf("    fmov x17, %s", dD),
+			fmt.Sprintf("    bfi x17, x16, #%d, #%d", idx, w),
+			fmt.Sprintf("    mov %s.d[0], x17", dV),
+		), nil
+	}
+	// INSERTQ xmm1, xmm2: the field is xmm2[length-1:0], the length xmm2[69:64] and the index
+	// xmm2[77:72]. Both are read before the destination (which may be xmm2) is written.
+	return append(lines,
+		fmt.Sprintf("    mov x17, %s.d[1]", sV),
+		fmt.Sprintf("    fmov x16, %s", sD),
+		"    neg x7, x17",
+		"    mov x6, #-1",
+		"    lsr x6, x6, x7",
+		"    lsr x7, x17, #8",
+		"    lsl x6, x6, x7",
+		"    lsl x16, x16, x7",
+		"    and x16, x16, x6",
+		fmt.Sprintf("    fmov x17, %s", dD),
+		"    bic x17, x17, x6",
+		"    orr x16, x16, x17",
+		fmt.Sprintf("    mov %s.d[0], x16", dV),
+	), nil
+}
+
+// sse4aField returns the bit index and the width of the field that fits below bit 64 for the
+// immediate forms: bits 5:0 of each byte, a length of 0 meaning 64.
+func sse4aField(length, index x86asm.Imm) (idx, w int) {
+	idx = int(index & 63)
+	w = int(length & 63)
+	if w == 0 {
+		w = 64
+	}
+	if idx+w > 64 {
+		w = 64 - idx
+	}
+	return idx, w
+}

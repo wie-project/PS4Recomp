@@ -2,6 +2,7 @@
 #import <GameController/GameController.h>
 #include <errno.h>
 #include <mach/mach_time.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,10 +13,52 @@
 
 #define MAX_PAD_HANDLES 4
 
+// Motion sensors (scePadSetMotionSensorState and the calls after it).
+//
+// Facts, from shadPS4 (src/core/libraries/pad/pad.cpp, src/input/controller*.cpp) and the SDL3
+// GameController backend it uses on macOS (externals/sdl3/src/joystick/apple/SDL_mfijoystick.m):
+// - ScePadData.orientation is a unit quaternion (x, y, z, w). It is integrated from the gyro and
+//   is (0, 0, 0, 1) when the pad is opened and after scePadResetOrientation: the pose at that
+//   moment becomes the identity.
+// - angularVelocity is in rad/s, acceleration in g (gravity included).
+// - Axes: x to the right, y out of the top face, z toward the player. A pad lying still and flat
+//   reports acceleration (0, +1, 0) and angular velocity 0. (shadPS4 scales SDL's m/s^2 by 0.098,
+//   which gives 0.96 g at rest; this runtime reports the physical 1.0 g, as GCMotion gives it.) This is SDL's axis convention, which
+//   shadPS4 passes through unchanged.
+// - GCMotion -> pad axes (as SDL converts them): rate (x, z, -y), acceleration -(x, y, z).
+// - The motion sensor is on after scePadOpen: inFAMOUS Second Son imports none of the motion
+//   state calls (only scePadOpen and scePadReadState) and its tutorial on a console still sees the
+//   pad held sideways.
+// The SDK's exact behaviour of the three state calls is not public (shadPS4 does not implement
+// them). Our choices:
+// - Motion sensor off: the pad reports orientation (0, 0, 0, 1) and zero acceleration and angular
+//   velocity (what shadPS4 reports for a pad without data). Turning it on again starts the
+//   orientation at the identity.
+// - Angular velocity deadband: rates below PAD_DEADBAND_RAD_S per axis are reported and
+//   integrated as 0. The threshold, 1 deg/s, is this runtime's choice (the size of a DualShock 4
+//   gyro's zero-rate offset); the console's value is not known.
+// - Tilt correction: the orientation's pitch and roll are pulled toward the measured gravity
+//   with a time constant of PAD_TILT_TAU_S (a complementary filter); yaw is untouched.
+#define PAD_DEADBAND_RAD_S (M_PI / 180.0)
+#define PAD_TILT_TAU_S 0.4
+
+typedef struct { double x, y, z; } PadVec;
+typedef struct { double x, y, z, w; } PadQuat;
+
+typedef struct {
+  int on, tilt, deadband;
+  PadQuat orient;     // current pose relative to the pose at enable / reset
+  PadVec ref_up;      // measured gravity direction at enable / reset (the reference frame's up)
+  PadQuat last_pose;  // virtual pad pose at the last update
+  PadVec last_accel;  // acceleration reported at the last update (g)
+  uint64_t last_us;
+} PadMotionState;
+
 typedef struct {
   int in_use;
   int32_t handle;
   int32_t userId;
+  PadMotionState motion;
 } PadHandleSlot;
 
 static PadHandleSlot g_pad_slots[MAX_PAD_HANDLES];
@@ -38,6 +81,222 @@ static uint64_t get_time_micros(void) {
   }
   uint64_t t = mach_absolute_time();
   return (t * timebase.numer) / (timebase.denom * 1000ULL);
+}
+
+static const PadQuat kQuatIdentity = {0, 0, 0, 1};
+
+static PadQuat quat_mul(PadQuat a, PadQuat b) {
+  return (PadQuat){a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                   a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                   a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+                   a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+
+static PadQuat quat_conj(PadQuat q) { return (PadQuat){-q.x, -q.y, -q.z, q.w}; }
+
+static PadQuat quat_normalize(PadQuat q) {
+  double n = sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+  if (n == 0) return kQuatIdentity;
+  return (PadQuat){q.x / n, q.y / n, q.z / n, q.w / n};
+}
+
+// Rotation vector (axis * angle, rad) -> quaternion.
+static PadQuat quat_exp(PadVec r) {
+  double a = sqrt(r.x * r.x + r.y * r.y + r.z * r.z);
+  if (a < 1e-12) return kQuatIdentity;
+  double k = sin(a / 2) / a;
+  return (PadQuat){r.x * k, r.y * k, r.z * k, cos(a / 2)};
+}
+
+// Quaternion -> rotation vector of the shorter rotation.
+static PadVec quat_log(PadQuat q) {
+  if (q.w < 0) q = (PadQuat){-q.x, -q.y, -q.z, -q.w};
+  double s = sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+  if (s < 1e-12) return (PadVec){0, 0, 0};
+  double k = 2 * atan2(s, q.w) / s;
+  return (PadVec){q.x * k, q.y * k, q.z * k};
+}
+
+// A vector given in the frame q rotates into, expressed in the frame q rotates from: q^-1 v q.
+static PadVec quat_rotate_inv(PadQuat q, PadVec v) {
+  PadQuat r = quat_mul(quat_mul(quat_conj(q), (PadQuat){v.x, v.y, v.z, 0}), q);
+  return (PadVec){r.x, r.y, r.z};
+}
+
+static PadVec vec_scale(PadVec v, double k) { return (PadVec){v.x * k, v.y * k, v.z * k}; }
+static double vec_len(PadVec v) { return sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+
+// The virtual pad of PS4_PAD_SCRIPT tilt steps and the sideways key: a pose (pad -> world, world
+// y up) that turns at a constant body rate from one pose to the next.
+typedef struct {
+  uint64_t start_us, dur_us;
+  PadQuat from, to;
+  PadVec rate; // body frame, rad/s, while turning
+} PadTurn;
+static PadTurn g_turn = {0, 0, {0, 0, 0, 1}, {0, 0, 0, 1}, {0, 0, 0}};
+
+static PadQuat turn_pose(uint64_t t_us) {
+  if (t_us <= g_turn.start_us) return g_turn.from;
+  if (t_us >= g_turn.start_us + g_turn.dur_us) return g_turn.to;
+  return quat_mul(g_turn.from, quat_exp(vec_scale(g_turn.rate, (double)(t_us - g_turn.start_us) / 1e6)));
+}
+
+static PadVec turn_rate(uint64_t t_us) {
+  if (t_us > g_turn.start_us && t_us < g_turn.start_us + g_turn.dur_us) return g_turn.rate;
+  return (PadVec){0, 0, 0};
+}
+
+// Pose of a pad, from lying flat: rolled about z (positive raises the right side), then
+// pitched about its own x (positive tilts the top face toward the player), then yawed about its
+// own y (the top face's normal; positive turns counter-clockwise seen from above). Held sideways
+// (roll 90), pitch turns the pad left and right and yaw turns it up and down.
+static PadQuat pose_from_angles(double roll_deg, double pitch_deg, double yaw_deg) {
+  PadQuat roll = quat_exp((PadVec){0, 0, roll_deg * M_PI / 180});
+  PadQuat pitch = quat_exp((PadVec){pitch_deg * M_PI / 180, 0, 0});
+  PadQuat yaw = quat_exp((PadVec){0, yaw_deg * M_PI / 180, 0});
+  return quat_mul(quat_mul(roll, pitch), yaw);
+}
+
+static void start_turn(uint64_t t_us, PadQuat target, uint64_t dur_us) {
+  PadQuat from = turn_pose(t_us);
+  g_turn.start_us = t_us;
+  g_turn.from = from;
+  g_turn.to = target;
+  g_turn.dur_us = dur_us;
+  PadVec r = quat_log(quat_mul(quat_conj(from), target));
+  g_turn.rate = dur_us ? vec_scale(r, 1e6 / (double)dur_us) : (PadVec){0, 0, 0};
+  if (!dur_us) g_turn.from = target;
+}
+
+// Clock of the debug scripts and the virtual pad (call with g_pad_mutex held): microseconds since
+// the first pad read (0 before it, so scePadOpen and the motion calls before that read do not move
+// the origin of existing scripts), or with PS4_PAD_CLOCK=frames, submitted video flips at 30 fps.
+extern volatile uint64_t g_ps4_videoout_flip_count;
+static int g_pad_clock_frames = -1;
+static uint64_t g_pad_clock_t0;
+static int g_pad_clock_started;
+
+static void pad_clock_start(void) {
+  if (!g_pad_clock_started) {
+    g_pad_clock_started = 1;
+    g_pad_clock_t0 = get_time_micros();
+  }
+}
+
+static uint64_t pad_script_clock_us(void) {
+  if (g_pad_clock_frames < 0) {
+    const char *c = getenv("PS4_PAD_CLOCK");
+    g_pad_clock_frames = (c && strcmp(c, "frames") == 0) ? 1 : 0;
+  }
+  if (g_pad_clock_frames) return g_ps4_videoout_flip_count * 1000000ULL / 30;
+  if (!g_pad_clock_started) return 0;
+  const uint64_t now = get_time_micros();
+  const uint64_t t0 = g_pad_clock_t0;
+  return now - t0;
+}
+
+// One sample of the pad's motion: body rate (rad/s) and acceleration (g) in pad axes. A connected
+// motion-capable controller wins; otherwise the virtual pad (resting flat unless a script or the
+// sideways key turns it).
+typedef struct {
+  int device;
+  PadVec rate, accel;
+  PadQuat pose; // virtual pad pose (used when !device)
+} PadMotionSample;
+
+static void motion_reset(PadMotionState *m, const PadMotionSample *s, uint64_t now_us) {
+  m->orient = kQuatIdentity;
+  double n = vec_len(s->accel);
+  m->ref_up = (fabs(n - 1) < 0.1) ? vec_scale(s->accel, 1 / n) : (PadVec){0, 1, 0};
+  m->last_pose = s->pose;
+  m->last_accel = s->accel;
+  m->last_us = now_us;
+}
+
+static double deadband(double w, int on) { return (on && fabs(w) < PAD_DEADBAND_RAD_S) ? 0 : w; }
+
+// Advances one handle's orientation to now_us and writes the three motion fields.
+static void motion_update(PadMotionState *m, const PadMotionSample *s, uint64_t now_us, OrbisPadData *d) {
+  if (!m->on) {
+    d->quat = (vec_float4){0, 0, 0, 1};
+    d->vel = (vec_float3){0, 0, 0};
+    d->acell = (vec_float3){0, 0, 0};
+    return;
+  }
+  double dt = now_us > m->last_us ? (double)(now_us - m->last_us) / 1e6 : 0;
+  PadVec theta;
+  if (s->device) {
+    // shadPS4 skips gaps over 1 s instead of integrating a stale rate across them.
+    double k = dt <= 1.0 ? dt : 0;
+    theta = (PadVec){deadband(s->rate.x, m->deadband) * k, deadband(s->rate.y, m->deadband) * k,
+                     deadband(s->rate.z, m->deadband) * k};
+  } else {
+    // The virtual pad's exact turn since the last update, deadbanded on its mean rate.
+    theta = quat_log(quat_mul(quat_conj(m->last_pose), s->pose));
+    if (dt > 0) {
+      theta = (PadVec){deadband(theta.x / dt, m->deadband) * dt, deadband(theta.y / dt, m->deadband) * dt,
+                       deadband(theta.z / dt, m->deadband) * dt};
+    }
+  }
+  m->orient = quat_normalize(quat_mul(m->orient, quat_exp(theta)));
+  if (m->tilt && dt > 0) {
+    double n = vec_len(s->accel);
+    if (fabs(n - 1) < 0.1) {
+      PadVec a = vec_scale(s->accel, 1 / n);
+      PadVec g = quat_rotate_inv(m->orient, m->ref_up);
+      PadVec e = {a.y * g.z - a.z * g.y, a.z * g.x - a.x * g.z, a.x * g.y - a.y * g.x};
+      double se = vec_len(e);
+      if (se > 1e-12) {
+        double ang = atan2(se, a.x * g.x + a.y * g.y + a.z * g.z);
+        double gain = dt / PAD_TILT_TAU_S < 1 ? dt / PAD_TILT_TAU_S : 1;
+        m->orient = quat_normalize(quat_mul(m->orient, quat_exp(vec_scale(e, ang * gain / se))));
+      }
+    }
+  }
+  m->last_pose = s->pose;
+  m->last_accel = s->accel;
+  m->last_us = now_us;
+  d->quat = (vec_float4){(float)m->orient.x, (float)m->orient.y, (float)m->orient.z, (float)m->orient.w};
+  d->vel = (vec_float3){(float)deadband(s->rate.x, m->deadband), (float)deadband(s->rate.y, m->deadband),
+                        (float)deadband(s->rate.z, m->deadband)};
+  d->acell = (vec_float3){(float)s->accel.x, (float)s->accel.y, (float)s->accel.z};
+}
+
+// A shake of the virtual pad (PS4_PAD_SCRIPT shake steps, the N key): a vertical linear
+// acceleration of amp_g * sin(2 pi hz t) on top of gravity, as when a pad is rattled up and down.
+typedef struct {
+  uint64_t start_us, end_us; // end UINT64_MAX: until the key is released
+  double amp_g, hz;
+} PadShake;
+static PadShake g_shake;
+
+static void start_shake(uint64_t t_us, uint64_t dur_us, double amp_g, double hz) {
+  g_shake.start_us = t_us;
+  g_shake.end_us = dur_us == UINT64_MAX ? UINT64_MAX : t_us + dur_us;
+  g_shake.amp_g = amp_g;
+  g_shake.hz = hz;
+}
+
+// Virtual pad sample at t_us: rate of its turn, and gravity plus the shake's acceleration seen in
+// the pad's axes (a turn at a constant rate about the pad's centre adds none).
+static PadMotionSample virtual_sample(uint64_t t_us) {
+  PadMotionSample s;
+  s.device = 0;
+  s.pose = turn_pose(t_us);
+  s.rate = turn_rate(t_us);
+  double up = 1;
+  if (t_us >= g_shake.start_us && t_us < g_shake.end_us) {
+    up += g_shake.amp_g * sin(2 * M_PI * g_shake.hz * (double)(t_us - g_shake.start_us) / 1e6);
+  }
+  s.accel = quat_rotate_inv(s.pose, (PadVec){0, up, 0});
+  return s;
+}
+
+static PadHandleSlot *find_slot(int32_t handle) {
+  for (int i = 0; i < MAX_PAD_HANDLES; i++) {
+    if (g_pad_slots[i].in_use && g_pad_slots[i].handle == handle) return &g_pad_slots[i];
+  }
+  return NULL;
 }
 
 int32_t scePadInit(void) {
@@ -80,6 +339,13 @@ int32_t scePadOpen(int32_t userID, int32_t type, int32_t index, void *param) {
   slot->handle = g_next_pad_handle++;
   slot->userId = userID;
   slot->in_use = 1;
+  // A new handle starts with the motion sensor on, and tilt correction and deadband off. The
+  // orientation starts at the identity (as after scePadResetOrientation).
+  memset(&slot->motion, 0, sizeof(slot->motion));
+  slot->motion.on = 1;
+  const uint64_t now = pad_script_clock_us();
+  PadMotionSample rest = virtual_sample(now);
+  motion_reset(&slot->motion, &rest, now);
   int32_t assignedHandle = slot->handle;
 
   pthread_mutex_unlock(&g_pad_mutex);
@@ -110,6 +376,8 @@ static int g_key_rx_up = 0;
 static int g_key_rx_down = 0;
 static int g_key_rx_left = 0;
 static int g_key_rx_right = 0;
+static int g_key_sideways = 0;
+static int g_key_shake = 0;
 
 void ps4_pad_handle_key(unsigned short keyCode, int isDown) {
   pthread_mutex_lock(&g_pad_mutex);
@@ -218,6 +486,24 @@ void ps4_pad_handle_key(unsigned short keyCode, int isDown) {
     btn = ORBIS_PAD_BUTTON_OPTIONS;
     break;
 
+  // --- Motion: H holds the pad sideways (rolled 90 degrees, right side up) ---
+  case 4: // H
+    if (isDown != g_key_sideways) {
+      g_key_sideways = isDown ? 1 : 0;
+      start_turn(pad_script_clock_us(), pose_from_angles(isDown ? 90 : 0, 0, 0), 300000);
+    }
+    break;
+
+  // --- Motion: N rattles the pad (1 g at 6 Hz, up and down) while held ---
+  case 45: // N
+    if (isDown != g_key_shake) {
+      g_key_shake = isDown ? 1 : 0;
+      const uint64_t now = pad_script_clock_us();
+      if (isDown) start_shake(now, UINT64_MAX, 1.0, 6.0);
+      else g_shake.end_us = now;
+    }
+    break;
+
   // --- Touchpad Click ---
   case 17: // T
   case 50: // ` (Backtick)
@@ -310,8 +596,8 @@ void ps4_pad_handle_key(unsigned short keyCode, int isDown) {
 // Stick values are 0..255 (128 = center); -1 keeps the stick untouched.
 // Menus auto-repeat a held direction: Uncharted 4's menus move twice for a 300 ms hold and
 // once for 100 ms, so taps should be short.
-__attribute__((weak)) volatile int g_ps4_screenshot_request = 0;
-__attribute__((weak)) volatile int g_ps4_gnm_dump_request = 0;
+extern volatile int g_ps4_screenshot_request;
+extern volatile int g_ps4_gnm_dump_request;
 typedef enum {
   PAD_CTL_HOLD, PAD_CTL_SHOT, PAD_CTL_DUMPRT, PAD_CTL_DUMPDRAWS, PAD_CTL_TRACE, PAD_CTL_CLOSE,
   PAD_CTL_TERMINATE
@@ -432,37 +718,25 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
 
   pthread_mutex_lock(&g_pad_mutex);
 
-  int found = 0;
-  for (int i = 0; i < MAX_PAD_HANDLES; i++) {
-    if (g_pad_slots[i].in_use && g_pad_slots[i].handle == handle) {
-      found = 1;
-      break;
-    }
-  }
-
-  if (!found) {
+  PadHandleSlot *slot = find_slot(handle);
+  if (!slot) {
     pthread_mutex_unlock(&g_pad_mutex);
     return -EINVAL;
   }
 
   memset(data, 0, sizeof(OrbisPadData));
 
-  extern volatile uint64_t g_ps4_videoout_flip_count;
   uint32_t buttons = g_key_buttons;
   // Debug clock for AUTOPRESS/SCRIPT: wall time since the first pad read, or with
   // PS4_PAD_CLOCK=frames, submitted video flips converted to ms at 30 fps (so scripts
   // stay in sync with the game when the host runs slowly).
-  static int pad_clock_frames = -1;
-  if (pad_clock_frames < 0) {
-    const char *c = getenv("PS4_PAD_CLOCK");
-    pad_clock_frames = (c && strcmp(c, "frames") == 0) ? 1 : 0;
-  }
+  pad_clock_start();
+  const uint64_t script_us = pad_script_clock_us();
   {
     // Debug aid for headless runs: PS4_PAD_AUTOPRESS=<hex button mask> holds
     // those buttons for 300 ms every 4 s (e.g. 0x4000 = Cross).
     static int autopress_init;
     static uint32_t autopress_mask;
-    static struct timespec autopress_t0;
     static long autopress_until = -1;
     if (!autopress_init) {
       autopress_init = 1;
@@ -472,51 +746,69 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
       // PS4_PAD_SCRIPT drive menus afterwards without stray presses).
       const char *until = getenv("PS4_PAD_AUTOPRESS_UNTIL");
       if (until) autopress_until = strtol(until, NULL, 10);
-      clock_gettime(CLOCK_MONOTONIC, &autopress_t0);
     }
     if (autopress_mask) {
-      struct timespec now;
-      clock_gettime(CLOCK_MONOTONIC, &now);
-      long ms = (now.tv_sec - autopress_t0.tv_sec) * 1000 + (now.tv_nsec - autopress_t0.tv_nsec) / 1000000;
-      if (pad_clock_frames) ms = (long)(g_ps4_videoout_flip_count * 1000 / 30);
+      long ms = (long)(script_us / 1000);
       if (ms % 4000 < 300 && (autopress_until < 0 || ms < autopress_until)) buttons |= autopress_mask;
     }
   }
   uint8_t lx = g_key_lx;
   uint8_t ly = g_key_ly;
   {
-    // Debug aid: PS4_PAD_SCRIPT="<t_ms>:<hex mask>[:<dur_ms>[:<lx>:<ly>]],..." presses the
-    // buttons (and optionally sets the left stick) at absolute times since the first pad
-    // read, e.g. "60000:8:200,61000:4000" = Options at 60 s, Cross at 61 s.
-    // The default hold is 200 ms. Menus auto-repeat a held direction, so use about 100 ms for one
-    // menu step (see PS4_PAD_CTL above). PS4_PAD_AUTOPRESS keeps pressing for the whole run unless
-    // PS4_PAD_AUTOPRESS_UNTIL ends it, and its presses then confirm whatever a menu has selected.
-    typedef struct { long t, dur; uint32_t mask; int lx, ly; } PadStep;
+    // Debug aid: PS4_PAD_SCRIPT="<step>,<step>,..." with steps at absolute times since the first
+    // pad read:
+    //   <t_ms>:<hex mask>[:<dur_ms>[:<lx>:<ly>]]       press the buttons (and optionally set the
+    //                                                   left stick) for dur_ms (default 200)
+    //   <t_ms>:shake:<amp_g>[:<dur_ms>[:<hz>]]          rattle the virtual pad up and down:
+    //                                                   amp_g * sin(2 pi hz t) of vertical
+    //                                                   acceleration for dur_ms (default 1000, 6 Hz)
+    //   <t_ms>:tilt:<roll>[:<pitch>[:<yaw>[:<turn_ms>]]]  turn the virtual pad's motion sensors,
+    //                                                   from wherever it is, to this pose (degrees,
+    //                                                   see pose_from_angles) over turn_ms
+    //                                                   (default 500; 0 = at once) and hold it
+    // e.g. "60000:8:200,61000:4000" = Options at 60 s, Cross at 61 s, and
+    // "90000:tilt:90,120000:tilt:0" = held sideways (right side up) from 90 s to 120 s.
+    // A connected motion-capable controller takes precedence over the virtual pad.
+    // Menus auto-repeat a held direction, so use about 100 ms for one menu step (see PS4_PAD_CTL
+    // above). PS4_PAD_AUTOPRESS keeps pressing for the whole run unless PS4_PAD_AUTOPRESS_UNTIL
+    // ends it, and its presses then confirm whatever a menu has selected.
+    typedef struct { long t, dur; uint32_t mask; int lx, ly; int tilt, shake, done; double roll, pitch, yaw, amp, hz; } PadStep;
     static PadStep steps[256];
     static int nsteps = -1;
-    static struct timespec t0;
     if (nsteps < 0) {
       nsteps = 0;
-      clock_gettime(CLOCK_MONOTONIC, &t0);
       const char *env = getenv("PS4_PAD_SCRIPT");
       while (env && *env && nsteps < 256) {
-        PadStep st = {0, 200, 0, -1, -1};
+        PadStep st = {0, 200, 0, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0};
         char *end;
         st.t = strtol(env, &end, 10);
-        if (*end == ':') st.mask = (uint32_t)strtoul(end + 1, &end, 16);
-        if (*end == ':') st.dur = strtol(end + 1, &end, 10);
-        if (*end == ':') st.lx = (int)strtol(end + 1, &end, 10);
-        if (*end == ':') st.ly = (int)strtol(end + 1, &end, 10);
+        if (strncmp(end, ":shake:", 7) == 0) {
+          st.shake = 1;
+          st.dur = 1000;
+          st.hz = 6;
+          st.amp = strtod(end + 7, &end);
+          if (*end == ':') st.dur = strtol(end + 1, &end, 10);
+          if (*end == ':') st.hz = strtod(end + 1, &end);
+        } else if (strncmp(end, ":tilt:", 6) == 0) {
+          st.tilt = 1;
+          st.dur = 500;
+          st.roll = strtod(end + 6, &end);
+          if (*end == ':') st.pitch = strtod(end + 1, &end);
+          if (*end == ':') st.yaw = strtod(end + 1, &end);
+          if (*end == ':') st.dur = strtol(end + 1, &end, 10);
+        } else {
+          if (*end == ':') st.mask = (uint32_t)strtoul(end + 1, &end, 16);
+          if (*end == ':') st.dur = strtol(end + 1, &end, 10);
+          if (*end == ':') st.lx = (int)strtol(end + 1, &end, 10);
+          if (*end == ':') st.ly = (int)strtol(end + 1, &end, 10);
+        }
         steps[nsteps++] = st;
         env = strchr(end, ',');
         if (env) env++;
       }
     }
     if (nsteps > 0) {
-      struct timespec now;
-      clock_gettime(CLOCK_MONOTONIC, &now);
-      long ms = (now.tv_sec - t0.tv_sec) * 1000 + (now.tv_nsec - t0.tv_nsec) / 1000000;
-      if (pad_clock_frames) ms = (long)(g_ps4_videoout_flip_count * 1000 / 30);
+      long ms = (long)(script_us / 1000);
       // marks the start of the scripted part of a run (the walking benchmark measures after it)
       static int announced = 0;
       if (!announced && ms >= steps[0].t) {
@@ -524,6 +816,22 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
         fprintf(stderr, "[pad] script started at %ld ms\n", ms);
       }
       for (int i = 0; i < nsteps; i++) {
+        if (steps[i].shake) {
+          if (!steps[i].done && ms >= steps[i].t) {
+            steps[i].done = 1;
+            start_shake((uint64_t)steps[i].t * 1000, (uint64_t)steps[i].dur * 1000, steps[i].amp, steps[i].hz);
+          }
+          continue;
+        }
+        if (steps[i].tilt) {
+          // Started at its own time, so the pose does not depend on when the pad is read.
+          if (!steps[i].done && ms >= steps[i].t) {
+            steps[i].done = 1;
+            start_turn((uint64_t)steps[i].t * 1000, pose_from_angles(steps[i].roll, steps[i].pitch, steps[i].yaw),
+                       (uint64_t)steps[i].dur * 1000);
+          }
+          continue;
+        }
         if (ms >= steps[i].t && ms < steps[i].t + steps[i].dur) {
           buttons |= steps[i].mask;
           if (steps[i].lx >= 0) lx = (uint8_t)steps[i].lx;
@@ -538,6 +846,7 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
   uint8_t r2 = g_key_r2;
   ps4_pad_control_file(&buttons, &lx, &ly, &rx, &ry);
 
+  PadMotionSample motion = virtual_sample(script_us);
   @autoreleasepool {
     GCController *controller = nil;
     // Automated background runs (PS4_BACKGROUND_WINDOW) take input only from the scripts above:
@@ -613,8 +922,30 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
       rx = (uint8_t)((rstickX + 1.0f) * 127.5f);
       ry = (uint8_t)((-rstickY + 1.0f) * 127.5f);
     }
+    GCMotion *gm = controller ? controller.motion : nil;
+    if (gm && slot->motion.on) {
+      // Turn the controller's sensors on once per controller (a controller that refuses stays
+      // off, and the virtual pad is used).
+      static GCController *sensors_requested;
+      if (sensors_requested != controller) {
+        sensors_requested = controller;
+        gm.sensorsActive = YES;
+      }
+      if (gm.sensorsActive && gm.hasRotationRate && gm.hasGravityAndUserAcceleration) {
+        GCRotationRate r = gm.rotationRate;
+        GCAcceleration a = gm.acceleration;
+        motion.device = 1;
+        motion.rate = (PadVec){r.x, r.z, -r.y};
+        motion.accel = (PadVec){-a.x, -a.y, -a.z};
+      }
+    }
   }
+  motion_update(&slot->motion, &motion, script_us, data);
 
+  // The L2/R2 bits of a pad come from its analog triggers: a scripted or auto press of the bit
+  // is a fully pulled trigger.
+  if ((buttons & ORBIS_PAD_BUTTON_L2) && l2 == 0) l2 = 255;
+  if ((buttons & ORBIS_PAD_BUTTON_R2) && r2 == 0) r2 = 255;
   data->buttons = buttons;
   data->leftStick.x = lx;
   data->leftStick.y = ly;
@@ -709,22 +1040,45 @@ void shim_scePadGetHandle(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-int32_t scePadSetMotionSensorState(int32_t handle, int32_t bEnable) {
-  (void)handle;
-  (void)bEnable;
+// The three motion state calls and scePadResetOrientation act on one handle (see the motion
+// notes at the top). Each logs a change of state once.
+typedef enum { PAD_MOTION_SENSOR, PAD_MOTION_TILT, PAD_MOTION_DEADBAND } PadMotionSetting;
+
+static int32_t pad_set_motion_state(int32_t handle, PadMotionSetting what, int32_t bEnable) {
+  static const char *const names[] = {"scePadSetMotionSensorState", "scePadSetTiltCorrectionState",
+                                      "scePadSetAngularVelocityDeadbandState"};
+  pthread_mutex_lock(&g_pad_mutex);
+  PadHandleSlot *slot = find_slot(handle);
+  if (!slot) {
+    pthread_mutex_unlock(&g_pad_mutex);
+    return ORBIS_PAD_ERROR_INVALID_HANDLE;
+  }
+  PadMotionState *m = &slot->motion;
+  int on = bEnable != 0;
+  int *field = what == PAD_MOTION_SENSOR ? &m->on : what == PAD_MOTION_TILT ? &m->tilt : &m->deadband;
+  if (*field != on) {
+    fprintf(stderr, "[pad] %s(handle %d, %d)\n", names[what], handle, on);
+    if (what == PAD_MOTION_SENSOR && on) {
+      const uint64_t now = pad_script_clock_us();
+      PadMotionSample s = virtual_sample(now);
+      motion_reset(m, &s, now);
+    }
+  }
+  *field = on;
+  pthread_mutex_unlock(&g_pad_mutex);
   return 0;
+}
+
+int32_t scePadSetMotionSensorState(int32_t handle, int32_t bEnable) {
+  return pad_set_motion_state(handle, PAD_MOTION_SENSOR, bEnable);
 }
 
 int32_t scePadSetTiltCorrectionState(int32_t handle, int32_t bEnable) {
-  (void)handle;
-  (void)bEnable;
-  return 0;
+  return pad_set_motion_state(handle, PAD_MOTION_TILT, bEnable);
 }
 
 int32_t scePadSetAngularVelocityDeadbandState(int32_t handle, int32_t bEnable) {
-  (void)handle;
-  (void)bEnable;
-  return 0;
+  return pad_set_motion_state(handle, PAD_MOTION_DEADBAND, bEnable);
 }
 
 int32_t scePadResetLightBar(int32_t handle) {
@@ -733,7 +1087,21 @@ int32_t scePadResetLightBar(int32_t handle) {
 }
 
 int32_t scePadResetOrientation(int32_t handle) {
-  (void)handle;
+  pthread_mutex_lock(&g_pad_mutex);
+  PadHandleSlot *slot = find_slot(handle);
+  if (!slot) {
+    pthread_mutex_unlock(&g_pad_mutex);
+    return ORBIS_PAD_ERROR_INVALID_HANDLE;
+  }
+  // The current pose becomes the identity. The gravity of the virtual pad (or, with a device,
+  // the one last reported) defines the new reference up.
+  const uint64_t now = pad_script_clock_us();
+  PadMotionSample s = virtual_sample(now);
+  if (slot->motion.on) {
+    s.accel = slot->motion.last_accel;
+  }
+  motion_reset(&slot->motion, &s, now);
+  pthread_mutex_unlock(&g_pad_mutex);
   return 0;
 }
 

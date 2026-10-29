@@ -95,7 +95,9 @@ func decodeAVX(src []byte, pos int, vex Prefix, vexIndex int, inst Inst, mode in
 
 	var modrm uint8
 	var haveModRM bool
-	if pos < len(src) {
+	// Every VEX/EVEX opcode has a ModRM byte except 0F 77 (VZEROUPPER, VZEROALL).
+	noModRM := mapSelect == 1 && opbyte == 0x77 && !evex
+	if pos < len(src) && !noModRM {
 		modrm = src[pos]
 		haveModRM = true
 	}
