@@ -2,7 +2,7 @@
 
 A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates PlayStation 4 (x86-64 ELF) binaries into native ARM64 executables and standalone `.app` bundles. No JIT, virtual machines, or MoltenVK required.
 
-![TLOU test](images/last_test_01.jpg)
+![Bloodborne test](images/blood_test_01.jpg)
 
 ---
 
@@ -22,7 +22,7 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 
 | Title                                    | Title ID    | Engine / Type       | Status                 | Notes                                                                   |
 | ---------------------------------------- | ----------- | ------------------- | ---------------------- | ----------------------------------------------------------------------- |
-| **Bloodborne: Game of the Year Edition** | `CUSA03173` | FromSoftware Engine | **In Progress**        | Recompiles; halts during early engine startup                           |
+| **Bloodborne: Game of the Year Edition** | `CUSA03173` | FromSoftware Engine | **Bootable**           | Boots, renders logo: halts during call of unimplemented function        |
 | **The Last of Us Remastered**            | `CUSA00557` | Naughty Dog Engine  | **Bootable / In-Game** | Boots, renders 3D graphics and audio; gameplay verification in progress |
 | **Hollow Knight: Silksong**              | —           | Unity 6             | **Suspended**          | Paused pending guest C++ exception unwinding in ARM64 backend           |
 | **Hogwarts Legacy**                      | `CUSA12824` | Unreal Engine 4     | **In Progress**        | Recompiles; halts during early engine startup                           |

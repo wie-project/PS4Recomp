@@ -311,3 +311,44 @@ void shim_sceNpTrophyGetTrophyUnlockState(GuestContext *ctx) {
     ctx->rax = 0;
     SHIM_RETURN();
 }
+
+void shim_sceNpTrophyGetGameInfo(GuestContext *ctx) {
+    uint64_t details_addr = ctx->rdx;
+    uint64_t data_addr = ctx->rcx;
+    if (details_addr) {
+        size_t sz = *(size_t *)(ctx->mem_base + details_addr);
+        if (sz > sizeof(size_t)) {
+            memset(ctx->mem_base + details_addr + sizeof(size_t), 0, sz - sizeof(size_t));
+        }
+    }
+    if (data_addr) {
+        size_t sz = *(size_t *)(ctx->mem_base + data_addr);
+        if (sz > sizeof(size_t)) {
+            memset(ctx->mem_base + data_addr + sizeof(size_t), 0, sz - sizeof(size_t));
+        }
+    }
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpTrophyGetTrophyInfo(GuestContext *ctx) {
+    int32_t trophy_id = (int32_t)ctx->rdx;
+    uint64_t details_addr = ctx->rcx;
+    uint64_t data_addr = ctx->r8;
+    if (details_addr) {
+        size_t sz = *(size_t *)(ctx->mem_base + details_addr);
+        if (sz > sizeof(size_t)) {
+            memset(ctx->mem_base + details_addr + sizeof(size_t), 0, sz - sizeof(size_t));
+            *(int32_t *)(ctx->mem_base + details_addr + sizeof(size_t)) = trophy_id;
+        }
+    }
+    if (data_addr) {
+        size_t sz = *(size_t *)(ctx->mem_base + data_addr);
+        if (sz > sizeof(size_t)) {
+            memset(ctx->mem_base + data_addr + sizeof(size_t), 0, sz - sizeof(size_t));
+            *(int32_t *)(ctx->mem_base + data_addr + sizeof(size_t)) = trophy_id;
+        }
+    }
+    ctx->rax = 0;
+    SHIM_RETURN();
+}

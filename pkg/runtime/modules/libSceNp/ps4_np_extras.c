@@ -331,3 +331,242 @@ void shim_sceNpGetUserIdByAccountId(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+//=============================================================================
+// Additional libSceNpSignaling
+//=============================================================================
+
+void shim_sceNpSignalingDeactivateConnection(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+//=============================================================================
+// Additional libSceNpScore
+//=============================================================================
+
+void shim_sceNpScoreAbortRequest(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreCensorComment(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreSanitizeComment(GuestContext *ctx) {
+    const char *comment = (const char *)NPX_GPTR(ctx, ctx->rsi);
+    char *sanitized = (char *)NPX_GPTR(ctx, ctx->rdx);
+    if (sanitized && comment) {
+        strncpy(sanitized, comment, 63);
+        sanitized[63] = '\0';
+    }
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreSetPlayerCharacterId(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetRankingByNpIdPcId(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetRankingByRange(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetBoardInfo(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreRecordGameData(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetGameData(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreRecordScore(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+//=============================================================================
+// Additional libSceNpWebApi
+//=============================================================================
+
+void shim_sceNpWebApiRegisterPushEventCallback(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)npx_next(&g_npx_webapi_callback);
+    SHIM_RETURN();
+}
+
+void shim_sceNpWebApiUnregisterPushEventCallback(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpWebApiCreatePushEventFilter(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)npx_next(&g_npx_webapi_filter);
+    SHIM_RETURN();
+}
+
+void shim_sceNpWebApiDeletePushEventFilter(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpWebApiGetHttpStatusCode(GuestContext *ctx) {
+    int32_t *code = (int32_t *)NPX_GPTR(ctx, ctx->rsi);
+    if (code) *code = 401;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_WEBAPI_ERROR_NOT_SIGNED_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpWebApiGetHttpResponseHeaderValue(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_WEBAPI_ERROR_NOT_SIGNED_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpWebApiGetHttpResponseHeaderValueLength(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_WEBAPI_ERROR_NOT_SIGNED_IN;
+    SHIM_RETURN();
+}
+
+//=============================================================================
+// Additional libSceNpMatching2
+//=============================================================================
+
+#define ORBIS_NET_ERROR_RESOLVER_ETIMEDOUT ((int32_t)0x804101e2)
+
+void shim_sceNpMatching2SetDefaultRequestOptParam(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2ContextStart(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)ORBIS_NET_ERROR_RESOLVER_ETIMEDOUT;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2ContextStop(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2DestroyContext(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2RegisterContextCallback(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2RegisterLobbyEventCallback(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2RegisterRoomEventCallback(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2RegisterSignalingCallback(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2GetServerId(GuestContext *ctx) {
+    uint32_t *serverId = (uint32_t *)NPX_GPTR(ctx, ctx->rsi);
+    if (serverId) *serverId = 1;
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2CreateJoinRoom(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2JoinRoom(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2LeaveRoom(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2SearchRoom(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2SetRoomDataInternal(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2SetRoomDataExternal(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2SetRoomMemberDataInternal(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2GrantRoomOwner(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2KickoutRoomMember(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2JoinLobby(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2LeaveLobby(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2GetLobbyInfoList(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2GetWorldInfoList(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2SignalingGetConnectionStatus(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)NPX_SIGNALING_ERROR_CONN_NOT_FOUND;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2SignalingGetPingInfo(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)NPX_SIGNALING_ERROR_CONN_NOT_FOUND;
+    SHIM_RETURN();
+}
+
+

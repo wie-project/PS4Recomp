@@ -19,10 +19,12 @@ extern "C" {
 #define ORBIS_NP_ERROR_USER_NOT_FOUND         0x80550007
 #define ORBIS_NP_ERROR_CALLBACK_MAX           0x8055001D
 #define ORBIS_NP_ERROR_CALLBACK_NOT_REGISTERED 0x80550009
+#define ORBIS_NP_ERROR_CALLBACK_ALREADY_REGISTERED 0x8055001E
 #define ORBIS_NP_ERROR_REQUEST_NOT_FOUND      0x80550014
 #define ORBIS_NP_ERROR_INVALID_SIZE           0x80550011
 #define ORBIS_NP_ERROR_ABORTED                0x80550012
 #define ORBIS_NP_ERROR_INVALID_ID             0x80550015
+#define ORBIS_NP_UTIL_ERROR_NOT_MATCH         0x80550609
 
 // NP Auth error codes
 #define ORBIS_NP_AUTH_ERROR_INVALID_ARGUMENT  0x80550301
@@ -185,6 +187,12 @@ int32_t sceNpRegisterStateCallbackForToolkit(void* callback, void* userdata);
 int32_t sceNpUnregisterStateCallbackForToolkit(void);
 int32_t sceNpCheckCallbackForLib(void);
 int32_t sceNpCheckCallback(void);
+int32_t sceNpSetNpTitleId(const void* title_id, const void* title_secret);
+int32_t sceNpRegisterPlusEventCallback(void* callback, void* userdata);
+int32_t sceNpUnregisterPlusEventCallback(void);
+void sceNpRegisterGamePresenceCallback(void* callback, void* userdata);
+int32_t sceNpCmpOnlineId(const OrbisNpOnlineId* id1, const OrbisNpOnlineId* id2);
+int32_t sceNpCmpNpId(const OrbisNpId* id1, const OrbisNpId* id2);
 
 int32_t sceNpAuthCreateRequest(void);
 int32_t sceNpAuthCreateAsyncRequest(const OrbisNpAuthCreateAsyncRequestParameter* param);
@@ -278,6 +286,12 @@ void shim_sceNpRegisterStateCallbackForToolkit(GuestContext *ctx);
 void shim_sceNpUnregisterStateCallbackForToolkit(GuestContext *ctx);
 void shim_sceNpCheckCallbackForLib(GuestContext *ctx);
 void shim_sceNpCheckCallback(GuestContext *ctx);
+void shim_sceNpSetNpTitleId(GuestContext *ctx);
+void shim_sceNpRegisterPlusEventCallback(GuestContext *ctx);
+void shim_sceNpUnregisterPlusEventCallback(GuestContext *ctx);
+void shim_sceNpRegisterGamePresenceCallback(GuestContext *ctx);
+void shim_sceNpCmpOnlineId(GuestContext *ctx);
+void shim_sceNpCmpNpId(GuestContext *ctx);
 
 void shim_sceNpAuthCreateRequest(GuestContext *ctx);
 void shim_sceNpAuthCreateAsyncRequest(GuestContext *ctx);

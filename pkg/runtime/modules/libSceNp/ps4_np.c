@@ -267,6 +267,76 @@ int32_t sceNpCheckCallback(void) {
     return 0;
 }
 
+int32_t sceNpSetNpTitleId(const void* title_id, const void* title_secret) {
+    if (!title_id || !title_secret) {
+        NP_LOG("sceNpSetNpTitleId: invalid arguments");
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT;
+    }
+    NP_LOG("sceNpSetNpTitleId -> ORBIS_OK");
+    return 0;
+}
+
+static void* g_plus_event_cb = NULL;
+static void* g_plus_event_cb_userdata = NULL;
+
+int32_t sceNpRegisterPlusEventCallback(void* callback, void* userdata) {
+    if (!callback) {
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT;
+    }
+    if (g_plus_event_cb != NULL) {
+        return ORBIS_NP_ERROR_CALLBACK_ALREADY_REGISTERED;
+    }
+    g_plus_event_cb = callback;
+    g_plus_event_cb_userdata = userdata;
+    NP_LOG("sceNpRegisterPlusEventCallback -> ORBIS_OK");
+    return 0;
+}
+
+int32_t sceNpUnregisterPlusEventCallback(void) {
+    if (g_plus_event_cb == NULL) {
+        return ORBIS_NP_ERROR_CALLBACK_NOT_REGISTERED;
+    }
+    g_plus_event_cb = NULL;
+    g_plus_event_cb_userdata = NULL;
+    NP_LOG("sceNpUnregisterPlusEventCallback -> ORBIS_OK");
+    return 0;
+}
+
+static void* g_game_presence_cb = NULL;
+static void* g_game_presence_cb_userdata = NULL;
+
+void sceNpRegisterGamePresenceCallback(void* callback, void* userdata) {
+    g_game_presence_cb = callback;
+    g_game_presence_cb_userdata = userdata;
+    NP_LOG("sceNpRegisterGamePresenceCallback");
+}
+
+int32_t sceNpCmpOnlineId(const OrbisNpOnlineId* id1, const OrbisNpOnlineId* id2) {
+    if (!id1 || !id2) {
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT;
+    }
+    if (strncmp(id1->data, id2->data, ORBIS_NP_ONLINEID_MAX_LENGTH) != 0) {
+        return ORBIS_NP_UTIL_ERROR_NOT_MATCH;
+    }
+    return 0;
+}
+
+int32_t sceNpCmpNpId(const OrbisNpId* id1, const OrbisNpId* id2) {
+    if (!id1 || !id2) {
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT;
+    }
+    if (strncmp(id1->handle.data, id2->handle.data, ORBIS_NP_ONLINEID_MAX_LENGTH) != 0) {
+        return ORBIS_NP_UTIL_ERROR_NOT_MATCH;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (id1->opt[i] != id2->opt[i]) return ORBIS_NP_UTIL_ERROR_NOT_MATCH;
+    }
+    for (int i = 0; i < 8; i++) {
+        if (id1->reserved[i] != id2->reserved[i]) return ORBIS_NP_UTIL_ERROR_NOT_MATCH;
+    }
+    return 0;
+}
+
 // GuestContext shims for NpManager
 void shim_sceNpCheckNpAvailability(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCheckNpAvailability((int32_t)ctx->rdi, (OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rsi));
@@ -425,6 +495,47 @@ void shim_sceNpCheckCallbackForLib(GuestContext *ctx) {
 
 void shim_sceNpCheckCallback(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpCheckCallback();
+    SHIM_RETURN();
+}
+
+void shim_sceNpSetNpTitleId(GuestContext *ctx) {
+    const void* id = NP_GPTR(ctx, ctx->rdi);
+    const void* secret = NP_GPTR(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceNpSetNpTitleId(id, secret);
+    SHIM_RETURN();
+}
+
+void shim_sceNpRegisterPlusEventCallback(GuestContext *ctx) {
+    void* cb = NP_GPTR(ctx, ctx->rdi);
+    void* udata = NP_GPTR(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceNpRegisterPlusEventCallback(cb, udata);
+    SHIM_RETURN();
+}
+
+void shim_sceNpUnregisterPlusEventCallback(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceNpUnregisterPlusEventCallback();
+    SHIM_RETURN();
+}
+
+void shim_sceNpRegisterGamePresenceCallback(GuestContext *ctx) {
+    void* cb = NP_GPTR(ctx, ctx->rdi);
+    void* udata = NP_GPTR(ctx, ctx->rsi);
+    sceNpRegisterGamePresenceCallback(cb, udata);
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpCmpOnlineId(GuestContext *ctx) {
+    const OrbisNpOnlineId* id1 = (const OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rdi);
+    const OrbisNpOnlineId* id2 = (const OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceNpCmpOnlineId(id1, id2);
+    SHIM_RETURN();
+}
+
+void shim_sceNpCmpNpId(GuestContext *ctx) {
+    const OrbisNpId* id1 = (const OrbisNpId*)NP_GPTR(ctx, ctx->rdi);
+    const OrbisNpId* id2 = (const OrbisNpId*)NP_GPTR(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceNpCmpNpId(id1, id2);
     SHIM_RETURN();
 }
 

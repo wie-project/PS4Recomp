@@ -58,3 +58,25 @@ void shim_sceNpLookupNpId(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)NP_COMMUNITY_ERROR_NO_LOGIN;
     SHIM_RETURN();
 }
+
+// int sceNpLookupCreateAsyncRequest(int titleCtxId, const void *param) -> reqId
+void shim_sceNpLookupCreateAsyncRequest(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)lookup_next(&g_lookup_req_counter);
+    SHIM_RETURN();
+}
+
+// int sceNpLookupPollAsync(int reqId, int *result)
+void shim_sceNpLookupPollAsync(GuestContext *ctx) {
+    int32_t *result = (int32_t *)((ctx->rsi) ? (ctx->mem_base + ctx->rsi) : NULL);
+    if (result) {
+        *result = NP_COMMUNITY_ERROR_NO_LOGIN;
+    }
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+// int sceNpLookupAbortRequest(int reqId)
+void shim_sceNpLookupAbortRequest(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
