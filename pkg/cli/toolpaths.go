@@ -12,6 +12,9 @@ import (
 // homebrewFreeType is the Homebrew prefix of FreeType on Apple Silicon.
 const homebrewFreeType = "/opt/homebrew/opt/freetype"
 
+// homebrewFFmpeg is the Homebrew prefix of FFmpeg on Apple Silicon.
+const homebrewFFmpeg = "/opt/homebrew/opt/ffmpeg"
+
 // exeDirs returns the directories the bundled tools are searched from: the directory of the
 // running executable, and the directory it resolves to when reached through a symlink.
 func exeDirs() []string {
@@ -81,4 +84,31 @@ func freeTypeIn(dirs []string, pkgConfig func(args ...string) ([]byte, error), b
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// findFFmpeg returns the compiler and linker flags for FFmpeg: pkg-config, then Homebrew.
+// It returns nil, nil when none is found.
+func findFFmpeg() (cflags, libs []string) {
+	return ffmpegIn(exeDirs(), func(args ...string) ([]byte, error) {
+		return exec.Command("pkg-config", args...).Output()
+	}, homebrewFFmpeg)
+}
+
+func ffmpegIn(dirs []string, pkgConfig func(args ...string) ([]byte, error), brewDir string) (cflags, libs []string) {
+	modules := []string{"libavformat", "libavcodec", "libswscale", "libswresample", "libavutil"}
+	if out, err := pkgConfig(append([]string{"--cflags"}, modules...)...); err == nil {
+		cflags = strings.Fields(string(out))
+	} else if fileExists(filepath.Join(brewDir, "include")) {
+		cflags = []string{"-I" + filepath.Join(brewDir, "include")}
+	} else if fileExists("/opt/homebrew/include/libavcodec/avcodec.h") {
+		cflags = []string{"-I/opt/homebrew/include"}
+	}
+	if out, err := pkgConfig(append([]string{"--libs"}, modules...)...); err == nil {
+		libs = strings.Fields(string(out))
+	} else if fileExists(filepath.Join(brewDir, "lib")) {
+		libs = []string{"-L" + filepath.Join(brewDir, "lib"), "-lavformat", "-lavcodec", "-lswscale", "-lswresample", "-lavutil"}
+	} else if fileExists("/opt/homebrew/lib/libavcodec.dylib") {
+		libs = []string{"-L/opt/homebrew/lib", "-lavformat", "-lavcodec", "-lswscale", "-lswresample", "-lavutil"}
+	}
+	return cflags, libs
 }

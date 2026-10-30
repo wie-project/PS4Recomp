@@ -3394,6 +3394,11 @@ id<MTLTexture> TextureCache::GetTextureImpl(const ImageDesc& img, const uint64_t
             e->width == width && e->height == height && e->depth == depth && e->levels == levels &&
             e->layers == layers && e->swizzle == img.view_swizzle && e->surf.pitch == sd.pitch &&
             e->surf.tile_mode == sd.tile_mode && e->surf.is_pow2 == sd.is_pow2) {
+            // CPU-written linear textures (e.g. Scaleform glyph cache) change dynamically without GPU barriers
+            if (e->surf.tile_mode == TileMode::DisplayLinearAligned ||
+                e->surf.tile_mode == TileMode::DisplayLinearGeneral) {
+                e->dirty = true;
+            }
             if (refresh_min_bytes) {
                 // stale contents: big surfaces are copied on the GPU, small ones by the CPU
                 // (MSAA entries take the CPU path, which only clears their dirty flag)

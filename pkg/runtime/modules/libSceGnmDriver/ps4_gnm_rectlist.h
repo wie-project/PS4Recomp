@@ -21,15 +21,17 @@
 namespace ps4gnm_rect {
 
 // Capture index of every vertex of a RectList draw of `count` vertices (3 per rectangle):
-// the index buffer values of an indexed draw (indices != nullptr; 32-bit if i32), 0..count-1
-// otherwise. Returns the number of capture slots per instance (largest index + 1), or 0 if
+// the index buffer values of an indexed draw (indices != nullptr; 32-bit if i32),
+// vertex_offset..vertex_offset+count-1 otherwise (since Metal non-indexed draws have
+// gl_BaseVertex == 0, the capture vertex shader writes to vertex_offset + i).
+// Returns the number of capture slots per instance (largest index + 1), or 0 if
 // count is not a positive multiple of 3.
-inline uint32_t BuildSlots(const void* indices, bool i32, uint32_t count, uint32_t* slots) {
+inline uint32_t BuildSlots(const void* indices, bool i32, uint32_t count, uint32_t* slots, uint32_t vertex_offset = 0) {
     if (count == 0 || count % 3) return 0;
     uint32_t n = 0;
     for (uint32_t i = 0; i < count; ++i) {
-        const uint32_t v = !indices ? i : i32 ? static_cast<const uint32_t*>(indices)[i]
-                                             : static_cast<const uint16_t*>(indices)[i];
+        const uint32_t v = !indices ? (vertex_offset + i) : i32 ? static_cast<const uint32_t*>(indices)[i]
+                                                               : static_cast<const uint16_t*>(indices)[i];
         slots[i] = v;
         if (v >= n) n = v + 1;
     }

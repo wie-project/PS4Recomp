@@ -592,6 +592,7 @@ func finishBuild(ctx context.Context, ev *events.Writer, cfg *Config, targetBin,
 
 func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, targetBin string, optLevel string, asan bool) error {
 	ftCflags, ftLibs := findFreeType()
+	ffCflags, ffLibs := findFFmpeg()
 
 	var sb strings.Builder
 	sb.WriteString("ninja_required_version = 1.5\n\n")
@@ -607,6 +608,7 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		}
 	}
 	incFlags = append(incFlags, ftCflags...)
+	incFlags = append(incFlags, ffCflags...)
 
 	hasAsm := false
 	for _, f := range cFiles {
@@ -688,6 +690,7 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		staticLibs = append(staticLibs, atracLib)
 	}
 	ldflags = append(ldflags, ftLibs...)
+	ldflags = append(ldflags, ffLibs...)
 
 	fmt.Fprintf(&sb, "ldflags = %s\n\n", ninjaShellArgs(ldflags))
 	sb.WriteString("rule link_bin\n")
@@ -834,6 +837,12 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 	} else {
 		fmt.Fprintf(logw, "             FreeType: %s\n", strings.Join(append(slices.Clone(ftCflags), ftLibs...), " "))
 	}
+	ffCflags, ffLibs := findFFmpeg()
+	if len(ffCflags)+len(ffLibs) == 0 {
+		fmt.Fprintln(logw, "             FFmpeg: not found")
+	} else {
+		fmt.Fprintf(logw, "             FFmpeg: %s\n", strings.Join(append(slices.Clone(ffCflags), ffLibs...), " "))
+	}
 	// Try building with Ninja first if available
 	if ninjaPath := findNinja(); ninjaPath != "" {
 		fmt.Fprintf(logw, "             ninja: %s\n", ninjaPath)
@@ -919,6 +928,7 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 					clangArgs = append(clangArgs, "-I"+inc)
 				}
 				clangArgs = append(clangArgs, ftCflags...)
+				clangArgs = append(clangArgs, ffCflags...)
 				if asan {
 					clangArgs = append(clangArgs, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
 				}
@@ -989,6 +999,7 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 		linkArgs = append(linkArgs, atracLib)
 	}
 	linkArgs = append(linkArgs, ftLibs...)
+	linkArgs = append(linkArgs, ffLibs...)
 	linkArgs = append(linkArgs, objFiles...)
 
 	cmd := groupCommand(ctx, "clang", linkArgs...)

@@ -511,8 +511,8 @@ int ps4_vfs_open(const char *guest_path, int host_flags, mode_t mode) {
 
   char resolved[1024];
   if (ps4_vfs_resolve(guest_path, resolved, sizeof(resolved)) == 0) {
-    if (access(resolved, F_OK) == 0) {
-      return open(resolved, host_flags, mode);
+    if (access(resolved, F_OK) == 0 || (host_flags & O_CREAT)) {
+      return open(resolved, host_flags, mode ? mode : 0666);
     }
   }
 

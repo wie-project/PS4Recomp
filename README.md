@@ -22,7 +22,7 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 
 | Title                                    | Title ID    | Engine / Type       | Status                 | Notes                                                                   |
 | ---------------------------------------- | ----------- | ------------------- | ---------------------- | ----------------------------------------------------------------------- |
-| **Bloodborne: Game of the Year Edition** | `CUSA03173` | FromSoftware Engine | **Bootable**           | Boots, renders logo: halts during call of unimplemented function        |
+| **Bloodborne: Game of the Year Edition** | `CUSA03173` | FromSoftware Engine | **Bootable / In-Game** | Starts, settings work, crashes at the start of the game                 |
 | **The Last of Us Remastered**            | `CUSA00557` | Naughty Dog Engine  | **Bootable / In-Game** | Boots, renders 3D graphics and audio; gameplay verification in progress |
 | **Hollow Knight: Silksong**              | —           | Unity 6             | **Suspended**          | Paused pending guest C++ exception unwinding in ARM64 backend           |
 | **Hogwarts Legacy**                      | `CUSA12824` | Unreal Engine 4     | **In Progress**        | Recompiles; halts during early engine startup                           |
@@ -38,7 +38,7 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 - **Xcode Command Line Tools**: `xcode-select --install`
 - **Build Tools & Libraries**:
   ```bash
-  brew install cmake ninja freetype
+  brew install cmake ninja freetype ffmpeg
   ```
 
 ### Build from Source
@@ -113,6 +113,42 @@ Recompile the game into a standalone macOS `.app` bundle:
 | `--app-dir <dir>`    | Host directory mapping to `/app0` for game assets              | Auto-detected |
 | `--copy-resources`   | Copy game assets into the macOS `.app` bundle `Resources/`     | `false`       |
 | `--asan`             | Compile runtime with AddressSanitizer and LeakSanitizer        | `false`       |
+
+---
+
+## Controls & Input Mapping
+
+PS4Recomp provides native game controller support via Apple's GameController framework (DualShock 4, DualSense, Xbox Wireless, and Nintendo Switch controllers are detected automatically over Bluetooth or USB).
+
+When playing without a physical controller, built-in keyboard emulation is active whenever the game window is focused:
+
+### Keyboard to DualShock 4 Mapping
+
+| PS4 Controller Input         | Primary Keyboard Key       | Alternative Key(s)         | Description                          |
+| ---------------------------- | -------------------------- | -------------------------- | ------------------------------------ |
+| **Left Stick / D-Pad Up**    | `W`                        | `Up Arrow`                 | Move forward / Menu Up               |
+| **Left Stick / D-Pad Down**  | `S`                        | `Down Arrow`               | Move backward / Menu Down            |
+| **Left Stick / D-Pad Left**  | `A`                        | `Left Arrow`               | Move left / Menu Left                |
+| **Left Stick / D-Pad Right** | `D`                        | `Right Arrow`              | Move right / Menu Right              |
+| **Right Stick Up**           | `Numpad 8`                 | `Page Up` (`Fn+Up`)        | Camera pitch up                      |
+| **Right Stick Down**         | `Numpad 2`, `Numpad 5`     | `Page Down` (`Fn+Down`)    | Camera pitch down                    |
+| **Right Stick Left**         | `Numpad 4`                 | `Home` (`Fn+Left`)         | Camera yaw left                      |
+| **Right Stick Right**        | `Numpad 6`                 | `End` (`Fn+Right`)         | Camera yaw right                     |
+| **Cross (✕)**                | `Space`                    | `Return` (Enter), `K`, `Z` | Confirm / Select / Action            |
+| **Circle (◯)**               | `L`                        | `O`, `X`                   | Cancel / Back / Dodge / Dash         |
+| **Square (◻)**               | `J`                        | `U`, `C`                   | Attack / Use Item                    |
+| **Triangle (△)**             | `I`                        | `Y`, `V`                   | Heavy Attack / Switch Weapon         |
+| **L1**                       | `Q`                        | —                          | Left Bumper / Guard                  |
+| **R1**                       | `E`                        | —                          | Right Bumper / Light Attack          |
+| **L2**                       | `Left Shift`               | `1`                        | Left Trigger (Full pull)             |
+| **R2**                       | `Left Ctrl`, `Right Shift` | `2`, `3`                   | Right Trigger (Full pull)            |
+| **L3**                       | `F`                        | —                          | Left Stick Click / Sprint            |
+| **R3**                       | `G`                        | `B`                        | Right Stick Click / Target Lock      |
+| **Options / Start**          | `Escape`                   | `Tab`, `P`, `M`, `R`       | Pause Menu / In-game Options         |
+| **Touchpad Click**           | `T`                        | `` ` `` (Backtick)         | Gestures / Map / Inventory           |
+| **Motion: Tilt Sideways**    | `H`                        | —                          | Emulate rolling controller 90° right |
+| **Motion: Shake Controller** | `N`                        | —                          | Emulate SixAxis shake (1g at 6 Hz)   |
+| **Quit Application**         | `Cmd + Q`                  | —                          | Cleanly terminate runtime            |
 
 ---
 

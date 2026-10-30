@@ -8206,6 +8206,17 @@ void DrawEncode(DrawRec& r) {
             ib_len = bytes;
         }
         const uint32_t inst = std::max(1u, args.num_instances);
+
+        // ---- vertex / instance offsets (shadPS4 GetDrawOffsets)
+        uint32_t vertex_offset = regs[0xA102]; // VGT_INDX_OFFSET
+        uint32_t instance_offset = 0;
+        if (vs->info.has_fetch_shader) {
+            if (vertex_offset == 0 && vs->info.vertex_offset_sgpr >= 0 && vs->info.vertex_offset_sgpr < 16)
+                vertex_offset = vs_ud[vs->info.vertex_offset_sgpr];
+            if (vs->info.instance_offset_sgpr >= 0 && vs->info.instance_offset_sgpr < 16)
+                instance_offset = vs_ud[vs->info.instance_offset_sgpr];
+        }
+
         ps4gnm_rect::Buffers rect_bufs{};
         if (rect) {
             // capture index of every vertex, and room for every captured vertex
@@ -8229,7 +8240,7 @@ void DrawEncode(DrawRec& r) {
                 NoteSkip(SkipReason::Arena);
                 return;
             }
-            const uint32_t per_instance = ps4gnm_rect::BuildSlots(src, args.index_type == 1, n, (uint32_t*)sp);
+            const uint32_t per_instance = ps4gnm_rect::BuildSlots(src, args.index_type == 1, n, (uint32_t*)sp, vertex_offset);
             *(uint32_t*)pp = per_instance;
             const uint64_t bytes = (uint64_t)per_instance * inst * rect->vertex_stride;
             if (bytes > (64u << 20)) {
@@ -8249,16 +8260,6 @@ void DrawEncode(DrawRec& r) {
             rect_bufs.vertices_off = voff;
             rect_bufs.capture_slot = rect->capture_slot;
             rect_bufs.params_slot = rect->params_slot;
-        }
-
-        // ---- vertex / instance offsets (shadPS4 GetDrawOffsets)
-        uint32_t vertex_offset = regs[0xA102]; // VGT_INDX_OFFSET
-        uint32_t instance_offset = 0;
-        if (vs->info.has_fetch_shader) {
-            if (vertex_offset == 0 && vs->info.vertex_offset_sgpr >= 0 && vs->info.vertex_offset_sgpr < 16)
-                vertex_offset = vs_ud[vs->info.vertex_offset_sgpr];
-            if (vs->info.instance_offset_sgpr >= 0 && vs->info.instance_offset_sgpr < 16)
-                instance_offset = vs_ud[vs->info.instance_offset_sgpr];
         }
 
         // ---- encode
