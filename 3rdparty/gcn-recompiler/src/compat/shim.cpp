@@ -154,8 +154,16 @@ const u32* GuestCode(u64 addr, u32 max_dwords) {
         return nullptr;
     }
     std::vector<u32> words;
-    // Read in chunks; fall back to dword reads near the end of a mapping.
+    words.reserve(max_dwords + 16);
+    // One read of the whole range; near the end of a mapping, chunks, then dwords.
     constexpr u32 Chunk = 64;
+    words.resize(max_dwords);
+    if (gm.read(gm.ctx, addr, words.data(), u64(max_dwords) * 4)) {
+        words.insert(words.end(), 16, 0xBF810000u);
+        auto& v = cache.code[addr] = std::move(words);
+        return v.data();
+    }
+    words.clear();
     while (words.size() < max_dwords) {
         u32 buf[Chunk];
         if (gm.read(gm.ctx, addr + words.size() * 4, buf, sizeof(buf))) {

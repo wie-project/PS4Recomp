@@ -29,6 +29,7 @@
 // values).
 
 #include <algorithm>
+#include <ranges>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -38,6 +39,7 @@
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/passes/ir_passes.h"
+#include "shader_recompiler/ir/passes/lane_mask_bits.h"
 #include "shader_recompiler/ir/passes/wave_uniformity.h"
 #include "shader_recompiler/ir/post_order.h"
 #include "shader_recompiler/ir/program.h"
@@ -672,6 +674,8 @@ private:
                     }
                 }
             }
+            // the per-lane bits of 64-bit scalar masks (InverseBallotEliminationPass)
+            scalar_virtual.insert(program.scalar_mask_vregs.begin(), program.scalar_mask_vregs.end());
         }
         return scalar_virtual;
     }
@@ -742,6 +746,18 @@ private:
         return blocks;
     }
 
+    // `innermost`: the region each block of a region is directly in.
+    void FindInnermost() {
+        if (!innermost.empty()) {
+            return;
+        }
+        for (size_t r = 0; r < regions.size(); ++r) {
+            for (const size_t b : regions[r].blocks) {
+                innermost[BlockAt(b)] = int(r);
+            }
+        }
+    }
+
     // Whether running the region as unchanged code, taken per lane, keeps the scalar state of
     // every subgroup of a wave as GCN's wave has it. GCN runs a scope's scalar instructions for
     // the whole wave when any of its lanes runs the scope, a subgroup with no lane in the scope
@@ -751,13 +767,7 @@ private:
     // there). A subgroup that runs a scope runs every block of it its lanes reach, so the values
     // read in the scope are the ones its own lanes wrote.
     bool ScalarStateStaysInScope(const Region& region) {
-        if (innermost.empty()) {
-            for (size_t r = 0; r < regions.size(); ++r) {
-                for (const size_t b : regions[r].blocks) {
-                    innermost[BlockAt(b)] = int(r);
-                }
-            }
-        }
+        FindInnermost();
         for (const IR::Block* block : SubtreeBlocks(region)) {
             // the exits of the block's scope: its merge, and the merges of the loops around it
             std::vector<const std::unordered_set<u64>*> exits;
@@ -1073,6 +1083,11 @@ private:
 
     // Why the shader cannot be predicated, or nullptr.
     const char* Unsupported() {
+        if (const IR::Inst* bad = UnhandledMaskBit()) {
+            LOG_WARNING(Render_Recompiler, "wave64: a 64-bit mask bit computed by {}: its bit outside EXEC is not known",
+                        bad->GetOpcode());
+            return "a 64-bit mask bit computed by an instruction whose bit outside EXEC is not known";
+        }
         if (lanes_may_end) {
             for (const auto& [node, region] : ends) {
                 if (!IsBlockNode(node - 1)) {
@@ -1158,8 +1173,16 @@ private:
         return nullptr;
     }
 
-    // A value of a predicated loop used after it: through a register written where P is true.
+    // A value of a predicated loop used after it: through a register written where P is true (for
+    // the wave, as a 64-bit mask's bit, when FindMaskLoopResults marked it).
+    bool IsMaskLoopResult(size_t region, const IR::Inst* inst) const {
+        return std::ranges::any_of(loop_results, [&](const LoopResult& result) {
+            return result.mask && result.region == region && result.inst == inst;
+        });
+    }
+
     void KeepLoopResults(const Region& loop) {
+        const size_t region_index = size_t(&loop - regions.data());
         const auto blocks = LoopBlocks(loop);
         for (IR::Block* block : blocks) {
             for (auto it = block->begin(); it != block->end(); ++it) {
@@ -1177,6 +1200,11 @@ private:
                     continue;
                 }
                 const IR::VirtualReg reg{program.next_reg_index++, inst.Type()};
+                if (IsMaskLoopResult(region_index, &inst)) {
+                    // a 64-bit mask's bit (FindMaskLoopResults): written for the whole wave
+                    program.scalar_mask_vregs.insert(reg.Key());
+                    scalar_virtual.insert(reg.Key());
+                }
                 IR::IREmitter{*block, std::next(it)}.SetVirtualReg(reg, IR::Value{&inst});
                 for (const auto& [user, operand] : outside) {
                     IR::IREmitter ir{*user->GetParent(), IR::Block::InstructionList::s_iterator_to(*user)};
@@ -1192,6 +1220,315 @@ private:
 
     IR::U1 WavePredicate(IR::IREmitter& ir) const {
         return IR::U1{ir.GetVirtualReg(wave)};
+    }
+
+    // The bit that the scalar instruction which computed the 64-bit mask `bit` (the lane's bit of
+    // it) gives a lane outside EXEC (ClassifyOutsideBit). Emitted before `ir`'s insertion point;
+    // `outside_bits` holds the bits of the write being masked (a shared operand is computed
+    // once). Unsupported() refused predication for a mask bit built from anything else
+    // (UnhandledMaskBit).
+    IR::U1 OutsideExecBit(IR::IREmitter& ir, const IR::U1& bit) {
+        if (bit.IsImmediate()) {
+            return bit;
+        }
+        IR::Inst* const inst{bit.Inst()};
+        if (const auto it = outside_bits.find(inst); it != outside_bits.end()) {
+            return it->second;
+        }
+        const auto arg = [&](size_t i) { return OutsideExecBit(ir, IR::U1{inst->Arg(i)}); };
+        IR::U1 result{bit};
+        switch (ClassifyOutsideBit(*inst, program.scalar_mask_vregs)) {
+        case OutsideBit::Zero:
+            result = ir.Imm1(false);
+            break;
+        case OutsideBit::Own:
+            break;
+        case OutsideBit::Combine:
+            if (std::ranges::all_of(std::views::iota(FirstMaskOperand(*inst), inst->NumArgs()), [&](size_t i) {
+                    return inst->Arg(i).IsImmediate() || arg(i) == IR::U1{inst->Arg(i)};
+                })) {
+                break; // every mask operand is its own outside form: so is the result
+            }
+            switch (inst->GetOpcode()) {
+            case IR::Opcode::LogicalNot:
+                result = ir.LogicalNot(arg(0));
+                break;
+            case IR::Opcode::LogicalAnd:
+                result = ir.LogicalAnd(arg(0), arg(1));
+                break;
+            case IR::Opcode::LogicalOr:
+                result = ir.LogicalOr(arg(0), arg(1));
+                break;
+            case IR::Opcode::LogicalXor:
+                result = ir.LogicalXor(arg(0), arg(1));
+                break;
+            case IR::Opcode::SelectU1:
+                result = IR::U1{ir.Select(IR::U1{inst->Arg(0)}, arg(1), arg(2))};
+                break;
+            default:
+                UNREACHABLE_MSG("wave64: mask bit combined by {}", inst->GetOpcode());
+            }
+            break;
+        case OutsideBit::Unhandled:
+            UNREACHABLE_MSG("wave64: a 64-bit mask bit computed by {} (not refused by Unsupported)",
+                            inst->GetOpcode());
+        }
+        outside_bits.emplace(inst, result);
+        return result;
+    }
+
+    // The first instruction whose outside-EXEC bit is not known (ClassifyOutsideBit) in the value
+    // of a mask virtual register's write in a block MaskBlock masks, or null.
+    // The U1 values of predicated loops that KeepLoopResults will carry out of their loop in a
+    // register, found on the program as it is before the transform, in KeepLoopResults' order
+    // (a value already carried out of a loop processed before keeps only its other uses). Which
+    // of them carry a 64-bit mask's bit (their register is a mask register) depends on the
+    // others: decided together, as a fixpoint, before Unsupported() and before any change.
+    struct LoopResult {
+        const IR::Inst* inst;
+        size_t region;
+        std::vector<IR::Use> outside; // the uses KeepLoopResults moves to the register
+        bool mask = false;
+    };
+
+    // The loop result an operand reads after KeepLoopResults, or null.
+    const LoopResult* CarriedOperand(const IR::Inst* user, size_t operand) const {
+        if (const auto it = result_uses.find(user); it != result_uses.end()) {
+            for (const auto& [op, index] : it->second) {
+                if (op == operand) {
+                    return &loop_results[index];
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // Whether `root` is built from mask bits, with the operands KeepLoopResults moves to
+    // registers read as those registers (a mask register is the lane's own bit).
+    bool IsMaskTree(const IR::Inst* root) {
+        if (const auto it = mask_trees.find(root); it != mask_trees.end()) {
+            return it->second;
+        }
+        tree_stack.clear();
+        tree_stack.push_back(root);
+        while (!tree_stack.empty()) {
+            const IR::Inst* const inst = tree_stack.back();
+            if (mask_trees.contains(inst)) {
+                tree_stack.pop_back();
+                continue;
+            }
+            const OutsideBit kind = ClassifyOutsideBit(*inst, program.scalar_mask_vregs);
+            if (kind != OutsideBit::Combine) {
+                mask_trees.emplace(inst, kind == OutsideBit::Own);
+                tree_stack.pop_back();
+                continue;
+            }
+            bool pending = false;
+            bool any = false;
+            for (size_t i = FirstMaskOperand(*inst); i < inst->NumArgs(); ++i) {
+                if (inst->Arg(i).IsImmediate()) {
+                    continue;
+                }
+                if (const LoopResult* carried = CarriedOperand(inst, i)) {
+                    any = any || carried->mask;
+                    continue;
+                }
+                const IR::Inst* const arg = inst->Arg(i).Inst();
+                if (const auto it = mask_trees.find(arg); it != mask_trees.end()) {
+                    any = any || it->second;
+                } else {
+                    tree_stack.push_back(arg);
+                    pending = true;
+                }
+            }
+            if (!pending) {
+                mask_trees.emplace(inst, any);
+                tree_stack.pop_back();
+            }
+        }
+        return mask_trees.at(root);
+    }
+
+    // Whether the value read by (`user`, `operand`) ends up in a mask: written into a mask
+    // register (a mask phi's or a mask loop result's), or combined as a mask operand into a
+    // value that does.
+    bool FeedsMask(const IR::Inst* user, size_t operand) {
+        feed_stack.clear();
+        feed_seen.clear();
+        feed_stack.emplace_back(user, operand);
+        while (!feed_stack.empty()) {
+            const auto [u, op] = feed_stack.back();
+            feed_stack.pop_back();
+            if (u->GetOpcode() == IR::Opcode::SetVirtualRegister) {
+                if (op == 1 && program.scalar_mask_vregs.contains(u->Arg(0).VirtualReg().Key())) {
+                    return true;
+                }
+                continue;
+            }
+            if (ClassifyOutsideBit(*u, program.scalar_mask_vregs) != OutsideBit::Combine ||
+                op < FirstMaskOperand(*u) || !feed_seen.insert(u).second) {
+                continue;
+            }
+            for (const IR::Use& use : u->Uses()) {
+                if (const LoopResult* carried = CarriedOperand(use.user, use.operand)) {
+                    if (carried->mask) {
+                        return true; // written into a mask loop result's register
+                    }
+                    continue;
+                }
+                feed_stack.emplace_back(use.user, use.operand);
+            }
+        }
+        return false;
+    }
+
+    void FindMaskLoopResults() {
+        if (loop_results_known) {
+            return;
+        }
+        loop_results_known = true;
+        for (size_t r = 0; r < regions.size(); ++r) {
+            const Region& region = regions[r];
+            if (region.mode != Mode::Predicated || region.type != NodeType::Loop) {
+                continue;
+            }
+            const auto blocks = LoopBlocks(region);
+            for (const IR::Block* block : blocks) {
+                for (const IR::Inst& inst : block->Instructions()) {
+                    if (inst.Type() != IR::Type::U1) {
+                        continue;
+                    }
+                    LoopResult result{&inst, r, {}};
+                    for (const IR::Use& use : inst.Uses()) {
+                        if (std::ranges::contains(blocks, use.user->GetParent()) ||
+                            CarriedOperand(use.user, use.operand)) {
+                            continue;
+                        }
+                        result.outside.push_back(use);
+                    }
+                    if (result.outside.empty()) {
+                        continue;
+                    }
+                    const size_t index = loop_results.size();
+                    for (const IR::Use& use : result.outside) {
+                        result_uses[use.user].emplace_back(use.operand, index);
+                    }
+                    loop_results.push_back(std::move(result));
+                }
+            }
+        }
+        // marking only adds mask registers, which only adds mask bits: a monotone fixpoint
+        for (bool changed = true; changed;) {
+            changed = false;
+            mask_trees.clear();
+            for (LoopResult& result : loop_results) {
+                if (result.mask) {
+                    continue;
+                }
+                bool mask = IsMaskTree(result.inst);
+                for (size_t u = 0; !mask && u < result.outside.size(); ++u) {
+                    const auto& [user, operand] = result.outside[u];
+                    mask = FeedsMask(user, operand) ||
+                           (ClassifyOutsideBit(*user, program.scalar_mask_vregs) == OutsideBit::Combine &&
+                            operand >= FirstMaskOperand(*user) && IsMaskTree(user));
+                }
+                if (mask) {
+                    result.mask = true;
+                    changed = true;
+                    mask_trees.clear();
+                }
+            }
+        }
+    }
+
+    // The first instruction whose outside-EXEC bit MaskBlock would not know, in the value of a
+    // mask register's write in a block MaskBlock masks, or in a mask loop result (its write in
+    // the loop), as the program will be after KeepLoopResults: an operand moved to an unmarked
+    // loop result's register is unknown. Null when there is none: then MaskBlock's
+    // OutsideExecBit never reaches UNREACHABLE.
+    const IR::Inst* UnhandledMaskBit() {
+        FindMaskLoopResults();
+        std::unordered_set<const IR::Inst*> seen;
+        std::vector<const IR::Inst*> stack;
+        // the first unhandled source in the tree of `root` (read by (`user`, `operand`))
+        const auto walk = [&](const IR::Inst* user, size_t operand, const IR::Inst* root) -> const IR::Inst* {
+            if (user) {
+                if (const LoopResult* carried = CarriedOperand(user, operand)) {
+                    return carried->mask ? nullptr : carried->inst;
+                }
+            }
+            stack.push_back(root);
+            while (!stack.empty()) {
+                const IR::Inst* const v = stack.back();
+                stack.pop_back();
+                if (!seen.insert(v).second) {
+                    continue;
+                }
+                const OutsideBit kind = ClassifyOutsideBit(*v, program.scalar_mask_vregs);
+                if (kind == OutsideBit::Unhandled) {
+                    stack.clear();
+                    return v;
+                }
+                if (kind != OutsideBit::Combine) {
+                    continue;
+                }
+                for (size_t i = FirstMaskOperand(*v); i < v->NumArgs(); ++i) {
+                    if (v->Arg(i).IsImmediate()) {
+                        continue;
+                    }
+                    if (const LoopResult* carried = CarriedOperand(v, i)) {
+                        if (!carried->mask) {
+                            stack.clear();
+                            return carried->inst;
+                        }
+                        continue;
+                    }
+                    stack.push_back(v->Arg(i).Inst());
+                }
+            }
+            return nullptr;
+        };
+        const auto check_block = [&](const IR::Block* block) -> const IR::Inst* {
+            for (const IR::Inst& inst : block->Instructions()) {
+                if (inst.GetOpcode() != IR::Opcode::SetVirtualRegister ||
+                    !program.scalar_mask_vregs.contains(inst.Arg(0).VirtualReg().Key()) ||
+                    inst.Arg(1).IsImmediate()) {
+                    continue;
+                }
+                if (const IR::Inst* bad = walk(&inst, 1, inst.Arg(1).Inst())) {
+                    return bad;
+                }
+            }
+            return nullptr;
+        };
+        for (const Region& region : regions) {
+            if (region.mode != Mode::Predicated && region.mode != Mode::MaskedBranch) {
+                continue;
+            }
+            for (const size_t b : region.blocks) {
+                if (const IR::Inst* bad = check_block(BlockAt(b))) {
+                    return bad;
+                }
+            }
+        }
+        if (lanes_may_end) {
+            FindInnermost();
+            for (size_t i = 0; i < syntax.size(); ++i) {
+                if (IsBlockNode(i) && !innermost.contains(BlockAt(i))) {
+                    if (const IR::Inst* bad = check_block(BlockAt(i))) {
+                        return bad;
+                    }
+                }
+            }
+        }
+        for (const LoopResult& result : loop_results) {
+            if (result.mask) {
+                if (const IR::Inst* bad = walk(nullptr, 0, result.inst)) {
+                    return bad;
+                }
+            }
+        }
+        return nullptr;
     }
 
     // `predicated`: a block of a Predicated region (every invocation runs it), not of a masked
@@ -1212,6 +1549,19 @@ private:
                     // v_writelane writes its lane whatever EXEC is, but only in a wave that runs
                     // it (not in one that skipped the scope or left the loop)
                     inst->SetArg(*operand, SelectValue(ir, WavePredicate(ir), value, ReadOld(ir, *inst, value)));
+                    continue;
+                }
+                if (op == IR::Opcode::SetVirtualRegister &&
+                    program.scalar_mask_vregs.contains(inst->Arg(0).VirtualReg().Key())) {
+                    // a lane's bit of a 64-bit scalar mask: the scalar instruction writes all 64
+                    // bits, a lane outside EXEC included, for the whole wave
+                    const IR::U1 bit{value};
+                    outside_bits.clear();
+                    const IR::U1 outside{OutsideExecBit(ir, bit)};
+                    const IR::U1 written{outside == bit ? bit
+                                                        : IR::U1{ir.Select(Predicate(ir), bit, outside)}};
+                    inst->SetArg(*operand, ir.Select(WavePredicate(ir), written,
+                                                     IR::U1{ReadOld(ir, *inst, value)}));
                     continue;
                 }
                 // scalar state: kept per wave (any lane of the wave runs scalar instructions)
@@ -1580,24 +1930,8 @@ private:
         wave = IR::VirtualReg{program.next_reg_index++, IR::Type::U1};
         FindWaveGotos();
         if (lanes_may_end) {
-            // the code outside every region is predicated too (masked before the predicates'
-            // own writes exist)
-            for (size_t i = 0; i < syntax.size(); ++i) {
-                if (IsBlockNode(i) && !innermost.contains(BlockAt(i))) {
-                    MaskBlock(BlockAt(i), true);
-                    program.predicated_blocks.insert(BlockAt(i));
-                }
-            }
             running = IR::VirtualReg{program.next_reg_index++, IR::Type::U1};
             running_wave = IR::VirtualReg{program.next_reg_index++, IR::Type::U1};
-        }
-        IR::Block* const entry = BlockAt(0);
-        IR::IREmitter init{*entry, entry->begin()};
-        init.SetVirtualReg(pred, IR::Value{true});
-        init.SetVirtualReg(wave, IR::Value{true});
-        if (lanes_may_end) {
-            init.SetVirtualReg(running, IR::Value{true});
-            init.SetVirtualReg(running_wave, IR::Value{true});
         }
 
         for (Region& region : regions) {
@@ -1617,6 +1951,25 @@ private:
             if (region.mode == Mode::Predicated && region.type == NodeType::Loop) {
                 KeepLoopResults(region);
             }
+        }
+        if (lanes_may_end) {
+            // the code outside every region is predicated too: after KeepLoopResults (a loop
+            // result used here is read from its register, a mask register when it carries a mask
+            // bit) and before the predicates' own writes exist
+            for (size_t i = 0; i < syntax.size(); ++i) {
+                if (IsBlockNode(i) && !innermost.contains(BlockAt(i))) {
+                    MaskBlock(BlockAt(i), true);
+                    program.predicated_blocks.insert(BlockAt(i));
+                }
+            }
+        }
+        IR::Block* const entry = BlockAt(0);
+        IR::IREmitter init{*entry, entry->begin()};
+        init.SetVirtualReg(pred, IR::Value{true});
+        init.SetVirtualReg(wave, IR::Value{true});
+        if (lanes_may_end) {
+            init.SetVirtualReg(running, IR::Value{true});
+            init.SetVirtualReg(running_wave, IR::Value{true});
         }
         for (const Region& region : regions) {
             const bool predicated = region.mode == Mode::Predicated;
@@ -1670,6 +2023,14 @@ private:
     bool mask_values_known = false;
     std::unordered_set<u64> scalar_virtual;
     bool scalar_virtual_known = false;
+    std::unordered_map<const IR::Inst*, IR::U1> outside_bits; // OutsideExecBit
+    std::vector<LoopResult> loop_results; // FindMaskLoopResults
+    std::unordered_map<const IR::Inst*, std::vector<std::pair<size_t, size_t>>> result_uses; // user: (operand, result)
+    bool loop_results_known = false;
+    std::unordered_map<const IR::Inst*, bool> mask_trees; // IsMaskTree
+    std::vector<const IR::Inst*> tree_stack;              // IsMaskTree
+    std::vector<std::pair<const IR::Inst*, size_t>> feed_stack; // FeedsMask
+    std::unordered_set<const IR::Inst*> feed_seen;              // FeedsMask
     std::unordered_map<const IR::Block*, std::unordered_set<u64>> scalar_live_in;
     const std::unordered_set<u64> empty_set;
     std::unordered_map<const IR::Block*, int> innermost; // the region a block is directly in

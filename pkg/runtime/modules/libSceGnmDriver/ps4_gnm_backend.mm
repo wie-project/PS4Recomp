@@ -70,7 +70,7 @@ GnmBackendChoice ChooseBackend(const char* env, bool device_has_metal4, uint32_t
             c.why = "default (Metal 3)";
         } else if (!device_has_metal4) {
             c.why = "default: Metal 3, the GPU does not support MTLGPUFamilyMetal4";
-        } else if (metal4_caps != kGnmCapAll) {
+        } else if ((metal4_caps & kGnmCapAll) != kGnmCapAll) {
             c.why = "default: Metal 3, the Metal 4 backend lacks " + Missing(metal4_caps);
         } else {
             c.kind = GnmBackendKind::Metal4;
@@ -102,7 +102,7 @@ GnmBackendChoice ChooseBackend(const char* env, bool device_has_metal4, uint32_t
                 Missing(metal4_caps) + "; use PS4_GNM_METAL=3";
         return c;
     }
-    if (!only_clears && metal4_caps != kGnmCapAll) {
+    if (!only_clears && (metal4_caps & kGnmCapAll) != kGnmCapAll) {
         c.why = "PS4_GNM_METAL=4: this build's Metal 4 backend lacks " + Missing(metal4_caps) +
                 "; set PS4_GNM_MTL4_ONLY_CLEARS=1 to run it with draws skipped (debug)";
         return c;

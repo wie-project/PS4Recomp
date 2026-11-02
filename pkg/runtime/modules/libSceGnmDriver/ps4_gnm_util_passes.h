@@ -18,10 +18,16 @@ struct GnmUtil {
     id<MTLRenderPipelineState> present = nil;     // present_vs + present_fs, BGRA8Unorm target
     id<MTLRenderPipelineState> depth2color = nil; // present_vs + depth2color_fs, R32Float target
     id<MTLComputePipelineState> detile = nil;     // detile_gather
+    id<MTLComputePipelineState> quad_prep = nil;    // quad_list_prep (indirect quad-list draws)
+    id<MTLComputePipelineState> quad_indices = nil; // quad_list_indices (their indexed conversion)
+    id<MTLComputePipelineState> args_patch = nil;   // indirect_args_patch (record offsets)
 };
 // Compiles kGnmUtilMsl and builds the three pipelines. False (why set) only when the library does
 // not compile; a pipeline that fails stays nil and why says which.
 bool MakeGnmUtil(id<MTLDevice> dev, GnmUtil* out, std::string* why);
+
+// VideoOut reads encoded display bytes, independent of a shader's storage-image type.
+id<MTLTexture> PresentTextureView(id<MTLTexture> src, uint32_t pixel_format);
 
 // A full-screen triangle (present_vs) into the pass `pd`, with `pso`, `dss` (nil: none set) and
 // `src` at fragment texture 0. The caller opened the command buffer and ended the open encoder; the

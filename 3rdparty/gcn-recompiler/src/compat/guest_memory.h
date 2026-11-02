@@ -41,9 +41,11 @@ inline bool ReadGuest(u64 addr, void* dst, u64 size) {
 }
 
 // Returns a host pointer to a copy of the GCN code at guest address `addr` (up to
-// max_dwords, stopping at the first unreadable dword). The copy lives in a thread-local cache
-// that stays valid until ClearGuestCodeCache() (called on GuestMemoryScope exit). Returns nullptr if nothing is readable.
-const u32* GuestCode(u64 addr, u32 max_dwords = 4096);
+// max_dwords, stopping at the first unreadable dword), padded with 16 s_endpgm. The copy lives
+// in a thread-local cache, keyed by the address, that stays valid until ClearGuestCodeCache()
+// (called on GuestMemoryScope exit). The only caller is GetFetchShaderCode (fetch_shader.cpp),
+// always with kFetchShaderMaxDwords. Returns nullptr if nothing is readable.
+const u32* GuestCode(u64 addr, u32 max_dwords);
 void ClearGuestCodeCache();
 
 } // namespace GcnShim

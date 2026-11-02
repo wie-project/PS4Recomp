@@ -70,9 +70,35 @@ void Dispatch(GuestContext* ctx, const uint32_t* regs, uint32_t dim_x, uint32_t 
               uint32_t dim_z, uint64_t indirect_addr, const char* name, int queue);
 
 // Run `fn` once all GPU work encoded so far has completed (fences/labels/interrupts: EOP,
-// RELEASE_MEM, EOS). Commits the open command buffer. Actions run in submission order, on the
-// calling thread when nothing is in flight, otherwise on Metal's completion thread.
+// RELEASE_MEM, EOS). It does not commit: the action waits for the completion of the open command
+// buffer (everything encoded into it, also after `fn` was queued), which the CP commits at the end
+// of its submission. Actions run in submission order, on the calling thread when nothing is in
+// flight, otherwise on Metal's completion thread.
 void AfterGpu(std::function<void()> fn);
+// The same for an action of GNM queue `queue` (kQueueGfx, kQueueCompute): it waits for that queue's
+// work, and actions of one queue run in their order. AfterGpu(fn) is a graphics-queue action.
+void AfterGpu(std::function<void()> fn, int queue);
+// AfterGpu for a label write of `value` to `addr` by `packet` ("EOP", "RELEASE_MEM", "EOS") of GNM
+// queue `queue`; with PS4_GNM_LABEL_TRACE=<that address> its latency is logged ([gnm-label]).
+void AfterGpuLabel(uint64_t addr, uint64_t value, const char* packet, int queue, std::function<void()> fn);
+
+// EVENT_WRITE ZPASS_DONE (PIXEL_PIPE_STAT_DUMP, event index 1) at `addr`: an occlusion query's
+// begin or end. The DB writes its ZPASS sample counter, a u64 with bit 63 set (valid), once per
+// render backend, 16 bytes apart (one begin/end pair each; `backends`: 8, 16 on PS4 Pro), after the
+// work before it. A query's count is the end minus the begin, summed over the backends. The
+// renderer counts the samples that pass the depth/stencil tests (Metal visibility results) of the
+// draws while a query is open, and writes the running count into backend 0's slot; the other
+// backends' slots get a 0 count with the valid bit. The end of a query is the event at its begin
+// address + 8 (the begin and end fields of a pair).
+void ZpassDone(uint64_t addr, uint32_t backends);
+
+// The query address of an EVENT_WRITE packet if it is a ZPASS_DONE event (EVENT_TYPE 57,
+// PIXEL_PIPE_STAT_DUMP, with EVENT_INDEX 1), else 0. `payload` is the packet's dwords after the
+// PM4 header: the event dword, ADDRESS_LO (its low 3 bits are not address bits) and ADDRESS_HI.
+inline uint64_t ZpassDoneAddress(const uint32_t* payload, uint32_t payload_dw) {
+    if (payload_dw < 3 || ((payload[0] >> 8) & 0xF) != 1 || (payload[0] & 0x3F) != 57) return 0;
+    return ((uint64_t)payload[1] & ~7ull) | ((uint64_t)payload[2] << 32);
+}
 
 // Surface extents from the NOP hints after CB/DB register setup (0 = unknown); raw = w | h << 16.
 void SetExtentHints(const uint32_t cb[8], uint32_t db);
@@ -86,6 +112,33 @@ void WaitKernelCompiles();
 
 // True if GPU work was encoded since the last Flush(true).
 bool HasPendingWork();
+
+// ---- Asynchronous compute (PS4_GNM_ASYNC_COMPUTE=1, Task 10.2.1): eligible compute-ring work runs
+// on a command queue of its own, beside graphics, as the ASC queues run beside the graphics ring on
+// GCN. On only on a backend that has the queue (Metal 3).
+bool AsyncComputeOn();
+// The CP found a memory WAIT_REG_MEM of `waiting_queue` met only by a label the other queue's GPU
+// work will write (or, unknown_producer, by nothing it can name: the "earlier work" fallback, a
+// timed-out wait): the waiting queue's later work runs after the other queue's work so far.
+// Graphics waiting on compute: the compute queue's work so far completes first (a CPU wait), so its
+// written memory and the caches over it are final. A compute ring waiting on graphics: the rest of
+// its submission runs on the main queue, behind graphics. Nothing with asynchronous compute off.
+// other_ring: the compute ring (CP slot) whose pending label met a graphics wait (-1: unknown). The
+// graphics ring consuming a ring's results at once gains nothing from running it beside graphics,
+// and each such wait ends Main's open encoder: that ring's work runs on Main for a while
+// (kGfxConsumedPresents presents after its last such wait; counted as gfx-consumed).
+void JoinQueues(int waiting_queue, bool unknown_producer = false, int other_ring = -1);
+// CP thread: the compute ring (CP slot, 0..63) whose packets are being processed, -1 for none (the
+// graphics ring). Dispatch and GpuDma of kQueueCompute take it.
+void SetCpComputeRing(int ring);
+struct AsyncComputeCounts {
+    bool on = false;
+    uint64_t eligible = 0;    // compute-ring jobs encoded on the asynchronous compute queue
+    uint64_t joined = 0;      // compute-ring jobs that ran on the main queue (any reason)
+    uint64_t cross_waits = 0; // GPU waits encoded of one queue for the other (either direction)
+    uint64_t alias_skipped = 0; // Metal 3 alias-window waits left out: the access was on the other queue
+};
+AsyncComputeCounts GetAsyncComputeCounts();
 // Guest dispatches run concurrently (as consecutive dispatches do on GCN); the command
 // processor calls this where the guest synchronizes (cache flushes, partial flushes, fences,
 // waits, CP writes), so later dispatches see the memory written by earlier ones. `queue`: the
@@ -116,6 +169,7 @@ void DebugSetComputeHoldNs(uint64_t ns);
 // Test hook: committed seqs, compute encoders opened and compute barriers encoded, since Init.
 struct EncodeCounts {
     uint64_t committed = 0, compute_encoders = 0, compute_barriers = 0;
+    uint64_t render_passes = 0, occlusion_splits = 0; // render passes begun; of them ended by a ZPASS_DONE
 };
 EncodeCounts GetEncodeCounts();
 
@@ -131,7 +185,9 @@ uint8_t* Gds();
 // the GPU timeline, behind the work encoded so far, so the CPU does not wait for the GPU.
 // Returns false if it cannot (unaligned range, unmapped memory); the caller then drains and
 // copies on the CPU.
-bool GpuDma(bool src_gds, bool src_fill, uint64_t src, uint32_t fill_value, bool dst_gds, uint64_t dst, uint32_t n);
+// queue: the GNM queue of the packet (a compute ring's goes where that ring's work goes).
+bool GpuDma(bool src_gds, bool src_fill, uint64_t src, uint32_t fill_value, bool dst_gds, uint64_t dst, uint32_t n,
+            int queue = kQueueGfx);
 
 // Presentation: the display buffer at `addr` (a GPU render target, or guest memory copied on the
 // GPU behind the frame's work) is rendered into a BGRA8 texture and handed to the Metal screen
@@ -155,6 +211,9 @@ void DebugReleaseGpu();
 // Test hook: the GPU work encoded from now on waits until `shared_event` (an id<MTLSharedEvent>
 // of the renderer's device) reaches `value`.
 void DebugGpuWait(void* shared_event, uint64_t value);
+// Test hook: the same for the work of GNM queue `queue` (kQueueCompute: the asynchronous compute
+// queue's, when it is on).
+void DebugGpuWaitQueue(void* shared_event, uint64_t value, int queue);
 // Test hook: a GPU fill of `value` into a fresh chunk of the upload arena (larger than a recycled
 // one, so made for this call), waited for; `out` gets the chunk's first `n` bytes as the CPU then
 // reads them. False without a renderer.
@@ -256,11 +315,36 @@ struct GuestMemoryStats {
                                   // until a remap or the refused spans' idle reset)
 };
 GuestMemoryStats GetGuestMemoryStats();
+// Indirect draws Draw refused (it returned false: the CP drains the GPU, reads the arguments on the
+// CPU and draws directly), by reason: base vertex / start instance written to user SGPRs the GPU
+// path cannot feed, VGT_INDX_OFFSET set, an indexed draw without INDEX_BUFFER_SIZE, a primitive the
+// CPU must convert (all but quad lists), an argument record or index buffer outside guest memory
+// or unaligned, an indexed quad list whose converted indices could exceed one upload arena chunk
+// (4 MiB) or would take the command buffer's quad index pools past 64 MiB (quad-size).
+enum class IndirectFallback : uint8_t { UserSgpr, IndxOffset, NoMaxIndex, Emulation, Range, QuadSize, Count };
+// Refusals so far for that reason; for Emulation, of primitive type `prim` (VGT_PRIMITIVE_TYPE).
+uint64_t IndirectFallbacks(IndirectFallback reason, uint32_t prim = 0);
+// Test hook: false makes the renderer behave as if the GPU path's indirect kernels did not exist:
+// Draw refuses indirect quad lists (counted as Emulation of QuadList), and triangle-list record
+// offsets are corrected on the CPU. True restores them.
+void TestSetIndirectKernels(bool available);
+// Indirect triangle-list records whose offsets were corrected so far: on the GPU (args-patched, a
+// compute pass each) or, without the kernel, on the CPU.
+uint64_t ArgsPatched(bool on_cpu);
+// Indirect triangle-list draws whose record pending GPU work writes, drawn with the record's base
+// vertex / start instance although the CP writes them to no SGPR (not checked), so far.
+uint64_t IndirectRecordOffsetsUnchecked();
+// Bytes of quad index pools allocated so far for the converted indices of indirect quad lists
+// (each draw reserves its worst case in the open seq's pool; pools are arena memory of their seq).
+uint64_t QuadIndexPoolBytes();
 // Renderer gave up on the GPU (a GPU watchdog fired): nothing more is rendered.
 bool Hung();
 // Tests: the result of the next fast guest memory dispatch is never made final (as if the CPU
 // never got its verdict), to test the waits that would otherwise never end.
 void TestWithholdNextTicket();
+// Tests: the next chain of fast guest memory dispatches runs on the GPU, and then its command buffer
+// is reported failed (as if the GPU faulted right after it) instead of the chain's GPU signal.
+void TestFailNextChain();
 // Tests: locks (hold) or unlocks the texture cache's lock on the calling thread.
 void TestHoldTextureCacheLock(bool hold);
 

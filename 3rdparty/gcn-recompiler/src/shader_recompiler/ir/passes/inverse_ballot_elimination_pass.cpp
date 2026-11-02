@@ -122,6 +122,7 @@ void InverseBallotEliminationPass(IR::Program& program) {
             if (prod->GetOpcode() == IR::Opcode::Phi) {
                 IR::Inst* const new_phi{&*block->PrependNewInst(insert_point, IR::Opcode::Phi)};
                 new_phi->SetFlags(IR::Type::U1);
+                program.lane_mask_phis.insert(new_phi); // a mask's bit per lane: scalar state
                 for (size_t arg_index = 0; arg_index < prod->NumArgs(); ++arg_index) {
                     IR::Block* const phi_block = prod->PhiBlock(arg_index);
                     IR::IREmitter ir{*phi_block};

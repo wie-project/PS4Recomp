@@ -5,11 +5,52 @@
 
 #include <cstdint>
 #include <map>
+#include <span>
 #include <string>
 #include <vector>
+#include "api/gcn_spirv_geometry.h"
 #include "gcn_recompiler.h"
 
 namespace GcnMsl {
+
+enum class StageRole : uint8_t {
+    Plain = 0,
+    TessVertex,
+    TessControl,
+    TessEval,
+    GeometryKernel,
+};
+
+struct StageVariant {
+    StageRole role = StageRole::Plain;
+    uint32_t index_type = 0;      // TessVertex: 0 = unindexed, 1 = uint16, 2 = uint32
+    uint32_t domain = 0;          // TessControl fallback: GcnTessDomain
+    uint32_t output_vertices = 0; // TessEval: control points per patch
+    uint32_t patch_first = 0;     // TessEval: first per-patch location
+    uint32_t patch_end = 0;       // TessEval: one past last per-patch location
+};
+
+struct TessLayout {
+    uint32_t input = 0;
+    uint32_t output = 0;
+    uint32_t patch_input = 0;
+    uint32_t patch_output = 0;
+    std::vector<GcnSpirv::InterfaceMember> members;
+};
+
+struct SpirvScan {
+    bool valid = false;
+    uint32_t local_size[3] = {0, 0, 0};
+    uint32_t domain = 0;  // GcnTessDomain
+    uint32_t spacing = 0; // GcnTessSpacing
+    bool clockwise = false;
+    bool point_mode = false;
+    uint32_t output_vertices = 0;
+    uint32_t patch_first = 0;
+    uint32_t patch_end = 0;
+};
+
+SpirvScan ScanSpirv(std::span<const uint32_t> code);
 
 // SPIR-V (set 0) binding -> MSL slot(s) chosen by SPIRV-Cross automatic assignment.
 struct Bindings {
@@ -31,7 +72,8 @@ struct Bindings {
 // buffer (guest memory buffers). nullptr disables the argument buffer fallback.
 bool Convert(const std::vector<uint32_t>& spirv, const gcn_msl_options& opt, std::string& out,
              std::string& err, Bindings* bindings,
-             const std::vector<uint32_t>* arg_candidates = nullptr);
+             const std::vector<uint32_t>* arg_candidates = nullptr,
+             const StageVariant* variant = nullptr, TessLayout* layout = nullptr);
 
 // Buffer slots of a vertex shader's capture variant: the stage output struct of vertex v of
 // instance i is written to output[i * params[0] + v] ([[buffer(output_buffer)]], indexed from the

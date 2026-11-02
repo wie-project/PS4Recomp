@@ -9,6 +9,29 @@
 
 namespace Shader::Gcn {
 
+namespace {
+
+// GCN's DX9-style ("legacy") and clamped float ops return 0 or +-FLT_MAX where IEEE gives
+// NaN or +-Inf. Inf/NaN are tested on the integer bit pattern so Metal's fast math cannot fold
+// the test away.
+IR::U1 IsInfBits(IR::IREmitter& ir, const IR::F32& value) {
+    const IR::U32 magnitude{ir.BitwiseAnd(ir.BitCast<IR::U32>(value), ir.Imm32(0x7fffffffu))};
+    return ir.IEqual(magnitude, ir.Imm32(0x7f800000u));
+}
+
+IR::U32 SignBits(IR::IREmitter& ir, const IR::F32& value) {
+    return ir.BitwiseAnd(ir.BitCast<IR::U32>(value), ir.Imm32(0x80000000u));
+}
+
+/// +-Inf becomes +-FLT_MAX; anything else is unchanged.
+IR::F32 ClampInf(IR::IREmitter& ir, const IR::F32& value) {
+    const IR::F32 max{
+        ir.BitCast<IR::F32>(IR::U32{ir.BitwiseOr(SignBits(ir, value), ir.Imm32(0x7f7fffffu))})};
+    return IR::F32{ir.Select(IsInfBits(ir, value), max, value)};
+}
+
+} // namespace
+
 void Translator::EmitVectorAlu(const GcnInst& inst) {
     switch (inst.opcode) {
         // VOP2
@@ -1079,10 +1102,7 @@ void Translator::V_EXP_F32(const GcnInst& inst) {
 
 void Translator::V_LOG_CLAMP_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    const IR::F32 result{ir.FPLog2(src0)};
-    const IR::F32 max_val{ir.Imm32(std::numeric_limits<float>::max())};
-    const IR::F32 min_val{ir.Imm32(-std::numeric_limits<float>::max())};
-    SetDst(inst.dst[0], ir.FPClamp(result, min_val, max_val));
+    SetDst(inst.dst[0], ClampInf(ir, ir.FPLog2(src0)));
 }
 
 void Translator::V_LOG_F32(const GcnInst& inst) {
@@ -1097,16 +1117,12 @@ void Translator::V_RCP_F32(const GcnInst& inst) {
 
 void Translator::V_RCP_LEGACY_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    const auto result = ir.FPRecip(src0);
-    const auto inf = ir.FPIsInf(result);
-
-    const auto raw_result = ir.ConvertFToU(32, result);
-    const auto sign_bit = ir.ShiftRightLogical(raw_result, ir.Imm32(31u));
-    const auto sign_bit_set = ir.INotEqual(sign_bit, ir.Imm32(0u));
-    const IR::F32 inf_result{ir.Select(sign_bit_set, ir.Imm32(-0.0f), ir.Imm32(0.0f))};
-    const IR::F32 val{ir.Select(inf, inf_result, result)};
-
-    SetDst(inst.dst[0], val);
+    const IR::F32 result{ir.FPRecip(src0)};
+    const IR::U32 res_bits{ir.BitCast<IR::U32>(result)};
+    const IR::U1 is_inf_or_nan{
+        ir.IEqual(ir.BitwiseAnd(res_bits, ir.Imm32(0x7f800000u)), ir.Imm32(0x7f800000u))};
+    const IR::F32 signed_zero{ir.BitCast<IR::F32>(SignBits(ir, src0))};
+    SetDst(inst.dst[0], IR::F32{ir.Select(is_inf_or_nan, signed_zero, result)});
 }
 
 void Translator::V_RCP_F64(const GcnInst& inst) {
@@ -1116,12 +1132,10 @@ void Translator::V_RCP_F64(const GcnInst& inst) {
 
 void Translator::V_RSQ_LEGACY_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    const IR::F32 result{ir.FPRecipSqrt(src0)};
-    const IR::F32 max_val{ir.Imm32(std::numeric_limits<float>::max())};
-    const IR::F32 min_val{ir.Imm32(-std::numeric_limits<float>::max())};
-    const IR::F32 clamped{ir.FPClamp(result, min_val, max_val)};
+    const IR::F32 result{ClampInf(ir, ir.FPRecipSqrt(src0))};
+    const IR::U32 src_mag{ir.BitwiseAnd(ir.BitCast<IR::U32>(src0), ir.Imm32(0x7fffffffu))};
     const IR::F32 zero{ir.Imm32(0.0f)};
-    const IR::F32 output{ir.Select(ir.FPEqual(src0, zero), zero, clamped)};
+    const IR::F32 output{ir.Select(ir.IEqual(src_mag, ir.Imm32(0u)), zero, result)};
     SetDst(inst.dst[0], output);
 }
 
@@ -1132,18 +1146,12 @@ void Translator::V_RSQ_F32(const GcnInst& inst) {
 
 void Translator::V_RCP_CLAMP_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    const IR::F32 result{ir.FPRecip(src0)};
-    const IR::F32 max_val{ir.Imm32(std::numeric_limits<float>::max())};
-    const IR::F32 min_val{ir.Imm32(-std::numeric_limits<float>::max())};
-    SetDst(inst.dst[0], ir.FPClamp(result, min_val, max_val));
+    SetDst(inst.dst[0], ClampInf(ir, ir.FPRecip(src0)));
 }
 
 void Translator::V_RSQ_CLAMP_F32(const GcnInst& inst) {
     const IR::F32 src0{GetSrc<IR::F32>(inst.src[0])};
-    const IR::F32 result{ir.FPRecipSqrt(src0)};
-    const IR::F32 max_val{ir.Imm32(std::numeric_limits<float>::max())};
-    const IR::F32 min_val{ir.Imm32(-std::numeric_limits<float>::max())};
-    SetDst(inst.dst[0], ir.FPClamp(result, min_val, max_val));
+    SetDst(inst.dst[0], ClampInf(ir, ir.FPRecipSqrt(src0)));
 }
 
 void Translator::V_SQRT_F32(const GcnInst& inst) {
@@ -2082,9 +2090,16 @@ void Translator::SetCarryOut(const GcnInst& inst, const IR::U1& carry) {
 }
 
 IR::F32 Translator::LegacyMul(const IR::F32& a, const IR::F32& b) {
-    // DX9 rules, 0.0 * x = 0.0
+    // DX9 rules, 0.0 * x = +0.0 (even if x is NaN or Inf). Test on integer bits so Metal
+    // fast-math cannot fold 0.0 * x before the select.
     const IR::F32 zero{ir.Imm32(0.0f)};
-    const IR::U1 either_zero{ir.LogicalOr(ir.FPEqual(a, zero), ir.FPEqual(b, zero))};
+    const IR::U32 lhs_bits{ir.BitCast<IR::U32>(a)};
+    const IR::U32 rhs_bits{ir.BitCast<IR::U32>(b)};
+    const IR::U1 lhs_zero{
+        ir.IEqual(ir.BitwiseAnd(lhs_bits, ir.Imm32(0x7fffffffu)), ir.Imm32(0u))};
+    const IR::U1 rhs_zero{
+        ir.IEqual(ir.BitwiseAnd(rhs_bits, ir.Imm32(0x7fffffffu)), ir.Imm32(0u))};
+    const IR::U1 either_zero{ir.LogicalOr(lhs_zero, rhs_zero)};
     return IR::F32{ir.Select(either_zero, zero, ir.FPMul(a, b))};
 }
 

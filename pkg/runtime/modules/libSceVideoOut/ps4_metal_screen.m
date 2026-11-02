@@ -77,11 +77,33 @@ static void run_on_main(dispatch_block_t block) {
     }
 }
 
+static void metal_screen_pump_events_main(void);
+
 void ps4_host_run_main_loop(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+
+        static id s_startupLatencyActivity;
+        if (!s_startupLatencyActivity) {
+            s_startupLatencyActivity = [[NSProcessInfo processInfo]
+                beginActivityWithOptions:(NSActivityUserInitiated | NSActivityLatencyCritical)
+                                  reason:@"game_runtime"];
+        }
     }
+
+    // Pump window and input events regularly on the main thread (every 8ms),
+    // completely decoupling window responsiveness from the guest frame presentation rate.
+    // When guest threads compile shaders, load assets, or drop frames, the main thread continues
+    // to service WindowServer events, preventing the macOS spinning wait cursor (beachball)
+    // and input lockup.
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0), 8 * NSEC_PER_MSEC, 2 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer, ^{
+        metal_screen_pump_events_main();
+    });
+    dispatch_resume(timer);
+
     for (;;) {
         CFRunLoopRun();
     }
@@ -1719,8 +1741,8 @@ static void metal_screen_pump_events_main(void) {
                 ps4_keyboard_handle_flags(event.modifierFlags);
             }
             [NSApp sendEvent:event];
-            [NSApp updateWindows];
         }
+        [NSApp updateWindows];
 
         // Failsafe: if window was closed or hidden and not minimized, exit cleanly
         if (g_inited && g_window && ![g_window isVisible] && ![g_window isMiniaturized]) {

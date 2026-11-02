@@ -18,7 +18,8 @@ namespace ps4gnm {
 // buffers (Task 3.3). Draws: the renderer's own textures too (Task 4.2), checked by every
 // renderer-level host test on Metal 4 with PS4_GNM_RESIDENCY_CHECK=1 (Task 4.3).
 // Backend tests drive the backend directly.
-const uint32_t kMetal4BackendCaps = kGnmCapAll;
+// The second queue (kGnmCapAsyncCompute) since Task 10.2.1.
+const uint32_t kMetal4BackendCaps = kGnmCapAll | kGnmCapAsyncCompute;
 
 // The visibility of the renderer's barriers (encoder starts, the renderer's own barriers, the
 // barriers between copies and dispatches of one encoder): guest memory is reached through several
@@ -82,17 +83,19 @@ Metal4Backend::~Metal4Backend() {
     }
     // Queue operations issued after the last commit (the timeline signal, deferred signals) may
     // still be pending after its feedback: one more signal runs after all of them.
-    if (queue_) {
+    for (id<MTL4CommandQueue> q : {queue_, async_queue_}) {
+        if (!q) continue;
         id<MTLSharedEvent> drained = [dev_ newSharedEvent];
-        [queue_ signalEvent:drained value:1];
+        [q signalEvent:drained value:1];
         if (![drained waitUntilSignaledValue:1 timeoutMS:(uint64_t)secs * 1000]) {
             fprintf(stderr, "[gnm-draw] FATAL: Metal4Backend destroyed with queue operations still pending after %lld s "
                             "(a GPU hang?)\n", secs);
             abort();
         }
     }
-    // The command queue goes first: it uses feedback_q_ without holding a reference to it.
+    // The command queues go first: they use feedback_q_ without holding a reference to it.
     queue_ = nil;
+    async_queue_ = nil;
     feedback_q_ = nullptr;
 }
 
@@ -118,21 +121,33 @@ bool Metal4Backend::Init(id<MTLDevice> dev, std::string* why) {
     // until the destructor has released queue_. Probed with the macOS 27.0 SDK. Should a later SDK
     // stop releasing it, this +1 is one dispatch queue leaked per backend, never an over-release:
     // gnm_backend_cmd_test (TestFeedbackQueueFreed) then fails.
-    (void)CFBridgingRetain(feedback_q_);
-    qd.feedbackQueue = feedback_q_;
+    // The second queue's descriptor (AsyncCompute) gets its own +1 the same way.
     NSError* err = nil;
-    queue_ = [dev newMTL4CommandQueueWithDescriptor:qd error:&err];
-    qd = nil;
-    if (!queue_) {
-        if (why) *why = err ? err.localizedDescription.UTF8String : "newMTL4CommandQueueWithDescriptor failed";
-        return false;
+    for (int q = 0; q < 2; ++q) {
+        MTL4CommandQueueDescriptor* d = q ? [MTL4CommandQueueDescriptor new] : qd;
+        if (q) d.label = @"gnm async compute";
+        (void)CFBridgingRetain(feedback_q_);
+        d.feedbackQueue = feedback_q_;
+        id<MTL4CommandQueue> made = [dev newMTL4CommandQueueWithDescriptor:d error:&err];
+        d = nil;
+        qd = nil;
+        if (!made) {
+            if (why) *why = err ? err.localizedDescription.UTF8String : "newMTL4CommandQueueWithDescriptor failed";
+            return false;
+        }
+        (q ? async_queue_ : queue_) = made;
     }
     side_queue_ = [dev newCommandQueue];
     side_queue_.label = @"gnm side (Metal 3)";
     timeline_ = [dev newSharedEvent];
     timeline_.label = @"gnm timeline";
+    async_timeline_ = [dev newSharedEvent];
+    async_timeline_.label = @"gnm async compute timeline";
     if (!res_.Init(dev, why)) return false;
-    for (int c = 0; c < kGnmResidencyClasses; ++c) [queue_ addResidencySet:res_.Set((GnmResidencyClass)c)];
+    for (int c = 0; c < kGnmResidencyClasses; ++c) {
+        [queue_ addResidencySet:res_.Set((GnmResidencyClass)c)];
+        [async_queue_ addResidencySet:res_.Set((GnmResidencyClass)c)];
+    }
     MTL4ArgumentTableDescriptor* ad = [MTL4ArgumentTableDescriptor new];
     ad.maxBufferBindCount = 31;
     ad.maxTextureBindCount = 128;
@@ -171,6 +186,7 @@ void Metal4Backend::Recycle() {
     while (!busy_.empty() && busy_.front().second <= done) {
         Part p = std::move(busy_.front().first);
         busy_.pop_front();
+        busy_popped_++;
         [p.alloc reset];
         p.keep.clear(); // the GPU is done with what the part's encoders used
         NoteAllocatorSize(p);
@@ -271,7 +287,35 @@ Metal4Backend::Part Metal4Backend::AcquirePart(GnmCmdTarget t) {
     return p;
 }
 
+void Metal4Backend::OpenGroup(int q) {
+    std::lock_guard<std::mutex> lk(evict_mu_);
+    open_queues_ |= uint8_t(1u << q);
+}
+
+void Metal4Backend::MakeResident(id<MTLAllocation> a, GnmResidencyClass c) {
+    {
+        std::lock_guard<std::mutex> lk(evict_mu_);
+        // held again: the waiting removals are cancelled
+        pending_evicts_.erase(std::remove_if(pending_evicts_.begin(), pending_evicts_.end(),
+                                             [a](const PendingEvict& e) { return e.a == a; }),
+                              pending_evicts_.end());
+    }
+    res_.Add(a, c);
+}
+
+void Metal4Backend::Evict(id<MTLAllocation> a, uint64_t after_seq) {
+    {
+        std::lock_guard<std::mutex> lk(evict_mu_);
+        if (open_queues_) {
+            pending_evicts_.push_back({a, after_seq, open_queues_});
+            return;
+        }
+    }
+    res_.Remove(a, after_seq);
+}
+
 void Metal4Backend::BeginPart(GnmCmdTarget t, NSString* label) {
+    OpenGroup(QueueOf(t));
     TargetState& x = t_[(int)t];
     x.part = AcquirePart(t);
     x.cb = x.part.cb;
@@ -284,39 +328,42 @@ void Metal4Backend::BeginPart(GnmCmdTarget t, NSString* label) {
 // state); the renderer warns once at startup that PS4_GNM_ENCODER_STATUS is Metal 3 only.
 void Metal4Backend::BeginCmd(GnmCmdTarget t, NSString* label, bool) { BeginPart(t, label); }
 
-// On Metal's feedback queue (serial). A seq is done when it is final and every part's feedback
-// arrived. Completions run in seq order: a seq done before an earlier one waits for it. fed_
-// covers every seq about to be delivered before the first completion runs (CompletedSeq >= seq
-// inside each). Each completion runs before this commit stops counting as pending, so the
+// On Metal's feedback queue (serial; both queues use it). A seq is done when it is final and every
+// part's feedback arrived. Completions of one queue run in seq order: a seq done before an earlier
+// one of its queue waits for it; the other queue's seqs do not hold it. fed_ covers every seq
+// about to be delivered whose earlier seqs (both queues) are delivered too, before the first
+// completion runs. Each completion runs before this commit stops counting as pending, so the
 // destructor never returns while one may still run.
-void Metal4Backend::OnFeedback(uint64_t seq, id<MTL4CommitFeedback> fb) {
+void Metal4Backend::OnFeedback(uint64_t gid, id<MTL4CommitFeedback> fb) {
     std::unique_lock<std::mutex> serial(feedback_mu_); // released before this commit stops counting as pending
     ready_.clear();
-    uint64_t first = 0; // the seq of ready_[0]
     {
         std::lock_guard<std::mutex> lk(seq_mu_);
-        first = delivered_ + 1;
-        SeqRec& r = seqs_[seq];
+        SeqRec& r = recs_[gid];
         r.done++;
         if (fb.error && !r.error) r.error = fb.error;
         r.failed |= fb.error != nil;
         if (fb.GPUStartTime > 0 && (r.start == 0 || fb.GPUStartTime < r.start)) r.start = fb.GPUStartTime;
         r.end = std::max(r.end, (double)fb.GPUEndTime);
-        for (;;) {
-            auto it = seqs_.find(delivered_ + 1);
-            if (it == seqs_.end() || !it->second.final || it->second.done < it->second.parts) break;
-            ready_.push_back(std::move(it->second));
-            seqs_.erase(it);
-            ++delivered_;
-        }
-        fed_.store(delivered_, std::memory_order_release);
+        for (std::deque<uint64_t>& order : order_)
+            while (!order.empty()) {
+                auto it = recs_.find(order.front());
+                if (!it->second.final || it->second.done < it->second.parts) break;
+                ready_.push_back(std::move(it->second));
+                recs_.erase(it);
+                order.pop_front();
+            }
+        // every seq up to final_seq_ is final; one not delivered is at the front of its queue's order
+        uint64_t fed = final_seq_;
+        for (const std::deque<uint64_t>& order : order_)
+            if (!order.empty()) fed = std::min(fed, recs_[order.front()].seq - 1);
+        fed_.store(std::max(fed, fed_.load(std::memory_order_relaxed)), std::memory_order_release);
     }
     // outside seq_mu_: a callback may commit, wait or take the renderer's locks
-    for (uint64_t i = 0; i < ready_.size(); ++i) {
-        SeqRec& r = ready_[i];
+    for (SeqRec& r : ready_) {
         if (!r.fn) continue;
         GnmCompletion c;
-        c.seq = first + i;
+        c.seq = r.seq;
         c.failed = r.failed;
         c.gpu_start = r.start;
         c.gpu_end = r.end;
@@ -329,24 +376,29 @@ void Metal4Backend::OnFeedback(uint64_t seq, id<MTL4CommitFeedback> fb) {
     if (--feedback_pending_ == 0) feedback_cv_.notify_all();
 }
 
-// Ends and commits the open command buffers as one more part of the open seq, the upload one first
-// (its copies run before the main command buffer's work: one commit array is executed in order);
-// with_main = false leaves the main command buffer open (CommitUpload). The queue signals deferred
-// by QueueSignal for the committed targets follow the commit. final: the seq's last part; the
-// timeline is signalled with the seq after it and its completion runs when every part's feedback
+// Ends and commits the open command buffers of queue q as one more part of its open seq, the upload
+// one first (its copies run before the main command buffer's work: one commit array is executed in
+// order); with_main = false leaves the main command buffer open (CommitUpload). The queue signals
+// deferred by QueueSignal for the committed targets follow the commit. final: the seq's last part,
+// numbered seq: q's timeline is signalled with it after the part, the parts, bytes chunks and
+// evictions waiting for the number get it, and its completion runs when every part's feedback
 // arrived. Encoders must have been ended by the caller (FATAL otherwise: ending one here would
 // leave the renderer's encoder state stale).
-void Metal4Backend::Submit(bool final, bool with_main, GnmCompletionFn fn, void* ctx) {
-    const uint64_t seq = open_seq();
+void Metal4Backend::Submit(int q, bool final, uint64_t seq, bool with_main, GnmCompletionFn fn, void* ctx) {
+    static const GnmCmdTarget kTargets[2][2] = {{GnmCmdTarget::Upload, GnmCmdTarget::Main},
+                                                {GnmCmdTarget::AsyncCompute, GnmCmdTarget::AsyncCompute}};
+    const int nt = q ? 1 : 2;
+    Group& g = grp_[q];
     id<MTL4CommandBuffer> list[2];
     NSUInteger n = 0;
-    bool committed[2] = {false, false};
-    for (GnmCmdTarget t : {GnmCmdTarget::Upload, GnmCmdTarget::Main}) {
+    bool committed[3] = {false, false, false};
+    for (int i = 0; i < nt; ++i) {
+        const GnmCmdTarget t = kTargets[q][i];
         TargetState& x = t_[(int)t];
         if (!x.cb || (t == GnmCmdTarget::Main && !with_main)) continue;
         if (x.renc || x.cenc) {
-            fprintf(stderr, "[gnm-draw] FATAL: Metal4Backend: a commit of seq %llu with an open encoder (%s target)\n",
-                    (unsigned long long)seq, t == GnmCmdTarget::Main ? "main" : "upload");
+            fprintf(stderr, "[gnm-draw] FATAL: Metal4Backend: a commit with an open encoder (%s target)\n",
+                    t == GnmCmdTarget::Main ? "main" : t == GnmCmdTarget::Upload ? "upload" : "async compute");
             abort();
         }
         [x.cb endCommandBuffer];
@@ -358,7 +410,8 @@ void Metal4Backend::Submit(bool final, bool with_main, GnmCompletionFn fn, void*
         }
         last_rendered_[(int)t] = x.part.rendered;
         if (t == GnmCmdTarget::Main && frame_idx_ < kFrameParts) frame_cur_[frame_idx_++] = x.part.rendered;
-        busy_.emplace_back(std::move(x.part), seq);
+        g.busy_at.push_back(busy_popped_ + busy_.size());
+        busy_.emplace_back(std::move(x.part), UINT64_MAX);
         x.cb = nil;
         x.part = Part{};
         x.work = false; // nothing recorded on this target until its next part
@@ -371,77 +424,162 @@ void Metal4Backend::Submit(bool final, bool with_main, GnmCompletionFn fn, void*
         peak_cur_ = busy_.size();
         peak_submits_ = 0;
     }
+    uint64_t gid;
     {
         std::lock_guard<std::mutex> lk(seq_mu_);
-        SeqRec& r = seqs_[seq];
+        if (!g.gid) g.gid = ++next_gid_;
+        gid = g.gid;
+        SeqRec& r = recs_[gid];
         if (n) {
             r.parts++;
             feedback_pending_++;
         }
         if (final) {
             r.final = true;
+            r.seq = seq;
             r.fn = fn;
             r.ctx = ctx;
+            order_[q].push_back(gid);
+            final_seq_ = seq;
         }
     }
+    if (final) {
+        std::lock_guard<std::mutex> lk(flight_mu_);
+        flight_.push_back({seq, q});
+    }
     res_.Commit(); // every allocation the parts use is in a set before the queue sees them
+    id<MTL4CommandQueue> queue = Queue(q);
     if (n) {
         MTL4CommitOptions* opts = [MTL4CommitOptions new];
-        [opts addFeedbackHandler:^(id<MTL4CommitFeedback> fb) { OnFeedback(seq, fb); }];
-        [queue_ commit:list count:n options:opts];
+        [opts addFeedbackHandler:^(id<MTL4CommitFeedback> fb) { OnFeedback(gid, fb); }];
+        [queue commit:list count:n options:opts];
         commits_.fetch_add(1, std::memory_order_relaxed);
         if (!final) split_commits_.fetch_add(1, std::memory_order_relaxed);
     }
-    for (GnmCmdTarget t : {GnmCmdTarget::Upload, GnmCmdTarget::Main}) {
-        if (!committed[(int)t]) continue;
-        for (auto& [ev, v] : t_[(int)t].signals) [queue_ signalEvent:ev value:v];
-        t_[(int)t].signals.clear();
+    for (int t = 0; t < 3; ++t) {
+        if (!committed[t]) continue;
+        for (auto& [ev, v] : t_[t].signals) [queue signalEvent:ev value:v];
+        t_[t].signals.clear();
     }
-    if (final) {
-        [queue_ signalEvent:timeline_ value:seq];
-        last_seq_ = seq;
+    if (!final) return;
+    [queue signalEvent:(q ? async_timeline_ : timeline_) value:seq];
+    last_seq_ = seq;
+    for (size_t at : g.busy_at) busy_[at - busy_popped_].second = seq;
+    g.busy_at.clear();
+    for (Chunk& c : g.chunks) {
+        c.last_seq = seq;
+        chunks_busy_.push_back(c);
     }
+    g.chunks.clear();
+    if (g.chunk_dirty) g.chunk.last_seq = seq;
+    g.chunk_dirty = false;
+    g.gid = 0;
+    // evictions that waited for this seq's number
+    std::lock_guard<std::mutex> lk(evict_mu_);
+    open_queues_ &= uint8_t(~(1u << q));
+    size_t keep = 0;
+    for (PendingEvict& e : pending_evicts_) {
+        if (e.queues & (1u << q)) {
+            e.after = std::max(e.after, seq);
+            e.queues &= uint8_t(~(1u << q));
+        }
+        if (!e.queues) {
+            res_.Remove(e.a, e.after);
+            continue;
+        }
+        if (&pending_evicts_[keep] != &e) pending_evicts_[keep] = std::move(e);
+        keep++;
+    }
+    pending_evicts_.resize(keep);
 }
 
 // A split inside the open seq (a signal that must follow recorded work, a wait that must not hold
-// it back): commits every open command buffer and opens new ones on the same targets. Only with
-// Main current: the renderer issues queue-level events on Main only (RequireMainTarget), and a
-// split on Upload would also commit Main, which may have its render encoder open while an upload
-// encoder records (FATAL in Submit, far from the cause), where Metal 3 touches the upload command
-// buffer only.
+// it back): commits every open command buffer of the current queue and opens new ones on the same
+// targets. On the first queue only with Main current: the renderer issues queue-level events on
+// Main (RequireMainTarget) or AsyncCompute, and a split on Upload would also commit Main, which may
+// have its render encoder open while an upload encoder records (FATAL in Submit, far from the
+// cause), where Metal 3 touches the upload command buffer only.
 void Metal4Backend::Split() {
-    if (cur_ != GnmCmdTarget::Main) {
+    if (cur_ == GnmCmdTarget::Upload) {
         fprintf(stderr, "[gnm-draw] FATAL: Metal4Backend: a queue-level event splits the seq on the Upload target "
                         "(events are issued on Main only)\n");
         abort();
     }
+    if (cur_ == GnmCmdTarget::AsyncCompute) {
+        TargetState& a = t_[(int)GnmCmdTarget::AsyncCompute];
+        NSString* label = a.cb.label;
+        Submit(1, false, 0, false, nullptr, nullptr);
+        BeginPart(GnmCmdTarget::AsyncCompute, label);
+        return;
+    }
     NSString* labels[2] = {t_[0].cb.label, t_[1].cb.label};
     const bool open[2] = {t_[0].cb != nil, t_[1].cb != nil};
-    Submit(false, true, nullptr, nullptr);
+    Submit(0, false, 0, true, nullptr, nullptr);
     for (int t = 0; t < 2; ++t)
         if (open[t]) BeginPart((GnmCmdTarget)t, labels[t]);
 }
 
 void Metal4Backend::CommitUpload() {
-    if (t_[(int)GnmCmdTarget::Upload].cb) Submit(false, false, nullptr, nullptr);
+    if (t_[(int)GnmCmdTarget::Upload].cb) Submit(0, false, 0, false, nullptr, nullptr);
 }
 
 void Metal4Backend::Commit(uint64_t seq, GnmCompletionFn done, void* ctx) {
-    if (seq != open_seq()) {
-        fprintf(stderr, "[gnm-draw] FATAL: Metal4Backend::Commit of seq %llu, expected %llu\n", (unsigned long long)seq,
-                (unsigned long long)open_seq());
+    if (seq <= last_seq_) {
+        fprintf(stderr, "[gnm-draw] FATAL: Metal4Backend::Commit of seq %llu, after seq %llu\n", (unsigned long long)seq,
+                (unsigned long long)last_seq_);
         abort();
     }
     // every seq ends with a committed command buffer: its feedback is the seq's completion
     if (!t_[(int)GnmCmdTarget::Main].cb) BeginPart(GnmCmdTarget::Main, nil);
-    Submit(true, true, done, ctx);
+    Submit(0, true, seq, true, done, ctx);
 }
 
+void Metal4Backend::CommitAsync(uint64_t seq, GnmCompletionFn done, void* ctx) {
+    if (seq <= last_seq_) {
+        fprintf(stderr, "[gnm-draw] FATAL: Metal4Backend::CommitAsync of seq %llu, after seq %llu\n",
+                (unsigned long long)seq, (unsigned long long)last_seq_);
+        abort();
+    }
+    if (!t_[(int)GnmCmdTarget::AsyncCompute].cb) BeginPart(GnmCmdTarget::AsyncCompute, nil);
+    Submit(1, true, seq, false, done, ctx);
+}
+
+uint64_t Metal4Backend::CompletedSeq() const {
+    const uint64_t t[2] = {timeline_.signaledValue, async_timeline_.signaledValue};
+    uint64_t done;
+    {
+        std::lock_guard<std::mutex> lk(flight_mu_);
+        while (!flight_.empty() && flight_.front().seq <= t[flight_.front().q]) {
+            flight_done_ = std::max(flight_done_, flight_.front().seq);
+            flight_.pop_front();
+        }
+        // with nothing in flight, every seq a timeline reached is complete
+        if (flight_.empty()) flight_done_ = std::max(flight_done_, std::max(t[0], t[1]));
+        done = flight_done_;
+    }
+    return std::max(done, fed_.load(std::memory_order_acquire));
+}
+
+// Waits for the first uncompleted seq up to `need` on its own queue's timeline, then the next.
 bool Metal4Backend::WaitForRoom(uint64_t committed, uint64_t max_outstanding, double timeout_ms) {
     if (committed < max_outstanding) return true;
     const uint64_t need = committed - max_outstanding + 1;
-    if (CompletedSeq() >= need) return true;
-    return [timeline_ waitUntilSignaledValue:need timeoutMS:(uint64_t)timeout_ms];
+    const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double, std::milli>(timeout_ms);
+    for (;;) {
+        if (CompletedSeq() >= need) return true;
+        Flight f{0, 0};
+        bool any;
+        {
+            std::lock_guard<std::mutex> lk(flight_mu_);
+            any = !flight_.empty();
+            if (any) f = flight_.front();
+        }
+        if (!any) return CompletedSeq() >= need; // every committed seq completed meanwhile
+        const double left = std::chrono::duration<double, std::milli>(end - std::chrono::steady_clock::now()).count();
+        if (left <= 0) return false;
+        if (![(f.q ? async_timeline_ : timeline_) waitUntilSignaledValue:f.seq timeoutMS:(uint64_t)std::max(1.0, left)])
+            return CompletedSeq() >= need;
+    }
 }
 
 // Queue-level events exist only between command buffers. A signal with no work recorded in the
@@ -459,14 +597,14 @@ void Metal4Backend::QueueSignal(id<MTLSharedEvent> ev, uint64_t value) {
         return;
     }
     UploadFirst();
-    [queue_ signalEvent:ev value:value];
+    [Queue(QueueOf(cur_)) signalEvent:ev value:value];
 }
 
 void Metal4Backend::QueueWait(id<MTLSharedEvent> ev, uint64_t value) {
     TargetState& x = Cur();
     if (x.work || !x.signals.empty()) Split(); // the uploads too
     else UploadFirst();
-    [queue_ waitForEvent:ev value:value];
+    [Queue(QueueOf(cur_)) waitForEvent:ev value:value];
 }
 
 // The current target is Main and Upload holds recorded work or signals: commit Upload alone (a
@@ -475,7 +613,7 @@ void Metal4Backend::UploadFirst() {
     TargetState& u = t_[(int)GnmCmdTarget::Upload];
     if (cur_ != GnmCmdTarget::Main || !u.cb || (!u.work && u.signals.empty())) return;
     NSString* label = u.cb.label;
-    Submit(false, false, nullptr, nullptr);
+    Submit(0, false, 0, false, nullptr, nullptr);
     BeginPart(GnmCmdTarget::Upload, label);
 }
 
@@ -538,6 +676,7 @@ bool Metal4Backend::BeginRender(const GnmPassDesc& d) {
         }
         CheckResident(d.depth.tex, "attachment");
         CheckResident(d.stencil.tex, "attachment");
+        if (d.visibility) CheckResident(d.visibility, "visibility result buffer");
     }
     BeforeWork();
     TargetState& x = Cur();
@@ -571,6 +710,10 @@ bool Metal4Backend::BeginRender(const GnmPassDesc& d) {
     if (d.height) rp.renderTargetHeight = d.height;
     if (d.default_samples) rp.defaultRasterSampleCount = d.default_samples;
     if (d.num_sample_positions) [rp setSamplePositions:d.sample_positions count:d.num_sample_positions];
+    if (d.visibility) {
+        rp.visibilityResultBuffer = d.visibility;
+        rp.visibilityResultType = MTLVisibilityResultTypeReset; // as Metal 3: reset when the encoder is made
+    }
     x.renc = [x.cb renderCommandEncoderWithDescriptor:rp];
     x.part.rendered = true;
     if (!x.renc) return false; // as Metal3Backend: no encoder, no serial change
@@ -773,6 +916,10 @@ void Metal4Backend::CopyBufferToTexture(id<MTLBuffer> src, uint64_t src_off, uin
 void Metal4Backend::SetRenderPipeline(id<MTLRenderPipelineState> p) { [Cur().renc setRenderPipelineState:p]; }
 void Metal4Backend::SetDepthStencil(id<MTLDepthStencilState> d) { [Cur().renc setDepthStencilState:d]; }
 
+void Metal4Backend::SetVisibilityResultMode(MTLVisibilityResultMode mode, uint64_t offset) {
+    [Cur().renc setVisibilityResultMode:mode offset:offset];
+}
+
 // Metal 4 takes buffers by address, and an index buffer with its length (index_length: the bytes
 // readable at index_offset; reads past it return 0). Every buffer must be resident.
 void Metal4Backend::Draw(const GnmDraw& d) {
@@ -819,9 +966,14 @@ uint64_t Metal4Backend::BytesAddress(const void* p, size_t n) {
                         "limit is 4 KiB)\n", n, kBytesChunk);
         abort();
     }
-    size_t off = (chunk_used_ + kBytesAlign - 1) & ~(kBytesAlign - 1);
-    if (!chunk_.buf || off + n > kBytesChunk) {
-        if (chunk_.buf) chunks_busy_.push_back(chunk_);
+    Group& g = grp_[QueueOf(cur_)];
+    size_t off = (g.chunk_used + kBytesAlign - 1) & ~(kBytesAlign - 1);
+    if (!g.chunk.buf || off + n > kBytesChunk) {
+        if (g.chunk.buf) {
+            // used by the open seq: free after it (Submit); else after the seq that used it last
+            if (g.chunk_dirty) g.chunks.push_back(g.chunk);
+            else chunks_busy_.push_back(g.chunk);
+        }
         id<MTLBuffer> b = nil;
         if (!chunks_free_.empty()) {
             b = chunks_free_.back();
@@ -831,13 +983,13 @@ uint64_t Metal4Backend::BytesAddress(const void* p, size_t n) {
             b.label = @"gnm bytes arena";
             res_.Add(b, GnmResidencyClass::Builtin);
         }
-        chunk_ = Chunk{b, 0};
+        g.chunk = Chunk{b, 0};
         off = 0;
     }
-    memcpy((uint8_t*)chunk_.buf.contents + off, p, n);
-    chunk_used_ = off + n;
-    chunk_.last_seq = open_seq();
-    return chunk_.buf.gpuAddress + off;
+    memcpy((uint8_t*)g.chunk.buf.contents + off, p, n);
+    g.chunk_used = off + n;
+    g.chunk_dirty = true;
+    return g.chunk.buf.gpuAddress + off;
 }
 
 void Metal4Backend::EndEncoder() {

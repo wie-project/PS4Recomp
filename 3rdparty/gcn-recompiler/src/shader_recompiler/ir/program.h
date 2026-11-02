@@ -31,6 +31,13 @@ struct Program {
     // predicate and branches on P && cond): not taken by every invocation
     std::unordered_set<const Block*> branch_merges;
     std::unordered_set<const Inst*> subgroup_ballots;
+    // PS4Recomp: the per-lane bits of 64-bit scalar masks (SGPR pairs, VCC, copies of EXEC) that
+    // InverseBallotEliminationPass carries through phis (`lane_mask_phis`, until
+    // LowerPhisToRegsPass), then the virtual registers that hold them (VirtualReg::Key; also those
+    // SsaRepairPass and predicate_wave64_pass.cpp's loop results add, lane_mask_bits.h). They are
+    // the wave's scalar state: predicate_wave64_pass.cpp writes them for the whole wave.
+    std::unordered_set<const Inst*> lane_mask_phis;
+    std::unordered_set<u64> scalar_mask_vregs;
     Info& info;
 };
 

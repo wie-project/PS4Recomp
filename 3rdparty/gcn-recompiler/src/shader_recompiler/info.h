@@ -242,17 +242,29 @@ struct Info : InfoPersistent {
         return *reinterpret_cast<const T*>(&flattened_ud_buf[sharp_idx]);
     }
 
+    static constexpr VAddr MinTableAddress = 0x10000ULL;
+
     template <typename T>
     T ReadUdReg(u32 ptr_index, u32 dword_offset) const {
-        T data;
-        if (ptr_index != IR::NumScalarRegs) {
-            u64 base;
-            std::memcpy(&base, &user_data[ptr_index], sizeof(base));
+        T data{};
+        const size_t byte_offset = size_t{dword_offset} * sizeof(u32);
+        if (ptr_index != IR::NumScalarRegs && ptr_index != 0xFFFFFFFFu) {
+            if (ptr_index >= user_data.size() ||
+                sizeof(u64) > (user_data.size() - ptr_index) * sizeof(u32)) {
+                return data;
+            }
+            u64 base = user_data[ptr_index] | (static_cast<u64>(user_data[ptr_index + 1]) << 32);
             base &= 0xFFFFFFFFFFFFULL;
-            GcnShim::ReadGuest(base + u64(dword_offset) * 4, &data, sizeof(T));
+            if (base < MinTableAddress) {
+                return data;
+            }
+            GcnShim::ReadGuest(base + byte_offset, &data, sizeof(T));
             return data;
         }
-        std::memcpy(&data, user_data.data() + dword_offset, sizeof(T));
+        if (byte_offset <= user_data.size_bytes() &&
+            sizeof(T) <= user_data.size_bytes() - byte_offset) {
+            std::memcpy(&data, user_data.data() + dword_offset, sizeof(T));
+        }
         return data;
     }
 
@@ -273,11 +285,15 @@ struct Info : InfoPersistent {
     }
 
     void ReadTessConstantBuffer(TessellationDataConstantBuffer& tess_constants) const {
+        tess_constants = {};
         ASSERT(tess_consts_dword_offset >= 0); // We've already tracked the V# UD
         auto buf = ReadUdReg<AmdGpu::Buffer>(static_cast<u32>(tess_consts_ptr_base),
                                              static_cast<u32>(tess_consts_dword_offset));
-        VAddr tess_constants_addr = buf.base_address;
-        GcnShim::ReadGuest(tess_constants_addr, &tess_constants, sizeof(tess_constants));
+        VAddr base = buf.base_address;
+        if (base < MinTableAddress) {
+            return;
+        }
+        GcnShim::ReadGuest(base, &tess_constants, sizeof(tess_constants));
     }
 
     void Serialize(Serialization::Archive& ar) const;

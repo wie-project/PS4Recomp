@@ -46,15 +46,20 @@ enum GnmCaps : uint32_t {
     kGnmCapCopies = 1u << 2,  // CopyBuffer, FillBuffer, CopyTextureRegion, CopyBufferToTexture
     kGnmCapDraws = 1u << 3,   // every GnmDraw kind, SetFixed, barriers inside a render pass
     kGnmCapAll = kGnmCapClears | kGnmCapCompute | kGnmCapCopies | kGnmCapDraws,
+    // a second command queue for compute-ring work (GnmCmdTarget::AsyncCompute, CommitAsync); not in
+    // kGnmCapAll, which is what a backend needs to be chosen
+    kGnmCapAsyncCompute = 1u << 4,
 };
 
 // A Metal 3 queue holds at most this many uncompleted command buffers; the Metal 4 backend applies
 // the same limit to its seq timeline (WaitForRoom).
 constexpr uint64_t kGnmMaxCommandBuffers = 64;
 
-// The command buffers being recorded: the main one (one seq of the timeline) and the texture
-// upload one, committed right before it (the renderer's former S.upload_cmd).
-enum class GnmCmdTarget : uint8_t { Main = 0, Upload = 1 };
+// The command buffers being recorded: the main one (one seq of the timeline), the texture
+// upload one, committed right before it (the renderer's former S.upload_cmd), and, with
+// kGnmCapAsyncCompute, the asynchronous compute one: compute-ring work on a command queue of its
+// own, committed on its own (CommitAsync) with a seq of the same numbering.
+enum class GnmCmdTarget : uint8_t { Main = 0, Upload = 1, AsyncCompute = 2 };
 
 // The encoder open on the current target. At most one is open per target.
 enum class GnmEncoder : uint8_t { None = 0, Render, Compute, Copy };
@@ -96,6 +101,9 @@ struct GnmPassDesc {
     uint32_t default_samples = 0;      // defaultRasterSampleCount; 0: not set
     uint32_t num_sample_positions = 0; // programmable sample positions; 0: the defaults
     MTLSamplePosition sample_positions[4] = {};
+    // visibilityResultBuffer (occlusion queries: SetVisibilityResultMode); nil: none. It must be
+    // resident (Metal 4).
+    __unsafe_unretained id<MTLBuffer> visibility = nil;
     __unsafe_unretained NSString* label = nil;
 };
 
@@ -213,7 +221,11 @@ public:
     // Commits the upload command buffer (if open), then the main one, as seq (the previous seq + 1).
     // done(ctx, …) runs once when everything of seq has completed. Encoders must be ended.
     virtual void Commit(uint64_t seq, GnmCompletionFn done, void* ctx) = 0;
-    // The highest seq whose command buffers and every earlier one have completed (any thread).
+    // Commits the asynchronous compute command buffer as seq (kGnmCapAsyncCompute only). done(ctx, …)
+    // runs once it has completed. Encoders must be ended.
+    virtual void CommitAsync(uint64_t seq, GnmCompletionFn done, void* ctx) = 0;
+    // The highest seq whose command buffers and every earlier one have completed, on every queue
+    // (any thread).
     virtual uint64_t CompletedSeq() const = 0;
     // Before opening a main command buffer while `committed` seqs were committed: waits until fewer
     // than max_outstanding are uncompleted. False: none completed within timeout_ms (a GPU hang).
@@ -230,8 +242,13 @@ public:
     GnmEncoder OpenEncoder() const { return enc_[(int)enc_target_].open; }
     // Per target: the current target's serial, which changes whenever an encoder is opened on that
     // target. Encoders opened on Upload (texture uploads, alias copies) never change Main's serial.
-    // The renderer's dedupe is valid only while Main's serial holds.
+    // The renderer's dedupe is valid only while Main's serial holds. Serials are unique across
+    // targets (one counter), so a serial names one encoder of one target.
     uint64_t EncoderSerial() const { return enc_[(int)enc_target_].serial; }
+    // Target t's serial, and the commands (draws, dispatches, copies, fills) encoded on t so far:
+    // whether work was encoded there between two looks (the renderer's asynchronous compute routing).
+    uint64_t EncoderSerialOf(GnmCmdTarget t) const { return enc_[(int)t].serial; }
+    uint64_t CommandsOf(GnmCmdTarget t) const { return enc_[(int)t].commands; }
     virtual bool BeginRender(const GnmPassDesc& d) = 0;
     virtual void BeginCompute(bool serial) = 0; // serial: dispatches in order (PS4_GNM_SERIAL_COMPUTE, uploads)
     virtual void BeginCopies() = 0;
@@ -252,6 +269,13 @@ public:
     // 0 and waits for nothing, and says why.
     virtual uint64_t AccessFence() = 0;
     virtual void WaitAccessFence(uint64_t id) = 0;
+    // Whether fence `id` belongs to an encoder of the other command queue than the current target's
+    // (Main and Upload share one, AsyncCompute has its own): a fence cannot be waited for there, so
+    // the renderer orders such an access by other means. False for a fence no longer live.
+    virtual bool AccessFenceOtherQueue(uint64_t id) const {
+        (void)id;
+        return false;
+    }
     // Called by every command (draw, dispatch, copy, fill) before it is encoded, with its encoder
     // open: the renderer orders the guest windows the command uses there (AccessFence /
     // WaitAccessFence). Encoder thread.
@@ -265,6 +289,10 @@ public:
     virtual void SetRenderPipeline(id<MTLRenderPipelineState> p) = 0;
     virtual void SetDepthStencil(id<MTLDepthStencilState> d) = 0;
     virtual void SetFixed(const GnmFixedState& f, uint32_t changed) = 0; // changed: GnmFixedBits
+    // Visibility results of the following draws of the open render encoder (counting: samples that
+    // pass the depth and stencil tests, added at byte `offset` of the pass's visibility buffer).
+    // Counting needs a pass begun with GnmPassDesc::visibility.
+    virtual void SetVisibilityResultMode(MTLVisibilityResultMode mode, uint64_t offset) = 0;
     virtual void SetComputePipeline(id<MTLComputePipelineState> p) = 0;
 
     // ---- binding (on the open encoder of the stage)
@@ -281,6 +309,15 @@ public:
 
     // ---- work
     virtual void Draw(const GnmDraw& d) = 0;
+    virtual void SetStageInRegion(MTLRegion region) = 0;
+    virtual void SetStageInRegionIndirect(id<MTLBuffer> buf, uint64_t offset) {
+        (void)buf;
+        (void)offset;
+    }
+    virtual void SetTessellationFactorBuffer(id<MTLBuffer> buf, uint64_t offset, uint64_t instance_stride) = 0;
+    virtual void DrawPatches(uint32_t num_control_points, uint32_t patch_start, uint32_t patch_count,
+                             id<MTLBuffer> patch_index_buffer, uint64_t patch_index_buffer_offset,
+                             uint32_t instance_count, uint32_t base_instance) = 0;
     virtual void Dispatch(MTLSize groups, MTLSize threads_per_group) = 0;
     virtual void DispatchThreads(MTLSize threads, MTLSize threads_per_group) = 0;
     virtual void DispatchIndirect(id<MTLBuffer> args, uint64_t off, MTLSize threads_per_group) = 0;
@@ -312,6 +349,7 @@ public:
 protected:
     GnmBindOps ops_{};
     void BeforeCommand() {
+        enc_[(int)enc_target_].commands++;
         if (before_cmd_) before_cmd_(before_ctx_);
     }
     GnmBeforeCommandFn before_cmd_ = nullptr;
@@ -325,7 +363,7 @@ protected:
     void NoteEncoderOpened(GnmEncoder e) {
         EncoderTrack& x = enc_[(int)enc_target_];
         x.open = e;
-        ++x.serial;
+        x.serial = ++serials_;
     }
     void NoteEncoderEnded() { enc_[(int)enc_target_].open = GnmEncoder::None; }
 
@@ -333,8 +371,10 @@ private:
     struct EncoderTrack {
         GnmEncoder open = GnmEncoder::None;
         uint64_t serial = 0;
+        uint64_t commands = 0;
     };
-    EncoderTrack enc_[2]{}; // per GnmCmdTarget
+    EncoderTrack enc_[3]{}; // per GnmCmdTarget
+    uint64_t serials_ = 0;
     GnmCmdTarget enc_target_ = GnmCmdTarget::Main;
 };
 

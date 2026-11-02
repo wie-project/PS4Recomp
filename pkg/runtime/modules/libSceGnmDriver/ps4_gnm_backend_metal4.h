@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // PS4Recomp - the Metal 4 renderer backend (ps4_gnm_backend.h, docs/metal4-backend.md):
-// MTL4CommandQueue; one or more MTL4CommandBuffers per seq (split at queue-level events), each
-// with a command allocator that is reset only after its seq completed; a timeline MTLSharedEvent
-// signalled with each seq after its last commit; commit feedback for errors and GPU times, with
-// completions delivered in seq order once CompletedSeq has reached their seq; argument tables per
-// target and stage; a bytes arena for setBytes; a barrier at each encoder start; copies and fills
-// on compute encoders; residency sets (GnmResidency).
+// two MTL4CommandQueues (Main and Upload on one, AsyncCompute on the other, kGnmCapAsyncCompute);
+// one or more MTL4CommandBuffers per seq (split at queue-level events), each with a command
+// allocator that is reset only after its seq completed; a timeline MTLSharedEvent per queue,
+// signalled with each of its seqs after the seq's last commit; commit feedback for errors and GPU
+// times, with completions delivered in seq order per queue; argument tables per target and stage;
+// a bytes arena for setBytes; a barrier at each encoder start; copies and fills on compute
+// encoders; residency sets (GnmResidency) on both queues.
 #ifndef PS4_GNM_BACKEND_METAL4_H
 #define PS4_GNM_BACKEND_METAL4_H
 
@@ -48,12 +49,14 @@ public:
     GnmCmdTarget Target() const override { return cur_; }
     void CommitUpload() override;
     void Commit(uint64_t seq, GnmCompletionFn done, void* ctx) override;
-    // The timeline, or the seqs whose feedback arrived (all parts, every earlier seq too) if that is
-    // further: the feedback and the timeline signal reach the CPU in either order, and a
-    // completion must never run while CompletedSeq is below its seq.
-    uint64_t CompletedSeq() const override {
-        return std::max<uint64_t>(timeline_.signaledValue, fed_.load(std::memory_order_acquire));
-    }
+    // On the second queue. A seq must be above every seq committed so far, on either queue.
+    void CommitAsync(uint64_t seq, GnmCompletionFn done, void* ctx) override;
+    // The longest prefix of committed seqs, of both queues, that the timelines show completed, or
+    // the prefix whose feedback arrived (fed_) if that is further: the feedback and the timeline
+    // signal reach the CPU in either order. With one queue in use, a completion never runs while
+    // CompletedSeq is below its seq; with both, a seq's completion may run while an earlier seq of
+    // the other queue still runs (as on Metal 3).
+    uint64_t CompletedSeq() const override;
     bool WaitForRoom(uint64_t committed, uint64_t max_outstanding, double timeout_ms) override;
     void QueueSignal(id<MTLSharedEvent> ev, uint64_t value) override;
     void QueueWait(id<MTLSharedEvent> ev, uint64_t value) override;
@@ -74,9 +77,13 @@ public:
     void SetRenderPipeline(id<MTLRenderPipelineState> p) override;
     void SetDepthStencil(id<MTLDepthStencilState> d) override;
     void SetFixed(const GnmFixedState& f, uint32_t changed) override;
+    void SetVisibilityResultMode(MTLVisibilityResultMode mode, uint64_t offset) override;
     void SetComputePipeline(id<MTLComputePipelineState> p) override;
 
     void Draw(const GnmDraw& d) override;
+    void SetStageInRegion(MTLRegion) override {}
+    void SetTessellationFactorBuffer(id<MTLBuffer>, uint64_t, uint64_t) override {}
+    void DrawPatches(uint32_t, uint32_t, uint32_t, id<MTLBuffer>, uint64_t, uint32_t, uint32_t) override {}
     void Dispatch(MTLSize groups, MTLSize tpt) override;
     void DispatchThreads(MTLSize threads, MTLSize tpt) override;
     void DispatchIndirect(id<MTLBuffer> args, uint64_t off, MTLSize tpt) override;
@@ -88,8 +95,10 @@ public:
     void CopyBufferToTexture(id<MTLBuffer> src, uint64_t src_off, uint64_t row_bytes, uint64_t image_bytes, MTLSize size,
                              id<MTLTexture> dst, uint32_t slice, uint32_t level, MTLOrigin origin) override;
 
-    void MakeResident(id<MTLAllocation> a, GnmResidencyClass c) override { res_.Add(a, c); }
-    void Evict(id<MTLAllocation> a, uint64_t after_seq) override { res_.Remove(a, after_seq); }
+    void MakeResident(id<MTLAllocation> a, GnmResidencyClass c) override;
+    // after_seq, or for a queue whose seq is open now (being recorded, or split parts committed)
+    // that seq once it is committed, whichever is later (any thread)
+    void Evict(id<MTLAllocation> a, uint64_t after_seq) override;
     bool IsResident(id<MTLAllocation> a) const override { return res_.Contains(a); }
     GnmBackendStats Stats() const override;
     void NoteFrameEnd() override;
@@ -188,7 +197,8 @@ private:
         // QueueSignal after work not committed yet: issued right after this part's commit
         std::vector<std::pair<id<MTLSharedEvent>, uint64_t>> signals;
     };
-    struct SeqRec { // the commits of one seq and their feedback
+    struct SeqRec { // the commits of one seq (a group of parts on one queue) and their feedback
+        uint64_t seq = 0; // known once final
         uint32_t parts = 0, done = 0;
         bool final = false, failed = false;
         double start = 0, end = 0;
@@ -204,7 +214,7 @@ private:
     const TargetState& Cur() const { return t_[(int)cur_]; }
     void Recycle();                       // allocators, command buffers and bytes chunks of completed seqs
     Part AcquirePart(GnmCmdTarget t);
-    bool last_rendered_[2] = {false, false}; // per target: the last submitted part had a render pass
+    bool last_rendered_[3] = {false, false, false}; // per target: the last submitted part had a render pass
     // Main's parts of the current and the previous frame (NoteFrameEnd): had a render pass, by
     // position; a part past the previous frame's count is predicted from last_rendered_
     static constexpr size_t kFrameParts = 256;
@@ -215,12 +225,30 @@ private:
     void NoteFreshSize(uint64_t bytes);   // a part recorded on a fresh allocator: the trim's estimate
     void NoteAllocatorSize(Part& p); // alloc_bytes_ follows p's allocator after recording or a reset
     void BeginPart(GnmCmdTarget t, NSString* label);
-    // Ends and commits the open command buffers (upload first; main only if with_main) as one more
-    // part of the open seq; final: the seq's last part (then the timeline is signalled with it).
-    void Submit(bool final, bool with_main, GnmCompletionFn fn, void* ctx);
-    void Split();                         // commit and reopen every open target inside the seq
+    // Queue q's open seq (Main and Upload: 0; AsyncCompute: 1): its commits so far, its bytes chunks
+    // and its busy parts wait for the seq number it gets at its final commit.
+    struct Chunk {
+        id<MTLBuffer> buf = nil;
+        uint64_t last_seq = 0;
+    };
+    struct Group {
+        uint64_t gid = 0;               // its SeqRec in recs_ (0: no commit yet)
+        std::vector<size_t> busy_at;    // its parts in busy_ (absolute positions, busy_popped_ based)
+        std::vector<Chunk> chunks;      // bytes chunks it filled
+        Chunk chunk;                    // the bytes chunk being filled
+        size_t chunk_used = 0;
+        bool chunk_dirty = false;       // chunk used by this seq
+    };
+    static int QueueOf(GnmCmdTarget t) { return t == GnmCmdTarget::AsyncCompute ? 1 : 0; }
+    id<MTL4CommandQueue> Queue(int q) const { return q ? async_queue_ : queue_; }
+    // Ends and commits the open command buffers of queue q (q 0: upload first; main only if
+    // with_main) as one more part of q's open seq; final: the seq's last part, numbered seq (then
+    // q's timeline is signalled with it).
+    void Submit(int q, bool final, uint64_t seq, bool with_main, GnmCompletionFn fn, void* ctx);
+    void Split();                         // commit and reopen every open target of the current queue inside the seq
+    void OpenGroup(int q);                // q's seq is open from here (Evict waits for its number)
     void UploadFirst();                   // on Main: commit recorded Upload work before a queue event
-    void OnFeedback(uint64_t seq, id<MTL4CommitFeedback> fb);
+    void OnFeedback(uint64_t gid, id<MTL4CommitFeedback> fb);
     void BeforeWork();                    // a split for signals waiting on the current target
     void AfterDispatch(TargetState& x);   // the barrier after a dispatch of a serial encoder
     void BeforeDispatch(TargetState& x);  // a barrier if a copy ran since the last one
@@ -236,17 +264,40 @@ private:
 
     id<MTLDevice> dev_ = nil;
     id<MTL4CommandQueue> queue_ = nil;
+    id<MTL4CommandQueue> async_queue_ = nil;
     id<MTLCommandQueue> side_queue_ = nil;
-    id<MTLSharedEvent> timeline_ = nil;
+    id<MTLSharedEvent> timeline_ = nil;       // Main and Upload's queue
+    id<MTLSharedEvent> async_timeline_ = nil; // AsyncCompute's queue
     // The serial queue Metal delivers commit feedback on. Owned by the backend (strong); it must
     // outlive queue_, which does not retain it (see Init and the destructor).
     dispatch_queue_t feedback_q_ = nullptr;
     GnmResidency res_;
-    TargetState t_[2];
+    TargetState t_[3];
     GnmCmdTarget cur_ = GnmCmdTarget::Main;
-    uint64_t last_seq_ = 0; // the last seq committed (Commit); open_seq_ = last_seq_ + 1
+    uint64_t last_seq_ = 0; // the last seq committed, on either queue (encoder thread)
+    // the lowest seq work recorded now can get (CheckResident)
     uint64_t open_seq() const { return last_seq_ + 1; }
-    std::deque<std::pair<Part, uint64_t>> busy_; // parts of uncompleted seqs, in seq order
+    Group grp_[2];
+    // parts of uncompleted seqs, in commit order; UINT64_MAX until their seq's final commit
+    std::deque<std::pair<Part, uint64_t>> busy_;
+    size_t busy_popped_ = 0; // parts popped from busy_'s front so far
+    // committed seqs whose queue's timeline has not reached them, in seq order (CompletedSeq)
+    struct Flight {
+        uint64_t seq;
+        int q;
+    };
+    mutable std::mutex flight_mu_;
+    mutable std::deque<Flight> flight_;
+    mutable uint64_t flight_done_ = 0;
+    // Evict of an allocation while a queue's seq is open: the removal waits for that seq's number
+    struct PendingEvict {
+        id<MTLAllocation> a;
+        uint64_t after = 0;
+        uint8_t queues = 0; // bit q: q's open seq
+    };
+    std::mutex evict_mu_;
+    uint8_t open_queues_ = 0; // under evict_mu_: bit q: q has an open seq
+    std::vector<PendingEvict> pending_evicts_; // under evict_mu_ (an allocation may be listed twice)
     std::vector<Part> free_small_;       // reset parts at most TrimThreshold() (any order)
     std::vector<Part> free_large_;       // reset parts over it, at most kTrimLargeKeep
     std::array<uint64_t, kTrimSizeSamples> size_ring_{}, size_scratch_{};
@@ -258,9 +309,11 @@ private:
     std::mutex seq_mu_;
     std::condition_variable feedback_cv_; // under seq_mu_: feedback_pending_ reached 0
     uint64_t feedback_pending_ = 0;        // under seq_mu_: commits whose feedback has not run yet
-    std::unordered_map<uint64_t, SeqRec> seqs_;
-    uint64_t delivered_ = 0;            // under seq_mu_: completions delivered up to this seq
-    std::atomic<uint64_t> fed_{0};      // = delivered_, readable from any thread (CompletedSeq)
+    std::unordered_map<uint64_t, SeqRec> recs_; // under seq_mu_: by group id
+    uint64_t next_gid_ = 0;                     // under seq_mu_
+    std::deque<uint64_t> order_[2];             // under seq_mu_: final groups of each queue not delivered, in seq order
+    uint64_t final_seq_ = 0;                    // under seq_mu_: the last seq made final
+    std::atomic<uint64_t> fed_{0}; // every seq up to this one delivered, on both queues (CompletedSeq)
     std::vector<SeqRec> ready_;         // under feedback_mu_: completions to run, in seq order
     // OnFeedback runs on the serial feedback queue (probed: dispatch_assert_queue holds in each
     // handler, none overlap), but Metal hands the handlers to it in a way ThreadSanitizer does not
@@ -268,12 +321,6 @@ private:
     // the order it cannot see.
     std::mutex feedback_mu_;
     // bytes arena: 256 KiB shared chunks, resident (Builtin), reused once their last seq completed
-    struct Chunk {
-        id<MTLBuffer> buf = nil;
-        uint64_t last_seq = 0;
-    };
-    Chunk chunk_;
-    size_t chunk_used_ = 0; // bytes of chunk_ handed out
     std::deque<Chunk> chunks_busy_;
     std::vector<id<MTLBuffer>> chunks_free_;
     bool full_barriers_ = false, no_barriers_ = false;

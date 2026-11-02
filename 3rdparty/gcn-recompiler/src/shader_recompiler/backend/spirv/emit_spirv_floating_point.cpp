@@ -7,7 +7,10 @@
 namespace Shader::Backend::SPIRV {
 
 Id Decorate(EmitContext& ctx, IR::Inst* inst, Id op) {
-    ctx.Decorate(op, spv::Decoration::NoContraction);
+    if (ctx.sw_stage == SwStage::TessellationEval || ctx.sw_stage == SwStage::Geometry ||
+        ctx.profile.NeedPositionNoContraction(ctx.runtime_info.hw_stage)) {
+        ctx.Decorate(op, spv::Decoration::NoContraction);
+    }
     return op;
 }
 
@@ -142,7 +145,18 @@ Id EmitFPSqrt(EmitContext& ctx, Id value) {
 }
 
 Id EmitFPSaturate32(EmitContext& ctx, Id value) {
-    return ctx.OpNClamp(ctx.F32[1], value, ctx.f32_zero_value, ctx.f32_one_value);
+    // GCN's clamp modifier turns NaN into +0.0f. Test NaN on the IEEE-754 integer bit pattern
+    // so Metal's fast-math cannot fold isnan() to false.
+    const Id bits{ctx.OpBitcast(ctx.U32[1], value)};
+    const Id exp_mask{ctx.ConstU32(0x7f800000u)};
+    const Id mant_mask{ctx.ConstU32(0x007fffffu)};
+    const Id exp_all_ones{
+        ctx.OpIEqual(ctx.U1[1], ctx.OpBitwiseAnd(ctx.U32[1], bits, exp_mask), exp_mask)};
+    const Id mant_nonzero{ctx.OpINotEqual(
+        ctx.U1[1], ctx.OpBitwiseAnd(ctx.U32[1], bits, mant_mask), ctx.u32_zero_value)};
+    const Id is_nan{ctx.OpLogicalAnd(ctx.U1[1], exp_all_ones, mant_nonzero)};
+    const Id safe{ctx.OpSelect(ctx.F32[1], is_nan, ctx.f32_zero_value, value)};
+    return ctx.OpFClamp(ctx.F32[1], safe, ctx.f32_zero_value, ctx.f32_one_value);
 }
 
 Id EmitFPSaturate64(EmitContext& ctx, Id value) {
@@ -368,7 +382,14 @@ Id EmitFPIsNan16(EmitContext& ctx, Id value) {
 }
 
 Id EmitFPIsNan32(EmitContext& ctx, Id value) {
-    return ctx.OpIsNan(ctx.U1[1], value);
+    const Id bits{ctx.OpBitcast(ctx.U32[1], value)};
+    const Id exp_mask{ctx.ConstU32(0x7f800000u)};
+    const Id mant_mask{ctx.ConstU32(0x007fffffu)};
+    const Id exp_all_ones{
+        ctx.OpIEqual(ctx.U1[1], ctx.OpBitwiseAnd(ctx.U32[1], bits, exp_mask), exp_mask)};
+    const Id mant_nonzero{ctx.OpINotEqual(
+        ctx.U1[1], ctx.OpBitwiseAnd(ctx.U32[1], bits, mant_mask), ctx.u32_zero_value)};
+    return ctx.OpLogicalAnd(ctx.U1[1], exp_all_ones, mant_nonzero);
 }
 
 Id EmitFPIsNan64(EmitContext& ctx, Id value) {
@@ -376,7 +397,9 @@ Id EmitFPIsNan64(EmitContext& ctx, Id value) {
 }
 
 Id EmitFPIsInf32(EmitContext& ctx, Id value) {
-    return ctx.OpIsInf(ctx.U1[1], value);
+    const Id bits{ctx.OpBitcast(ctx.U32[1], value)};
+    const Id mag{ctx.OpBitwiseAnd(ctx.U32[1], bits, ctx.ConstU32(0x7fffffffu))};
+    return ctx.OpIEqual(ctx.U1[1], mag, ctx.ConstU32(0x7f800000u));
 }
 
 Id EmitFPIsInf64(EmitContext& ctx, Id value) {

@@ -707,6 +707,17 @@ void shim_sceKernelRaiseException(GuestContext *ctx) {
 void shim_sceKernelDebugRaiseException(GuestContext *ctx) {
     uint64_t error = ctx->rdi;
     uint64_t unk = ctx->rsi;
+    if (error == 0xa0020007ULL || error == 0xa002000cULL || error == 0xa002000dULL) {
+        static int s_nonfatal_logged = 0;
+        if (s_nonfatal_logged < 8) {
+            s_nonfatal_logged++;
+            fprintf(stderr, "[ps4-kernel] Non-fatal debug exception 0x%llx (unk=0x%llx, RIP=0x%llx) ignored\n",
+                    (unsigned long long)error, (unsigned long long)unk, (unsigned long long)ctx->rip);
+        }
+        ctx->rax = 0;
+        SHIM_RETURN();
+        return;
+    }
     fprintf(stderr, "\n[ps4-kernel] Fatal debug exception raised: error=0x%llx (unk=0x%llx, RIP=0x%llx)\n",
             (unsigned long long)error, (unsigned long long)unk, (unsigned long long)ctx->rip);
     recomp_dump_guest_context(ctx);
@@ -717,6 +728,17 @@ void shim_sceKernelDebugRaiseException(GuestContext *ctx) {
 void shim_sceKernelDebugRaiseExceptionOnReleaseMode(GuestContext *ctx) {
     uint64_t error = ctx->rdi;
     uint64_t unk = ctx->rsi;
+    if (error == 0xa0020007ULL || error == 0xa002000cULL || error == 0xa002000dULL) {
+        static int s_nonfatal_rel_logged = 0;
+        if (s_nonfatal_rel_logged < 8) {
+            s_nonfatal_rel_logged++;
+            fprintf(stderr, "[ps4-kernel] Non-fatal debug exception (release mode) 0x%llx (unk=0x%llx, RIP=0x%llx) ignored\n",
+                    (unsigned long long)error, (unsigned long long)unk, (unsigned long long)ctx->rip);
+        }
+        ctx->rax = 0;
+        SHIM_RETURN();
+        return;
+    }
     fprintf(stderr, "\n[ps4-kernel] Fatal debug exception (release mode) raised: error=0x%llx (unk=0x%llx, RIP=0x%llx)\n",
             (unsigned long long)error, (unsigned long long)unk, (unsigned long long)ctx->rip);
     recomp_dump_guest_context(ctx);

@@ -37,10 +37,19 @@ namespace Shader::Gcn {
  * We take the reverse way, extract the original input semantics from these instructions.
  **/
 
+// The longest fetch shader read: the bound InlinedFetchShaderHash already gives a fetch shader's
+// identity. A fetch shader is one s_load_dwordx4 per V#, one 2-dword buffer load per attribute,
+// two v_add_i32, waits and s_setpc_b64; the code is read on every draw's permutation lookup
+// (ParseFetchShader), so the read covers only that bound (1 KiB), not a whole program. The
+// longest fetch shader ParseFetchShaderAt accepts is about 163 dwords; one without s_setpc_b64
+// within the bound runs into the s_endpgm padding, and the ASSERT on it throws (a CompileError:
+// the lookup's catch returns no permutation, a translation fails with the error).
+constexpr u32 kFetchShaderMaxDwords = 256;
+
 const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base) {
     u64 addr;
     std::memcpy(&addr, &info.user_data[sgpr_base], sizeof(addr));
-    const u32* code = GcnShim::GuestCode(addr & 0xFFFFFFFFFFFFULL);
+    const u32* code = GcnShim::GuestCode(addr & 0xFFFFFFFFFFFFULL, kFetchShaderMaxDwords);
     ASSERT_MSG(code != nullptr, "Fetch shader at {:#x} is not readable", addr);
     return code;
 }

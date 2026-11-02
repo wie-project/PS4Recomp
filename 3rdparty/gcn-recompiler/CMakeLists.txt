@@ -36,6 +36,7 @@ set(GCN_SOURCES
     src/compat/shim.cpp
     src/api/gcn_recompiler.cpp
     src/api/gcn_msl.cpp
+    src/api/gcn_spirv_geometry.cpp
     src/api/gcn_shader_cache.cpp
     src/api/gcn_rectlist.cpp
 )
@@ -73,7 +74,8 @@ target_include_directories(gcn_recompiler
             ${EXT}/boost
             ${EXT}/sirit/include
             ${EXT}/sirit/src
-            ${EXT}/sirit/externals/SPIRV-Headers/include)
+            ${EXT}/sirit/externals/SPIRV-Headers/include
+            ${EXT}/sirit/externals/SPIRV-Headers/include/spirv/unified1)
 target_compile_definitions(gcn_recompiler PRIVATE FMT_USE_NONTYPE_TEMPLATE_ARGS=0)
 target_compile_options(gcn_recompiler PRIVATE
     -Wno-unused-parameter -Wno-invalid-offsetof -Wno-unknown-attributes
@@ -105,4 +107,11 @@ if (GCN_BUILD_TOOLS)
     endif()
     set_target_properties(gcn_c_smoke PROPERTIES LINKER_LANGUAGE C)
     target_link_options(gcn_c_smoke PRIVATE -lc++)
+    # Tessellation & Geometry shader MSL compilation smoke test.
+    add_executable(gcn_tess_gs_smoke tests/tess_gs_smoke.mm)
+    target_link_libraries(gcn_tess_gs_smoke PRIVATE gcn_recompiler "-framework Foundation" "-framework Metal")
+    target_compile_options(gcn_tess_gs_smoke PRIVATE -fobjc-arc)
+    if (GCN_BUILD_MSL)
+        target_link_libraries(gcn_tess_gs_smoke PRIVATE ${GCN_SPIRV_CROSS_DIR}/libspirv-cross.a)
+    endif()
 endif()

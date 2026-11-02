@@ -55,6 +55,11 @@ struct Profile {
     bool supports_shader_stencil_export{};
     bool wave64_force_fallback{}; // PS4Recomp: testing only (GCN_COMPILE_WAVE64_FALLBACK)
 
+    template <typename Stage>
+    constexpr bool NeedPositionNoContraction(Stage hw_stage) const {
+        return static_cast<u32>(hw_stage) == 3u; // HwStage::Export
+    }
+
     bool operator==(const Profile&) const = default;
 };
 

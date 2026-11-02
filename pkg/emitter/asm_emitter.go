@@ -75,6 +75,7 @@ type AsmEmitter struct {
 	HLE          *HLEReport
 	linesBuf     []string
 	knownFuncSet map[uint64]bool
+	bb60fps      bool
 	// unresolved describes every import slot (PLT stub and GOT slot address) that no host
 	// shim and no loaded module satisfies. Each one is bound to shim_unresolved_stub.
 	unresolved map[uint64]unresolvedImport
@@ -231,6 +232,7 @@ func NewAsmEmitter(loaded *elfloader.LoadedELF, d *disasm.Disassembler, l *lifte
 		lifter:     l,
 		shimMap:    shimMap,
 		unresolved: unresolved,
+		bb60fps:    isBloodborne109(loaded),
 
 		UnresolvedFuncImports: unresFuncs,
 		UnresolvedDataImports: unresData,
@@ -441,7 +443,20 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 			fmt.Fprintf(w, "\nL_fn_0x%x_loc_0x%x:\n", addr, blockAddr)
 			e.lifter.ResetFlags()
 
+			var lastInst disasm.Instruction
 			for _, inst := range block.Insts {
+				if e.bb60fps {
+					inst = bloodbornePatchInst(inst)
+					if custom, ok := bloodborneDynamicDeltaLines(inst.Address); ok {
+						for _, line := range custom {
+							w.WriteString(line)
+							w.WriteByte('\n')
+						}
+						lastInst = inst
+						continue
+					}
+				}
+				lastInst = inst
 				nextPC := inst.Address + uint64(inst.Inst.Len)
 				lines, err := e.lifter.LiftInstructionToBuf(inst, nextPC, fn, e.linesBuf[:0])
 				if err != nil {
@@ -456,7 +471,7 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 			}
 			// A block that falls through hands the next one CF in the block-boundary sense.
 			if n := len(block.Insts); n > 0 {
-				for _, line := range e.lifter.EndBlock(block.Insts[n-1]) {
+				for _, line := range e.lifter.EndBlock(lastInst) {
 					w.WriteString(line)
 					w.WriteByte('\n')
 				}
@@ -470,7 +485,7 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 						break
 					}
 				}
-				for _, line := range e.lifter.FallThrough(fn, block.Insts[n-1], next, hasNext) {
+				for _, line := range e.lifter.FallThrough(fn, lastInst, next, hasNext) {
 					w.WriteString(line)
 					w.WriteByte('\n')
 				}

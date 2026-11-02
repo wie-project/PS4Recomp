@@ -797,8 +797,38 @@ GCN_API gcn_status gcn_compile(const gcn_compile_desc* desc, gcn_shader** out, c
                 arg_candidates.push_back(i);
             }
         }
-        if (!GcnMsl::Convert(sh->spirv, mo, sh->msl, sh->msl_error, &sh->msl_bindings,
-                             &arg_candidates)) {
+        GcnMsl::StageVariant variant{};
+        const std::vector<u32>* spirv_to_convert = &sh->spirv;
+        std::vector<u32> gs_rewritten;
+        if (sh->info.hw_stage == HwStage::Local || sh->info.hw_stage == HwStage::Export) {
+            variant.role = GcnMsl::StageRole::TessVertex;
+        } else if (sh->info.sw_stage == SwStage::TessellationControl) {
+            variant.role = GcnMsl::StageRole::TessControl;
+            const auto scan = GcnMsl::ScanSpirv(sh->spirv);
+            variant.domain = scan.domain ? scan.domain
+                             : sh->runtime.sw.tcs.tess_type == AmdGpu::TessellationType::Triangle
+                                 ? GCN_TESS_DOMAIN_TRIANGLES
+                             : sh->runtime.sw.tcs.tess_type == AmdGpu::TessellationType::Isoline
+                                 ? GCN_TESS_DOMAIN_ISOLINES
+                                 : GCN_TESS_DOMAIN_QUADS;
+        } else if (sh->info.sw_stage == SwStage::TessellationEval) {
+            variant.role = GcnMsl::StageRole::TessEval;
+            const auto scan = GcnMsl::ScanSpirv(sh->spirv);
+            variant.output_vertices = scan.output_vertices ? scan.output_vertices : 3u;
+            variant.patch_first = scan.patch_first;
+            variant.patch_end = scan.patch_end;
+        } else if (sh->info.sw_stage == SwStage::Geometry) {
+            variant.role = GcnMsl::StageRole::GeometryKernel;
+            GcnSpirv::GeometryEsLayout dummy_es{};
+            dummy_es.stride = std::max<u32>((sh->runtime.hw.gs.in_vertex_data_size ? sh->runtime.hw.gs.in_vertex_data_size * 4 : 16u), 4u);
+            auto rw = GcnSpirv::RewriteGeometryShader(sh->spirv, dummy_es);
+            if (rw.ok) {
+                gs_rewritten = std::move(rw.spirv);
+                spirv_to_convert = &gs_rewritten;
+            }
+        }
+        if (!GcnMsl::Convert(*spirv_to_convert, mo, sh->msl, sh->msl_error, &sh->msl_bindings,
+                             &arg_candidates, &variant)) {
             sh->msl.clear();
             CopyErr(err, err_size, "SPIRV-Cross: " + sh->msl_error);
             status = GCN_ERR_MSL;
@@ -906,6 +936,39 @@ GCN_API void gcn_shader_get_info(const gcn_shader* s, gcn_shader_info* o) {
     o->msl_num_samplers = s->msl_bindings.num_samplers;
     o->msl_argument_buffer = s->msl_bindings.argument_buffer;
     o->msl_argument_buffer_entries = s->msl_bindings.num_arg_entries;
+    o->tess_consts_dword_offset = info.tess_consts_dword_offset;
+    o->tess_consts_ptr_base = static_cast<u32>(info.tess_consts_ptr_base);
+}
+
+GCN_API uint32_t gcn_read_tess_ls_stride(const GcnShaderInfo* hs_info, const uint32_t* hs_user_data,
+                                         uint32_t num_hs_user_data, GcnGuestMemory mem) {
+    if (!hs_info || !hs_user_data || !mem.read || hs_info->tess_consts_dword_offset < 0) {
+        return 0;
+    }
+    try {
+        GcnShim::GuestMemoryScope scope{mem.read, mem.ctx};
+        Info tmp{};
+        tmp.tess_consts_dword_offset = hs_info->tess_consts_dword_offset;
+        tmp.tess_consts_ptr_base = static_cast<IR::ScalarReg>(hs_info->tess_consts_ptr_base);
+        tmp.user_data = std::span<const u32>(hs_user_data, std::min<u32>(num_hs_user_data, 16u));
+        TessellationDataConstantBuffer tess_constants{};
+        tmp.ReadTessConstantBuffer(tess_constants);
+        if (tess_constants.ls_stride != 0) {
+            return tess_constants.ls_stride;
+        }
+        const auto buf = tmp.ReadUdReg<AmdGpu::Buffer>(
+            hs_info->tess_consts_ptr_base, static_cast<u32>(hs_info->tess_consts_dword_offset));
+        if (buf.base_address < 0x10000ULL) {
+            return 0;
+        }
+        u32 ls_stride = 0;
+        if (!GcnShim::ReadGuest(buf.base_address, &ls_stride, sizeof(ls_stride))) {
+            return 0;
+        }
+        return ls_stride;
+    } catch (...) {
+        return 0;
+    }
 }
 
 // Binding numbering per stage: buffers first, then images (each takes num_bindings), then

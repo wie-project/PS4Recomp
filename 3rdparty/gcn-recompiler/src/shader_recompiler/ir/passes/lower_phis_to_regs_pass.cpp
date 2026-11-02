@@ -53,6 +53,9 @@ void LowerPhisToRegsPass(IR::Program& program) {
             }
 
             const IR::VirtualReg reg{program.next_reg_index++, inst.Flags<IR::Type>()};
+            if (program.lane_mask_phis.contains(&inst)) {
+                program.scalar_mask_vregs.insert(reg.Key());
+            }
             for (size_t arg_index = 0; arg_index < inst.NumArgs(); arg_index++) {
                 IR::IREmitter ir{*inst.PhiBlock(arg_index)};
                 ir.SetVirtualReg(reg, inst.Arg(arg_index));
@@ -60,6 +63,7 @@ void LowerPhisToRegsPass(IR::Program& program) {
             inst.ReplaceUsesWithAndRemove(ir.GetVirtualReg(reg));
         }
     }
+    program.lane_mask_phis.clear(); // removed above
 }
 
 } // namespace Shader::Optimization

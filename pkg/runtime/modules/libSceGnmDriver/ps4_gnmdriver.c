@@ -784,13 +784,15 @@ int32_t sceGnmMapComputeQueueWithPriority(uint32_t pipe_id, uint32_t queue_id, u
     return sceGnmMapComputeQueue(pipe_id, queue_id, ring_base_addr, ring_size_dw, read_ptr_addr);
 }
 
-int32_t sceGnmUnmapComputeQueue(uint32_t pipe_id, uint32_t queue_id) {
+int32_t sceGnmUnmapComputeQueue(uint32_t vqueue_id) {
+    if (vqueue_id == 0 || vqueue_id > 64) {
+        return -1;
+    }
     pthread_mutex_lock(&g_gnm_compute_mutex);
-    for (int i = 0; i < (int)GNM_MAX_COMPUTE_QUEUES; i++) {
-        if (g_compute_queues[i].in_use && g_compute_queues[i].pipe_id == pipe_id && g_compute_queues[i].queue_id == queue_id) {
-            ps4_gnm_metal_reset_compute_queue((uint32_t)i);
-            memset(&g_compute_queues[i], 0, sizeof(g_compute_queues[i]));
-        }
+    uint32_t slot = vqueue_id - 1;
+    if (slot < (uint32_t)GNM_MAX_COMPUTE_QUEUES && g_compute_queues[slot].in_use) {
+        ps4_gnm_metal_reset_compute_queue(slot);
+        memset(&g_compute_queues[slot], 0, sizeof(g_compute_queues[slot]));
     }
     pthread_mutex_unlock(&g_gnm_compute_mutex);
     return ORBIS_GNM_OK;
@@ -801,14 +803,22 @@ int32_t sceGnmComputeWaitSemaphore(void) {
 }
 
 int32_t sceGnmComputeWaitOnAddress(uint32_t *cmdbuf, uint32_t size, uint64_t addr, uint32_t mask, uint32_t cmp_func, uint32_t ref) {
-    (void)addr;
-    (void)mask;
-    (void)cmp_func;
-    (void)ref;
-    if (!cmdbuf || size < 7) return -1;
-    cmdbuf[0] = PM4_TYPE3_HEADER(PM4_IT_WAIT_REG_MEM, 5, 1, 0);
-    memset(cmdbuf + 1, 0, 6 * sizeof(uint32_t));
-    return ORBIS_GNM_OK;
+    if (!cmdbuf || (size != 0 && size < 0x0e)) return -1;
+    cmdbuf[0]  = 0xc0011000u;
+    cmdbuf[1]  = 0x0u;
+    cmdbuf[2]  = 0x0u;
+    cmdbuf[3]  = 0xc0053c00u;
+    cmdbuf[4]  = (cmp_func & 7u) | 0x10u;
+    cmdbuf[5]  = (uint32_t)addr;
+    cmdbuf[6]  = (uint32_t)(addr >> 32);
+    cmdbuf[7]  = ref;
+    cmdbuf[8]  = mask;
+    cmdbuf[9]  = 0x0000000au;
+    cmdbuf[10] = 0xc0021000u;
+    cmdbuf[11] = 0x0u;
+    cmdbuf[12] = 0x0u;
+    cmdbuf[13] = 0x0u;
+    return 0x0e;
 }
 
 int32_t sceGnmGetLastWaitedAddress(void) {
@@ -941,16 +951,16 @@ int32_t sceGnmValidateDisableDiagnostics2(void) {
     return ORBIS_GNM_ERROR_VALIDATION_NOT_ENABLED;
 }
 
-int32_t sceGnmValidateCommandBuffers(void) {
-    return ORBIS_GNM_ERROR_VALIDATION_NOT_ENABLED;
-}
-
 int32_t sceGnmValidateDrawCommandBuffers(void) {
     return ORBIS_GNM_ERROR_VALIDATION_NOT_ENABLED;
 }
 
 int32_t sceGnmValidateDispatchCommandBuffers(void) {
     return ORBIS_GNM_ERROR_VALIDATION_NOT_ENABLED;
+}
+
+int32_t sceGnmValidateCommandBuffers(void) {
+    return (int32_t)0x80d11001;
 }
 
 int32_t sceGnmValidationRegisterMemoryCheckCallback(void) {
@@ -962,7 +972,19 @@ int32_t sceRazorIsLoaded(void) {
 }
 
 int32_t sceRazorCaptureImmediate(void) {
-    return ORBIS_GNM_ERROR_CAPTURE_RAZOR_NOT_LOADED;
+    return 0;
+}
+
+int32_t sceRazorCaptureSinceLastFlip(void) {
+    return 0;
+}
+
+int32_t sceRazorCaptureCommandBuffersOnlyImmediate(void) {
+    return 0;
+}
+
+int32_t sceRazorCaptureCommandBuffersOnlySinceLastFlip(void) {
+    return 0;
 }
 
 int32_t sceRazorCpuJobManagerSequence(void) {
@@ -1012,6 +1034,167 @@ int32_t sceGnmRequestMipStatsReportAndReset(void) {
 // Command Buffer Processing & Submission
 static uint64_t g_submitted_frames = 0;
 
+static void *gnm_resolve_guest_or_host_ptr(GuestContext *ctx, uint64_t addr, size_t size_bytes) {
+    if (addr == 0) return NULL;
+    if (ctx && ctx->mem_base) {
+        if (addr < ctx->mem_size && size_bytes <= ctx->mem_size - addr) {
+            return (void *)(ctx->mem_base + addr);
+        }
+        uintptr_t base = (uintptr_t)ctx->mem_base;
+        if (addr >= base && addr + size_bytes <= base + ctx->mem_size) {
+            return (void *)(uintptr_t)addr;
+        }
+    }
+    if (addr >= 0x10000ULL) {
+        return (void *)(uintptr_t)addr;
+    }
+    return NULL;
+}
+
+int32_t sceGnmPrepareFlip(uint32_t *dcb, void *label_addr, uint32_t value) {
+    if (dcb != NULL) {
+        memset(dcb, 0, 0x0f * sizeof(uint32_t));
+        dcb[0] = 0xabcdef10u;
+        dcb[1] = (uint32_t)(uintptr_t)label_addr;
+        dcb[2] = (uint32_t)((uintptr_t)label_addr >> 32);
+        dcb[3] = value;
+    }
+    return 0x0f;
+}
+
+int32_t sceGnmPrepareFlipWithEopInterrupt(uint32_t *dcb, void *label_addr, uint32_t value, uint32_t int_mode, uint32_t sys_ev) {
+    if (dcb != NULL) {
+        memset(dcb, 0, 0x14 * sizeof(uint32_t));
+        dcb[0] = 0xabcdef12u;
+        dcb[1] = (uint32_t)(uintptr_t)label_addr;
+        dcb[2] = (uint32_t)((uintptr_t)label_addr >> 32);
+        dcb[3] = value;
+        dcb[4] = int_mode;
+        dcb[5] = sys_ev;
+    }
+    return 0x14;
+}
+
+int32_t sceGnmPrepareFlipWithEopInterruptRequeued(uint32_t *dcb, void *label_addr, uint32_t value, uint32_t int_mode, uint32_t sys_ev) {
+    if (dcb != NULL) {
+        memset(dcb, 0, 0x14 * sizeof(uint32_t));
+        dcb[0] = 0xabcdef13u;
+        dcb[1] = (uint32_t)(uintptr_t)label_addr;
+        dcb[2] = (uint32_t)((uintptr_t)label_addr >> 32);
+        dcb[3] = value;
+        dcb[4] = int_mode;
+        dcb[5] = sys_ev;
+    }
+    return 0x14;
+}
+
+static bool PatchFlipRequest(GuestContext *ctx, uint32_t *cmdb, uint32_t size_in_bytes) {
+    if (!cmdb || size_in_bytes < 16) return false;
+    uint32_t size_dw = size_in_bytes >> 2;
+    bool fire_eop = false;
+
+    // 1. Scan for HLE sceGnmPrepareFlip* sentinels (0xabcdef10..0xabcdef13)
+    for (uint32_t i = 0; i < size_dw; i++) {
+        uint32_t w = cmdb[i];
+        if (w >= 0xabcdef10u && w <= 0xabcdef13u) {
+            bool is_eop = (w == 0xabcdef12u || w == 0xabcdef13u);
+            uint32_t max_len = is_eop ? 0x14u : 0x0fu;
+            uint32_t len = (i + max_len <= size_dw) ? max_len : (size_dw - i);
+            if (i + 4 <= size_dw) {
+                uint64_t label_addr = (uint64_t)cmdb[i + 1] | ((uint64_t)cmdb[i + 2] << 32);
+                uint32_t val = cmdb[i + 3];
+                uint32_t *label_ptr = (uint32_t *)gnm_resolve_guest_or_host_ptr(ctx, label_addr, sizeof(uint32_t));
+                if (label_ptr) {
+                    __atomic_store_n(label_ptr, val, __ATOMIC_RELEASE);
+                }
+            }
+            if (is_eop) {
+                fire_eop = true;
+            }
+            if (len >= 2) {
+                cmdb[i] = 0xc0001000u | ((len - 2u) << 16);
+                memset(&cmdb[i + 1], 0, (len - 1u) * sizeof(uint32_t));
+            } else {
+                cmdb[i] = 0x80000000u;
+            }
+            i += len - 1u;
+        }
+    }
+
+    // 2. Check for Orbis SDK DrawCommandBuffer::prepareFlip* 64-dword NOP packet at the end of the DCB
+    if (size_dw >= 64) {
+        uint32_t *fp = cmdb + (size_dw - 64);
+        if (fp[0] == 0xc03e1000u) {
+            uint32_t backup[7];
+            memcpy(backup, fp, sizeof(backup));
+            uint32_t payload_type = backup[1];
+            if (payload_type == 0x68750777u || payload_type == 0x68750778u ||
+                payload_type == 0x68750780u || payload_type == 0x68750781u) {
+                // First 5 dwords: 5-dword NOP (ps4_videoout_submit_flip locks the VO buffer label)
+                fp[0] = PM4_TYPE3_HEADER(PM4_IT_NOP, 3, 0, 0);
+                fp[1] = 0u;
+                fp[2] = 0u;
+                fp[3] = 0u;
+                fp[4] = 0u;
+
+                if (payload_type == 0x68750777u) {
+                    // PrepareFlip
+                    fp[5] = PM4_TYPE3_HEADER(PM4_IT_NOP, 0x39, 0, 0);
+                    fp[6] = 0x68750779u;
+                } else if (payload_type == 0x68750778u) {
+                    // PrepareFlipLabel: NOP(0x34) + WRITE_DATA(5)
+                    fp[5] = PM4_TYPE3_HEADER(PM4_IT_NOP, 0x34, 0, 0);
+                    fp[6] = 0x68750779u;
+                    uint32_t *wd = fp + 0x3b;
+                    wd[0] = PM4_TYPE3_HEADER(PM4_IT_WRITE_DATA, 3, 0, 0);
+                    wd[1] = 0x500u;
+                    wd[2] = backup[2] & 0xfffffffcu;
+                    wd[3] = backup[3];
+                    wd[4] = backup[4];
+                    if (!ctx || !ctx->mem_base) {
+                        uint64_t label_addr = ((uint64_t)wd[2]) | ((uint64_t)wd[3] << 32);
+                        uint32_t *label_ptr = (uint32_t *)gnm_resolve_guest_or_host_ptr(ctx, label_addr, sizeof(uint32_t));
+                        if (label_ptr) __atomic_store_n(label_ptr, wd[4], __ATOMIC_RELEASE);
+                    }
+                } else if (payload_type == 0x68750781u) {
+                    // PrepareFlipInterruptLabel: NOP(0x33) + EVENT_WRITE_EOP(6)
+                    fp[5] = PM4_TYPE3_HEADER(PM4_IT_NOP, 0x33, 0, 0);
+                    fp[6] = 0x68750779u;
+                    uint32_t *eop = fp + 0x3a;
+                    eop[0] = PM4_TYPE3_HEADER(PM4_IT_EVENT_WRITE_EOP, 4, 0, 0);
+                    eop[1] = (backup[5] & 0x3fu) + 0x500u + (backup[6] & 0x3fu) * 0x1000u;
+                    eop[2] = backup[2] & 0xfffffffcu;
+                    eop[3] = (backup[3] & 0xffffu) | 0x22000000u;
+                    eop[4] = backup[4];
+                    eop[5] = 0u;
+                    if (!ctx || !ctx->mem_base) {
+                        uint64_t label_addr = ((uint64_t)eop[2]) | ((uint64_t)(backup[3] & 0xffffu) << 32);
+                        uint32_t *label_ptr = (uint32_t *)gnm_resolve_guest_or_host_ptr(ctx, label_addr, sizeof(uint32_t));
+                        if (label_ptr) __atomic_store_n(label_ptr, eop[4], __ATOMIC_RELEASE);
+                        fire_eop = true;
+                    }
+                } else if (payload_type == 0x68750780u) {
+                    // PrepareFlipInterrupt: NOP(0x33) + EVENT_WRITE_EOP(6)
+                    fp[5] = PM4_TYPE3_HEADER(PM4_IT_NOP, 0x33, 0, 0);
+                    fp[6] = 0x68750779u;
+                    uint32_t *eop = fp + 0x3a;
+                    eop[0] = PM4_TYPE3_HEADER(PM4_IT_EVENT_WRITE_EOP, 4, 0, 0);
+                    eop[1] = (backup[5] & 0x3fu) + 0x500u + (backup[6] & 0x3fu) * 0x1000u;
+                    eop[2] = 0u;
+                    eop[3] = 0x01000000u;
+                    eop[4] = 0u;
+                    eop[5] = 0u;
+                    if (!ctx || !ctx->mem_base) {
+                        fire_eop = true;
+                    }
+                }
+            }
+        }
+    }
+
+    return fire_eop;
+}
+
 static int32_t ps4_gnm_process_command_buffers(GuestContext *ctx, uint32_t count,
                                                const uint64_t *dcb_gpu_addrs, const uint32_t *dcb_sizes_in_bytes,
                                                const uint64_t *ccb_gpu_addrs, const uint32_t *ccb_sizes_in_bytes) {
@@ -1032,7 +1215,7 @@ int32_t sceGnmSubmitCommandBuffers(GuestContext *ctx, uint32_t count,
     }
 
     for (uint32_t i = 0; i < count; i++) {
-        if (dcb_sizes_in_bytes[i] > 0x3ffffc) {
+        if (dcb_sizes_in_bytes[i] == 0 || dcb_sizes_in_bytes[i] > 0x3ffffc) {
             return ORBIS_GNM_ERROR_INVALID_VALUE;
         }
         if (ccb_sizes_in_bytes && ccb_sizes_in_bytes[i] > 0x3ffffc) {
@@ -1068,7 +1251,7 @@ int32_t sceGnmSubmitAndFlipCommandBuffers(GuestContext *ctx, uint32_t count,
     }
 
     for (uint32_t i = 0; i < count; i++) {
-        if (dcb_sizes_in_bytes[i] > 0x3ffffc) {
+        if (dcb_sizes_in_bytes[i] == 0 || dcb_sizes_in_bytes[i] > 0x3ffffc) {
             return ORBIS_GNM_ERROR_INVALID_VALUE;
         }
         if (ccb_sizes_in_bytes && ccb_sizes_in_bytes[i] > 0x3ffffc) {
@@ -1076,10 +1259,22 @@ int32_t sceGnmSubmitAndFlipCommandBuffers(GuestContext *ctx, uint32_t count,
         }
     }
 
+    bool fire_eop = false;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t *cmdb = (uint32_t *)gnm_resolve_guest_or_host_ptr(ctx, dcb_gpu_addrs[i], dcb_sizes_in_bytes[i]);
+        if (cmdb && PatchFlipRequest(ctx, cmdb, dcb_sizes_in_bytes[i])) {
+            fire_eop = true;
+        }
+    }
+
     pthread_mutex_lock(&g_gnm_mutex);
     ps4_gnm_process_command_buffers(ctx, count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes);
     g_submitted_frames++;
     pthread_mutex_unlock(&g_gnm_mutex);
+
+    if (fire_eop) {
+        ps4_gnm_signal_interrupt(PS4_GNM_EVENT_GFX_EOP);
+    }
 
     // Present frame & signal flip event via libSceVideoOut
     int32_t flip_res = ps4_videoout_submit_flip(ctx, (int32_t)vo_handle, (int32_t)buf_idx, flip_mode, flip_arg, 1);
@@ -1117,12 +1312,17 @@ int32_t sceGnmRequestFlipAndSubmitDoneForWorkload(GuestContext *ctx, uint64_t wo
         if (gpu_addr_size_in_bytes > 0x3ffffc) {
             return ORBIS_GNM_ERROR_INVALID_VALUE;
         }
+        uint32_t *cmdb = (uint32_t *)gnm_resolve_guest_or_host_ptr(ctx, gpu_addr, gpu_addr_size_in_bytes);
+        bool fire_eop = cmdb ? PatchFlipRequest(ctx, cmdb, gpu_addr_size_in_bytes) : false;
         // ps4_gnmdriver_init takes g_gnm_mutex itself (and is idempotent), so it runs before
         // the lock is taken here.
         ps4_gnmdriver_init(ctx);
         pthread_mutex_lock(&g_gnm_mutex);
         ps4_gnm_process_command_buffers(ctx, 1, &gpu_addr, &gpu_addr_size_in_bytes, NULL, NULL);
         pthread_mutex_unlock(&g_gnm_mutex);
+        if (fire_eop) {
+            ps4_gnm_signal_interrupt(PS4_GNM_EVENT_GFX_EOP);
+        }
     }
 
     sceGnmSubmitDone();
@@ -1490,7 +1690,7 @@ void shim_sceGnmMapComputeQueueWithPriority(GuestContext *ctx) {
 }
 
 void shim_sceGnmUnmapComputeQueue(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceGnmUnmapComputeQueue((uint32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceGnmUnmapComputeQueue((uint32_t)ctx->rdi);
     SHIM_RETURN();
 }
 
@@ -1502,11 +1702,8 @@ void shim_sceGnmComputeWaitSemaphore(GuestContext *ctx) {
 
 void shim_sceGnmComputeWaitOnAddress(GuestContext *ctx) {
     uint32_t *cmdbuf = (uint32_t *)recomp_guest_to_host(ctx, ctx->rdi);
-    uint32_t cmp_func = (uint32_t)ctx->r9;
-    uint32_t ref = 0;
-    if (ctx->rsp && ctx->mem_base) {
-        ref = *(uint32_t *)recomp_guest_to_host(ctx, ctx->rsp + 8);
-    }
+    uint32_t cmp_func = (uint32_t)ctx->r8;
+    uint32_t ref = (uint32_t)ctx->r9;
     ctx->rax = (uint64_t)(int64_t)sceGnmComputeWaitOnAddress(cmdbuf, (uint32_t)ctx->rsi, ctx->rdx, (uint32_t)ctx->rcx, cmp_func, ref);
     SHIM_RETURN();
 }
@@ -1577,12 +1774,6 @@ void shim_sceGnmValidateDisableDiagnostics2(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-void shim_sceGnmValidateCommandBuffers(GuestContext *ctx) {
-    (void)ctx;
-    ctx->rax = (uint64_t)(int64_t)sceGnmValidateCommandBuffers();
-    SHIM_RETURN();
-}
-
 void shim_sceGnmValidateDrawCommandBuffers(GuestContext *ctx) {
     (void)ctx;
     ctx->rax = (uint64_t)(int64_t)sceGnmValidateDrawCommandBuffers();
@@ -1592,6 +1783,12 @@ void shim_sceGnmValidateDrawCommandBuffers(GuestContext *ctx) {
 void shim_sceGnmValidateDispatchCommandBuffers(GuestContext *ctx) {
     (void)ctx;
     ctx->rax = (uint64_t)(int64_t)sceGnmValidateDispatchCommandBuffers();
+    SHIM_RETURN();
+}
+
+void shim_sceGnmValidateCommandBuffers(GuestContext *ctx) {
+    (void)ctx;
+    ctx->rax = 0x80D11001ULL;
     SHIM_RETURN();
 }
 
@@ -1610,6 +1807,24 @@ void shim_sceRazorIsLoaded(GuestContext *ctx) {
 void shim_sceRazorCaptureImmediate(GuestContext *ctx) {
     (void)ctx;
     ctx->rax = (uint64_t)(int64_t)sceRazorCaptureImmediate();
+    SHIM_RETURN();
+}
+
+void shim_sceRazorCaptureSinceLastFlip(GuestContext *ctx) {
+    (void)ctx;
+    ctx->rax = (uint64_t)(int64_t)sceRazorCaptureSinceLastFlip();
+    SHIM_RETURN();
+}
+
+void shim_sceRazorCaptureCommandBuffersOnlyImmediate(GuestContext *ctx) {
+    (void)ctx;
+    ctx->rax = (uint64_t)(int64_t)sceRazorCaptureCommandBuffersOnlyImmediate();
+    SHIM_RETURN();
+}
+
+void shim_sceRazorCaptureCommandBuffersOnlySinceLastFlip(GuestContext *ctx) {
+    (void)ctx;
+    ctx->rax = (uint64_t)(int64_t)sceRazorCaptureCommandBuffersOnlySinceLastFlip();
     SHIM_RETURN();
 }
 
@@ -1870,6 +2085,21 @@ int32_t sceGnmSetEmbeddedVsShader(uint32_t *cmdbuf, uint32_t size, uint32_t shad
 }
 
 int32_t sceGnmSetPsShader(uint32_t *cmdbuf, uint32_t size, const uint32_t *ps_regs) {
+    if (!cmdbuf || size <= 0x27) return -1;
+    if (!ps_regs) {
+        uint32_t *c = cmdbuf;
+        *c++ = PM4_TYPE3_HEADER(PM4_IT_SET_SH_REG, 2, 0, 0);
+        *c++ = 8u; // SPI_SHADER_PGM_LO_PS
+        *c++ = 0u;
+        *c++ = 0u;
+
+        *c++ = PM4_TYPE3_HEADER(PM4_IT_SET_CONTEXT_REG, 1, 0, 0);
+        *c++ = 0x203u; // DB_SHADER_CONTROL
+        *c++ = 0u;
+
+        write_trailing_nop(c, 0x20);
+        return ORBIS_GNM_OK;
+    }
     return sceGnmSetPsShader350(cmdbuf, size, ps_regs);
 }
 
@@ -1938,7 +2168,7 @@ int32_t sceGnmSetPsShader350(uint32_t *cmdbuf, uint32_t size, const uint32_t *ps
 }
 
 int32_t sceGnmUpdatePsShader(uint32_t *cmdbuf, uint32_t size, const uint32_t *ps_regs) {
-    return sceGnmSetPsShader350(cmdbuf, size, ps_regs);
+    return sceGnmSetPsShader(cmdbuf, size, ps_regs);
 }
 
 int32_t sceGnmUpdatePsShader350(uint32_t *cmdbuf, uint32_t size, const uint32_t *ps_regs) {
@@ -2059,6 +2289,10 @@ int32_t sceGnmSetLsShader(uint32_t *cmdbuf, uint32_t size, const uint32_t *ls_re
     *c++ = ls_regs[3];
 
     write_trailing_nop(c, 11);
+
+    cmdbuf[20] = PM4_TYPE3_HEADER(PM4_IT_SET_SH_REG, 1, 0, 0); // 0xc0017600
+    cmdbuf[21] = 0x14bu; // SPI_SHADER_PGM_RSRC2_LS
+    cmdbuf[22] = ls_regs[3];
     return ORBIS_GNM_OK;
 }
 
@@ -2425,6 +2659,24 @@ void shim_sceGnmRequestFlipAndSubmitDoneForWorkload(GuestContext *ctx) {
         flip_arg = *(int64_t *)recomp_guest_to_host(ctx, ctx->rsp + 8);
     }
     ctx->rax = (uint64_t)(int64_t)sceGnmRequestFlipAndSubmitDoneForWorkload(ctx, workload, gpu_addr, gpu_addr_size_in_bytes, vo_handle, buf_idx, flip_mode, flip_arg);
+    SHIM_RETURN();
+}
+
+void shim_sceGnmPrepareFlip(GuestContext *ctx) {
+    uint32_t *dcb = (uint32_t *)recomp_guest_to_host(ctx, ctx->rdi);
+    ctx->rax = (uint64_t)(int64_t)sceGnmPrepareFlip(dcb, (void *)(uintptr_t)ctx->rsi, (uint32_t)ctx->rdx);
+    SHIM_RETURN();
+}
+
+void shim_sceGnmPrepareFlipWithEopInterrupt(GuestContext *ctx) {
+    uint32_t *dcb = (uint32_t *)recomp_guest_to_host(ctx, ctx->rdi);
+    ctx->rax = (uint64_t)(int64_t)sceGnmPrepareFlipWithEopInterrupt(dcb, (void *)(uintptr_t)ctx->rsi, (uint32_t)ctx->rdx, (uint32_t)ctx->rcx, (uint32_t)ctx->r8);
+    SHIM_RETURN();
+}
+
+void shim_sceGnmPrepareFlipWithEopInterruptRequeued(GuestContext *ctx) {
+    uint32_t *dcb = (uint32_t *)recomp_guest_to_host(ctx, ctx->rdi);
+    ctx->rax = (uint64_t)(int64_t)sceGnmPrepareFlipWithEopInterruptRequeued(dcb, (void *)(uintptr_t)ctx->rsi, (uint32_t)ctx->rdx, (uint32_t)ctx->rcx, (uint32_t)ctx->r8);
     SHIM_RETURN();
 }
 

@@ -378,9 +378,42 @@ typedef struct gcn_shader_info {
      * useResource:usage: on the encoder. */
     int32_t msl_argument_buffer;
     uint32_t msl_argument_buffer_entries;
+    /* Hull shader tessellation constant buffer V# location (populated for HS):
+     * tess_consts_dword_offset >= 0: V# at *(ptr in user SGPRs[tess_consts_ptr_base..+1]) +
+     *                                4 * tess_consts_dword_offset
+     * tess_consts_dword_offset < 0 && tess_consts_ptr_base < 16: V# inline at
+     *                                user SGPRs[tess_consts_ptr_base..+3] */
+    int32_t tess_consts_dword_offset;
+    uint32_t tess_consts_ptr_base;
 } gcn_shader_info;
 
+typedef gcn_shader GcnShader;
+typedef gcn_shader_info GcnShaderInfo;
+typedef gcn_msl_options GcnMslOptions;
+typedef gcn_runtime_info GcnRuntimeInfo;
+typedef gcn_profile GcnProfile;
+typedef gcn_compile_desc GcnCompileDesc;
+
+typedef struct gcn_guest_memory {
+    union {
+        gcn_read_guest_fn read;
+        gcn_read_guest_fn read_guest;
+    };
+    union {
+        void* ctx;
+        void* read_ctx;
+        void* user_data;
+    };
+} gcn_guest_memory;
+typedef gcn_guest_memory GcnGuestMemory;
+
 GCN_API void gcn_shader_get_info(const gcn_shader* shader, gcn_shader_info* out);
+
+/* Read word 0 (ls_stride) from the hull shader's tessellation constant buffer V# in guest memory.
+ * Returns 0 if hs_info has no tess constant buffer, the V# is invalid, or its base address is
+ * unmapped or < 0x10000ULL. */
+GCN_API uint32_t gcn_read_tess_ls_stride(const GcnShaderInfo* hs_info, const uint32_t* hs_user_data,
+                                         uint32_t num_hs_user_data, GcnGuestMemory mem);
 
 /* ---- Resource table ---------------------------------------------------------------------- */
 
@@ -776,6 +809,186 @@ typedef struct gcn_rectlist_msl {
 GCN_API gcn_status gcn_shader_rectlist_msl(const gcn_shader* vs, const gcn_msl_options* opt,
                                            gcn_rectlist_msl* out, char* err, size_t err_size);
 GCN_API void gcn_rectlist_msl_free(gcn_rectlist_msl* m);
+
+/* ---- Tessellation & Geometry Shader MSL Compilation -------------------------------------- */
+
+/* Reserved Metal buffer slots for inter-stage communication in tessellation (LS -> HS -> TES)
+ * and geometry (ES -> GS -> Pass-Through VS) pipelines. Shader resource buffers use slots 0..12
+ * (moving guest storage buffers into an argument buffer at slot 0 when > 8 guest buffers or
+ * discrete slots would exceed 12), leaving 13..17 for inter-stage buffers, 18..28 for TessVertex
+ * stage-in vertex attributes, and 29..30 for BDA page table / fault buffers. */
+enum {
+    GCN_TESS_OUTPUT_BUFFER_SLOT = 13,
+    GCN_TESS_INDEX_BUFFER_SLOT = 14,
+    GCN_TESS_PATCH_BUFFER_SLOT = 14,
+    GCN_TESS_FACTOR_BUFFER_SLOT = 15,
+    GCN_TESS_PARAMS_BUFFER_SLOT = 16,
+    GCN_TESS_INPUT_BUFFER_SLOT = 17,
+    GCN_TESS_VERTEX_ATTR_BASE_SLOT = 18,
+    GCN_GEO_ES_BUFFER_SLOT = 13,     /* kGeometryKernelSet = 7, binding = 0 */
+    GCN_GEO_RECORD_BUFFER_SLOT = 14, /* set = 7, binding = 1 */
+    GCN_GEO_INDEX_BUFFER_SLOT = 15,  /* set = 7, binding = 2 */
+    GCN_GEO_PARAMS_BUFFER_SLOT = 16, /* set = 7, binding = 3 */
+};
+
+typedef enum gcn_tess_domain {
+    GCN_TESS_DOMAIN_NONE = 0,
+    GCN_TESS_DOMAIN_TRIANGLES = 1,
+    GCN_TESS_DOMAIN_QUADS = 2,
+    GCN_TESS_DOMAIN_ISOLINES = 3,
+} gcn_tess_domain;
+typedef gcn_tess_domain GcnTessDomain;
+
+typedef enum gcn_tess_spacing {
+    GCN_TESS_SPACING_EQUAL = 0,
+    GCN_TESS_SPACING_FRACTIONAL_ODD = 1,
+    GCN_TESS_SPACING_FRACTIONAL_EVEN = 2,
+} gcn_tess_spacing;
+typedef gcn_tess_spacing GcnTessSpacing;
+
+typedef enum gcn_gs_input_primitive {
+    GCN_GS_INPUT_POINTS = 0,
+    GCN_GS_INPUT_LINES = 1,
+    GCN_GS_INPUT_TRIANGLES = 2,
+} gcn_gs_input_primitive;
+typedef gcn_gs_input_primitive GcnGsInputPrimitive;
+
+typedef enum gcn_gs_output_primitive {
+    GCN_GS_OUTPUT_TRIANGLE_STRIP = 0,
+    GCN_GS_OUTPUT_LINE_STRIP = 1,
+} gcn_gs_output_primitive;
+typedef gcn_gs_output_primitive GcnGsOutputPrimitive;
+
+typedef struct gcn_tess_shader_set {
+    char* ls_msl; /* TessVertex compute kernel (unindexed) */
+    union {
+        char* ls_u16_msl;       /* TessVertex compute kernel (16-bit index buffer at slot 14) */
+        char* ls_indexed16_msl;
+        char* ls_index16_msl;
+    };
+    union {
+        char* ls_u32_msl;       /* TessVertex compute kernel (32-bit index buffer at slot 14) */
+        char* ls_indexed32_msl;
+        char* ls_index32_msl;
+    };
+    union {
+        char* hs_msl;           /* TessControl compute kernel (multi-patch workgroup) */
+        char* tcs_msl;
+    };
+    union {
+        char* vs_msl;           /* TessEval post-tessellation vertex shader */
+        char* tes_msl;
+    };
+    union {
+        uint32_t ls_stride;     /* bytes of one LS output control point struct in MSL */
+        uint32_t ls_output_stride;
+        uint32_t vertex_stride;
+    };
+    union {
+        uint32_t cp_stride;     /* bytes of one HS output control point struct in MSL */
+        uint32_t hs_output_stride;
+        uint32_t hs_cp_stride;
+        uint32_t control_point_stride;
+    };
+    union {
+        uint32_t patch_stride;  /* bytes of one HS per-patch output struct in MSL */
+        uint32_t hs_patch_stride;
+        uint32_t patch_output_stride;
+    };
+    uint32_t hs_input_stride;   /* bytes of one HS input control point struct in MSL */
+    uint32_t vs_input_stride;   /* bytes of one TES input control point struct in MSL */
+    uint32_t vs_patch_stride;   /* bytes of one TES per-patch input struct in MSL */
+    union {
+        uint32_t output_vertices; /* HS OpExecutionMode OutputVertices */
+        uint32_t output_control_points;
+        uint32_t num_output_control_points;
+    };
+    union {
+        uint32_t domain;        /* GcnTessDomain (1 = triangles, 2 = quads, 3 = isolines) */
+        uint32_t tess_domain;
+    };
+    union {
+        uint32_t spacing;       /* GcnTessSpacing (0 = equal, 1 = fractional_odd, 2 = fractional_even) */
+        uint32_t partitioning;
+        uint32_t tess_spacing;
+    };
+    union {
+        bool clockwise;         /* TES VertexOrderCw */
+        bool winding_clockwise;
+    };
+    bool point_mode;            /* TES PointMode */
+    uint32_t patch_first;       /* first per-patch location written by HS */
+    uint32_t patch_end;         /* one past last per-patch location written by HS */
+    union {
+        uint32_t hs_local_size[3]; /* OpExecutionMode LocalSize of HS */
+        uint32_t tcs_local_size[3];
+    };
+    union {
+        char* error;            /* malloc'd error string on failure (NULL on success) */
+        char* err;
+    };
+} gcn_tess_shader_set;
+typedef gcn_tess_shader_set GcnTessShaderSet;
+
+typedef struct gcn_gs_shader_set {
+    char* es_msl; /* TessVertex compute kernel for ES (unindexed) */
+    union {
+        char* es_u16_msl;       /* TessVertex compute kernel for ES (16-bit index buffer at slot 14) */
+        char* es_indexed16_msl;
+        char* es_index16_msl;
+    };
+    union {
+        char* es_u32_msl;       /* TessVertex compute kernel for ES (32-bit index buffer at slot 14) */
+        char* es_indexed32_msl;
+        char* es_index32_msl;
+    };
+    union {
+        char* gs_msl;           /* Rewritten GeometryKernel compute shader */
+        char* gs_kernel_msl;
+    };
+    union {
+        char* vs_msl;           /* Pass-through vertex shader (entry points "main0" and "bb_gs_pass") */
+        char* passthrough_msl;
+        char* pass_through_msl;
+        char* copy_vs_msl;
+    };
+    union {
+        uint32_t es_stride;     /* bytes of one ES output vertex struct in MSL */
+        uint32_t es_output_stride;
+    };
+    uint32_t record_stride;     /* bytes of one GS vertex record (16 + 16 * num_varyings) */
+    uint32_t index_slots;       /* index slots per primitive (2 * max_vertices) */
+    union {
+        uint32_t input_primitive; /* GcnGsInputPrimitive (0 = points, 1 = lines, 2 = triangles) */
+        uint32_t input;
+    };
+    uint32_t input_vertices;    /* vertices per input primitive (1, 2, or 3) */
+    union {
+        uint32_t output_primitive; /* GcnGsOutputPrimitive (0 = triangle_strip, 1 = line_strip) */
+        uint32_t output;
+    };
+    union {
+        uint32_t max_vertices;  /* OpExecutionMode OutputVertices */
+        uint32_t output_vertices;
+    };
+    uint32_t num_varyings;      /* number of non-Position output locations */
+    uint32_t gs_local_size[3];  /* {64, 1, 1} */
+    union {
+        char* error;            /* malloc'd error string on failure (NULL on success) */
+        char* err;
+    };
+} gcn_gs_shader_set;
+typedef gcn_gs_shader_set GcnGsShaderSet;
+
+GCN_API bool gcn_compile_tess_shaders_msl(const GcnShader* ls, const GcnShader* hs,
+                                          const GcnShader* vs, const GcnMslOptions* opts,
+                                          GcnTessShaderSet* out);
+GCN_API void gcn_free_tess_shaders_msl(GcnTessShaderSet* set);
+
+GCN_API bool gcn_compile_gs_shaders_msl(const GcnShader* es, const GcnShader* gs,
+                                        bool emulate_depth_negative_one_to_one,
+                                        const GcnMslOptions* opts, GcnGsShaderSet* out);
+GCN_API void gcn_free_gs_shaders_msl(GcnGsShaderSet* set);
 
 /* ---- Misc -------------------------------------------------------------------------------- */
 

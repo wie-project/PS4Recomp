@@ -635,7 +635,9 @@ void EmitContext::DefineVertexBlock() {
     // rely on it: a depth prepass followed by passes with depth func EQUAL (Uncharted 4's g-buffer
     // pass; its characters use different vertex shaders in the two passes). Metal guarantees that
     // only for invariant positions (with MTLCompileOptions.preserveInvariance).
-    Decorate(output_position, spv::Decoration::Invariant);
+    if (sw_stage == SwStage::Vertex) {
+        Decorate(output_position, spv::Decoration::Invariant);
+    }
     const bool needs_clip_distance_emulation = sw_stage == SwStage::Vertex &&
                                                hw_stage == HwStage::Vertex &&
                                                profile.needs_clip_distance_emulation;

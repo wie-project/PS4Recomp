@@ -15,6 +15,10 @@
 // query's list (wide_).
 // Completed entries stay for reuse (no allocation in steady state). Not thread-safe (the encoder
 // thread's).
+// Two command buffers can be open at once (the main one and the asynchronous compute one, kTargets):
+// a write belongs to the open command buffer of its target until that one is committed. A range
+// written by both while both are open keeps its latest write only (a race between the GNM queues on
+// GCN as well); the renderer's per-command-buffer write lists still invalidate at each completion.
 #ifndef PS4_GNM_PENDING_WRITES_H
 #define PS4_GNM_PENDING_WRITES_H
 
@@ -28,8 +32,9 @@ namespace ps4gnm {
 
 class GnmPendingWrites {
 public:
-    static constexpr uint64_t kOpen = UINT64_MAX; // the seq of a write in the open command buffer
+    static constexpr uint64_t kOpen = UINT64_MAX; // the seq of a write in an open command buffer
     static constexpr size_t kKeepIdle = 4096;      // the default keep_idle (below)
+    static constexpr int kTargets = 2;             // open command buffers: 0 main, 1 asynchronous compute
 
     struct Range {
         uint64_t addr = 0, size = 0, epoch = 0;
@@ -38,8 +43,9 @@ public:
     // run Compact)
     explicit GnmPendingWrites(size_t keep_idle = kKeepIdle) : keep_idle_(keep_idle) {}
 
-    // [addr, addr + size) written by the open command buffer, as write number `epoch` (increasing).
-    void Note(uint64_t addr, uint64_t size, uint64_t epoch) {
+    // [addr, addr + size) written by target tgt's open command buffer, as write number `epoch`
+    // (increasing over all targets).
+    void Note(uint64_t addr, uint64_t size, uint64_t epoch, int tgt = 0) {
         if (!size) return;
         const Key k{addr, size};
         auto it = idx_.find(k);
@@ -47,24 +53,26 @@ public:
         if (it == idx_.end()) {
             i = (uint32_t)e_.size();
             idx_.emplace(k, i);
-            e_.push_back({addr, size, epoch, 0, false}); // not open yet: joins open_ below
+            e_.push_back({addr, size, epoch, 0, 0, false}); // not open yet: joins open_ below
         } else {
             i = it->second;
         }
         Entry& e = e_[i];
-        if (e.seq != kOpen) open_.push_back(i);
+        if (e.seq != kOpen || e.tgt != tgt) open_[tgt].push_back(i);
         if (!e.live) {
             live_.push_back(i);
             AddToBuckets(i);
         }
         e.epoch = epoch;
         e.seq = kOpen;
+        e.tgt = (uint8_t)tgt;
         e.live = true;
     }
-    // The open command buffer was committed as `seq`.
-    void Commit(uint64_t seq) {
-        for (uint32_t i : open_) e_[i].seq = seq;
-        open_.clear();
+    // Target tgt's open command buffer was committed as `seq`.
+    void Commit(uint64_t seq, int tgt = 0) {
+        for (uint32_t i : open_[tgt])
+            if (e_[i].seq == kOpen && e_[i].tgt == tgt) e_[i].seq = seq; // (a later write of another target took it)
+        open_[tgt].clear();
     }
     // Every seq up to `done` completed: their writes are no longer pending. Walks the pending
     // ranges once per new `done`. A completed range keeps its entry (the next frame writes it
@@ -147,7 +155,8 @@ private:
     }
     struct Entry {
         uint64_t addr, size, epoch, seq;
-        bool live; // in live_: its latest write is pending
+        uint8_t tgt; // the target of its latest write
+        bool live;   // in live_: its latest write is pending
     };
     struct Key {
         uint64_t addr, size;
@@ -170,10 +179,10 @@ private:
         }
         e_.swap(keep);
         idx_.clear();
-        open_.clear();
+        for (auto& o : open_) o.clear();
         for (uint32_t i = 0; i < (uint32_t)e_.size(); ++i) {
             idx_.emplace(Key{e_[i].addr, e_[i].size}, i);
-            if (e_[i].seq == kOpen) open_.push_back(i);
+            if (e_[i].seq == kOpen) open_[e_[i].tgt].push_back(i);
         }
         stamp_.assign(e_.size(), 0u);
         gen_ = 0;
@@ -182,7 +191,7 @@ private:
     std::vector<Entry> e_;
     std::unordered_map<Key, uint32_t, KeyHash> idx_;
     std::vector<uint32_t> live_; // pending entries
-    std::vector<uint32_t> open_; // entries whose latest write is in the open command buffer
+    std::vector<uint32_t> open_[kTargets]; // per target: entries whose latest write is in its open command buffer
     std::unordered_map<uint64_t, std::vector<uint32_t>> buckets_; // pending entries by 1 MiB
     std::vector<uint32_t> wide_;                                  // pending entries covering 65+ buckets
     mutable std::vector<uint32_t> stamp_;                         // per entry: the query that saw it

@@ -54,6 +54,7 @@ extern "C" {
 #define PM4_IT_DRAW_INDEX_AUTO            0x2D
 #define PM4_IT_NUM_INSTANCES              0x2F
 #define PM4_IT_DRAW_INDEX_OFFSET_2        0x35
+#define PM4_IT_WRITE_DATA                 0x37
 #define PM4_IT_DRAW_INDEX_INDIRECT_MULTI  0x38
 #define PM4_IT_WAIT_REG_MEM               0x3C
 #define PM4_IT_EVENT_WRITE                0x46
@@ -149,6 +150,9 @@ int32_t sceGnmSubmitAndFlipCommandBuffersForWorkload(GuestContext *ctx, uint32_t
 int32_t sceGnmSubmitDone(void);
 int32_t sceGnmRequestFlipAndSubmitDone(GuestContext *ctx, uint64_t gpu_addr, uint32_t gpu_addr_size_in_bytes, uint32_t vo_handle, uint32_t buf_idx, uint32_t flip_mode, int64_t flip_arg);
 int32_t sceGnmRequestFlipAndSubmitDoneForWorkload(GuestContext *ctx, uint64_t workload, uint64_t gpu_addr, uint32_t gpu_addr_size_in_bytes, uint32_t vo_handle, uint32_t buf_idx, uint32_t flip_mode, int64_t flip_arg);
+int32_t sceGnmPrepareFlip(uint32_t *dcb, void *label_addr, uint32_t value);
+int32_t sceGnmPrepareFlipWithEopInterrupt(uint32_t *dcb, void *label_addr, uint32_t value, uint32_t int_mode, uint32_t sys_ev);
+int32_t sceGnmPrepareFlipWithEopInterruptRequeued(uint32_t *dcb, void *label_addr, uint32_t value, uint32_t int_mode, uint32_t sys_ev);
 
 // Markers
 int32_t sceGnmInsertDingDongMarker(uint32_t *cmdbuf, uint32_t size);
@@ -190,7 +194,7 @@ void sceGnmDingDongForWorkload(uint32_t gnm_vqid, uint32_t next_offs_dw, uint64_
 // Compute queue & event management
 int32_t sceGnmMapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint64_t ring_base_addr, uint32_t ring_size_dw, uint32_t *read_ptr_addr);
 int32_t sceGnmMapComputeQueueWithPriority(uint32_t pipe_id, uint32_t queue_id, uint64_t ring_base_addr, uint32_t ring_size_dw, uint32_t *read_ptr_addr, uint32_t pipePriority);
-int32_t sceGnmUnmapComputeQueue(uint32_t pipe_id, uint32_t queue_id);
+int32_t sceGnmUnmapComputeQueue(uint32_t vqueue_id);
 int32_t sceGnmComputeWaitSemaphore(void);
 int32_t sceGnmComputeWaitOnAddress(uint32_t *cmdbuf, uint32_t size, uint64_t addr, uint32_t mask, uint32_t cmp_func, uint32_t ref);
 int32_t sceGnmGetLastWaitedAddress(void);
@@ -212,12 +216,15 @@ int32_t sceGnmValidateGetDiagnostics(void);
 int32_t sceGnmValidateResetState(void);
 int32_t sceGnmValidateDisableDiagnostics(void);
 int32_t sceGnmValidateDisableDiagnostics2(void);
-int32_t sceGnmValidateCommandBuffers(void);
 int32_t sceGnmValidateDrawCommandBuffers(void);
 int32_t sceGnmValidateDispatchCommandBuffers(void);
+int32_t sceGnmValidateCommandBuffers(void);
 int32_t sceGnmValidationRegisterMemoryCheckCallback(void);
 int32_t sceRazorIsLoaded(void);
 int32_t sceRazorCaptureImmediate(void);
+int32_t sceRazorCaptureSinceLastFlip(void);
+int32_t sceRazorCaptureCommandBuffersOnlyImmediate(void);
+int32_t sceRazorCaptureCommandBuffersOnlySinceLastFlip(void);
 int32_t sceRazorCpuJobManagerSequence(void);
 int32_t sceRazorCpuJobManagerJob(void);
 int32_t sceRazorCpuJobManagerDispatch(void);
@@ -309,12 +316,15 @@ void shim_sceGnmValidateGetDiagnostics(GuestContext *ctx);
 void shim_sceGnmValidateResetState(GuestContext *ctx);
 void shim_sceGnmValidateDisableDiagnostics(GuestContext *ctx);
 void shim_sceGnmValidateDisableDiagnostics2(GuestContext *ctx);
-void shim_sceGnmValidateCommandBuffers(GuestContext *ctx);
 void shim_sceGnmValidateDrawCommandBuffers(GuestContext *ctx);
 void shim_sceGnmValidateDispatchCommandBuffers(GuestContext *ctx);
+void shim_sceGnmValidateCommandBuffers(GuestContext *ctx);
 void shim_sceGnmValidationRegisterMemoryCheckCallback(GuestContext *ctx);
 void shim_sceRazorIsLoaded(GuestContext *ctx);
 void shim_sceRazorCaptureImmediate(GuestContext *ctx);
+void shim_sceRazorCaptureSinceLastFlip(GuestContext *ctx);
+void shim_sceRazorCaptureCommandBuffersOnlyImmediate(GuestContext *ctx);
+void shim_sceRazorCaptureCommandBuffersOnlySinceLastFlip(GuestContext *ctx);
 void shim_sceRazorCpuJobManagerSequence(GuestContext *ctx);
 void shim_sceRazorCpuJobManagerJob(GuestContext *ctx);
 void shim_sceRazorCpuJobManagerDispatch(GuestContext *ctx);
@@ -366,6 +376,9 @@ void shim_sceGnmSubmitAndFlipCommandBuffersForWorkload(GuestContext *ctx);
 void shim_sceGnmSubmitDone(GuestContext *ctx);
 void shim_sceGnmRequestFlipAndSubmitDone(GuestContext *ctx);
 void shim_sceGnmRequestFlipAndSubmitDoneForWorkload(GuestContext *ctx);
+void shim_sceGnmPrepareFlip(GuestContext *ctx);
+void shim_sceGnmPrepareFlipWithEopInterrupt(GuestContext *ctx);
+void shim_sceGnmPrepareFlipWithEopInterruptRequeued(GuestContext *ctx);
 // NID-only entry points (R3TYO7Tdv5o, ut57TBmRQN0), documented no-ops
 void shim_Func_4774D83BB4DDBF9A(GuestContext *ctx);
 void shim_Func_BADE7B4C199140DD(GuestContext *ctx);
