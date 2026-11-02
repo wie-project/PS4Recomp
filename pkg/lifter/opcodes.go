@@ -118,6 +118,7 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.VPERMILPS, x86asm.VPERMILPD, x86asm.VCMPPS, x86asm.VSHUFPS,
 		x86asm.VINSERTPS, x86asm.VMOVSHDUP, x86asm.VMOVLPS, x86asm.VMOVMSKPS,
 		x86asm.VBLENDPS, x86asm.VBLENDVPS, x86asm.VPBLENDVB, x86asm.SHUFPS, x86asm.SHUFPD,
+		x86asm.VMASKMOVPS, x86asm.VMASKMOVPD, x86asm.MASKMOVDQU, x86asm.VMASKMOVDQU,
 		x86asm.PCLMULQDQ, x86asm.AESKEYGENASSIST,
 		// String operations
 		x86asm.MOVSB, x86asm.MOVSW, x86asm.MOVSQ,

@@ -341,6 +341,10 @@ static size_t ajm_out_write(AjmOut *o, const uint8_t *src, size_t bytes) {
 // --- ATRAC9 helpers ---
 static bool at9_init(AjmInstance *inst, const uint8_t *cfg) {
     memcpy(inst->at9_config, cfg, 4);
+    if (cfg[0] != 0xFE) {
+        // Not a standalone ATRAC9 config (likely relies on stream RIFF/WAVE header); defer init
+        return false;
+    }
     if (inst->at9_handle) {
         Atrac9ReleaseHandle(inst->at9_handle);
         inst->at9_handle = NULL;
@@ -350,8 +354,6 @@ static bool at9_init(AjmInstance *inst, const uint8_t *cfg) {
     if (!inst->at9_handle) return false;
     int ret = Atrac9InitDecoder(inst->at9_handle, inst->at9_config);
     if (ret != 0) {
-        fprintf(stderr, "[AJM] Atrac9InitDecoder failed: 0x%x (config %02x %02x %02x %02x)\n",
-                ret, cfg[0], cfg[1], cfg[2], cfg[3]);
         return false;
     }
     Atrac9GetCodecInfo(inst->at9_handle, &inst->at9_info);
@@ -679,28 +681,10 @@ static int32_t process_single_job(AjmParsedJob *job) {
     if (control_flags & AJM_CONTROL_RESET) {
         ajm_instance_reset(inst);
     }
-    // Input control sideband: [init params], [format], [gapless]
+    // Input control sideband order (per PS4 SDK / shadPS4): Format -> Gapless -> Resample -> Initialize
     {
         uint8_t *in_cur = (uint8_t *)job->control_in_buf;
         uint8_t *in_end = in_cur ? in_cur + job->control_in_size : NULL;
-        if (in_cur && (control_flags & AJM_CONTROL_INITIALIZE)) {
-            size_t rem = (size_t)(in_end - in_cur);
-            if (inst->codec_type == AJM_CODEC_AT9_DEC) {
-                if (rem >= 4) {
-                    if (!at9_init(inst, in_cur)) {
-                        result_code |= ORBIS_AJM_RESULT_INVALID_PARAM;
-                    }
-                } else {
-                    result_code |= ORBIS_AJM_RESULT_INVALID_PARAM;
-                }
-            } else if (inst->codec_type == AJM_CODEC_MP3_DEC) {
-                mp3dec_init(&inst->mp3d);
-                inst->mp3_inited = true;
-                inst->is_initialized = true;
-            }
-            // AjmDecAt9InitializeParameters / generic init params are 8 bytes
-            in_cur += rem < 8 ? rem : 8;
-        }
         if (in_cur && (sideband_flags & AJM_SIDEBAND_FORMAT) &&
             in_cur + sizeof(OrbisAjmSidebandFormat) <= in_end) {
             in_cur += sizeof(OrbisAjmSidebandFormat); // output format request: not modelled
@@ -711,6 +695,26 @@ static int32_t process_single_job(AjmParsedJob *job) {
             memcpy(&gp, in_cur, sizeof(gp));
             ajm_apply_gapless_input(inst, &gp, (control_flags & AJM_CONTROL_RESET) != 0);
             in_cur += sizeof(gp);
+        }
+        if (in_cur && (control_flags & AJM_CONTROL_RESAMPLE) &&
+            in_cur + 8 <= in_end) {
+            in_cur += 8; // resample parameters
+        }
+        if (in_cur && (control_flags & AJM_CONTROL_INITIALIZE)) {
+            size_t rem = (size_t)(in_end - in_cur);
+            if (inst->codec_type == AJM_CODEC_AT9_DEC) {
+                if (rem >= 4) {
+                    memcpy(inst->at9_config, in_cur, 4);
+                    if (in_cur[0] == 0xFE) {
+                        at9_init(inst, in_cur);
+                    }
+                }
+            } else if (inst->codec_type == AJM_CODEC_MP3_DEC) {
+                mp3dec_init(&inst->mp3d);
+                inst->mp3_inited = true;
+                inst->is_initialized = true;
+            }
+            in_cur += rem < 8 ? rem : 8;
         }
     }
 

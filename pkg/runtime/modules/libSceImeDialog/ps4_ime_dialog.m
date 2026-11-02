@@ -20,7 +20,16 @@ static size_t utf16_strlen(const uint16_t *s, size_t max_len) {
     return len;
 }
 
-int32_t sceImeDialogInit(OrbisImeDialogParam *param, OrbisImeParamExtended *extended) {
+static inline void *recomp_guest_to_host_ptr(GuestContext *ctx, void *guest_ptr) {
+    uint64_t addr = (uint64_t)guest_ptr;
+    if (!addr) return NULL;
+    if (ctx && ctx->mem_base && addr < ctx->mem_size) {
+        return (void *)(ctx->mem_base + addr);
+    }
+    return guest_ptr;
+}
+
+int32_t sceImeDialogInit(GuestContext *ctx, const OrbisImeDialogParam *param, const OrbisImeParamExtended *extended) {
     (void)extended;
     if (!param || !param->input_text_buffer) {
         return (int32_t)0x80bc0031; // INVALID_ADDRESS
@@ -33,6 +42,15 @@ int32_t sceImeDialogInit(OrbisImeDialogParam *param, OrbisImeParamExtended *exte
     }
 
     g_ime_param = *param;
+    if (ctx && ctx->mem_base) {
+        g_ime_param.input_text_buffer = (uint16_t *)recomp_guest_to_host_ptr(ctx, (void *)param->input_text_buffer);
+        if (param->title) {
+            g_ime_param.title = (const uint16_t *)recomp_guest_to_host_ptr(ctx, (void *)param->title);
+        }
+        if (param->placeholder) {
+            g_ime_param.placeholder = (const uint16_t *)recomp_guest_to_host_ptr(ctx, (void *)param->placeholder);
+        }
+    }
     memset(&g_ime_result, 0, sizeof(g_ime_result));
     g_ime_status = ORBIS_IME_DIALOG_STATUS_RUNNING;
     pthread_mutex_unlock(&g_ime_mutex);
@@ -218,8 +236,9 @@ int32_t sceImeDialogGetPanelSizeExtended(const OrbisImeDialogParam *param,
 // Shims
 void shim_sceImeDialogInit(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceImeDialogInit(
-        ctx->rdi ? (OrbisImeDialogParam *)(ctx->mem_base + ctx->rdi) : NULL,
-        ctx->rsi ? (OrbisImeParamExtended *)(ctx->mem_base + ctx->rsi) : NULL
+        ctx,
+        ctx->rdi ? (const OrbisImeDialogParam *)(ctx->mem_base + ctx->rdi) : NULL,
+        ctx->rsi ? (const OrbisImeParamExtended *)(ctx->mem_base + ctx->rsi) : NULL
     );
     SHIM_RETURN();
 }

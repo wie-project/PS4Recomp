@@ -1205,3 +1205,57 @@ func TestVectorShiftPreservesFlags(t *testing.T) {
 		t.Errorf("expected PSRLQ to preserve NZCV, got:\n%s", joinedPsrlq)
 	}
 }
+
+func TestMaskmovdqu(t *testing.T) {
+	lifter := NewArm64Lifter(map[uint64]bool{0x1000: true})
+	fn := &disasm.Function{
+		EntryAddr: 0x1000,
+		EndAddr:   0x2000,
+		Blocks: map[uint64]*disasm.BasicBlock{
+			0x1000: {StartAddr: 0x1000},
+		},
+	}
+
+	// 1. VMASKMOVDQU X0, X1: c5 f9 f7 c1
+	vinst, err := x86asm.Decode([]byte{0xc5, 0xf9, 0xf7, 0xc1}, 64)
+	if err != nil {
+		t.Fatalf("decode vmaskmovdqu failed: %v", err)
+	}
+	if vinst.Op != x86asm.VMASKMOVDQU {
+		t.Fatalf("expected VMASKMOVDQU, got %v", vinst.Op)
+	}
+	dVinst := disasm.Instruction{Address: 0x1000, Inst: vinst}
+	linesV, err := lifter.LiftInstructionToBuf(dVinst, 0x1004, fn, nil)
+	if err != nil {
+		t.Fatalf("lift vmaskmovdqu failed: %v", err)
+	}
+	joinedV := strings.Join(linesV, "\n")
+	if !strings.Contains(joinedV, "add  x16, x28, x24") {
+		t.Errorf("expected add  x16, x28, x24 in vmaskmovdqu, got:\n%s", joinedV)
+	}
+	if !strings.Contains(joinedV, "fmov x17, d1") {
+		t.Errorf("expected fmov x17, d1 in vmaskmovdqu, got:\n%s", joinedV)
+	}
+	if !strings.Contains(joinedV, "strb w5, [x16") {
+		t.Errorf("expected strb w5, [x16 in vmaskmovdqu, got:\n%s", joinedV)
+	}
+
+	// 2. MASKMOVDQU X0, X1: 66 0f f7 c1
+	minst, err := x86asm.Decode([]byte{0x66, 0x0f, 0xf7, 0xc1}, 64)
+	if err != nil {
+		t.Fatalf("decode maskmovdqu failed: %v", err)
+	}
+	if minst.Op != x86asm.MASKMOVDQU {
+		t.Fatalf("expected MASKMOVDQU, got %v", minst.Op)
+	}
+	dMinst := disasm.Instruction{Address: 0x1004, Inst: minst}
+	linesM, err := lifter.LiftInstructionToBuf(dMinst, 0x1008, fn, nil)
+	if err != nil {
+		t.Fatalf("lift maskmovdqu failed: %v", err)
+	}
+	joinedM := strings.Join(linesM, "\n")
+	if !strings.Contains(joinedM, "add  x16, x28, x24") {
+		t.Errorf("expected add  x16, x28, x24 in maskmovdqu, got:\n%s", joinedM)
+	}
+}
+

@@ -91,7 +91,7 @@ typedef struct OrbisImeParamExtended {
 } OrbisImeParamExtended;
 
 // C API
-int32_t sceImeDialogInit(OrbisImeDialogParam *param, OrbisImeParamExtended *extended);
+int32_t sceImeDialogInit(GuestContext *ctx, const OrbisImeDialogParam *param, const OrbisImeParamExtended *extended);
 OrbisImeDialogStatus sceImeDialogGetStatus(void);
 int32_t sceImeDialogGetResult(OrbisImeDialogResult *result);
 int32_t sceImeDialogAbort(void);

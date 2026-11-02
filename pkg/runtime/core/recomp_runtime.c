@@ -670,6 +670,42 @@ GuestContext *recomp_init_runtime_file(const char *image_filename,
     }
   }
 
+  // Universal non-local jump registration:
+  // Dynamically resolve sigsetjmp / setjmp by PS4 standard NID or symbol name
+  static const char *const s_setjmp_names[] = {
+      "gNQ1V2vfXDE", // PS4 libc sigsetjmp NID
+      "sigsetjmp",
+      "_setjmp",
+      "setjmp",
+  };
+  for (size_t i = 0; i < sizeof(s_setjmp_names) / sizeof(s_setjmp_names[0]); i++) {
+    uint64_t addr = recomp_resolve_symbol("libc.prx", s_setjmp_names[i]);
+    if (!addr) {
+      addr = recomp_resolve_symbol(NULL, s_setjmp_names[i]);
+    }
+    if (addr) {
+      recomp_register_fn(addr, (recomp_fn_t)recomp_guest_setjmp);
+      fprintf(stderr, "[recomp-jmp] Hooked universal setjmp into dispatch table at 0x%llx (%s)\n",
+              (unsigned long long)addr, s_setjmp_names[i]);
+    }
+  }
+
+  pthread_mutex_lock(&g_unresolved_mutex);
+  for (int b = 0; b < UNRESOLVED_BUCKETS; b++) {
+    for (RecompUnresolvedSym *curr = g_unresolved_table[b]; curr; curr = curr->next) {
+      for (size_t i = 0; i < sizeof(s_setjmp_names) / sizeof(s_setjmp_names[0]); i++) {
+        if ((curr->nid && strcmp(curr->nid, s_setjmp_names[i]) == 0) ||
+            (curr->sym_name && strcmp(curr->sym_name, s_setjmp_names[i]) == 0)) {
+          recomp_register_fn(curr->addr, (recomp_fn_t)recomp_guest_setjmp);
+          fprintf(stderr, "[recomp-jmp] Hooked unresolved setjmp stub at 0x%llx (%s)\n",
+                  (unsigned long long)curr->addr, s_setjmp_names[i]);
+          break;
+        }
+      }
+    }
+  }
+  pthread_mutex_unlock(&g_unresolved_mutex);
+
   start_watch(ctx);
   return ctx;
 }
@@ -955,14 +991,60 @@ static uint64_t guest_return_address(GuestContext *ctx) {
   return ctx->rsp + 8 <= ctx->mem_size ? *(uint64_t *)(ctx->mem_base + ctx->rsp) : 0;
 }
 
+static _Thread_local GuestJmpRecord s_jmp_records[RECOMP_MAX_JMP_RECORDS];
+static _Thread_local int s_jmp_record_count = 0;
+
+void recomp_save_jmp_record(GuestContext *ctx, const GuestJmpRecord *rec) {
+  (void)ctx;
+  if (!rec) return;
+  for (int i = 0; i < s_jmp_record_count; i++) {
+    if (s_jmp_records[i].env == rec->env) {
+      s_jmp_records[i] = *rec;
+      return;
+    }
+  }
+  if (s_jmp_record_count < RECOMP_MAX_JMP_RECORDS) {
+    s_jmp_records[s_jmp_record_count++] = *rec;
+  } else {
+    memmove(&s_jmp_records[0], &s_jmp_records[1], sizeof(GuestJmpRecord) * (RECOMP_MAX_JMP_RECORDS - 1));
+    s_jmp_records[RECOMP_MAX_JMP_RECORDS - 1] = *rec;
+  }
+}
+
 void shim_guest_nonlocal_jump(GuestContext *ctx) {
+  uint64_t env = ctx->rdi;
+  int val = ctx->rsi ? (int)ctx->rsi : 1;
+
+  GuestJmpRecord *rec = NULL;
+  int found_idx = -1;
+  for (int i = s_jmp_record_count - 1; i >= 0; i--) {
+    if (s_jmp_records[i].env == env) {
+      rec = &s_jmp_records[i];
+      found_idx = i;
+      break;
+    }
+  }
+
+  if (!rec) {
+    fprintf(stderr,
+            "\nFATAL: guest longjmp(env=0x%llx, val=%d) called from 0x%llx: non-local jumps are not "
+            "supported without matching setjmp (no matching setjmp frame found)\n",
+            (unsigned long long)env, val, (unsigned long long)guest_return_address(ctx));
+    recomp_dump_guest_context(ctx);
+    fflush(stderr);
+    abort();
+  }
+
+  GuestJmpRecord target = *rec;
+  s_jmp_record_count = found_idx;
+
   fprintf(stderr,
-          "\nFATAL: guest longjmp(env=0x%llx, val=%d) called from 0x%llx: non-local jumps are not "
-          "supported by the ARM64 assembly backend\n",
-          (unsigned long long)ctx->rdi, (int)ctx->rsi, (unsigned long long)guest_return_address(ctx));
-  recomp_dump_guest_context(ctx);
+          "[recomp-jmp] guest longjmp(env=0x%llx, val=%d) -> unwinding to host_sp=0x%lx host_x30=0x%lx guest_rip=0x%llx\n",
+          (unsigned long long)env, val, (unsigned long)target.host_sp, (unsigned long)target.host_x30,
+          (unsigned long long)target.guest_rip);
   fflush(stderr);
-  abort();
+
+  recomp_guest_do_longjmp(ctx, &target, val);
 }
 
 // __cxa_throw(void *object, std::type_info *type, void (*dtor)(void *)); __cxa_rethrow(void).

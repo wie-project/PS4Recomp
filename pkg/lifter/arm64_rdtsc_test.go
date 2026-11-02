@@ -77,3 +77,23 @@ int main(void) {
 		t.Fatalf("%v: %s", err, o)
 	}
 }
+
+func TestRdtscpLifting(t *testing.T) {
+	// 0f 01 f9 = rdtscp
+	l := liftBlock(t, "0f01f9")[0]
+	forbid(t, "rdtscp", l, "msr nzcv...", "subs ...", "adds ...", "cmp ...")
+
+	foundTsc := false
+	foundAux := false
+	for _, ln := range l {
+		if strings.Contains(ln, "cntvct_el0") {
+			foundTsc = true
+		}
+		if strings.Contains(ln, "mov w21, wzr") {
+			foundAux = true
+		}
+	}
+	if !foundTsc || !foundAux {
+		t.Fatalf("expected cntvct_el0 and mov w21, wzr in lifted rdtscp, got:\n%s", strings.Join(l, "\n"))
+	}
+}

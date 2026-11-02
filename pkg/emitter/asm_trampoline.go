@@ -424,4 +424,87 @@ _recomp_indirect_jump:
     DISPATCH_LOOKUP
 99:
     DISPATCH_EXTERNAL
+
+// Non-local control transfer: setjmp / longjmp
+.globl _recomp_guest_setjmp
+_recomp_guest_setjmp:
+    ldr  x17, [x28, x26]
+    add  x26, x26, #8
+
+    add  x16, x28, x24
+    str  x17, [x16, #0]        // env[0] = RIP
+    str  x20, [x16, #8]        // env[1] = RBX
+    str  x26, [x16, #16]       // env[2] = RSP
+    str  x25, [x16, #24]       // env[3] = RBP
+    str  x12, [x16, #32]       // env[4] = R12
+    str  x13, [x16, #40]       // env[5] = R13
+    str  x14, [x16, #48]       // env[6] = R14
+    str  x15, [x16, #56]       // env[7] = R15
+    mov  w1, #0x037f
+    strh w1, [x16, #64]        // env[8] fpu cw
+    mov  w1, #0x1f80
+    str  w1, [x16, #68]        // env[8] mxcsr
+
+    stp  x29, x30, [sp, #-256]!
+    mov  x29, sp
+
+    add  x16, sp, #256         // caller's host sp
+    str  x24, [sp, #16]        // env
+    str  x16, [sp, #24]        // host_sp
+    ldr  x16, [sp, #8]         // caller's host x30
+    str  x16, [sp, #32]        // host_x30
+    ldr  x16, [sp, #0]         // caller's host x29
+    str  x16, [sp, #40]        // host_x29
+    str  x26, [sp, #48]        // guest_rsp
+    str  x25, [sp, #56]        // guest_rbp
+    str  x20, [sp, #64]        // guest_rbx
+    str  x12, [sp, #72]        // guest_r12
+    str  x13, [sp, #80]        // guest_r13
+    str  x14, [sp, #88]        // guest_r14
+    str  x15, [sp, #96]        // guest_r15
+    str  x17, [sp, #104]       // guest_rip
+
+    // Save caller-saved ARM64 registers that map to guest registers (x8..x15)
+    stp  x8,  x9,  [sp, #112]
+    stp  x10, x11, [sp, #128]
+    stp  x12, x13, [sp, #144]
+    stp  x14, x15, [sp, #160]
+
+    add  x2, x27, #0x70
+    ldr  x0, [x28, x2]         // ctx
+    add  x1, sp, #16           // &rec
+    bl   _recomp_save_jmp_record
+
+    // Restore guest registers x8..x15
+    ldp  x8,  x9,  [sp, #112]
+    ldp  x10, x11, [sp, #128]
+    ldp  x12, x13, [sp, #144]
+    ldp  x14, x15, [sp, #160]
+
+    ldp  x29, x30, [sp], #256
+    mov  x19, #0               // guest RAX = 0
+    ret
+
+.globl _recomp_guest_do_longjmp
+_recomp_guest_do_longjmp:
+    ldr  x26, [x1, #32]        // guest_rsp
+    ldr  x25, [x1, #40]        // guest_rbp
+    ldr  x20, [x1, #48]        // guest_rbx
+    ldr  x12, [x1, #56]        // guest_r12
+    ldr  x13, [x1, #64]        // guest_r13
+    ldr  x14, [x1, #72]        // guest_r14
+    ldr  x15, [x1, #80]        // guest_r15
+
+    ldr  x27, [x0, #0x88]      // fs_base
+    ldr  x28, [x0, #0x330]     // mem_base
+
+    ldr  x16, [x1, #8]         // host_sp
+    ldr  x30, [x1, #16]        // host_x30
+    ldr  x29, [x1, #24]        // host_x29
+
+    cmp  w2, #0
+    csinc w19, w2, wzr, ne     // x19 = val ? val : 1
+
+    mov  sp, x16
+    ret
 `

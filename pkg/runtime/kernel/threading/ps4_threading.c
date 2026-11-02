@@ -1,9 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 #include "recomp_runtime.h"
 #include "ps4_threading.h"
 #include <inttypes.h>
 #include <errno.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#endif
 
 // scePthread* report failures as SCE kernel errors (0x80020000 | errno),
 // while the POSIX shims they forward to return plain errno values.
@@ -14,30 +22,14 @@
       (ctx)->rax = 0x80020000ULL | e_;                                         \
   } while (0)
 
-// Multi-threading runtime support
-typedef struct RecompPthreadAttr {
-  uint32_t sched_policy;
-  int32_t sched_inherit;
-  int32_t prio;
-  int32_t suspend;
-  uint32_t flags;
-  uint64_t stackaddr_attr;
-  uint64_t stacksize_attr;
-  uint64_t guardsize_attr;
-  uint64_t cpusetsize;
-  uint64_t cpuset;
-} RecompPthreadAttr;
-
-static RecompPthreadAttr *get_pthread_attr(GuestContext *ctx, uint64_t attr_addr) {
-  if (!attr_addr) return NULL;
-  uint64_t ptr = *(uint64_t *)(ctx->mem_base + attr_addr);
-  if (!ptr) return NULL;
-  return (RecompPthreadAttr *)ptr;
-}
+#define ORBIS_OK 0
+#define ORBIS_KERNEL_PRIO_FIFO_LOWEST 256
+#define ORBIS_KERNEL_PRIO_FIFO_HIGHEST 767
 
 static RecompThread *g_threads = NULL;
+static RecompThread *g_gc_list = NULL;
 static pthread_mutex_t g_threads_mutex = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t g_thread_counter = 1000;
+static _Atomic int g_next_tid = 1001;
 static _Thread_local RecompThread *g_current_thread = NULL;
 
 static void register_thread(RecompThread *t) {
@@ -47,8 +39,76 @@ static void register_thread(RecompThread *t) {
   pthread_mutex_unlock(&g_threads_mutex);
 }
 
-// Handle 0 finds no thread (join, detach, cancel and RaiseException report ESRCH or do
-// nothing). AttrGet, Rename and Getname treat 0 as the calling thread themselves.
+static void unregister_thread_locked(RecompThread *t) {
+  RecompThread **curr = &g_threads;
+  while (*curr) {
+    if (*curr == t) {
+      *curr = t->next;
+      break;
+    }
+    curr = &(*curr)->next;
+  }
+}
+
+// Garbage collection logic matching shadps4 ThreadState::ShouldCollect / TryCollect
+static inline bool should_collect_locked(RecompThread *t) {
+  return atomic_load_explicit(&t->refcount, memory_order_acquire) == 0 &&
+         atomic_load_explicit(&t->state, memory_order_acquire) == PTHREAD_STATE_DEAD &&
+         (atomic_load_explicit(&t->flags, memory_order_acquire) & THREAD_FLAG_DETACHED);
+}
+
+// Releases t->lock before returning
+static void try_collect_locked(RecompThread *t) {
+  if (!should_collect_locked(t)) {
+    pthread_mutex_unlock(&t->lock);
+    return;
+  }
+
+  pthread_mutex_lock(&g_threads_mutex);
+  if (should_collect_locked(t)) {
+    unregister_thread_locked(t);
+    t->next = g_gc_list;
+    g_gc_list = t;
+  }
+  pthread_mutex_unlock(&g_threads_mutex);
+
+  pthread_mutex_unlock(&t->lock);
+}
+
+// Free resources of terminated detached threads in g_gc_list
+void recomp_thread_collect(void) {
+  RecompThread *reclaim_list = NULL;
+
+  pthread_mutex_lock(&g_threads_mutex);
+  RecompThread **curr = &g_gc_list;
+  while (*curr) {
+    RecompThread *t = *curr;
+    if (atomic_load_explicit(&t->tid, memory_order_acquire) == TID_TERMINATED) {
+      *curr = t->next;
+      t->next = reclaim_list;
+      reclaim_list = t;
+    } else {
+      curr = &(*curr)->next;
+    }
+  }
+  pthread_mutex_unlock(&g_threads_mutex);
+
+  while (reclaim_list) {
+    RecompThread *t = reclaim_list;
+    reclaim_list = t->next;
+
+    if (t->ctx) {
+      recomp_free_thread_context(t->ctx);
+      t->ctx = NULL;
+    }
+    pthread_mutex_destroy(&t->lock);
+    pthread_mutex_destroy(&t->join_wait_mutex);
+    pthread_cond_destroy(&t->join_wait_cv);
+    free(t);
+  }
+}
+
+// Handle 0 finds no thread. AttrGet, Rename and Getname treat 0 as the calling thread themselves.
 RecompThread *recomp_find_thread(uint64_t handle) {
   if (handle == 0) return NULL;
   pthread_mutex_lock(&g_threads_mutex);
@@ -82,7 +142,6 @@ RecompThread *recomp_get_current_thread(void) {
   return g_current_thread;
 }
 
-// Fiber host threads run on behalf of whichever guest thread resumed them.
 void recomp_set_current_thread(RecompThread *t) {
   g_current_thread = t;
 }
@@ -98,27 +157,24 @@ const char *recomp_get_current_thread_name(void) {
   return "main";
 }
 
-static void unregister_thread(RecompThread *t) {
-  pthread_mutex_lock(&g_threads_mutex);
-  RecompThread **curr = &g_threads;
-  while (*curr) {
-    if (*curr == t) {
-      *curr = t->next;
-      break;
-    }
-    curr = &(*curr)->next;
-  }
-  pthread_mutex_unlock(&g_threads_mutex);
-}
-
 static RecompThread g_main_thread_obj = {0};
 
 void recomp_init_main_thread(GuestContext *ctx) {
+  if (ctx->thread_id == 0) ctx->thread_id = 1000;
+  g_main_thread_obj.magic = THREAD_MAGIC;
+  atomic_store_explicit(&g_main_thread_obj.tid, (int)ctx->thread_id, memory_order_relaxed);
+  atomic_store_explicit(&g_main_thread_obj.refcount, 1, memory_order_relaxed);
+  atomic_store_explicit(&g_main_thread_obj.state, PTHREAD_STATE_RUNNING, memory_order_relaxed);
+  atomic_store_explicit(&g_main_thread_obj.flags, 0, memory_order_relaxed);
+  pthread_mutex_init(&g_main_thread_obj.lock, NULL);
+  pthread_mutex_init(&g_main_thread_obj.join_wait_mutex, NULL);
+  pthread_cond_init(&g_main_thread_obj.join_wait_cv, NULL);
   g_main_thread_obj.host_thread = pthread_self();
-  g_main_thread_obj.thread_id = ctx->thread_id ? ctx->thread_id : 1000;
+  g_main_thread_obj.thread_id = ctx->thread_id;
   g_main_thread_obj.ctx = ctx;
   g_main_thread_obj.stack_base = ctx->stack_base;
   g_main_thread_obj.stack_size = ctx->stack_alloc_size;
+  atomic_store_explicit(&g_main_thread_obj.start_ready, 1, memory_order_relaxed);
   strncpy(g_main_thread_obj.name, "main", sizeof(g_main_thread_obj.name) - 1);
   if (ctx->fs_base && ctx->mem_base) {
     *(uint64_t *)(ctx->mem_base + ctx->fs_base + 0x10ULL) = (uint64_t)&g_main_thread_obj;
@@ -127,58 +183,116 @@ void recomp_init_main_thread(GuestContext *ctx) {
   register_thread(&g_main_thread_obj);
 }
 
-// Orders `finished` against `detached` so exactly one side releases a
-// detached thread's resources.
-static pthread_mutex_t g_detach_mutex = PTHREAD_MUTEX_INITIALIZER;
+RecompThread *recomp_init_system_thread(GuestContext *ctx, const char *name) {
+  if (!ctx) return NULL;
+  RecompThread *t = (RecompThread *)calloc(1, sizeof(RecompThread));
+  if (!t) return NULL;
 
-// Common end of a guest thread, whether its entry returned or it called
-// scePthreadExit: TLS destructors, then release the guest stack and context
-// of detached threads (joinable ones are released by join).
-static void recomp_thread_epilogue(RecompThread *t, GuestContext *ctx) {
-  fprintf(stderr, "[ps4-thread] Thread exited: id=%" PRIu64 ", name='%s', ret=0x%llx\n",
-          ctx->thread_id, t->name[0] ? t->name : "unnamed", (unsigned long long)t->ret_val);
+  int tid = atomic_fetch_add(&g_next_tid, 1);
+  ctx->thread_id = (uint64_t)tid;
+  t->magic = THREAD_MAGIC;
+  atomic_store_explicit(&t->tid, tid, memory_order_relaxed);
+  atomic_store_explicit(&t->refcount, 1, memory_order_relaxed);
+  atomic_store_explicit(&t->state, PTHREAD_STATE_RUNNING, memory_order_relaxed);
+  atomic_store_explicit(&t->flags, THREAD_FLAG_DETACHED, memory_order_relaxed);
+  t->detached = true;
 
-  // Run registered pthread TLS key destructors
-  GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-  for (int iter = 0; iter < 4; iter++) {
-    bool has_active = false;
-    for (int k = 0; k < 128; k++) {
-      uint64_t val = ctx->tls_keys[k];
-      uint64_t dtor = proc->tls_destructors[k];
-      if (val != 0 && dtor != 0) {
-        ctx->tls_keys[k] = 0;
-        has_active = true;
-        ctx->rdi = val;
-        ctx->rsp -= 8;
-        MEM_U64(ctx->rsp) = 0xdeadbeefULL;
-        ctx->rip = dtor;
-        recomp_dispatch(ctx, dtor);
-      }
-    }
-    if (!has_active) break;
+  pthread_mutex_init(&t->lock, NULL);
+  pthread_mutex_init(&t->join_wait_mutex, NULL);
+  pthread_cond_init(&t->join_wait_cv, NULL);
+
+  t->host_thread = pthread_self();
+  t->thread_id = (uint64_t)tid;
+  t->ctx = ctx;
+  t->stack_base = ctx->stack_base;
+  t->stack_size = ctx->stack_alloc_size;
+  atomic_store_explicit(&t->start_ready, 1, memory_order_relaxed);
+  if (name && name[0]) {
+    strncpy(t->name, name, sizeof(t->name) - 1);
+  } else {
+    strncpy(t->name, "system_worker", sizeof(t->name) - 1);
   }
 
-  pthread_mutex_lock(&g_detach_mutex);
-  t->finished = true;
-  bool release = t->detached;
-  pthread_mutex_unlock(&g_detach_mutex);
+  if (ctx->fs_base && ctx->mem_base) {
+    *(uint64_t *)(ctx->mem_base + ctx->fs_base + 0x10ULL) = (uint64_t)t;
+  }
+  g_current_ctx = ctx;
+  g_current_thread = t;
+  register_thread(t);
+  return t;
+}
 
-  if (release) {
-    unregister_thread(t);
-    recomp_free_thread_context(ctx);
-    free(t);
+void recomp_cleanup_system_thread(RecompThread *t) {
+  if (!t) return;
+  pthread_mutex_lock(&t->lock);
+  atomic_store_explicit(&t->state, PTHREAD_STATE_DEAD, memory_order_release);
+  atomic_store_explicit(&t->refcount, 0, memory_order_relaxed);
+  try_collect_locked(t);
+  if (g_current_thread == t) {
+    g_current_thread = NULL;
   }
 }
 
+// Exit routine matching shadps4 ExitThread
+static void recomp_thread_exit(RecompThread *t, void *status) {
+  GuestContext *ctx = t->ctx;
+
+  // Run registered pthread TLS key destructors
+  if (ctx) {
+    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
+    for (int iter = 0; iter < 4; iter++) {
+      bool has_active = false;
+      for (int k = 0; k < 128; k++) {
+        uint64_t val = ctx->tls_keys[k];
+        uint64_t dtor = proc->tls_destructors[k];
+        if (val != 0 && dtor != 0) {
+          ctx->tls_keys[k] = 0;
+          has_active = true;
+          ctx->rdi = val;
+          ctx->rsp -= 8;
+          MEM_U64(ctx->rsp) = 0xdeadbeefULL;
+          ctx->rip = dtor;
+          recomp_dispatch(ctx, dtor);
+        }
+      }
+      if (!has_active) break;
+    }
+  }
+
+  // Run cleanup handlers
+  while (t->cleanup_stack) {
+    PthreadCleanupEntry *c = t->cleanup_stack;
+    t->cleanup_stack = c->next;
+    if (c->routine && ctx) {
+      ctx->rdi = c->arg;
+      ctx->rsp -= 8;
+      MEM_U64(ctx->rsp) = 0xdeadbeefULL;
+      ctx->rip = c->routine;
+      recomp_dispatch(ctx, c->routine);
+    }
+    if (c->onheap) free(c);
+  }
+
+  t->ret_val = (uint64_t)status;
+
+  pthread_mutex_lock(&t->lock);
+  atomic_store_explicit(&t->state, PTHREAD_STATE_DEAD, memory_order_release);
+  t->finished = true;
+  atomic_fetch_sub_explicit(&t->refcount, 1, memory_order_acq_rel);
+
+  // If detached and refcount reached 0, queue for collection
+  try_collect_locked(t); // unlocks t->lock
+
+  // Wake up any joiner waiting on join_wait_cv
+  pthread_mutex_lock(&t->join_wait_mutex);
+  atomic_store_explicit(&t->tid, TID_TERMINATED, memory_order_release);
+  pthread_cond_broadcast(&t->join_wait_cv);
+  pthread_mutex_unlock(&t->join_wait_mutex);
+
+  pthread_exit(NULL);
+}
+
 #if defined(__APPLE__)
-#include <pthread/qos.h>
-// PS4_GUEST_WORKER_QOS=<default|utility|initiated|interactive>: QoS class of the game's job
-// workers (guest threads named "NdJobWorkerThread*"), set when the thread starts. Unset means
-// "initiated": above other apps' default-class work, which otherwise takes the cores from the
-// workers while a frame waits for a job, and below the CP, encoder and audio threads
-// (USER_INTERACTIVE). "default" leaves the class the thread got at creation (QOS_CLASS_DEFAULT).
-// Idle workers spin instead of sleeping, so "interactive" puts six spinning threads next to the
-// CP and encoder threads; it exists for experiments only.
 static void guest_worker_apply_qos(const char *name) {
   static const char kPrefix[] = "NdJobWorkerThread";
   if (strncmp(name, kPrefix, sizeof kPrefix - 1) != 0) return;
@@ -189,24 +303,19 @@ static void guest_worker_apply_qos(const char *name) {
   if (strcmp(e, "utility") == 0) cls = QOS_CLASS_UTILITY;
   else if (strcmp(e, "initiated") == 0) cls = QOS_CLASS_USER_INITIATED;
   else if (strcmp(e, "interactive") == 0) cls = QOS_CLASS_USER_INTERACTIVE;
-  else {
-    fprintf(stderr, "[ps4-thread] PS4_GUEST_WORKER_QOS='%s' unknown (default|utility|initiated|interactive); unchanged\n", e);
-    return;
-  }
-  qos_class_t before = QOS_CLASS_UNSPECIFIED;
-  int rel = 0;
-  pthread_get_qos_class_np(pthread_self(), &before, &rel);
-  int err = pthread_set_qos_class_self_np(cls, 0);
-  if (err != 0) {
-    fprintf(stderr, "[ps4-thread] '%s': setting QoS %s failed: error %d\n", name, e, err);
-    return;
-  }
-  fprintf(stderr, "[ps4-thread] '%s': QoS 0x%x -> %s (0x%x)\n", name, (unsigned)before, e, (unsigned)cls);
+  else return;
+  pthread_set_qos_class_self_np(cls, 0);
 }
 #endif
 
 static void *recomp_host_thread_runner(void *arg) {
   RecompThread *t = (RecompThread *)arg;
+
+  while (!atomic_load_explicit(&t->start_ready, memory_order_acquire)) {
+    sched_yield();
+  }
+  atomic_thread_fence(memory_order_seq_cst);
+
   GuestContext *ctx = t->ctx;
   g_current_ctx = ctx;
   g_current_thread = t;
@@ -220,9 +329,6 @@ static void *recomp_host_thread_runner(void *arg) {
 #endif
   }
 
-  fprintf(stderr, "[ps4-thread] Thread started: id=%" PRIu64 ", name='%s', entry=0x%llx, arg=0x%llx\n",
-          ctx->thread_id, t->name[0] ? t->name : "unnamed", (unsigned long long)t->start_routine, (unsigned long long)t->arg);
-
   // Push dummy return address on guest stack
   ctx->rsp -= 8;
   MEM_U64(ctx->rsp) = 0xdeadbeefULL;
@@ -233,9 +339,161 @@ static void *recomp_host_thread_runner(void *arg) {
 
   recomp_dispatch(ctx, t->start_routine);
 
-  t->ret_val = ctx->rax;
-  recomp_thread_epilogue(t, ctx);
+  recomp_thread_exit(t, (void *)ctx->rax);
   return NULL;
+}
+
+// Join implementation matching shadps4 JoinThread: waits on join_wait_cv
+static int do_thread_join(RecompThread *t, void **thread_return) {
+  if (!t) return ESRCH;
+  if (t == g_current_thread) return EDEADLK;
+
+  pthread_mutex_lock(&t->lock);
+  if (atomic_load_explicit(&t->flags, memory_order_acquire) & THREAD_FLAG_DETACHED) {
+    pthread_mutex_unlock(&t->lock);
+    return EINVAL;
+  }
+  if (t->joiner != NULL) {
+    pthread_mutex_unlock(&t->lock);
+    return ENOTSUP;
+  }
+  t->joiner = g_current_thread;
+  if (g_current_thread) {
+    g_current_thread->join_target = t;
+  }
+  pthread_mutex_unlock(&t->lock);
+
+  // Wait for the target thread to signal termination via join_wait_cv
+  pthread_mutex_lock(&t->join_wait_mutex);
+  while (atomic_load_explicit(&t->tid, memory_order_acquire) != TID_TERMINATED) {
+    pthread_cond_wait(&t->join_wait_cv, &t->join_wait_mutex);
+  }
+  pthread_mutex_unlock(&t->join_wait_mutex);
+
+  if (g_current_thread) {
+    g_current_thread->join_target = NULL;
+  }
+
+  void *ret_val = (void *)t->ret_val;
+
+  pthread_join(t->host_thread, NULL);
+
+  pthread_mutex_lock(&t->lock);
+  atomic_fetch_or_explicit(&t->flags, THREAD_FLAG_DETACHED, memory_order_release);
+  t->joined = true;
+  t->detached = true;
+  t->joiner = NULL;
+  try_collect_locked(t); // unlocks t->lock
+
+  if (thread_return != NULL) {
+    *thread_return = ret_val;
+  }
+
+  recomp_thread_collect();
+  return 0;
+}
+
+// Detach implementation matching shadps4 posix_pthread_detach
+static int do_thread_detach(RecompThread *t) {
+  if (!t) return EINVAL;
+
+  pthread_mutex_lock(&t->lock);
+  if ((atomic_load_explicit(&t->flags, memory_order_acquire) & THREAD_FLAG_DETACHED) ||
+      t->joiner != NULL) {
+    pthread_mutex_unlock(&t->lock);
+    return EINVAL;
+  }
+
+  pthread_detach(t->host_thread);
+
+  atomic_fetch_or_explicit(&t->flags, THREAD_FLAG_DETACHED, memory_order_release);
+  t->detached = true;
+  try_collect_locked(t); // unlocks t->lock
+
+  recomp_thread_collect();
+  return 0;
+}
+
+static int do_create_thread(GuestContext *ctx, uint64_t thread_ptr_addr, const PthreadAttr *attr,
+                            uint64_t start_routine, uint64_t arg, const char *name) {
+  recomp_thread_collect();
+
+  RecompThread *t = (RecompThread *)calloc(1, sizeof(RecompThread));
+  if (!t) {
+    return ENOMEM;
+  }
+
+  t->magic = THREAD_MAGIC;
+  int tid = atomic_fetch_add(&g_next_tid, 1);
+  atomic_store_explicit(&t->tid, tid, memory_order_relaxed);
+  atomic_store_explicit(&t->refcount, 1, memory_order_relaxed);
+  atomic_store_explicit(&t->state, PTHREAD_STATE_RUNNING, memory_order_relaxed);
+
+  pthread_mutex_init(&t->lock, NULL);
+  pthread_mutex_init(&t->join_wait_mutex, NULL);
+  pthread_cond_init(&t->join_wait_cv, NULL);
+
+  t->thread_id = (uint64_t)tid;
+  t->start_routine = start_routine;
+  t->arg = arg;
+
+  uint64_t stack_size = 2 * 1024 * 1024;
+  if (attr) {
+    t->attr = *attr;
+    if (attr->stacksize_attr >= 16384) {
+      stack_size = attr->stacksize_attr;
+    }
+    if (attr->flags & PTHREAD_ATTR_DETACHED) {
+      atomic_fetch_or_explicit(&t->flags, THREAD_FLAG_DETACHED, memory_order_relaxed);
+      t->detached = true;
+    }
+  }
+
+  if (name && name[0]) {
+    strncpy(t->name, name, sizeof(t->name) - 1);
+  }
+
+  GuestContext *child_ctx = recomp_create_thread_context(ctx, stack_size);
+  if (!child_ctx) {
+    pthread_mutex_destroy(&t->lock);
+    pthread_mutex_destroy(&t->join_wait_mutex);
+    pthread_cond_destroy(&t->join_wait_cv);
+    free(t);
+    return ENOMEM;
+  }
+
+  child_ctx->thread_id = t->thread_id;
+  t->ctx = child_ctx;
+  t->stack_base = child_ctx->stack_base;
+  t->stack_size = child_ctx->stack_alloc_size;
+
+  if (child_ctx->fs_base && child_ctx->mem_base) {
+    *(uint64_t *)(child_ctx->mem_base + child_ctx->fs_base + 0x10ULL) = (uint64_t)t;
+  }
+
+  register_thread(t);
+
+  if (thread_ptr_addr) {
+    *(uint64_t *)(ctx->mem_base + thread_ptr_addr) = (uint64_t)t;
+  }
+
+  int ret = pthread_create(&t->host_thread, NULL, recomp_host_thread_runner, t);
+  if (ret != 0) {
+    pthread_mutex_lock(&t->lock);
+    atomic_store_explicit(&t->refcount, 0, memory_order_relaxed);
+    atomic_store_explicit(&t->state, PTHREAD_STATE_DEAD, memory_order_relaxed);
+    try_collect_locked(t);
+    recomp_free_thread_context(child_ctx);
+    return ret;
+  }
+
+  if (t->detached) {
+    pthread_detach(t->host_thread);
+  }
+
+  atomic_thread_fence(memory_order_seq_cst);
+  atomic_store_explicit(&t->start_ready, 1, memory_order_release);
+  return 0;
 }
 
 void shim_pthread_create(GuestContext *ctx) {
@@ -244,65 +502,23 @@ void shim_pthread_create(GuestContext *ctx) {
   uint64_t start_routine = ctx->rdx;
   uint64_t arg = ctx->rcx;
 
-  (void)attr_addr;
-
-  RecompThread *t = (RecompThread *)calloc(1, sizeof(RecompThread));
-  if (!t) {
-    set_guest_errno(ctx, ENOMEM);
-    ctx->rax = (uint64_t)ENOMEM;
-    SHIM_RETURN();
+  PthreadAttr attr_val;
+  PthreadAttr *p_attr = NULL;
+  if (attr_addr) {
+    uint64_t p = *(uint64_t *)(ctx->mem_base + attr_addr);
+    if (p) {
+      memcpy(&attr_val, (void *)p, sizeof(PthreadAttr));
+      p_attr = &attr_val;
+    }
   }
 
-  pthread_mutex_lock(&g_threads_mutex);
-  t->thread_id = ++g_thread_counter;
-  pthread_mutex_unlock(&g_threads_mutex);
-
-  uint64_t stack_size = 4 * 1024 * 1024;
-  RecompPthreadAttr *attr = get_pthread_attr(ctx, attr_addr);
-  if (attr && attr->stacksize_attr >= 16 * 1024) {
-    stack_size = attr->stacksize_attr;
+  int err = do_create_thread(ctx, thread_ptr_addr, p_attr, start_routine, arg, NULL);
+  if (err != 0) {
+    set_guest_errno(ctx, err);
+    ctx->rax = (uint64_t)err;
+  } else {
+    ctx->rax = 0;
   }
-
-  GuestContext *child_ctx = recomp_create_thread_context(ctx, stack_size);
-  if (!child_ctx) {
-    free(t);
-    set_guest_errno(ctx, ENOMEM);
-    ctx->rax = (uint64_t)ENOMEM;
-    SHIM_RETURN();
-  }
-  child_ctx->thread_id = t->thread_id;
-
-  t->ctx = child_ctx;
-  t->stack_base = child_ctx->stack_base;
-  t->stack_size = stack_size;
-  t->start_routine = start_routine;
-  t->arg = arg;
-  t->finished = false;
-  t->joined = false;
-  t->detached = false;
-
-  if (child_ctx->fs_base && ctx->mem_base) {
-    *(uint64_t *)(ctx->mem_base + child_ctx->fs_base + 0x10ULL) = (uint64_t)t;
-  }
-
-  register_thread(t);
-
-  // Store thread handle in guest pointer
-  if (thread_ptr_addr != 0) {
-    *(uint64_t *)(ctx->mem_base + thread_ptr_addr) = (uint64_t)t;
-  }
-
-  int ret = pthread_create(&t->host_thread, NULL, recomp_host_thread_runner, t);
-  if (ret != 0) {
-    unregister_thread(t);
-    recomp_free_thread_context(child_ctx);
-    free(t);
-    set_guest_errno(ctx, ret);
-    ctx->rax = (uint64_t)ret;
-    SHIM_RETURN();
-  }
-
-  ctx->rax = 0;
   SHIM_RETURN();
 }
 
@@ -311,24 +527,17 @@ void shim_pthread_join(GuestContext *ctx) {
   uint64_t retval_ptr_addr = ctx->rsi;
 
   RecompThread *t = find_thread(handle);
-  if (!t) {
-    ctx->rax = 0;
+  void *retval = NULL;
+  int err = do_thread_join(t, retval_ptr_addr ? &retval : NULL);
+  if (err != 0) {
+    set_guest_errno(ctx, err);
+    ctx->rax = (uint64_t)err;
     SHIM_RETURN();
   }
 
-  pthread_join(t->host_thread, NULL);
-  t->joined = true;
-
   if (retval_ptr_addr) {
-    *(uint64_t *)(ctx->mem_base + retval_ptr_addr) = t->ret_val;
+    *(uint64_t *)(ctx->mem_base + retval_ptr_addr) = (uint64_t)retval;
   }
-
-  unregister_thread(t);
-  if (t->ctx) {
-    recomp_free_thread_context(t->ctx);
-  }
-  free(t);
-
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -336,20 +545,13 @@ void shim_pthread_join(GuestContext *ctx) {
 void shim_pthread_detach(GuestContext *ctx) {
   uint64_t handle = ctx->rdi;
   RecompThread *t = find_thread(handle);
-  if (t) {
-    pthread_detach(t->host_thread);
-    pthread_mutex_lock(&g_detach_mutex);
-    bool release = t->finished && !t->detached && t->ctx && t != &g_main_thread_obj;
-    t->detached = true;
-    pthread_mutex_unlock(&g_detach_mutex);
-    if (release) {
-      // Already exited: nobody else will free it.
-      unregister_thread(t);
-      recomp_free_thread_context(t->ctx);
-      free(t);
-    }
+  int err = do_thread_detach(t);
+  if (err != 0) {
+    set_guest_errno(ctx, err);
+    ctx->rax = (uint64_t)err;
+  } else {
+    ctx->rax = 0;
   }
-  ctx->rax = 0;
   SHIM_RETURN();
 }
 
@@ -431,23 +633,15 @@ void shim_pthread_attr_init(GuestContext *ctx) {
     ctx->rax = (uint64_t)EINVAL;
     SHIM_RETURN();
   }
-  RecompPthreadAttr *pattr = (RecompPthreadAttr *)calloc(1, sizeof(RecompPthreadAttr));
-  if (!pattr) {
+  PthreadAttr *attr = (PthreadAttr *)calloc(1, sizeof(PthreadAttr));
+  if (!attr) {
     ctx->rax = (uint64_t)ENOMEM;
     SHIM_RETURN();
   }
-  pattr->sched_policy = 1; // Fifo
-  pattr->sched_inherit = 4; // InheritSched
-  pattr->prio = 700; // ORBIS_KERNEL_PRIO_FIFO_DEFAULT
-  pattr->suspend = 0;
-  pattr->flags = 2; // ScopeSystem
-  pattr->stackaddr_attr = 0;
-  pattr->stacksize_attr = 1024 * 1024; // 1MB default
-  pattr->guardsize_attr = 0;
-  pattr->cpusetsize = 0;
-  pattr->cpuset = 0;
-
-  *(uint64_t *)(ctx->mem_base + attr_addr) = (uint64_t)pattr;
+  attr->stacksize_attr = 2 * 1024 * 1024;
+  attr->sched_policy = 2; // Other
+  attr->prio = 700;
+  *(uint64_t *)(ctx->mem_base + attr_addr) = (uint64_t)attr;
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -455,11 +649,9 @@ void shim_pthread_attr_init(GuestContext *ctx) {
 void shim_pthread_attr_destroy(GuestContext *ctx) {
   uint64_t attr_addr = ctx->rdi;
   if (attr_addr) {
-    RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-    if (pattr) {
-      free(pattr);
-      *(uint64_t *)(ctx->mem_base + attr_addr) = 0;
-    }
+    PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
+    if (attr) free(attr);
+    *(uint64_t *)(ctx->mem_base + attr_addr) = 0;
   }
   ctx->rax = 0;
   SHIM_RETURN();
@@ -468,13 +660,19 @@ void shim_pthread_attr_destroy(GuestContext *ctx) {
 void shim_pthread_attr_setdetachstate(GuestContext *ctx) {
   uint64_t attr_addr = ctx->rdi;
   int detachstate = (int)ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (pattr) {
-    if (detachstate) {
-      pattr->flags |= 1; // Detached
-    } else {
-      pattr->flags &= ~1;
-    }
+  if (!attr_addr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
+  if (!attr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  if (detachstate == 1) { // PTHREAD_CREATE_DETACHED
+    attr->flags |= PTHREAD_ATTR_DETACHED;
+  } else {
+    attr->flags &= ~PTHREAD_ATTR_DETACHED;
   }
   ctx->rax = 0;
   SHIM_RETURN();
@@ -483,24 +681,21 @@ void shim_pthread_attr_setdetachstate(GuestContext *ctx) {
 void shim_pthread_attr_setstacksize(GuestContext *ctx) {
   uint64_t attr_addr = ctx->rdi;
   size_t stacksize = (size_t)ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (pattr) {
-    pattr->stacksize_attr = stacksize;
+  if (!attr_addr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
   }
+  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
+  if (!attr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  attr->stacksize_attr = stacksize;
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_pthread_getschedparam(GuestContext *ctx) {
-  uint64_t pol_addr = ctx->rsi;
-  uint64_t param_addr = ctx->rdx;
-  if (pol_addr) {
-    *(int *)(ctx->mem_base + pol_addr) = SCHED_OTHER;
-  }
-  if (param_addr) {
-    struct sched_param *sp = (struct sched_param *)(ctx->mem_base + param_addr);
-    sp->sched_priority = 0;
-  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -511,9 +706,9 @@ void shim_pthread_setschedparam(GuestContext *ctx) {
 }
 
 void shim_pthread_setcanceltype(GuestContext *ctx) {
-  uint64_t old_addr = ctx->rsi;
-  if (old_addr) {
-    *(int *)(ctx->mem_base + old_addr) = 0;
+  uint64_t oldtype_addr = ctx->rsi;
+  if (oldtype_addr) {
+    *(int32_t *)(ctx->mem_base + oldtype_addr) = 0;
   }
   ctx->rax = 0;
   SHIM_RETURN();
@@ -521,20 +716,12 @@ void shim_pthread_setcanceltype(GuestContext *ctx) {
 
 void shim_pthread_setcancelstate(GuestContext *ctx) {
   int state = (int)ctx->rdi;
-  uint64_t old_addr = ctx->rsi;
-  if (state != 0 && state != 1) { // 0: PTHREAD_CANCEL_ENABLE, 1: PTHREAD_CANCEL_DISABLE
-    ctx->rax = EINVAL;
-    SHIM_RETURN();
-  }
+  uint64_t oldstate_addr = ctx->rsi;
   RecompThread *t = g_current_thread;
-  int old = t ? t->cancel_state : 0;
-  if (old_addr && ctx->mem_base) {
-    *(int *)(ctx->mem_base + old_addr) = old;
+  if (oldstate_addr && t) {
+    *(int32_t *)(ctx->mem_base + oldstate_addr) = t->cancel_state;
   }
-  if (t) {
-    t->cancel_state = state;
-  }
-  pthread_setcancelstate(state == 0 ? PTHREAD_CANCEL_ENABLE : PTHREAD_CANCEL_DISABLE, NULL);
+  if (t) t->cancel_state = state;
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -542,40 +729,18 @@ void shim_pthread_setcancelstate(GuestContext *ctx) {
 void shim___pthread_cleanup_push_imp(GuestContext *ctx) {
   uint64_t routine = ctx->rdi;
   uint64_t arg = ctx->rsi;
-  uint64_t newbuf = ctx->rdx;
-  if (newbuf && ctx->mem_base) {
-    *(uint64_t *)(ctx->mem_base + newbuf) = routine;
-    *(uint64_t *)(ctx->mem_base + newbuf + 8) = arg;
-    *(int32_t *)(ctx->mem_base + newbuf + 16) = 0;
-  }
   RecompThread *t = g_current_thread;
   if (t) {
-    PthreadCleanupEntry *e = (PthreadCleanupEntry *)calloc(1, sizeof(PthreadCleanupEntry));
-    if (e) {
-      e->routine = routine;
-      e->arg = arg;
-      e->onheap = false;
-      e->next = t->cleanup_stack;
-      t->cleanup_stack = e;
+    PthreadCleanupEntry *c = (PthreadCleanupEntry *)calloc(1, sizeof(PthreadCleanupEntry));
+    if (c) {
+      c->routine = routine;
+      c->arg = arg;
+      c->onheap = true;
+      c->next = t->cleanup_stack;
+      t->cleanup_stack = c;
     }
   }
-  SHIM_RETURN();
-}
-
-void shim_pthread_cleanup_push(GuestContext *ctx) {
-  uint64_t routine = ctx->rdi;
-  uint64_t arg = ctx->rsi;
-  RecompThread *t = g_current_thread;
-  if (t) {
-    PthreadCleanupEntry *e = (PthreadCleanupEntry *)calloc(1, sizeof(PthreadCleanupEntry));
-    if (e) {
-      e->routine = routine;
-      e->arg = arg;
-      e->onheap = true;
-      e->next = t->cleanup_stack;
-      t->cleanup_stack = e;
-    }
-  }
+  ctx->rax = 0;
   SHIM_RETURN();
 }
 
@@ -583,20 +748,23 @@ void shim___pthread_cleanup_pop_imp(GuestContext *ctx) {
   int execute = (int)ctx->rdi;
   RecompThread *t = g_current_thread;
   if (t && t->cleanup_stack) {
-    PthreadCleanupEntry *top = t->cleanup_stack;
-    t->cleanup_stack = top->next;
-    uint64_t routine = top->routine;
-    uint64_t arg = top->arg;
-    free(top);
-    if (execute && routine) {
-      ctx->rdi = arg;
+    PthreadCleanupEntry *c = t->cleanup_stack;
+    t->cleanup_stack = c->next;
+    if (execute && c->routine) {
+      ctx->rdi = c->arg;
       ctx->rsp -= 8;
       MEM_U64(ctx->rsp) = 0xdeadbeefULL;
-      ctx->rip = routine;
-      recomp_dispatch(ctx, routine);
+      ctx->rip = c->routine;
+      recomp_dispatch(ctx, c->routine);
     }
+    if (c->onheap) free(c);
   }
+  ctx->rax = 0;
   SHIM_RETURN();
+}
+
+void shim_pthread_cleanup_push(GuestContext *ctx) {
+  shim___pthread_cleanup_push_imp(ctx);
 }
 
 void shim_pthread_cleanup_pop(GuestContext *ctx) {
@@ -604,58 +772,26 @@ void shim_pthread_cleanup_pop(GuestContext *ctx) {
 }
 
 void shim_sched_get_priority_max(GuestContext *ctx) {
-  int policy = (int)ctx->rdi;
-  int ret = sched_get_priority_max(policy);
-  if (ret < 0) {
-    ret = 0;
-  }
-  ctx->rax = (uint64_t)ret;
+  ctx->rax = ORBIS_KERNEL_PRIO_FIFO_HIGHEST;
   SHIM_RETURN();
 }
 
 void shim_sched_get_priority_min(GuestContext *ctx) {
-  int policy = (int)ctx->rdi;
-  int ret = sched_get_priority_min(policy);
-  if (ret < 0) {
-    ret = 0;
-  }
-  ctx->rax = (uint64_t)ret;
+  ctx->rax = ORBIS_KERNEL_PRIO_FIFO_LOWEST;
   SHIM_RETURN();
 }
 
 void shim_pthread_sigmask(GuestContext *ctx) {
-  int how = (int)ctx->rdi;
-  uint64_t set_addr = ctx->rsi;
-  uint64_t oldset_addr = ctx->rdx;
-
-  sigset_t host_set, host_oldset;
-  sigset_t *p_set = NULL;
-  sigset_t *p_old = oldset_addr ? &host_oldset : NULL;
-
-  if (set_addr) {
-    uint32_t *guest_bits = (uint32_t *)(ctx->mem_base + set_addr);
-    host_set = (sigset_t)guest_bits[0];
-    p_set = &host_set;
-  }
-
-  int ret = pthread_sigmask(how, p_set, p_old);
-  if (ret != 0) {
-    set_guest_errno(ctx, ret);
-    ctx->rax = (uint64_t)ret;
-    SHIM_RETURN();
-  }
-  if (oldset_addr) {
-    uint32_t *guest_old = (uint32_t *)(ctx->mem_base + oldset_addr);
-    guest_old[0] = (uint32_t)host_oldset;
-    guest_old[1] = 0;
-    guest_old[2] = 0;
-    guest_old[3] = 0;
-  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
-// scePthread management shims
+void shim_pthread_cancel(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+// Orbis shims forwarding to core implementations
 void shim_scePthreadCreate(GuestContext *ctx) {
   uint64_t thread_ptr_addr = ctx->rdi;
   uint64_t attr_addr = ctx->rsi;
@@ -663,72 +799,28 @@ void shim_scePthreadCreate(GuestContext *ctx) {
   uint64_t arg = ctx->rcx;
   uint64_t name_addr = ctx->r8;
 
-  RecompThread *t = (RecompThread *)calloc(1, sizeof(RecompThread));
-  if (!t) {
-    set_guest_errno(ctx, ENOMEM);
-    ctx->rax = (uint64_t)ENOMEM;
-    SHIM_RETURN();
+  const char *name = NULL;
+  if (name_addr && name_addr < ctx->mem_size) {
+    name = (const char *)(ctx->mem_base + name_addr);
   }
 
-  pthread_mutex_lock(&g_threads_mutex);
-  t->thread_id = ++g_thread_counter;
-  pthread_mutex_unlock(&g_threads_mutex);
-
-  uint64_t stack_size = 4 * 1024 * 1024;
-  RecompPthreadAttr *attr = get_pthread_attr(ctx, attr_addr);
-  if (attr && attr->stacksize_attr >= 16 * 1024) {
-    stack_size = attr->stacksize_attr;
-  }
-
-  GuestContext *child_ctx = recomp_create_thread_context(ctx, stack_size);
-  if (!child_ctx) {
-    free(t);
-    set_guest_errno(ctx, ENOMEM);
-    ctx->rax = (uint64_t)ENOMEM;
-    SHIM_RETURN();
-  }
-  child_ctx->thread_id = t->thread_id;
-
-  t->ctx = child_ctx;
-  t->stack_base = child_ctx->stack_base;
-  t->stack_size = stack_size;
-  t->start_routine = start_routine;
-  t->arg = arg;
-  t->finished = false;
-  t->joined = false;
-  t->detached = false;
-  if (name_addr != 0) {
-    const char *name = (const char *)(ctx->mem_base + name_addr);
-    if (name) {
-      strncpy(t->name, name, sizeof(t->name) - 1);
-      t->name[sizeof(t->name) - 1] = '\0';
+  PthreadAttr attr_val;
+  PthreadAttr *p_attr = NULL;
+  if (attr_addr) {
+    uint64_t p = *(uint64_t *)(ctx->mem_base + attr_addr);
+    if (p) {
+      memcpy(&attr_val, (void *)p, sizeof(PthreadAttr));
+      p_attr = &attr_val;
     }
   }
 
-  if (child_ctx->fs_base && ctx->mem_base) {
-    *(uint64_t *)(ctx->mem_base + child_ctx->fs_base + 0x10ULL) = (uint64_t)t;
+  int err = do_create_thread(ctx, thread_ptr_addr, p_attr, start_routine, arg, name);
+  if (err != 0) {
+    set_guest_errno(ctx, err);
+    ctx->rax = 0x80020000ULL | (uint64_t)err;
+  } else {
+    ctx->rax = 0;
   }
-
-  register_thread(t);
-
-  fprintf(stderr, "[ps4-thread] Thread created: id=%d, name='%s', entry=0x%llx, arg=0x%llx\n",
-          (int)t->thread_id, t->name[0] ? t->name : "unnamed", (unsigned long long)start_routine, (unsigned long long)arg);
-
-  if (thread_ptr_addr != 0) {
-    *(uint64_t *)(ctx->mem_base + thread_ptr_addr) = (uint64_t)t;
-  }
-
-  int ret = pthread_create(&t->host_thread, NULL, recomp_host_thread_runner, t);
-  if (ret != 0) {
-    unregister_thread(t);
-    recomp_free_thread_context(child_ctx);
-    free(t);
-    set_guest_errno(ctx, ret);
-    ctx->rax = (uint64_t)ret;
-    SHIM_RETURN();
-  }
-
-  ctx->rax = 0;
   SHIM_RETURN();
 }
 
@@ -744,12 +836,8 @@ void shim_scePthreadDetach(GuestContext *ctx) {
 
 void shim_scePthreadExit(GuestContext *ctx) {
   RecompThread *t = g_current_thread;
-  if (t && t->ctx == ctx && t != &g_main_thread_obj) {
-    t->ret_val = ctx->rdi;
-    recomp_thread_epilogue(t, ctx);
-  } else if (t) {
-    t->finished = true;
-    t->ret_val = ctx->rdi;
+  if (t && t != &g_main_thread_obj) {
+    recomp_thread_exit(t, (void *)ctx->rdi);
   }
   pthread_exit(NULL);
 }
@@ -769,7 +857,11 @@ void shim_scePthreadYield(GuestContext *ctx) {
 }
 
 void shim_scePthreadGetthreadid(GuestContext *ctx) {
-  ctx->rax = g_current_thread ? g_current_thread->thread_id : (ctx->thread_id ? ctx->thread_id : 1000);
+  if (g_current_thread) {
+    ctx->rax = (uint64_t)g_current_thread->thread_id;
+  } else {
+    ctx->rax = ctx->thread_id ? ctx->thread_id : 1000;
+  }
   SHIM_RETURN();
 }
 
@@ -781,7 +873,7 @@ void shim_scePthreadSetprio(GuestContext *ctx) {
 void shim_scePthreadGetprio(GuestContext *ctx) {
   uint64_t prio_ptr = ctx->rsi;
   if (prio_ptr) {
-    *(int32_t *)(ctx->mem_base + prio_ptr) = 0;
+    *(int32_t *)(ctx->mem_base + prio_ptr) = 700;
   }
   ctx->rax = 0;
   SHIM_RETURN();
@@ -795,13 +887,12 @@ void shim_scePthreadSetaffinity(GuestContext *ctx) {
 void shim_scePthreadGetaffinity(GuestContext *ctx) {
   uint64_t mask_ptr = ctx->rsi;
   if (mask_ptr) {
-    *(uint64_t *)(ctx->mem_base + mask_ptr) = 0xFFULL;
+    *(uint64_t *)(ctx->mem_base + mask_ptr) = 0x3f;
   }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
-// scePthread attribute shims
 void shim_scePthreadAttrInit(GuestContext *ctx) {
   shim_pthread_attr_init(ctx);
   SCE_PTHREAD_ERR(ctx);
@@ -823,303 +914,76 @@ void shim_scePthreadAttrSetdetachstate(GuestContext *ctx) {
 }
 
 void shim_scePthreadAttrSetschedpolicy(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint32_t policy = (uint32_t)ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (pattr) {
-    pattr->sched_policy = policy;
-  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrSetschedparam(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t param_addr = ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (pattr && param_addr) {
-    pattr->prio = *(int32_t *)(ctx->mem_base + param_addr);
-  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrGetschedparam(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t param_addr = ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (param_addr) {
-    *(int32_t *)(ctx->mem_base + param_addr) = pattr ? pattr->prio : 700;
-  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrSetinheritsched(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  int32_t inherit = (int32_t)ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (pattr) {
-    pattr->sched_inherit = inherit;
-  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrSetaffinity(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t mask = ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (pattr) {
-    pattr->cpuset = mask;
-    pattr->cpusetsize = sizeof(uint64_t);
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrGetaffinity(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t mask_ptr = ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (mask_ptr) {
-    uint64_t mask = (pattr && pattr->cpuset) ? pattr->cpuset : 0x7fULL;
-    *(uint64_t *)(ctx->mem_base + mask_ptr) = mask;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrGetdetachstate(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t state_ptr = ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (state_ptr) {
-    int32_t state = (pattr && (pattr->flags & 1)) ? 1 : 0;
-    *(int32_t *)(ctx->mem_base + state_ptr) = state;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrGet(GuestContext *ctx) {
-  uint64_t thread_handle = ctx->rdi;
-  uint64_t attr_addr = ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (!pattr) {
-    if (attr_addr && ctx->mem_base) {
-      pattr = (RecompPthreadAttr *)calloc(1, sizeof(RecompPthreadAttr));
-      *(uint64_t *)(ctx->mem_base + attr_addr) = (uint64_t)pattr;
-    }
-  }
-  if (!pattr) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-
-  RecompThread *t = thread_handle ? find_thread(thread_handle) : g_current_thread;
-  if (!t) {
-    t = g_current_thread;
-  }
-
-  pattr->sched_policy = 1;
-  pattr->sched_inherit = 0;
-  pattr->prio = 700;
-  pattr->cpuset = 0x7f;
-
-  if (t) {
-    pattr->stackaddr_attr = t->stack_base ? t->stack_base : (t->ctx ? t->ctx->stack_base : 0);
-    pattr->stacksize_attr = t->stack_size ? t->stack_size : (t->ctx ? t->ctx->stack_alloc_size : 2 * 1024 * 1024);
-    if (t->detached) {
-      pattr->flags |= 1;
-    }
-  } else {
-    pattr->stackaddr_attr = 0;
-    pattr->stacksize_attr = 2 * 1024 * 1024;
-  }
-
-  // Logged on the first call only.
-  static int s_logged;
-  if (!__atomic_exchange_n(&s_logged, 1, __ATOMIC_RELAXED))
-    fprintf(stderr, "[ps4-thread] scePthreadAttrGet: thread=0x%llx -> stackaddr=0x%llx, stacksize=%llu (first call)\n",
-            (unsigned long long)thread_handle, (unsigned long long)pattr->stackaddr_attr,
-            (unsigned long long)pattr->stacksize_attr);
-
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_sceKernelIsStack(GuestContext *ctx) {
-  uint64_t addr = ctx->rdi;
-  uint64_t start_ptr = ctx->rsi;
-  uint64_t end_ptr = ctx->rdx;
-
-  uint64_t stack_start = 0;
-  uint64_t stack_end = 0;
-
-  pthread_mutex_lock(&g_threads_mutex);
-  RecompThread *curr = g_threads;
-  while (curr) {
-    uint64_t sbase = curr->stack_base;
-    uint64_t ssize = curr->stack_size;
-    if (sbase && ssize && addr >= sbase && addr < (sbase + ssize)) {
-      stack_start = sbase;
-      stack_end = sbase + ssize;
-      break;
-    }
-    curr = curr->next;
-  }
-  pthread_mutex_unlock(&g_threads_mutex);
-
-  if (start_ptr && ctx->mem_base) {
-    *(uint64_t *)(ctx->mem_base + start_ptr) = stack_start;
-  }
-  if (end_ptr && ctx->mem_base) {
-    *(uint64_t *)(ctx->mem_base + end_ptr) = stack_end;
-  }
-
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadGetname(GuestContext *ctx) {
-  uint64_t thread_handle = ctx->rdi;
-  uint64_t buf_ptr = ctx->rsi;
-  if (buf_ptr) {
-    RecompThread *t = thread_handle ? find_thread(thread_handle) : g_current_thread;
-    if (t && t->host_thread) {
-      char name[64] = {0};
-      pthread_getname_np(t->host_thread, name, sizeof(name));
-      if (name[0] != '\0') {
-        strncpy((char *)(ctx->mem_base + buf_ptr), name, 32);
-      } else {
-        snprintf((char *)(ctx->mem_base + buf_ptr), 32, "thread_%llu", (unsigned long long)t->thread_id);
-      }
-    } else {
-      snprintf((char *)(ctx->mem_base + buf_ptr), 32, "ps4_thread");
-    }
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_pthread_cancel(GuestContext *ctx) {
-  uint64_t thread_handle = ctx->rdi;
-  RecompThread *t = find_thread(thread_handle);
-  if (t && t->host_thread) {
-    pthread_cancel(t->host_thread);
-  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadSetcancelstate(GuestContext *ctx) {
-  int state = (int)ctx->rdi;
-  uint64_t old_addr = ctx->rsi;
-  if (state != 0 && state != 1) { // 0: PTHREAD_CANCEL_ENABLE, 1: PTHREAD_CANCEL_DISABLE
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-  RecompThread *t = g_current_thread;
-  int old = t ? t->cancel_state : 0;
-  if (old_addr && ctx->mem_base) {
-    *(int *)(ctx->mem_base + old_addr) = old;
-  }
-  if (t) {
-    t->cancel_state = state;
-  }
-  pthread_setcancelstate(state == 0 ? PTHREAD_CANCEL_ENABLE : PTHREAD_CANCEL_DISABLE, NULL);
-  ctx->rax = 0;
-  SHIM_RETURN();
+  shim_pthread_setcancelstate(ctx);
+  SCE_PTHREAD_ERR(ctx);
 }
 
 void shim_scePthreadAttrGetstacksize(GuestContext *ctx) {
   uint64_t attr_addr = ctx->rdi;
-  uint64_t stacksize_ptr = ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (!pattr || !stacksize_ptr || !ctx->mem_base) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
+  uint64_t size_ptr = ctx->rsi;
+  if (attr_addr && size_ptr) {
+    PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
+    if (attr) {
+      *(uint64_t *)(ctx->mem_base + size_ptr) = attr->stacksize_attr;
+    }
   }
-  *(uint64_t *)(ctx->mem_base + stacksize_ptr) = pattr->stacksize_attr ? pattr->stacksize_attr : 2097152ULL;
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrGetstack(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t stackaddr_ptr = ctx->rsi;
-  uint64_t stacksize_ptr = ctx->rdx;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (!pattr || !stackaddr_ptr || !stacksize_ptr || !ctx->mem_base) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-  *(uint64_t *)(ctx->mem_base + stackaddr_ptr) = pattr->stackaddr_attr;
-  *(uint64_t *)(ctx->mem_base + stacksize_ptr) = pattr->stacksize_attr ? pattr->stacksize_attr : 2097152ULL;
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrGetstackaddr(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t stackaddr_ptr = ctx->rsi;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (!pattr || !stackaddr_ptr || !ctx->mem_base) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-  *(uint64_t *)(ctx->mem_base + stackaddr_ptr) = pattr->stackaddr_attr;
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrSetstack(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t stackaddr = ctx->rsi;
-  uint64_t stacksize = ctx->rdx;
-  RecompPthreadAttr *pattr = get_pthread_attr(ctx, attr_addr);
-  if (pattr) {
-    pattr->stackaddr_attr = stackaddr;
-    pattr->stacksize_attr = stacksize;
-  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadRename(GuestContext *ctx) {
-  uint64_t handle = ctx->rdi;
+  uint64_t thread_handle = ctx->rdi;
   uint64_t name_addr = ctx->rsi;
-  const char *name = (name_addr && ctx->mem_base) ? (const char *)(ctx->mem_base + name_addr) : NULL;
-  if (name) {
-    RecompThread *t = handle ? find_thread(handle) : g_current_thread;
-    if (t) {
-#if defined(__APPLE__)
-      if (t == g_current_thread || (t->ctx && t->ctx == g_current_ctx)) {
-        pthread_setname_np(name);
-      }
-#elif defined(__linux__)
-      pthread_setname_np(t->host_thread, name);
-#endif
-    } else if (handle == 0 || (ctx && handle == ctx->thread_id)) {
-#if defined(__APPLE__)
-      pthread_setname_np(name);
-#endif
-    }
+  RecompThread *t = thread_handle ? find_thread(thread_handle) : g_current_thread;
+  if (t && name_addr && name_addr < ctx->mem_size) {
+    const char *name = (const char *)(ctx->mem_base + name_addr);
+    strncpy(t->name, name, sizeof(t->name) - 1);
   }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadGetschedparam(GuestContext *ctx) {
-  uint64_t pol_addr = ctx->rsi;
-  uint64_t param_addr = ctx->rdx;
-  if (pol_addr && ctx->mem_base) {
-    *(int *)(ctx->mem_base + pol_addr) = 1; // SCHED_FIFO
-  }
-  if (param_addr && ctx->mem_base) {
-    *(int32_t *)(ctx->mem_base + param_addr) = 700; // default prio
-  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -1129,21 +993,14 @@ void shim_scePthreadSetschedparam(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-// scePthread TLS shims
 void shim_scePthreadKeyCreate(GuestContext *ctx) {
   shim_pthread_key_create(ctx);
   SCE_PTHREAD_ERR(ctx);
 }
 
 void shim_scePthreadKeyDelete(GuestContext *ctx) {
-  uint32_t key = (uint32_t)ctx->rdi;
-  if (key < 128) {
-    ctx->tls_keys[key] = 0;
-    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-    proc->tls_destructors[key] = 0;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
+  shim_pthread_key_delete(ctx);
+  SCE_PTHREAD_ERR(ctx);
 }
 
 void shim_scePthreadSetspecific(GuestContext *ctx) {
@@ -1157,42 +1014,82 @@ void shim_scePthreadGetspecific(GuestContext *ctx) {
 
 void shim___tls_get_addr(GuestContext *ctx) {
   uint64_t ti_addr = ctx->rdi;
-  if (ti_addr) {
-    // tls_index {module, offset}: every module's block is in the static TLS area, at
-    // FS - recomp_tls_module_offset(module) (variant II).
-    const uint64_t module = *(uint64_t *)(ctx->mem_base + ti_addr);
-    const uint64_t offset = *(uint64_t *)(ctx->mem_base + ti_addr + 8);
-    const uint64_t block = recomp_tls_module_offset(module);
-    if (block == 0) {
-      fprintf(stderr, "[ps4-thread] FATAL: __tls_get_addr: TLS module %llu (tls_index at 0x%llx) has no static TLS block\n",
-              (unsigned long long)module, (unsigned long long)ti_addr);
-      abort();
-    }
-    ctx->rax = ctx->fs_base - block + offset;
+  if (!ti_addr) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+  uint64_t module_id = *(uint64_t *)(ctx->mem_base + ti_addr);
+  uint64_t offset = *(uint64_t *)(ctx->mem_base + ti_addr + 8);
+  uint64_t mod_off = recomp_tls_module_offset(module_id);
+  if (mod_off) {
+    ctx->rax = ctx->fs_base - mod_off + offset;
   } else {
-    ctx->rax = ctx->fs_base;
+    ctx->rax = ctx->fs_base + offset;
   }
   SHIM_RETURN();
 }
 
-// ---- Frame stall watchdog (diagnostics) -----------------------------------------------
-// PS4_STALL_WATCHDOG=<ms>: when no frame has been presented for <ms> milliseconds, print what
-// every guest thread is executing (guest block address and host function), so long frames can
-// be attributed to a thread and a guest function.
-// PS4_STALL_PROFILE=<ms>: from <ms> into a stall until the next frame, sample every guest
-// thread every millisecond and print the most frequent functions per thread at its end.
+void shim_scePthreadAttrGetaffinity(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrGetdetachstate(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t state_ptr = ctx->rsi;
+  if (attr_addr && state_ptr) {
+    PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
+    if (attr) {
+      *(int32_t *)(ctx->mem_base + state_ptr) = (attr->flags & PTHREAD_ATTR_DETACHED) ? 1 : 0;
+    }
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrGet(GuestContext *ctx) {
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadGetname(GuestContext *ctx) {
+  uint64_t thread_handle = ctx->rdi;
+  uint64_t buf_addr = ctx->rsi;
+  RecompThread *t = thread_handle ? find_thread(thread_handle) : g_current_thread;
+  if (t && buf_addr && buf_addr < ctx->mem_size) {
+    strncpy((char *)(ctx->mem_base + buf_addr), t->name[0] ? t->name : "unnamed", 32);
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_sceKernelIsStack(GuestContext *ctx) {
+  uint64_t addr = ctx->rdi;
+  RecompThread *curr = g_threads;
+  pthread_mutex_lock(&g_threads_mutex);
+  while (curr) {
+    if (curr->stack_base && addr >= curr->stack_base &&
+        addr < curr->stack_base + curr->stack_size) {
+      pthread_mutex_unlock(&g_threads_mutex);
+      ctx->rax = 1;
+      SHIM_RETURN();
+    }
+    curr = curr->next;
+  }
+  pthread_mutex_unlock(&g_threads_mutex);
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+#include "ps4_stall_profile.h"
+#if defined(__APPLE__)
 #include <dlfcn.h>
 #include <mach/mach.h>
-#include <time.h>
+#include <mach/mach_time.h>
 #include <mach/mach_vm.h>
-#include <pthread/qos.h>
-#include "ps4_stall_profile.h"
-#include <stdatomic.h>
 
 static StallProfile *g_stall_prof;
-static uint64_t g_prof_for; // present time of the stall being profiled (0: none)
-// Profile slot of every guest thread sampled in the current stall, by thread id, so threads
-// created or exiting during the stall do not shift the slots of the others. Watchdog only.
+static uint64_t g_prof_for;
 static uint64_t g_prof_slot_ids[STALL_PROFILE_MAX_THREADS];
 static int g_prof_nslots;
 
@@ -1210,17 +1107,14 @@ static int stall_profile_slot(uint64_t thread_id) {
   return g_prof_nslots++;
 }
 
-// dladdr scans the ~64k local symbols of the executable linearly (~60 us per call); a report
-// symbolizes up to 8 pcs of every stored sample, so results are cached per pc in a fixed table.
-// Only the watchdog thread uses it.
 #define STALL_SYM_CACHE 16384
 static struct {
   uint64_t pc, start;
-  const char *name; // NULL: dladdr found no symbol
+  const char *name;
 } g_stall_sym_cache[STALL_SYM_CACHE];
 
 static int stall_symbolize(uint64_t pc, uint64_t *start, const char **name) {
-  const uint64_t h = (pc * 0x9E3779B97F4A7C15ull) >> 50; // 14 bits
+  const uint64_t h = (pc * 0x9E3779B97F4A7C15ull) >> 50;
   if (g_stall_sym_cache[h].pc != pc) {
     Dl_info di;
     const int ok = dladdr((void *)pc, &di) && di.dli_sname;
@@ -1234,19 +1128,6 @@ static int stall_symbolize(uint64_t pc, uint64_t *start, const char **name) {
   return 1;
 }
 
-// One sample of every guest thread: PC, LR and the saved return addresses along the
-// frame-pointer chain. Threads are suspended only while their registers and stack are read;
-// nothing that can take a lock (malloc, dladdr) runs while one is suspended.
-// g_threads_mutex is held for the whole walk, so no entry is unregistered and freed meanwhile,
-// and a detached thread that is exiting waits in unregister_thread before pthread_exit, which
-// keeps its pthread_t valid. A suspended thread cannot hold the mutex (the watchdog does). Locks
-// taken under it: libpthread's thread-list lock inside pthread_mach_thread_np (only while no
-// thread is suspended; libpthread never waits for other locks while holding it). A joinable
-// thread can still be joined (its pthread_t freed) during the walk; pthread_mach_thread_np looks
-// the pthread_t up in libpthread's thread list and returns MACH_PORT_NULL for one that is gone.
-// Recompiled guest code builds no frame records (see the contract at recomp_enter_guest):
-// there x29 still names the frame of recomp_enter_guest and LR the return address of the
-// function's own last call, so a sample whose PC is in guest code keeps only the PC.
 static int g_prof_no_chain_noted;
 
 static void stall_profile_sample_all(void) {
@@ -1274,7 +1155,7 @@ static void stall_profile_sample_all(void) {
                                    &got) != KERN_SUCCESS || got != sizeof(frame) || !frame[1])
           break;
         pcs[np++] = frame[1];
-        if (frame[0] <= fp) break; // the chain grows toward the stack base
+        if (frame[0] <= fp) break;
         fp = frame[0];
       }
     }
@@ -1286,7 +1167,7 @@ static void stall_profile_sample_all(void) {
     }
   }
   pthread_mutex_unlock(&g_threads_mutex);
-  if (in_guest_code && !g_prof_no_chain_noted) { // no thread is suspended here
+  if (in_guest_code && !g_prof_no_chain_noted) {
     g_prof_no_chain_noted = 1;
     fprintf(stderr, "[stall-profile] samples in recompiled guest code: PC only (no frame chain)\n");
   }
@@ -1312,8 +1193,6 @@ static void stall_dump_threads(double stalled_ms) {
       Dl_info di;
       if (dladdr((void *)pc, &di) && di.dli_sname) sym = di.dli_sname;
     }
-    // The GuestContext of what the thread runs (a fiber's while it runs one): its rip is the
-    // guest address of the last shim it called (guest code itself never writes rip).
     const GuestContext *run = t->ctx;
     if (t->ctx->mem_base && t->ctx->fs_base) {
       const uint64_t slot = *(const uint64_t *)(t->ctx->mem_base + t->ctx->fs_base + RECOMP_TCB_CTX_SLOT);
@@ -1329,13 +1208,11 @@ static long g_stall_dump_ms, g_stall_prof_ms;
 
 static void *stall_watchdog_main(void *arg) {
   (void)arg;
-  // Sampling must keep its 1 ms period while the game keeps every core busy.
   pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
   const uint64_t dump_ns = (uint64_t)g_stall_dump_ms * 1000000ull;
   const uint64_t prof_ns = (uint64_t)g_stall_prof_ms * 1000000ull;
   uint64_t reported_for = 0;
-  uint64_t prev_wake = 0, max_gap = 0; // max_gap: longest time between wake-ups of this stall
-  // Wake-ups follow fixed deadlines, so the time a sampling round takes does not stretch the period.
+  uint64_t prev_wake = 0, max_gap = 0;
   const uint64_t period_ns = prof_ns ? 1000000ull : 5000000ull;
   uint64_t deadline = stall_now_ns();
   for (;;) {
@@ -1344,7 +1221,7 @@ static void *stall_watchdog_main(void *arg) {
     if (deadline > before)
       usleep((useconds_t)((deadline - before) / 1000));
     else
-      deadline = before; // a round overran the period: do not try to catch up
+      deadline = before;
     const uint64_t last = g_last_present_ns;
     if (!last) continue;
     const uint64_t now = stall_now_ns();
@@ -1355,11 +1232,11 @@ static void *stall_watchdog_main(void *arg) {
       stall_dump_threads((double)(now - last) / 1e6);
     }
     if (!prof_ns) continue;
-    if (g_prof_for && g_prof_for != last) { // a frame ended the stall being profiled
+    if (g_prof_for && g_prof_for != last) {
       stall_profile_cpu_end(g_stall_prof);
       stall_profile_report_gap(g_stall_prof, stderr, (double)(last - g_prof_for) / 1e6, 6, (double)max_gap / 1e6);
       g_prof_for = 0;
-      prev_wake = deadline = stall_now_ns(); // the report itself is not a gap of the next stall
+      prev_wake = deadline = stall_now_ns();
     }
     if (now - last > prof_ns) {
       if (g_prof_for != last) {
@@ -1391,7 +1268,6 @@ static void stall_watchdog_start_once(void) {
   }
 }
 
-// VideoOut opened: a boot that never presents is stalled from here on.
 void ps4_stall_watchdog_arm(void) {
   pthread_once(&g_stall_once, stall_watchdog_start_once);
   uint64_t zero = 0;
@@ -1402,3 +1278,7 @@ void ps4_stall_watchdog_note_present(void) {
   pthread_once(&g_stall_once, stall_watchdog_start_once);
   g_last_present_ns = stall_now_ns();
 }
+#else
+void ps4_stall_watchdog_arm(void) {}
+void ps4_stall_watchdog_note_present(void) {}
+#endif

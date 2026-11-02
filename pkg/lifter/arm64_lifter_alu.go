@@ -1669,7 +1669,7 @@ const guestTscFreq = 2130000000
 // floor(cntvct * F / cntfrq) as recomp_rdtsc computes it, without a 128-bit product:
 // q*F + (r*F)/cntfrq with q, r = cntvct divmod cntfrq (r*F < cntfrq*F fits in 64 bits).
 // cntfrq_el0 is never 0 on Apple silicon (24 MHz, set by the firmware), so the divisions are
-// safe. RDTSCP (which would also write ECX = TSC_AUX) has no site in TLOU or U4 and is not lifted.
+// safe.
 // Flags are not touched. Scratch: x0-x2, x16, x17.
 func (l *Arm64Lifter) liftRdtsc(lines []string) []string {
 	lines = append(lines, "    mrs x16, cntvct_el0")
@@ -1684,6 +1684,14 @@ func (l *Arm64Lifter) liftRdtsc(lines []string) []string {
 	lines = append(lines, "    mov w19, w16")
 	lines = append(lines, "    lsr x16, x16, #32")
 	lines = append(lines, "    mov w22, w16")
+	return lines
+}
+
+// liftRdtscp handles RDTSCP (Read Time-Stamp Counter and Processor ID).
+// Writes EDX:EAX with scaled TSC and ECX with TSC_AUX (0 on PS4 guest).
+func (l *Arm64Lifter) liftRdtscp(lines []string) []string {
+	lines = l.liftRdtsc(lines)
+	lines = append(lines, "    mov w21, wzr")
 	return lines
 }
 

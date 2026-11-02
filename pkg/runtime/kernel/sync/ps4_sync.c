@@ -198,6 +198,8 @@ static GuestMutex *g_mutex_free, *g_mutex_all;
 
 static uint64_t guest_owner_id(GuestContext *ctx) {
   if (ctx && ctx->thread_id) return ctx->thread_id;
+  RecompThread *t = recomp_get_current_thread();
+  if (t && t->thread_id) return t->thread_id;
   return (uint64_t)(uintptr_t)pthread_self() | (1ULL << 63);
 }
 

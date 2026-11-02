@@ -1,22 +1,24 @@
-#include "ps4_hitch.h"
-#include "recomp_runtime.h"
 #include "ps4_syscalls.h"
+#include "ps4_hitch.h"
 #include "ps4_vfs.h"
+#include "recomp_runtime.h"
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
-#include <dirent.h>
-#include <pthread.h>
-#include <string.h>
-#include <stdlib.h>
 #include <unistd.h>
+
+#include "ps4_threading.h"
 
 static void guest_dir_cache_drop_fd(int fd);
 
@@ -132,9 +134,9 @@ void shim_sceKernelWritev(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-// Exit (does not return). Through ps4_host_quit, as the host's own quit paths: the pipeline
-// archive is saved and the log drained, and no static destructors run while game threads and
-// Metal completion handlers still use global state.
+// Exit (does not return). Through ps4_host_quit, as the host's own quit paths:
+// the pipeline archive is saved and the log drained, and no static destructors
+// run while game threads and Metal completion handlers still use global state.
 void shim_exit(GuestContext *ctx) {
   int status = (int)ctx->rdi;
   ps4_host_quit(status);
@@ -160,16 +162,16 @@ void shim_sysconf(GuestContext *ctx) {
   case 58: // FreeBSD _SC_NPROCESSORS_ONLN
     host_name = _SC_NPROCESSORS_ONLN;
     break;
-  case 1:  // FreeBSD _SC_ARG_MAX
+  case 1: // FreeBSD _SC_ARG_MAX
     host_name = _SC_ARG_MAX;
     break;
-  case 2:  // FreeBSD _SC_CHILD_MAX
+  case 2: // FreeBSD _SC_CHILD_MAX
     host_name = _SC_CHILD_MAX;
     break;
-  case 3:  // FreeBSD _SC_CLK_TCK
+  case 3: // FreeBSD _SC_CLK_TCK
     host_name = _SC_CLK_TCK;
     break;
-  case 5:  // FreeBSD _SC_OPEN_MAX
+  case 5: // FreeBSD _SC_OPEN_MAX
     host_name = _SC_OPEN_MAX;
     break;
   default:
@@ -178,9 +180,12 @@ void shim_sysconf(GuestContext *ctx) {
   }
   long val = sysconf(host_name);
   if (val < 0) {
-    if (name == 47) val = 4096;
-    else if (name == 57 || name == 58) val = 8;
-    else val = 4096;
+    if (name == 47)
+      val = 4096;
+    else if (name == 57 || name == 58)
+      val = 8;
+    else
+      val = 4096;
   }
   ctx->rax = (uint64_t)val;
   SHIM_RETURN();
@@ -224,8 +229,10 @@ void shim_mmap(GuestContext *ctx) {
   int flags = (int)ctx->rcx;
   int fd = (int)ctx->r8;
   off_t offset = (off_t)ctx->r9;
-  printf("[ps4-sys] mmap: addr=0x%llx len=%zu (%.2f MB) prot=0x%x flags=0x%x fd=%d offset=%lld\n",
-         (unsigned long long)addr, len, (double)len / (1024.0 * 1024.0), prot, flags, fd, (long long)offset);
+  printf("[ps4-sys] mmap: addr=0x%llx len=%zu (%.2f MB) prot=0x%x flags=0x%x "
+         "fd=%d offset=%lld\n",
+         (unsigned long long)addr, len, (double)len / (1024.0 * 1024.0), prot,
+         flags, fd, (long long)offset);
   fflush(stdout);
 
   if (len == 0) {
@@ -239,10 +246,12 @@ void shim_mmap(GuestContext *ctx) {
 
   uint64_t alloc_addr = (uint64_t)-1;
   if (addr != 0) {
-    alloc_addr = recomp_vm_alloc_fixed(ctx, addr, aligned_len, prot, flags, "mmap");
+    alloc_addr =
+        recomp_vm_alloc_fixed(ctx, addr, aligned_len, prot, flags, "mmap");
   }
   if (alloc_addr == (uint64_t)-1) {
-    alloc_addr = recomp_vm_alloc_named_aligned(ctx, aligned_len, align, prot, flags, "mmap");
+    alloc_addr = recomp_vm_alloc_named_aligned(ctx, aligned_len, align, prot,
+                                               flags, "mmap");
   }
 
   if (alloc_addr == (uint64_t)-1) {
@@ -253,9 +262,13 @@ void shim_mmap(GuestContext *ctx) {
     // If not anonymous and valid fd, read file data into the mapped memory
     if (!(flags & 0x1000) && fd >= 0) {
       ssize_t nread;
-      PS4_HITCH_TIMED(PS4_HITCH_IO, nread = ps4_vfs_pread(fd, ctx->mem_base + alloc_addr, len, offset));
+      PS4_HITCH_TIMED(
+          PS4_HITCH_IO,
+          nread = ps4_vfs_pread(fd, ctx->mem_base + alloc_addr, len, offset));
       if (nread < 0) {
-        fprintf(stderr, "[ps4-sys] mmap file read FAILED: fd=%d offset=%lld len=%zu errno=%d (%s)\n",
+        fprintf(stderr,
+                "[ps4-sys] mmap file read FAILED: fd=%d offset=%lld len=%zu "
+                "errno=%d (%s)\n",
                 fd, (long long)offset, len, errno, strerror(errno));
         set_guest_errno(ctx, errno);
         recomp_vm_free(ctx, alloc_addr, aligned_len);
@@ -266,7 +279,8 @@ void shim_mmap(GuestContext *ctx) {
              nread, (unsigned long long)alloc_addr);
       fflush(stdout);
     }
-    printf("[ps4-sys] mmap SUCCESS: out=0x%llx\n", (unsigned long long)alloc_addr);
+    printf("[ps4-sys] mmap SUCCESS: out=0x%llx\n",
+           (unsigned long long)alloc_addr);
     fflush(stdout);
     ctx->rax = alloc_addr;
   }
@@ -297,7 +311,8 @@ void shim_madvise(GuestContext *ctx) {
 #if defined(MADV_DONTNEED)
     int host_behav = MADV_DONTNEED;
 #if defined(MADV_FREE)
-    if (behav == 5) host_behav = MADV_FREE;
+    if (behav == 5)
+      host_behav = MADV_FREE;
 #endif
     madvise(ctx->mem_base + addr, len, host_behav);
 #endif
@@ -312,7 +327,8 @@ void shim_read(GuestContext *ctx) {
   uint64_t buf_addr = ctx->rsi;
   size_t count = (size_t)ctx->rdx;
   ssize_t ret;
-  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = ps4_vfs_read(fd, ctx->mem_base + buf_addr, count));
+  PS4_HITCH_TIMED(PS4_HITCH_IO,
+                  ret = ps4_vfs_read(fd, ctx->mem_base + buf_addr, count));
   if (ret < 0) {
     set_guest_errno(ctx, errno);
   }
@@ -355,7 +371,8 @@ void shim_sceKernelRead(GuestContext *ctx) {
   uint64_t buf_addr = ctx->rsi;
   size_t count = (size_t)ctx->rdx;
   ssize_t ret;
-  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = ps4_vfs_read(fd, ctx->mem_base + buf_addr, count));
+  PS4_HITCH_TIMED(PS4_HITCH_IO,
+                  ret = ps4_vfs_read(fd, ctx->mem_base + buf_addr, count));
   if (ret < 0) {
     int err = errno;
     set_guest_errno(ctx, err);
@@ -406,7 +423,9 @@ void shim_sceKernelPread(GuestContext *ctx) {
   off_t offset = (off_t)ctx->rcx;
 
   ssize_t ret;
-  PS4_HITCH_TIMED(PS4_HITCH_IO, ret = ps4_vfs_pread(fd, ctx->mem_base + buf_addr, nbytes, offset));
+  PS4_HITCH_TIMED(
+      PS4_HITCH_IO,
+      ret = ps4_vfs_pread(fd, ctx->mem_base + buf_addr, nbytes, offset));
   if (ret < 0) {
     int err = errno;
     set_guest_errno(ctx, err);
@@ -451,8 +470,8 @@ void shim_sceKernelPreadv(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-
-// Translate FreeBSD / Orbis OS open() flags to host (Darwin / Linux) open() flags
+// Translate FreeBSD / Orbis OS open() flags to host (Darwin / Linux) open()
+// flags
 static int ps4_open_flags_to_host(int ps4_flags, bool *out_direct) {
   int host_flags = 0;
   int acc = ps4_flags & 0x3;
@@ -464,24 +483,35 @@ static int ps4_open_flags_to_host(int ps4_flags, bool *out_direct) {
     host_flags |= O_RDONLY;
   }
 
-  if (ps4_flags & 0x0004) host_flags |= O_NONBLOCK;
-  if (ps4_flags & 0x0008) host_flags |= O_APPEND;
-  if (ps4_flags & 0x0080) host_flags |= O_SYNC;
-  if (ps4_flags & 0x0100) host_flags |= O_NOFOLLOW;
-  if (ps4_flags & 0x0200) host_flags |= O_CREAT;
-  if (ps4_flags & 0x0400) host_flags |= O_TRUNC;
-  if (ps4_flags & 0x0800) host_flags |= O_EXCL;
+  if (ps4_flags & 0x0004)
+    host_flags |= O_NONBLOCK;
+  if (ps4_flags & 0x0008)
+    host_flags |= O_APPEND;
+  if (ps4_flags & 0x0080)
+    host_flags |= O_SYNC;
+  if (ps4_flags & 0x0100)
+    host_flags |= O_NOFOLLOW;
+  if (ps4_flags & 0x0200)
+    host_flags |= O_CREAT;
+  if (ps4_flags & 0x0400)
+    host_flags |= O_TRUNC;
+  if (ps4_flags & 0x0800)
+    host_flags |= O_EXCL;
 #ifdef O_DSYNC
-  if (ps4_flags & 0x1000) host_flags |= O_DSYNC;
+  if (ps4_flags & 0x1000)
+    host_flags |= O_DSYNC;
 #else
-  if (ps4_flags & 0x1000) host_flags |= O_SYNC;
+  if (ps4_flags & 0x1000)
+    host_flags |= O_SYNC;
 #endif
 
   // FreeBSD O_DIRECTORY = 0x00020000 -> host O_DIRECTORY (0x00100000 on macOS)
-  if (ps4_flags & 0x00020000) host_flags |= O_DIRECTORY;
+  if (ps4_flags & 0x00020000)
+    host_flags |= O_DIRECTORY;
 
   // FreeBSD O_CLOEXEC = 0x00100000 -> host O_CLOEXEC (0x01000000 on macOS)
-  if (ps4_flags & 0x00100000) host_flags |= O_CLOEXEC;
+  if (ps4_flags & 0x00100000)
+    host_flags |= O_CLOEXEC;
 
   if (out_direct) {
     *out_direct = (ps4_flags & 0x00010000) != 0;
@@ -493,19 +523,31 @@ static int ps4_open_flags_to_host(int ps4_flags, bool *out_direct) {
 static int host_open_flags_to_ps4(int host_flags) {
   int ps4_flags = 0;
   int acc = host_flags & 0x3;
-  if (acc == O_WRONLY) ps4_flags |= 0x1;
-  else if (acc == O_RDWR) ps4_flags |= 0x2;
-  else ps4_flags |= 0x0;
+  if (acc == O_WRONLY)
+    ps4_flags |= 0x1;
+  else if (acc == O_RDWR)
+    ps4_flags |= 0x2;
+  else
+    ps4_flags |= 0x0;
 
-  if (host_flags & O_NONBLOCK) ps4_flags |= 0x0004;
-  if (host_flags & O_APPEND) ps4_flags |= 0x0008;
-  if (host_flags & O_SYNC) ps4_flags |= 0x0080;
-  if (host_flags & O_NOFOLLOW) ps4_flags |= 0x0100;
-  if (host_flags & O_CREAT) ps4_flags |= 0x0200;
-  if (host_flags & O_TRUNC) ps4_flags |= 0x0400;
-  if (host_flags & O_EXCL) ps4_flags |= 0x0800;
-  if (host_flags & O_DIRECTORY) ps4_flags |= 0x00020000;
-  if (host_flags & O_CLOEXEC) ps4_flags |= 0x00100000;
+  if (host_flags & O_NONBLOCK)
+    ps4_flags |= 0x0004;
+  if (host_flags & O_APPEND)
+    ps4_flags |= 0x0008;
+  if (host_flags & O_SYNC)
+    ps4_flags |= 0x0080;
+  if (host_flags & O_NOFOLLOW)
+    ps4_flags |= 0x0100;
+  if (host_flags & O_CREAT)
+    ps4_flags |= 0x0200;
+  if (host_flags & O_TRUNC)
+    ps4_flags |= 0x0400;
+  if (host_flags & O_EXCL)
+    ps4_flags |= 0x0800;
+  if (host_flags & O_DIRECTORY)
+    ps4_flags |= 0x00020000;
+  if (host_flags & O_CLOEXEC)
+    ps4_flags |= 0x00100000;
 
   return ps4_flags;
 }
@@ -611,8 +653,10 @@ void shim_sceKernelOpen(GuestContext *ctx) {
     }
     ctx->rax = (uint64_t)ret;
   }
-  printf("[ps4-sys] sceKernelOpen: '%s' (flags=0x%x, host_flags=0x%x) -> fd=%d (ret=0x%llx)\n",
-         path ? path : "(null)", flags, host_flags, ret, (unsigned long long)ctx->rax);
+  printf("[ps4-sys] sceKernelOpen: '%s' (flags=0x%x, host_flags=0x%x) -> fd=%d "
+         "(ret=0x%llx)\n",
+         path ? path : "(null)", flags, host_flags, ret,
+         (unsigned long long)ctx->rax);
   fflush(stdout);
   SHIM_RETURN();
 }
@@ -657,22 +701,23 @@ struct ps4_stat {
   uint32_t st_uid;          // 0x0C
   uint32_t st_gid;          // 0x10
   uint32_t st_rdev;         // 0x14
-  int64_t  st_atime_sec;    // 0x18
-  int64_t  st_atime_nsec;   // 0x20
-  int64_t  st_mtime_sec;    // 0x28
-  int64_t  st_mtime_nsec;   // 0x30
-  int64_t  st_ctime_sec;    // 0x38
-  int64_t  st_ctime_nsec;   // 0x40
-  int64_t  st_size;         // 0x48
-  int64_t  st_blocks;       // 0x50
+  int64_t st_atime_sec;     // 0x18
+  int64_t st_atime_nsec;    // 0x20
+  int64_t st_mtime_sec;     // 0x28
+  int64_t st_mtime_nsec;    // 0x30
+  int64_t st_ctime_sec;     // 0x38
+  int64_t st_ctime_nsec;    // 0x40
+  int64_t st_size;          // 0x48
+  int64_t st_blocks;        // 0x50
   uint32_t st_blksize;      // 0x58
   uint32_t st_flags;        // 0x5C
   uint32_t st_gen;          // 0x60
-  int32_t  st_lspare;       // 0x64
-  int64_t  st_birthtim_sec; // 0x68
-  int64_t  st_birthtim_nsec;// 0x70
+  int32_t st_lspare;        // 0x64
+  int64_t st_birthtim_sec;  // 0x68
+  int64_t st_birthtim_nsec; // 0x70
 };
-_Static_assert(sizeof(struct ps4_stat) == 120, "ps4_stat must be exactly 120 bytes");
+_Static_assert(sizeof(struct ps4_stat) == 120,
+               "ps4_stat must be exactly 120 bytes");
 
 static void fill_ps4_stat(struct ps4_stat *gst, const struct stat *st) {
   memset(gst, 0, sizeof(struct ps4_stat));
@@ -921,7 +966,8 @@ void shim_msync(GuestContext *ctx) {
   uint64_t addr = ctx->rdi;
   size_t len = (size_t)ctx->rsi;
   int flags = (int)ctx->rdx;
-  void *host_addr = (addr && ctx->mem_base) ? (void *)(ctx->mem_base + addr) : NULL;
+  void *host_addr =
+      (addr && ctx->mem_base) ? (void *)(ctx->mem_base + addr) : NULL;
   int ret = msync(host_addr, len, flags);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
@@ -938,7 +984,9 @@ void shim_pwrite(GuestContext *ctx) {
   uint64_t buf_addr = ctx->rsi;
   size_t nbyte = (size_t)ctx->rdx;
   off_t offset = (off_t)ctx->rcx;
-  const void *buf = (buf_addr && ctx->mem_base) ? (const void *)(ctx->mem_base + buf_addr) : NULL;
+  const void *buf = (buf_addr && ctx->mem_base)
+                        ? (const void *)(ctx->mem_base + buf_addr)
+                        : NULL;
   ssize_t ret = pwrite(fd, buf, nbyte, offset);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
@@ -954,7 +1002,9 @@ void shim_sceKernelPwrite(GuestContext *ctx) {
   uint64_t buf_addr = ctx->rsi;
   size_t nbyte = (size_t)ctx->rdx;
   off_t offset = (off_t)ctx->rcx;
-  const void *buf = (buf_addr && ctx->mem_base) ? (const void *)(ctx->mem_base + buf_addr) : NULL;
+  const void *buf = (buf_addr && ctx->mem_base)
+                        ? (const void *)(ctx->mem_base + buf_addr)
+                        : NULL;
   ssize_t ret = pwrite(fd, buf, nbyte, offset);
   if (ret < 0) {
     ctx->rax = 0x80020000 | (uint32_t)errno;
@@ -1042,8 +1092,10 @@ void shim_rename(GuestContext *ctx) {
   const char *oldpath = (const char *)(ctx->mem_base + old_addr);
   const char *newpath = (const char *)(ctx->mem_base + new_addr);
   char res_old[1024], res_new[1024];
-  if (ps4_vfs_resolve(oldpath, res_old, sizeof(res_old)) == 0) oldpath = res_old;
-  if (ps4_vfs_resolve(newpath, res_new, sizeof(res_new)) == 0) newpath = res_new;
+  if (ps4_vfs_resolve(oldpath, res_old, sizeof(res_old)) == 0)
+    oldpath = res_old;
+  if (ps4_vfs_resolve(newpath, res_new, sizeof(res_new)) == 0)
+    newpath = res_new;
   int ret = rename(oldpath, newpath);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
@@ -1105,7 +1157,8 @@ static GuestDirCache g_dir_cache[GUEST_DIR_CACHE_SLOTS];
 static pthread_mutex_t g_dir_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void guest_dir_cache_free(GuestDirCache *c) {
-  for (int i = 0; i < c->count; i++) free(c->names[i]);
+  for (int i = 0; i < c->count; i++)
+    free(c->names[i]);
   free(c->names);
   free(c->inos);
   free(c->types);
@@ -1116,14 +1169,16 @@ static void guest_dir_cache_free(GuestDirCache *c) {
 static void guest_dir_cache_drop_fd(int fd) {
   pthread_mutex_lock(&g_dir_cache_lock);
   for (int i = 0; i < GUEST_DIR_CACHE_SLOTS; i++) {
-    if (g_dir_cache[i].names && g_dir_cache[i].fd == fd) guest_dir_cache_free(&g_dir_cache[i]);
+    if (g_dir_cache[i].names && g_dir_cache[i].fd == fd)
+      guest_dir_cache_free(&g_dir_cache[i]);
   }
   pthread_mutex_unlock(&g_dir_cache_lock);
 }
 
 static GuestDirCache *guest_dir_cache_get(int fd) {
   struct stat st;
-  if (fstat(fd, &st) != 0) return NULL;
+  if (fstat(fd, &st) != 0)
+    return NULL;
   if (!S_ISDIR(st.st_mode)) {
     errno = ENOTDIR;
     return NULL;
@@ -1132,7 +1187,8 @@ static GuestDirCache *guest_dir_cache_get(int fd) {
   for (int i = 0; i < GUEST_DIR_CACHE_SLOTS; i++) {
     GuestDirCache *c = &g_dir_cache[i];
     if (c->names && c->fd == fd) {
-      if (c->dev == st.st_dev && c->ino == st.st_ino) return c;
+      if (c->dev == st.st_dev && c->ino == st.st_ino)
+        return c;
       guest_dir_cache_free(c);
       slot = c;
       break;
@@ -1140,7 +1196,8 @@ static GuestDirCache *guest_dir_cache_get(int fd) {
   }
   if (!slot) {
     for (int i = 0; i < GUEST_DIR_CACHE_SLOTS && !slot; i++) {
-      if (!g_dir_cache[i].names) slot = &g_dir_cache[i];
+      if (!g_dir_cache[i].names)
+        slot = &g_dir_cache[i];
     }
     if (!slot) {
       slot = &g_dir_cache[0];
@@ -1148,7 +1205,8 @@ static GuestDirCache *guest_dir_cache_get(int fd) {
     }
   }
   int dfd = dup(fd);
-  if (dfd < 0) return NULL;
+  if (dfd < 0)
+    return NULL;
   DIR *d = fdopendir(dfd);
   if (!d) {
     close(dfd);
@@ -1161,8 +1219,10 @@ static GuestDirCache *guest_dir_cache_get(int fd) {
   slot->types = (uint8_t *)calloc(cap, sizeof(uint8_t));
   struct dirent *e;
   while ((e = readdir(d)) != NULL) {
-    if (strncmp(e->d_name, "._", 2) == 0) continue;
-    if (strlen(e->d_name) > 255) continue;
+    if (strncmp(e->d_name, "._", 2) == 0)
+      continue;
+    if (strlen(e->d_name) > 255)
+      continue;
     if (slot->count == cap) {
       cap *= 2;
       slot->names = (char **)realloc(slot->names, cap * sizeof(char *));
@@ -1170,7 +1230,8 @@ static GuestDirCache *guest_dir_cache_get(int fd) {
       slot->types = (uint8_t *)realloc(slot->types, cap * sizeof(uint8_t));
     }
     slot->names[slot->count] = strdup(e->d_name);
-    slot->inos[slot->count] = (uint32_t)e->d_ino ? (uint32_t)e->d_ino : (uint32_t)(slot->count + 1);
+    slot->inos[slot->count] =
+        (uint32_t)e->d_ino ? (uint32_t)e->d_ino : (uint32_t)(slot->count + 1);
     slot->types[slot->count] = e->d_type; // DT_* values match FreeBSD
     slot->count++;
   }
@@ -1185,20 +1246,24 @@ static GuestDirCache *guest_dir_cache_get(int fd) {
 // Fills buf with FreeBSD dirents. *basep (if given) is the entry index; a
 // caller-supplied base restarts enumeration from that index. Returns bytes
 // written, 0 at end, or -1 with errno set.
-static int guest_getdirentries(int fd, char *buf, size_t nbytes, int64_t *basep) {
+static int guest_getdirentries(int fd, char *buf, size_t nbytes,
+                               int64_t *basep) {
   pthread_mutex_lock(&g_dir_cache_lock);
   GuestDirCache *c = guest_dir_cache_get(fd);
   if (!c) {
     pthread_mutex_unlock(&g_dir_cache_lock);
     return -1;
   }
-  if (basep && *basep >= 0 && *basep <= c->count) c->pos = (int)*basep;
-  if (basep && *basep < 0) c->pos = 0;
+  if (basep && *basep >= 0 && *basep <= c->count)
+    c->pos = (int)*basep;
+  if (basep && *basep < 0)
+    c->pos = 0;
   size_t off = 0;
   while (c->pos < c->count) {
     size_t namlen = strlen(c->names[c->pos]);
     size_t reclen = (8 + namlen + 1 + 3) & ~(size_t)3;
-    if (off + reclen > nbytes) break;
+    if (off + reclen > nbytes)
+      break;
     char *r = buf + off;
     memset(r, 0, reclen);
     *(uint32_t *)(r + 0) = c->inos[c->pos];
@@ -1214,7 +1279,8 @@ static int guest_getdirentries(int fd, char *buf, size_t nbytes, int64_t *basep)
     errno = EINVAL;
     return -1;
   }
-  if (basep) *basep = c->pos;
+  if (basep)
+    *basep = c->pos;
   pthread_mutex_unlock(&g_dir_cache_lock);
   return (int)off;
 }
@@ -1342,7 +1408,7 @@ void shim_poll(GuestContext *ctx) {
 // sigaction
 struct guest_sigaction {
   uint64_t handler;
-  int32_t  flags;
+  int32_t flags;
   uint32_t mask[4];
 };
 
@@ -1362,11 +1428,13 @@ void shim_sigaction(GuestContext *ctx) {
 
   pthread_mutex_lock(&g_sigaction_mutex);
   if (oact_addr) {
-    struct guest_sigaction *oact = (struct guest_sigaction *)(ctx->mem_base + oact_addr);
+    struct guest_sigaction *oact =
+        (struct guest_sigaction *)(ctx->mem_base + oact_addr);
     *oact = g_guest_sigactions[sig];
   }
   if (act_addr) {
-    struct guest_sigaction *act = (struct guest_sigaction *)(ctx->mem_base + act_addr);
+    struct guest_sigaction *act =
+        (struct guest_sigaction *)(ctx->mem_base + act_addr);
     g_guest_sigactions[sig] = *act;
   }
   pthread_mutex_unlock(&g_sigaction_mutex);
@@ -1433,7 +1501,8 @@ void shim_syscall(GuestContext *ctx) {
     size_t count = (size_t)ctx->rcx;
     ssize_t ret;
     PS4_HITCH_TIMED(PS4_HITCH_IO, ret = read(fd, ctx->mem_base + buf, count));
-    if (ret < 0) set_guest_errno(ctx, errno);
+    if (ret < 0)
+      set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();
   }
@@ -1442,7 +1511,8 @@ void shim_syscall(GuestContext *ctx) {
     uint64_t buf = ctx->rdx;
     size_t count = (size_t)ctx->rcx;
     ssize_t ret = write(fd, ctx->mem_base + buf, count);
-    if (ret < 0) set_guest_errno(ctx, errno);
+    if (ret < 0)
+      set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();
   }
@@ -1468,8 +1538,10 @@ void shim_syscall(GuestContext *ctx) {
       }
 #endif
     }
-    printf("[ps4-sys] syscall 5 (SYS_open): '%s' (resolved='%s', flags=0x%x, host_flags=0x%x) -> fd=%d\n",
-           path ? path : "(null)", actual_path ? actual_path : "(null)", flags, host_flags, ret);
+    printf("[ps4-sys] syscall 5 (SYS_open): '%s' (resolved='%s', flags=0x%x, "
+           "host_flags=0x%x) -> fd=%d\n",
+           path ? path : "(null)", actual_path ? actual_path : "(null)", flags,
+           host_flags, ret);
     fflush(stdout);
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();
@@ -1477,7 +1549,8 @@ void shim_syscall(GuestContext *ctx) {
   case 6: { // SYS_close
     int fd = (int)ctx->rsi;
     int ret = close(fd);
-    if (ret < 0) set_guest_errno(ctx, errno);
+    if (ret < 0)
+      set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)ret;
     SHIM_RETURN();
   }
@@ -1515,7 +1588,8 @@ void shim_syscall(GuestContext *ctx) {
   case 432: // SYS_thr_self
     ctx->rax = ctx->thread_id ? ctx->thread_id : 1;
     SHIM_RETURN();
-  case 477: { // SYS_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset)
+  case 477: { // SYS_mmap(void *addr, size_t len, int prot, int flags, int fd,
+              // off_t offset)
     uint64_t addr = ctx->rsi;
     size_t len = (size_t)ctx->rdx;
     int prot = (int)ctx->rcx;
@@ -1523,11 +1597,13 @@ void shim_syscall(GuestContext *ctx) {
     int fd = (int)ctx->r9;
     off_t offset = 0;
     if (ctx->rsp && ctx->mem_base && ctx->rsp + 16 <= ctx->mem_size) {
-      offset = (off_t)*(uint64_t *)(ctx->mem_base + ctx->rsp + 8);
+      offset = (off_t) * (uint64_t *)(ctx->mem_base + ctx->rsp + 8);
     }
 
-    printf("[ps4-sys] syscall 477 (SYS_mmap): addr=0x%llx len=%zu (%.2f MB) prot=0x%x flags=0x%x fd=%d offset=%lld\n",
-           (unsigned long long)addr, len, (double)len / (1024.0 * 1024.0), prot, flags, fd, (long long)offset);
+    printf("[ps4-sys] syscall 477 (SYS_mmap): addr=0x%llx len=%zu (%.2f MB) "
+           "prot=0x%x flags=0x%x fd=%d offset=%lld\n",
+           (unsigned long long)addr, len, (double)len / (1024.0 * 1024.0), prot,
+           flags, fd, (long long)offset);
     fflush(stdout);
 
     if (len == 0) {
@@ -1541,34 +1617,44 @@ void shim_syscall(GuestContext *ctx) {
 
     uint64_t alloc_addr = (uint64_t)-1;
     if (addr != 0) {
-      alloc_addr = recomp_vm_alloc_fixed(ctx, addr, aligned_len, prot, flags, "mmap_sys");
+      alloc_addr = recomp_vm_alloc_fixed(ctx, addr, aligned_len, prot, flags,
+                                         "mmap_sys");
     }
     if (alloc_addr == (uint64_t)-1) {
-      alloc_addr = recomp_vm_alloc_named_aligned(ctx, aligned_len, align, prot, flags, "mmap_sys");
+      alloc_addr = recomp_vm_alloc_named_aligned(ctx, aligned_len, align, prot,
+                                                 flags, "mmap_sys");
     }
 
     if (alloc_addr == (uint64_t)-1) {
-      fprintf(stderr, "[ps4-sys] ERROR: syscall 477 (SYS_mmap) FAILED: addr=0x%llx len=%zu\n",
+      fprintf(stderr,
+              "[ps4-sys] ERROR: syscall 477 (SYS_mmap) FAILED: addr=0x%llx "
+              "len=%zu\n",
               (unsigned long long)addr, len);
       set_guest_errno(ctx, ENOMEM);
       ctx->rax = (uint64_t)-1;
     } else {
       if (!(flags & 0x1000) && fd >= 0) {
         ssize_t nread;
-        PS4_HITCH_TIMED(PS4_HITCH_IO, nread = pread(fd, ctx->mem_base + alloc_addr, len, offset));
+        PS4_HITCH_TIMED(PS4_HITCH_IO,
+                        nread =
+                            pread(fd, ctx->mem_base + alloc_addr, len, offset));
         if (nread < 0) {
-          fprintf(stderr, "[ps4-sys] syscall 477 file read FAILED: fd=%d offset=%lld len=%zu errno=%d (%s)\n",
+          fprintf(stderr,
+                  "[ps4-sys] syscall 477 file read FAILED: fd=%d offset=%lld "
+                  "len=%zu errno=%d (%s)\n",
                   fd, (long long)offset, len, errno, strerror(errno));
           set_guest_errno(ctx, errno);
           recomp_vm_free(ctx, alloc_addr, aligned_len);
           ctx->rax = (uint64_t)-1;
           SHIM_RETURN();
         }
-        printf("[ps4-sys] syscall 477 file read SUCCESS: read=%zd bytes into 0x%llx\n",
+        printf("[ps4-sys] syscall 477 file read SUCCESS: read=%zd bytes into "
+               "0x%llx\n",
                nread, (unsigned long long)alloc_addr);
         fflush(stdout);
       }
-      printf("[ps4-sys] syscall 477 SUCCESS: out=0x%llx\n", (unsigned long long)alloc_addr);
+      printf("[ps4-sys] syscall 477 SUCCESS: out=0x%llx\n",
+             (unsigned long long)alloc_addr);
       fflush(stdout);
       ctx->rax = alloc_addr;
     }
@@ -1587,7 +1673,9 @@ void shim_syscall(GuestContext *ctx) {
     return;
   }
   default:
-    fprintf(stderr, "[ps4-sys] WARN: Unsupported syscall num=%d (rsi=0x%llx, rdx=0x%llx, rcx=0x%llx, r8=0x%llx)\n",
+    fprintf(stderr,
+            "[ps4-sys] WARN: Unsupported syscall num=%d (rsi=0x%llx, "
+            "rdx=0x%llx, rcx=0x%llx, r8=0x%llx)\n",
             num, (unsigned long long)ctx->rsi, (unsigned long long)ctx->rdx,
             (unsigned long long)ctx->rcx, (unsigned long long)ctx->r8);
     set_guest_errno(ctx, ENOSYS);
@@ -1598,17 +1686,34 @@ void shim_syscall(GuestContext *ctx) {
 
 // Stack protector canary check failure
 void shim___stack_chk_fail(GuestContext *ctx) {
-  uint64_t ret_addr = (ctx && ctx->mem_base && ctx->rsp + 8 <= ctx->mem_size) ? MEM_U64(ctx->rsp) : 0;
-  uint64_t r14_val = (ctx && ctx->mem_base && ctx->r14 + 8 <= ctx->mem_size) ? MEM_U64(ctx->r14) : 0;
-  uint64_t stack_canary = (ctx && ctx->mem_base && ctx->rbp >= 0x30 && ctx->rbp - 0x30 + 8 <= ctx->mem_size) ? MEM_U64(ctx->rbp - 0x30) : 0;
-  fprintf(stderr, "*** stack smashing detected ***: terminated (caller=0x%llx, rsp=0x%llx, rbp=0x%llx, r14=0x%llx, *r14=0x%llx, [rbp-0x30]=0x%llx, rax=0x%llx)\n",
-          (unsigned long long)ret_addr,
-          (unsigned long long)(ctx ? ctx->rsp : 0),
-          (unsigned long long)(ctx ? ctx->rbp : 0),
-          (unsigned long long)(ctx ? ctx->r14 : 0),
-          (unsigned long long)r14_val,
-          (unsigned long long)stack_canary,
-          (unsigned long long)(ctx ? ctx->rax : 0));
+  uint64_t ret_addr = (ctx && ctx->mem_base && ctx->rsp + 8 <= ctx->mem_size)
+                          ? MEM_U64(ctx->rsp)
+                          : 0;
+  uint64_t r14_val = (ctx && ctx->mem_base && ctx->r14 + 8 <= ctx->mem_size)
+                         ? MEM_U64(ctx->r14)
+                         : 0;
+  uint64_t stack_canary_30 = (ctx && ctx->mem_base && ctx->rbp >= 0x30 &&
+                              ctx->rbp - 0x30 + 8 <= ctx->mem_size)
+                                 ? MEM_U64(ctx->rbp - 0x30)
+                                 : 0;
+  uint64_t stack_canary_28 = (ctx && ctx->mem_base && ctx->rbp >= 0x28 &&
+                              ctx->rbp - 0x28 + 8 <= ctx->mem_size)
+                                 ? MEM_U64(ctx->rbp - 0x28)
+                                 : 0;
+  fprintf(
+      stderr,
+      "*** stack smashing detected ***: terminated (caller=0x%llx, rsp=0x%llx, "
+      "rbp=0x%llx, r14=0x%llx, *r14=0x%llx, [rbp-0x30]=0x%llx, [rbp-0x28]=0x%llx, rax=0x%llx, rcx=0x%llx)\n",
+      (unsigned long long)ret_addr, (unsigned long long)(ctx ? ctx->rsp : 0),
+      (unsigned long long)(ctx ? ctx->rbp : 0),
+      (unsigned long long)(ctx ? ctx->r14 : 0), (unsigned long long)r14_val,
+      (unsigned long long)stack_canary_30, (unsigned long long)stack_canary_28,
+      (unsigned long long)(ctx ? ctx->rax : 0),
+      (unsigned long long)(ctx ? ctx->rcx : 0));
+  if (ctx) {
+    recomp_dump_guest_context(ctx);
+  }
+  fflush(stderr);
   abort();
 }
 
@@ -1641,7 +1746,8 @@ void shim_clock_gettime(GuestContext *ctx) {
       int64_t tv_sec;
       int64_t tv_nsec;
     };
-    struct guest_timespec *g_ts = (struct guest_timespec *)(ctx->mem_base + tp_addr);
+    struct guest_timespec *g_ts =
+        (struct guest_timespec *)(ctx->mem_base + tp_addr);
     g_ts->tv_sec = (int64_t)host_ts.tv_sec;
     g_ts->tv_nsec = (int64_t)host_ts.tv_nsec;
     ctx->rax = 0;
@@ -1668,7 +1774,8 @@ void shim_gettimeofday(GuestContext *ctx) {
         int64_t tv_sec;
         int64_t tv_usec;
       };
-      struct guest_timeval *g_tv = (struct guest_timeval *)(ctx->mem_base + tv_addr);
+      struct guest_timeval *g_tv =
+          (struct guest_timeval *)(ctx->mem_base + tv_addr);
       g_tv->tv_sec = (int64_t)host_tv.tv_sec;
       g_tv->tv_usec = (int64_t)host_tv.tv_usec;
     }

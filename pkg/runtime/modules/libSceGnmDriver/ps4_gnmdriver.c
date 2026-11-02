@@ -1032,7 +1032,7 @@ int32_t sceGnmSubmitCommandBuffers(GuestContext *ctx, uint32_t count,
     }
 
     for (uint32_t i = 0; i < count; i++) {
-        if (dcb_sizes_in_bytes[i] == 0 || dcb_sizes_in_bytes[i] > 0x3ffffc) {
+        if (dcb_sizes_in_bytes[i] > 0x3ffffc) {
             return ORBIS_GNM_ERROR_INVALID_VALUE;
         }
         if (ccb_sizes_in_bytes && ccb_sizes_in_bytes[i] > 0x3ffffc) {
@@ -1068,7 +1068,7 @@ int32_t sceGnmSubmitAndFlipCommandBuffers(GuestContext *ctx, uint32_t count,
     }
 
     for (uint32_t i = 0; i < count; i++) {
-        if (dcb_sizes_in_bytes[i] == 0 || dcb_sizes_in_bytes[i] > 0x3ffffc) {
+        if (dcb_sizes_in_bytes[i] > 0x3ffffc) {
             return ORBIS_GNM_ERROR_INVALID_VALUE;
         }
         if (ccb_sizes_in_bytes && ccb_sizes_in_bytes[i] > 0x3ffffc) {

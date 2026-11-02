@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ps4_avplayer.h"
 #include "ps4_vfs.h"
+#include "ps4_threading.h"
 #include "recomp_runtime.h"
 
 extern "C" {
@@ -209,12 +210,41 @@ public:
         return val;
     }
 
+    bool try_pop(T &out) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_queue.empty()) return false;
+        out = std::move(m_queue.front());
+        m_queue.pop();
+        return true;
+    }
+
+    template <typename Predicate>
+    bool pop_if(Predicate pred, T &out) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_queue.empty()) return false;
+        if (!pred(m_queue.front())) return false;
+        out = std::move(m_queue.front());
+        m_queue.pop();
+        return true;
+    }
+
     bool wait_pop(const std::atomic<bool> &stop_flag, T &out) {
         std::unique_lock<std::mutex> lock(m_mutex);
         while (m_queue.empty() && !stop_flag.load()) {
             m_cv.wait_for(lock, std::chrono::milliseconds(10));
         }
         if (m_queue.empty() || stop_flag.load()) return false;
+        out = std::move(m_queue.front());
+        m_queue.pop();
+        return true;
+    }
+
+    bool wait_pop_timeout(T &out, uint32_t timeout_ms) {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        if (m_queue.empty()) {
+            m_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms));
+        }
+        if (m_queue.empty()) return false;
         out = std::move(m_queue.front());
         m_queue.pop();
         return true;
@@ -291,7 +321,7 @@ public:
     }
 
     ~AvPlayer() {
-        stop_playback(m_main_ctx);
+        stop_playback_internal(m_main_ctx, false);
         m_controller_stop.store(true);
         m_event_queue.notify_all();
         if (m_controller_thread.joinable()) {
@@ -310,7 +340,6 @@ public:
     int32_t add_source(const char *path) {
         if (!path || path[0] == '\0') return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
         m_state.store(AvState::AddingSource);
-        m_event_queue.push(AVPLAYER_EVENT_STATE_READY);
 
         char host_path[1024] = {0};
         const char *open_path = path;
@@ -378,6 +407,7 @@ public:
         }
 
         m_state.store(AvState::Ready);
+        m_event_queue.push(AVPLAYER_EVENT_STATE_READY);
         AVPLAYER_LOG("Source opened successfully: %s, found %zu supported streams", path, m_streams.size());
         return ORBIS_OK;
     }
@@ -412,7 +442,9 @@ public:
             return false;
         }
 
-        stop_playback_internal(ctx);
+        if (m_state.load() == AvState::Play || m_state.load() == AvState::Pause) {
+            stop_playback_internal(ctx, false);
+        }
 
         uint32_t max_fb = (uint32_t)std::min(std::max(2, m_init_data.num_output_video_framebuffers), 16);
 
@@ -460,7 +492,8 @@ public:
 
             uint32_t max_channels = 8;
             uint32_t audio_buf_size = max_channels * sizeof(int32_t) * 1024;
-            for (uint32_t i = 0; i < max_fb * 2; ++i) {
+            uint32_t num_audio_bufs = std::max(max_fb * 4, 16u);
+            for (uint32_t i = 0; i < num_audio_bufs; ++i) {
                 GuestBuffer buf = allocate_buffer(ctx, 0x10, audio_buf_size, false);
                 if (!buf.host_ptr) {
                     AVPLAYER_LOG("Failed to allocate audio buffer %u", i);
@@ -473,6 +506,7 @@ public:
         m_is_eof.store(false);
         m_is_paused.store(false);
         m_workers_stop.store(false);
+        m_eof_stop_event_sent.store(false);
         m_total_pause_duration = std::chrono::steady_clock::duration(0);
         m_start_time = std::chrono::steady_clock::now();
         m_state.store(AvState::Play);
@@ -492,7 +526,8 @@ public:
 
     bool stop_playback(GuestContext *ctx) {
         std::unique_lock<std::mutex> lock(m_state_mutex);
-        return stop_playback_internal(ctx);
+        m_eof_stop_event_sent.store(true);
+        return stop_playback_internal(ctx, true);
     }
 
     void pause_playback() {
@@ -524,36 +559,47 @@ public:
             return 0;
         }
         auto now = m_is_paused.load() ? m_pause_time : std::chrono::steady_clock::now();
+        if (m_audio_stream_idx >= 0 && m_last_audio_time.time_since_epoch().count() > 0) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_audio_time - m_total_pause_duration).count();
+            return m_last_audio_ts + (elapsed > 0 ? (uint64_t)elapsed : 0);
+        }
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_start_time - m_total_pause_duration).count();
         return elapsed > 0 ? (uint64_t)elapsed : 0;
     }
 
     bool is_active() {
         AvState st = m_state.load();
-        return (st == AvState::Play || st == AvState::Pause || st == AvState::Buffering ||
-                m_ready_video_frames.size() > 0 || m_ready_audio_frames.size() > 0);
+        if (st == AvState::Initial || st == AvState::Stop || st == AvState::Error) {
+            return false;
+        }
+        if (!m_is_eof.load()) {
+            return true;
+        }
+        return (m_ready_video_frames.size() > 0 || m_ready_audio_frames.size() > 0 ||
+                m_video_packets.size() > 0 || m_audio_packets.size() > 0);
     }
 
     bool get_video_data_ex(AvPlayerFrameInfoEx *info) {
         if (!info || !is_active() || m_is_paused.load()) return false;
-        if (m_ready_video_frames.size() == 0) return false;
 
         uint64_t now_ms = current_time();
-        auto front = m_ready_video_frames.pop();
-        if (!front.has_value()) return false;
+        DecodedVideoFrame frame;
+        bool ok = m_ready_video_frames.pop_if([now_ms, this](const DecodedVideoFrame &f) {
+            if (m_sync_mode == AVPLAYER_AV_SYNC_MODE_DEFAULT) {
+                return f.info.timestamp <= now_ms + 40;
+            }
+            return true;
+        }, frame);
 
-        if (m_sync_mode == AVPLAYER_AV_SYNC_MODE_DEFAULT && front->info.timestamp > now_ms + 40) {
-            m_ready_video_frames.push(std::move(*front));
-            return false;
-        }
+        if (!ok) return false;
 
         if (m_curr_video_buf.has_value()) {
             m_free_video_buffers.push(std::move(*m_curr_video_buf));
             m_curr_video_buf.reset();
         }
 
-        *info = front->info;
-        m_curr_video_buf = std::move(front->buffer);
+        *info = frame.info;
+        m_curr_video_buf = std::move(frame.buffer);
         return true;
     }
 
@@ -572,16 +618,24 @@ public:
 
     bool get_audio_data(AvPlayerFrameInfo *info) {
         if (!info || !is_active() || m_is_paused.load()) return false;
-        auto front = m_ready_audio_frames.pop();
-        if (!front.has_value()) return false;
+        DecodedAudioFrame frame;
+        bool ok = false;
+        if (m_is_eof.load() && m_audio_packets.size() == 0) {
+            ok = m_ready_audio_frames.try_pop(frame);
+        } else {
+            ok = m_ready_audio_frames.wait_pop_timeout(frame, 5);
+        }
+        if (!ok) return false;
 
         if (m_curr_audio_buf.has_value()) {
             m_free_audio_buffers.push(std::move(*m_curr_audio_buf));
             m_curr_audio_buf.reset();
         }
 
-        *info = front->info;
-        m_curr_audio_buf = std::move(front->buffer);
+        *info = frame.info;
+        m_last_audio_ts = frame.info.timestamp;
+        m_last_audio_time = std::chrono::steady_clock::now();
+        m_curr_audio_buf = std::move(frame.buffer);
         return true;
     }
 
@@ -634,7 +688,7 @@ private:
         buf.host_ptr = nullptr;
     }
 
-    bool stop_playback_internal(GuestContext *ctx) {
+    bool stop_playback_internal(GuestContext *ctx, bool emit_event = true) {
         m_workers_stop.store(true);
 
         m_video_packets.notify_all();
@@ -697,7 +751,9 @@ private:
         }
 
         m_state.store(AvState::Stop);
-        m_event_queue.push(AVPLAYER_EVENT_STATE_STOP);
+        if (emit_event) {
+            m_event_queue.push(AVPLAYER_EVENT_STATE_STOP);
+        }
         return true;
     }
 
@@ -724,6 +780,8 @@ private:
                 }
                 AVPLAYER_LOG("Demuxer EOF reached");
                 m_is_eof.store(true);
+                m_video_packets.notify_all();
+                m_audio_packets.notify_all();
                 break;
             }
 
@@ -744,9 +802,12 @@ private:
         AVFrame *nv12_frame = av_frame_alloc();
 
         while (!m_workers_stop.load()) {
+            if (m_video_packets.size() == 0 && m_is_eof.load()) {
+                break;
+            }
             AVPacket *pkt = nullptr;
             if (!m_video_packets.wait_pop(m_workers_stop, pkt) || !pkt) {
-                if (m_is_eof.load()) break;
+                if (m_is_eof.load() && m_video_packets.size() == 0) break;
                 continue;
             }
 
@@ -811,47 +872,77 @@ private:
     void audio_decoder_worker() {
         AVPLAYER_LOG("Audio decoder worker started");
         AVFrame *raw_frame = av_frame_alloc();
-        AVFrame *pcm_frame = av_frame_alloc();
 
         while (!m_workers_stop.load()) {
+            if (m_audio_packets.size() == 0 && m_is_eof.load()) {
+                break;
+            }
             AVPacket *pkt = nullptr;
             if (!m_audio_packets.wait_pop(m_workers_stop, pkt) || !pkt) {
-                if (m_is_eof.load()) break;
+                if (m_is_eof.load() && m_audio_packets.size() == 0) break;
                 continue;
             }
 
             int ret = avcodec_send_packet(m_audio_codec_ctx, pkt);
             av_packet_free(&pkt);
-            if (ret < 0) continue;
+            if (ret < 0 && ret != AVERROR(EAGAIN)) {
+                AVPLAYER_LOG("avcodec_send_packet error %d", ret);
+                continue;
+            }
 
             while (ret >= 0 && !m_workers_stop.load()) {
                 ret = avcodec_receive_frame(m_audio_codec_ctx, raw_frame);
                 if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
-                if (ret < 0) break;
+                if (ret < 0) {
+                    AVPLAYER_LOG("avcodec_receive_frame error %d", ret);
+                    break;
+                }
 
                 GuestBuffer buf;
                 if (!m_free_audio_buffers.wait_pop(m_workers_stop, buf)) break;
 
-                if (!m_swr_ctx) {
-                    SwrContext *swr = nullptr;
-                    AVChannelLayout in_layout = raw_frame->ch_layout;
-                    AVChannelLayout out_layout = raw_frame->ch_layout;
-                    swr_alloc_set_opts2(&swr, &out_layout, AV_SAMPLE_FMT_S16, raw_frame->sample_rate,
-                                        &in_layout, (AVSampleFormat)raw_frame->format, raw_frame->sample_rate,
-                                        0, nullptr);
-                    m_swr_ctx = swr;
-                    swr_init(m_swr_ctx);
+                const AVFrame *target_frame = raw_frame;
+                AVFrame *converted_frame = nullptr;
+
+                if (raw_frame->format != AV_SAMPLE_FMT_S16) {
+                    converted_frame = av_frame_alloc();
+                    converted_frame->best_effort_timestamp = raw_frame->best_effort_timestamp;
+                    converted_frame->pts = raw_frame->pts;
+                    converted_frame->pkt_dts = raw_frame->pkt_dts < 0 ? 0 : raw_frame->pkt_dts;
+                    converted_frame->format = AV_SAMPLE_FMT_S16;
+                    av_channel_layout_copy(&converted_frame->ch_layout, &raw_frame->ch_layout);
+                    converted_frame->sample_rate = raw_frame->sample_rate;
+
+                    if (!m_swr_ctx) {
+                        SwrContext *swr = nullptr;
+                        AVChannelLayout in_layout{};
+                        AVChannelLayout out_layout{};
+                        av_channel_layout_copy(&in_layout, &raw_frame->ch_layout);
+                        av_channel_layout_copy(&out_layout, &raw_frame->ch_layout);
+                        swr_alloc_set_opts2(&swr, &out_layout, AV_SAMPLE_FMT_S16, raw_frame->sample_rate,
+                                            &in_layout, (AVSampleFormat)raw_frame->format, raw_frame->sample_rate,
+                                            0, nullptr);
+                        av_channel_layout_uninit(&in_layout);
+                        av_channel_layout_uninit(&out_layout);
+                        m_swr_ctx = swr;
+                        swr_init(m_swr_ctx);
+                    }
+
+                    int conv_res = swr_convert_frame(m_swr_ctx, converted_frame, raw_frame);
+                    if (conv_res < 0) {
+                        AVPLAYER_LOG("swr_convert_frame error %d", conv_res);
+                        av_frame_free(&converted_frame);
+                        m_free_audio_buffers.push(std::move(buf));
+                        av_frame_unref(raw_frame);
+                        continue;
+                    }
+                    target_frame = converted_frame;
                 }
 
-                pcm_frame->format = AV_SAMPLE_FMT_S16;
-                pcm_frame->ch_layout = raw_frame->ch_layout;
-                pcm_frame->sample_rate = raw_frame->sample_rate;
-                swr_convert_frame(m_swr_ctx, pcm_frame, raw_frame);
-
-                uint32_t channels = (uint32_t)pcm_frame->ch_layout.nb_channels;
-                uint32_t bytes = channels * (uint32_t)pcm_frame->nb_samples * sizeof(int16_t);
-                if (bytes <= buf.size) {
-                    memcpy(buf.host_ptr, pcm_frame->data[0], bytes);
+                uint32_t channels = (uint32_t)target_frame->ch_layout.nb_channels;
+                uint32_t bytes = channels * (uint32_t)target_frame->nb_samples * sizeof(int16_t);
+                if (bytes <= buf.size && target_frame->data[0]) {
+                    memcpy(buf.host_ptr, target_frame->data[0], bytes);
                 }
 
                 AVStream *st = m_fmt_ctx->streams[m_audio_stream_idx];
@@ -862,22 +953,28 @@ private:
                 frame.info.p_data = frame.buffer.guest_addr;
                 frame.info.timestamp = ts;
                 frame.info.details.audio.channel_count = (uint16_t)channels;
-                frame.info.details.audio.sample_rate = (uint32_t)pcm_frame->sample_rate;
+                frame.info.details.audio.sample_rate = (uint32_t)target_frame->sample_rate;
                 frame.info.details.audio.size = bytes;
 
                 m_ready_audio_frames.push(std::move(frame));
-                av_frame_unref(pcm_frame);
+
+                if (converted_frame) {
+                    av_frame_free(&converted_frame);
+                }
                 av_frame_unref(raw_frame);
             }
         }
 
         av_frame_free(&raw_frame);
-        av_frame_free(&pcm_frame);
         AVPLAYER_LOG("Audio decoder worker ended");
     }
 
     void controller_worker() {
         AVPLAYER_LOG("Controller worker started");
+        RecompThread *sys_thr = nullptr;
+        if (m_controller_ctx) {
+            sys_thr = recomp_init_system_thread(m_controller_ctx, "AvController");
+        }
         while (!m_controller_stop.load()) {
             AvPlayerEvents ev;
             if (m_event_queue.wait_pop(m_controller_stop, ev)) {
@@ -896,14 +993,26 @@ private:
                     if (v_idx >= 0) enable_stream((uint32_t)v_idx);
                     if (a_idx >= 0) enable_stream((uint32_t)a_idx);
                     start_playback(m_main_ctx);
-                } else if (m_init_data.event_replacement.event_callback && m_controller_ctx) {
+                }
+                if (m_init_data.event_replacement.event_callback && m_controller_ctx) {
                     m_controller_ctx->rdi = m_init_data.event_replacement.object_ptr;
                     m_controller_ctx->rsi = (uint64_t)ev;
                     m_controller_ctx->rdx = 0;
                     m_controller_ctx->rcx = 0;
                     recomp_call_guest(m_controller_ctx, m_init_data.event_replacement.event_callback);
                 }
+            } else {
+                if (!m_controller_stop.load() && m_state.load() == AvState::Play && m_is_eof.load()) {
+                    if (!is_active() && !m_eof_stop_event_sent.exchange(true)) {
+                        m_state.store(AvState::Stop);
+                        AVPLAYER_LOG("Natural EOF reached and all frames consumed, emitting STOP event to game");
+                        m_event_queue.push(AVPLAYER_EVENT_STATE_STOP);
+                    }
+                }
             }
+        }
+        if (sys_thr) {
+            recomp_cleanup_system_thread(sys_thr);
         }
         AVPLAYER_LOG("Controller worker ended");
     }
@@ -938,10 +1047,13 @@ private:
     std::chrono::steady_clock::time_point m_start_time;
     std::chrono::steady_clock::time_point m_pause_time;
     std::chrono::steady_clock::duration m_total_pause_duration{0};
+    uint64_t m_last_audio_ts = 0;
+    std::chrono::steady_clock::time_point m_last_audio_time{};
 
     std::atomic<bool> m_is_paused{false};
     std::atomic<bool> m_is_looping{false};
     std::atomic<bool> m_is_eof{false};
+    std::atomic<bool> m_eof_stop_event_sent{false};
     std::atomic<bool> m_workers_stop{false};
     std::atomic<bool> m_controller_stop{false};
     std::atomic<AvState> m_state{AvState::Initial};

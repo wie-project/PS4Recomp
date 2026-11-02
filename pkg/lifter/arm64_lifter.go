@@ -1411,6 +1411,10 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		lines = l.liftRdtsc(lines)
 		return lines, nil
 
+	case x86asm.RDTSCP:
+		lines = l.liftRdtscp(lines)
+		return lines, nil
+
 	case x86asm.CPUID:
 		lines = l.liftCpuid(lines)
 		return lines, nil
@@ -1852,6 +1856,8 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 	// Masked Vector Moves
 	case x86asm.VMASKMOVPS, x86asm.VMASKMOVPD:
 		return l.liftMaskmov(inst, nextPC, lines)
+	case x86asm.MASKMOVDQU, x86asm.VMASKMOVDQU:
+		return l.liftMaskmovdqu(inst, nextPC, lines)
 
 	// Vector Arithmetic & Multiplies
 	case x86asm.PMADDUBSW, x86asm.VPMADDUBSW:

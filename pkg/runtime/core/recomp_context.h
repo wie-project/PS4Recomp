@@ -118,6 +118,26 @@ typedef struct GuestContext {
   uint64_t static_tls_size;
 } GuestContext;
 
+#define RECOMP_MAX_JMP_RECORDS 64
+typedef struct GuestJmpRecord {
+  uint64_t env;
+  uintptr_t host_sp;
+  uintptr_t host_x30;
+  uintptr_t host_x29;
+  uint64_t guest_rsp;
+  uint64_t guest_rbp;
+  uint64_t guest_rbx;
+  uint64_t guest_r12;
+  uint64_t guest_r13;
+  uint64_t guest_r14;
+  uint64_t guest_r15;
+  uint64_t guest_rip;
+} GuestJmpRecord;
+
+void recomp_save_jmp_record(GuestContext *ctx, const GuestJmpRecord *rec);
+void recomp_guest_do_longjmp(GuestContext *ctx, const GuestJmpRecord *rec, int val);
+void recomp_guest_setjmp(void);
+
 // The TCB slot (guest address fs_base + RECOMP_TCB_CTX_SLOT) that holds the GuestContext
 // pointer of the execution context running on the guest thread (contract at
 // recomp_enter_guest in the emitter's trampoline).

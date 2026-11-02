@@ -166,6 +166,73 @@ func (l *Arm64Lifter) liftMaskmov(inst disasm.Instruction, nextPC uint64, lines 
 	return lines, nil
 }
 
+// liftMaskmovdqu handles MASKMOVDQU and VMASKMOVDQU.
+// Stores bytes from the first source register into memory addressed by RDI (or EDI if 32-bit addr)
+// using a byte mask in the second source register. Destination address is implicitly [RDI].
+func (l *Arm64Lifter) liftMaskmovdqu(inst disasm.Instruction, nextPC uint64, lines []string) ([]string, error) {
+	dataReg, okD := inst.Inst.Args[0].(x86asm.Reg)
+	maskReg, okM := inst.Inst.Args[1].(x86asm.Reg)
+	if !okD || !okM {
+		lines = append(lines, l.emitUnsupported(inst, "maskmovdqu invalid args")...)
+		return lines, nil
+	}
+
+	_, _, _, dLowV, _, _, _, okDDesc := getVectorDesc(dataReg)
+	_, _, _, mLowV, _, _, mLowD, okMDesc := getVectorDesc(maskReg)
+	if !okDDesc || !okMDesc {
+		lines = append(lines, l.emitUnsupported(inst, "maskmovdqu invalid vector regs")...)
+		return lines, nil
+	}
+
+	// Destination effective address in guest space is RDI (x24).
+	// In ARM64 host space, add mem_base (x28).
+	if inst.Inst.AddrSize == 32 {
+		lines = append(lines,
+			"    ubfx x16, x24, #0, #32",
+			"    add  x16, x28, x16",
+		)
+	} else {
+		lines = append(lines, "    add  x16, x28, x24")
+	}
+
+	lblDone := fmt.Sprintf("L_maskmovdqu_done_%x", inst.Address)
+	lblHigh := fmt.Sprintf("L_maskmovdqu_high_%x", inst.Address)
+
+	// Low 8 bytes
+	lines = append(lines,
+		fmt.Sprintf("    fmov x17, %s", mLowD),
+		fmt.Sprintf("    cbz  x17, %s", lblHigh),
+	)
+	for i := 0; i < 8; i++ {
+		lblSkip := fmt.Sprintf("L_maskmovdqu_skip_%x_%d", inst.Address, i)
+		lines = append(lines,
+			fmt.Sprintf("    tbz  x17, #%d, %s", i*8+7, lblSkip),
+			fmt.Sprintf("    umov w5, %s.b[%d]", dLowV, i),
+			fmt.Sprintf("    strb w5, [x16, #%d]", i),
+			fmt.Sprintf("%s:", lblSkip),
+		)
+	}
+
+	// High 8 bytes
+	lines = append(lines,
+		fmt.Sprintf("%s:", lblHigh),
+		fmt.Sprintf("    mov  x17, %s.d[1]", mLowV),
+		fmt.Sprintf("    cbz  x17, %s", lblDone),
+	)
+	for i := 0; i < 8; i++ {
+		lblSkip := fmt.Sprintf("L_maskmovdqu_skip_%x_%d", inst.Address, i+8)
+		lines = append(lines,
+			fmt.Sprintf("    tbz  x17, #%d, %s", i*8+7, lblSkip),
+			fmt.Sprintf("    umov w5, %s.b[%d]", dLowV, i+8),
+			fmt.Sprintf("    strb w5, [x16, #%d]", i+8),
+			fmt.Sprintf("%s:", lblSkip),
+		)
+	}
+	lines = append(lines, fmt.Sprintf("%s:", lblDone))
+
+	return lines, nil
+}
+
 // liftPmaddupsw handles PMADDUBSW and VPMADDUBSW.
 func (l *Arm64Lifter) liftPmaddupsw(inst disasm.Instruction, nextPC uint64, lines []string) ([]string, error) {
 	lines, handled, err := l.liftMmxBinary(inst, nextPC, lines)
