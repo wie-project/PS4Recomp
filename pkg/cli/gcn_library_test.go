@@ -242,3 +242,13 @@ func TestCheckGcnLibraryMessage(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckGcnLibraryMatchesWorkspace(t *testing.T) {
+	lib := "../../3rdparty/gcn-recompiler/libgcn_recompiler.a"
+	if _, err := os.Stat(lib); err != nil {
+		t.Skip("libgcn_recompiler.a not present")
+	}
+	if err := checkGcnLibrary(lib); err != nil {
+		t.Fatalf("checkGcnLibrary failed on workspace library: %v", err)
+	}
+}

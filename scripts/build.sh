@@ -22,9 +22,14 @@ fi
 
 echo "=== [ps4-recomp] 2/5: Building 3rdparty static libraries ==="
 # 1. SPIRV-Cross
+if [ -f "3rdparty/spirv-cross/libspirv-cross.a" ] && nm "3rdparty/spirv-cross/libspirv-cross.a" 2>/dev/null | grep -q "spv_private"; then
+    echo "Cleaning stale spirv-cross static library with spv_private override..."
+    make -C 3rdparty/spirv-cross clean 2>/dev/null || true
+    rm -f "3rdparty/spirv-cross/libspirv-cross.a"
+fi
 if [ ! -f "3rdparty/spirv-cross/libspirv-cross.a" ]; then
     echo "Building spirv-cross static library..."
-    make -C 3rdparty/spirv-cross libspirv-cross.a -j"$NCPU"
+    make -C 3rdparty/spirv-cross libspirv-cross.a CXXFLAGS="-std=c++11 -Wall -Wextra -Wshadow -Wno-deprecated-declarations -O2 -DNDEBUG" -j"$NCPU"
 fi
 
 # 2. LibAtrac9
@@ -36,18 +41,16 @@ if [ ! -f "3rdparty/libatrac9/libatrac9.a" ]; then
 fi
 
 # 3. GCN Recompiler
-if [ ! -f "3rdparty/gcn-recompiler/libgcn_recompiler.a" ]; then
-    echo "Building gcn-recompiler static library..."
-    GCN_BUILD_DIR="${TMPDIR:-/tmp}/gcn_recompiler_build"
-    mkdir -p "$GCN_BUILD_DIR"
-    CMAKE_GEN=()
-    if command -v ninja &>/dev/null; then
-        CMAKE_GEN=(-G Ninja)
-    fi
-    cmake -B "$GCN_BUILD_DIR" "${CMAKE_GEN[@]}" -DCMAKE_BUILD_TYPE=Release -DGCN_BUILD_TOOLS=OFF 3rdparty/gcn-recompiler
-    cmake --build "$GCN_BUILD_DIR" --target gcn_recompiler -j"$NCPU"
-    cp "$GCN_BUILD_DIR/libgcn_recompiler.a" 3rdparty/gcn-recompiler/libgcn_recompiler.a
+echo "Building gcn-recompiler static library..."
+GCN_BUILD_DIR="${TMPDIR:-/tmp}/gcn_recompiler_build"
+mkdir -p "$GCN_BUILD_DIR"
+CMAKE_GEN=()
+if command -v ninja &>/dev/null; then
+    CMAKE_GEN=(-G Ninja)
 fi
+cmake -B "$GCN_BUILD_DIR" "${CMAKE_GEN[@]}" -DCMAKE_BUILD_TYPE=Release -DGCN_BUILD_TOOLS=OFF 3rdparty/gcn-recompiler
+cmake --build "$GCN_BUILD_DIR" --target gcn_recompiler -j"$NCPU"
+cp "$GCN_BUILD_DIR/libgcn_recompiler.a" 3rdparty/gcn-recompiler/libgcn_recompiler.a
 
 echo "=== [ps4-recomp] 3/5: Staging assets for embedding ==="
 STAGING_DIR="$REPO_ROOT/pkg/thirdparty/assets"

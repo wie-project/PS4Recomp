@@ -1335,6 +1335,14 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 		_ = os.Chmod(compatBin, 0o755)
 	}
 
+	// Mirror Frameworks to OutDir/Frameworks so ps4_app can run standalone outside the .app bundle
+	outFrameworks := filepath.Join(cfg.OutDir, "Frameworks")
+	frameworksSrc := filepath.Join(contentsDir, "Frameworks")
+	if fi, err := os.Stat(frameworksSrc); err == nil && fi.IsDir() {
+		_ = os.MkdirAll(outFrameworks, 0o755)
+		_ = copyDir(frameworksSrc, outFrameworks)
+	}
+
 	// 3. Copy guest_image.bin into Contents/SharedSupport/
 	guestImgSrc := filepath.Join(cfg.OutDir, "guest_image.bin")
 	guestImgDst := filepath.Join(sharedSupportDir, "guest_image.bin")
@@ -1571,8 +1579,24 @@ func bundleDylibDependencies(contentsDir, bundleBin string) error {
 		return err
 	}
 
-	// Add rpath to bundleBin pointing to Frameworks (ignore error if already present)
-	_ = exec.Command("install_name_tool", "-add_rpath", "@executable_path/../Frameworks", bundleBin).Run()
+	// Add rpath search paths so dylibs resolve in all execution contexts:
+	// - inside .app bundle: @executable_path/../Frameworks
+	// - standalone CLI in build dir or portable dir: @executable_path/Frameworks
+	// - standalone alongside dylibs: @executable_path
+	// - standalone anywhere on a Mac with Homebrew: /opt/homebrew/lib, /usr/local/lib
+	for _, rpath := range []string{
+		"@executable_path/../Frameworks",
+		"@executable_path/Frameworks",
+		"@executable_path",
+		"@loader_path/Frameworks",
+		"@loader_path",
+		"/opt/homebrew/lib",
+		"/usr/local/lib",
+		"/opt/homebrew/opt/freetype/lib",
+		"/opt/homebrew/opt/ffmpeg/lib",
+	} {
+		_ = exec.Command("install_name_tool", "-add_rpath", rpath, bundleBin).Run()
+	}
 
 	copied := make(map[string]string) // origPath -> dstPath
 	queue := []string{bundleBin}
