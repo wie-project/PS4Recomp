@@ -592,7 +592,7 @@ GuestContext *recomp_init_runtime_file(const char *image_filename,
     }
   }
 
-  // 2. Try macOS .app bundle Resources directory directly
+  // 2. Try macOS .app bundle SharedSupport directory directly
   if (!fp && image_filename) {
 #if defined(__APPLE__)
     char exec_path[1024] = {0};
@@ -604,9 +604,15 @@ GuestContext *recomp_init_runtime_file(const char *image_filename,
         strncpy(dir_buf, canonical_exec, sizeof(dir_buf) - 1);
         dir_buf[sizeof(dir_buf) - 1] = '\0';
         char *dir = dirname(dir_buf);
-        snprintf(path, sizeof(path), "%s/../Resources/%s", dir, image_filename);
+        snprintf(path, sizeof(path), "%s/../SharedSupport/%s", dir, image_filename);
         if (access(path, R_OK) == 0) {
           fp = fopen(path, "rb");
+        }
+        if (!fp) {
+          snprintf(path, sizeof(path), "%s/../Resources/%s", dir, image_filename);
+          if (access(path, R_OK) == 0) {
+            fp = fopen(path, "rb");
+          }
         }
         if (!fp) {
           snprintf(path, sizeof(path), "%s/%s", dir, image_filename);

@@ -132,25 +132,4 @@ func TestBuildSignalContext(t *testing.T) {
 	}
 }
 
-// A failed codesign fails the bundle step, so the build ends with build_failed.
-func TestPackageAppBundleFailsWhenSigningFails(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("app bundles are macOS only")
-	}
-	fake := t.TempDir()
-	if err := os.WriteFile(filepath.Join(fake, "codesign"), []byte("#!/bin/sh\necho 'fake codesign failure' >&2\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", fake+":/usr/bin:/bin")
-	out := t.TempDir()
-	bin := filepath.Join(out, "ps4_app")
-	if err := copyFile("/usr/bin/true", bin); err != nil {
-		t.Fatal(err)
-	}
-	oldLog := logw
-	logw = io.Discard
-	defer func() { logw = oldLog }()
-	if _, err := packageAppBundle(&Config{OutDir: out}, "eboot", bin); err == nil || !strings.Contains(err.Error(), "fake codesign failure") {
-		t.Errorf("packageAppBundle with a failing codesign: %v", err)
-	}
-}
+

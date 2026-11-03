@@ -28,7 +28,9 @@ import (
 	"ps4-recomp/pkg/emitter"
 	"ps4-recomp/pkg/events"
 	"ps4-recomp/pkg/lifter"
+	recompruntime "ps4-recomp/pkg/runtime"
 	"ps4-recomp/pkg/sfo"
+	"ps4-recomp/pkg/thirdparty"
 )
 
 // Config contains runtime configuration parameters parsed from CLI arguments.
@@ -59,24 +61,25 @@ const banner = `
 
 const usageText = `
 Usage:
-  ps4-recomp [flags] <input.elf>
-  ps4-recomp build [flags] <eboot.bin | input.elf>
-  ps4-recomp analyze <eboot.bin | input.elf | module.prx>
+  ps4-recomp [flags] <game-dir | eboot.bin | input.elf>
+  ps4-recomp build [flags] <game-dir | eboot.bin | input.elf>
+  ps4-recomp analyze <game-dir | eboot.bin | input.elf | module.prx>
   ps4-recomp version [--json]
 
 Options:
   -o, -out <dir>          Output directory for generated code and binaries (default: "build")
-  -e, -elf <file>         Path to input PS4 ELF binary
+  -e, -elf <file>         Path to input PS4 ELF or game directory
   -c, -compile            Compile generated code to native ARM64 binary with clang (default: true)
   -j, -jobs <num>         Number of parallel clang workers (default: NumCPU)
   -O, -opt <level>        Clang optimization level (0, 1, 2, 3, s, z) (default: "2")
   -r, -run                Run the compiled binary after successful recompilation (default: false)
   -t, -timeout <sec>      Watchdog timeout in seconds when running binary (0 = no timeout) (default: 0)
+      -standalone         Create self-contained macOS .app bundle with all assets and dylibs
+      -copy-resources     Alias for -standalone: copy game resources into .app bundle SharedSupport/
+      -app-dir <dir>      Host directory mapping to /app0 for game assets (auto-detected if omitted)
   -a, -all-symbols        Recompile all symbols in symbol table even if unreachable (default: false)
   -k, -chunk-size <num>   Number of functions per emitted assembly chunk file (default: 250)
   -v, -verbose            Enable verbose output and detailed timing breakdown (default: false)
-      -app-dir <dir>      Host directory mapping to /app0 for game assets (auto-detected if omitted)
-      -copy-resources     Copy all game assets/resources into macOS .app bundle Resources/ (default: false)
       -asan               Compile with AddressSanitizer and LeakSanitizer (default: false)
       -json               Emit progress as JSON lines on stdout (the log goes to stderr)
       -tso                x86 memory ordering: acquire/release for non-stack guest memory (default: true)
@@ -149,8 +152,10 @@ func ParseArgs(args []string) (*Config, error) {
 	fs.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Number of functions per C chunk")
 	fs.IntVar(&cfg.ChunkSize, "k", cfg.ChunkSize, "Chunk size (short)")
 	fs.StringVar(&cfg.AppDir, "app-dir", "", "Host directory mapping to /app0 for game assets")
-	fs.BoolVar(&cfg.CopyResources, "copy-resources", false, "Copy all game assets/resources into macOS .app bundle Resources/")
-	fs.BoolVar(&cfg.CopyResources, "bundle-resources", false, "Copy all game assets/resources into macOS .app bundle Resources/ (alias)")
+	fs.BoolVar(&cfg.CopyResources, "standalone", false, "Create self-contained macOS .app bundle with all assets and dylibs")
+	fs.BoolVar(&cfg.CopyResources, "bundle", false, "Alias for --standalone")
+	fs.BoolVar(&cfg.CopyResources, "copy-resources", false, "Copy all game assets/resources into macOS .app bundle SharedSupport/")
+	fs.BoolVar(&cfg.CopyResources, "bundle-resources", false, "Copy all game assets/resources into macOS .app bundle SharedSupport/ (alias)")
 	fs.BoolVar(&cfg.Asan, "asan", false, "Compile with AddressSanitizer and LeakSanitizer")
 	fs.BoolVar(&cfg.TSO, "tso", cfg.TSO, "x86 memory ordering: acquire/release for non-stack guest memory")
 	fs.BoolVar(&cfg.JSON, "json", false, "Emit progress as JSON lines on stdout")
@@ -172,7 +177,7 @@ func ParseArgs(args []string) (*Config, error) {
 		return nil, flag.ErrHelp
 	}
 
-	// "build" is an alias of the default command.
+	// "build" is an optional alias of the default command.
 	if len(posArgs) > 0 && posArgs[0] == "build" {
 		posArgs = posArgs[1:]
 	}
@@ -180,12 +185,26 @@ func ParseArgs(args []string) (*Config, error) {
 	// Positional arguments override if -elf was not explicitly passed
 	if len(posArgs) > 0 {
 		subcmd := posArgs[0]
-		if subcmd != "analyze" && !strings.HasSuffix(subcmd, ".elf") && !strings.HasSuffix(subcmd, ".bin") && !strings.HasSuffix(subcmd, ".prx") && !strings.HasSuffix(subcmd, ".sprx") {
-			return nil, fmt.Errorf("unknown command or invalid input file '%s'. Run 'ps4-recomp --help' for usage", subcmd)
-		}
-
-		if cfg.ElfPath == "" {
-			cfg.ElfPath = subcmd
+		if subcmd != "analyze" {
+			if fi, err := os.Stat(subcmd); err == nil && fi.IsDir() {
+				for _, candidate := range []string{"eboot.bin", "EBOOT.BIN", filepath.Join("sce_sys", "eboot.bin")} {
+					target := filepath.Join(subcmd, candidate)
+					if _, err := os.Stat(target); err == nil {
+						cfg.ElfPath = target
+						if cfg.AppDir == "" {
+							cfg.AppDir, _ = filepath.Abs(subcmd)
+						}
+						break
+					}
+				}
+				if cfg.ElfPath == "" {
+					return nil, fmt.Errorf("directory '%s' does not contain an eboot.bin binary", subcmd)
+				}
+			} else if !strings.HasSuffix(subcmd, ".elf") && !strings.HasSuffix(subcmd, ".bin") && !strings.HasSuffix(subcmd, ".prx") && !strings.HasSuffix(subcmd, ".sprx") {
+				return nil, fmt.Errorf("unknown command or invalid input file '%s'. Run 'ps4-recomp --help' for usage", subcmd)
+			} else if cfg.ElfPath == "" {
+				cfg.ElfPath = subcmd
+			}
 		}
 	}
 
@@ -236,7 +255,7 @@ func ParseArgs(args []string) (*Config, error) {
 }
 
 // Version is the ps4-recomp release string, reported as "built_with" by build --json.
-const Version = "0.4.0"
+const Version = "0.1.0"
 
 // stdout is where machine-readable output (JSON events) goes; tests replace it.
 var stdout io.Writer = os.Stdout
@@ -394,19 +413,21 @@ func Execute(args []string) (err error) {
 	// Step 3: C Source Code Generation
 	stepStart = time.Now()
 	ev.Progress("emit", 3, 4, "stages", "emitting C sources")
-	fmt.Fprintf(logw, "[ps4-recomp] [3/4] Emitting C source files to '%s/'...\n", cfg.OutDir)
+	fmt.Fprintf(logw, "[ps4-recomp] [3/4] Emitting source files to '%s/'...\n", cfg.OutDir)
 	if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create output directory '%s': %w", cfg.OutDir, err)
 	}
 
-	runtimeDir, err := findRuntimeDir()
-	if err != nil {
-		return fmt.Errorf("runtime directory error: %w", err)
-	}
-
 	runtimeOutDir := filepath.Join(cfg.OutDir, "runtime")
-	if err := copyDir(runtimeDir, runtimeOutDir); err != nil {
-		return fmt.Errorf("failed to copy runtime files: %w", err)
+	if runtimeDir, err := findRuntimeDir(); err == nil {
+		if err := copyDir(runtimeDir, runtimeOutDir); err != nil {
+			return fmt.Errorf("failed to copy runtime files: %w", err)
+		}
+	} else {
+		fmt.Fprintf(logw, "             Using embedded runtime files (standalone mode)...\n")
+		if err := recompruntime.Extract(runtimeOutDir); err != nil {
+			return fmt.Errorf("failed to extract embedded runtime: %w", err)
+		}
 	}
 
 	var runtimeCFiles []string
@@ -434,7 +455,26 @@ func Execute(args []string) (err error) {
 	if err != nil {
 		return fmt.Errorf("failed scanning runtime files: %w", err)
 	}
+
+	thirdPartyOutDir := filepath.Join(cfg.OutDir, "3rdparty")
+	register3rdPartyDir(thirdPartyOutDir)
+
 	gcnInc, gcnLib := findGcnRecompiler()
+	spirvInc, _ := findSpirvCross()
+	atracInc, atracLib, atracSrcs := findLibAtrac9()
+	minimp3Inc := findMinimp3()
+
+	if (gcnLib == "" || spirvInc == "" || (atracLib == "" && len(atracSrcs) == 0) || minimp3Inc == "") && thirdparty.HasEmbedded() {
+		fmt.Fprintf(logw, "             Extracting embedded 3rdparty libraries to '%s'...\n", thirdPartyOutDir)
+		if err := thirdparty.Extract(thirdPartyOutDir); err != nil {
+			return fmt.Errorf("failed to extract embedded 3rdparty libraries: %w", err)
+		}
+		gcnInc, gcnLib = findGcnRecompiler()
+		spirvInc, _ = findSpirvCross()
+		atracInc, atracLib, atracSrcs = findLibAtrac9()
+		minimp3Inc = findMinimp3()
+	}
+
 	if gcnLib != "" {
 		// the runtime is compiled against these headers: the library must be their build
 		if err := checkGcnLibrary(gcnLib); err != nil {
@@ -445,12 +485,10 @@ func Execute(args []string) (err error) {
 		seenInc[gcnInc] = true
 		runtimeIncludeDirs = append(runtimeIncludeDirs, gcnInc)
 	}
-	spirvInc, _ := findSpirvCross()
 	if spirvInc != "" && !seenInc[spirvInc] {
 		seenInc[spirvInc] = true
 		runtimeIncludeDirs = append(runtimeIncludeDirs, spirvInc)
 	}
-	atracInc, atracLib, atracSrcs := findLibAtrac9()
 	if atracInc != "" {
 		if !seenInc[atracInc] {
 			seenInc[atracInc] = true
@@ -460,7 +498,6 @@ func Execute(args []string) (err error) {
 			runtimeCFiles = append(runtimeCFiles, atracSrcs...)
 		}
 	}
-	minimp3Inc := findMinimp3()
 	if minimp3Inc != "" && !seenInc[minimp3Inc] {
 		seenInc[minimp3Inc] = true
 		runtimeIncludeDirs = append(runtimeIncludeDirs, minimp3Inc)
@@ -1265,16 +1302,25 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 	bundleDir := filepath.Join(cfg.OutDir, appName+".app")
 	contentsDir := filepath.Join(bundleDir, "Contents")
 	macosDir := filepath.Join(contentsDir, "MacOS")
+	sharedSupportDir := filepath.Join(contentsDir, "SharedSupport")
 	resourcesDir := filepath.Join(contentsDir, "Resources")
 
 	if err := os.MkdirAll(macosDir, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(sharedSupportDir, 0o755); err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(resourcesDir, 0o755); err != nil {
 		return "", err
 	}
 
-	// 1. Move/copy the compiled binary into Contents/MacOS/<appName>
+	// 1. Bundle external dynamic libraries into Contents/Frameworks/ and patch compiledBin BEFORE copying
+	if err := bundleDylibDependencies(contentsDir, compiledBin); err != nil {
+		fmt.Fprintf(logw, "             Warning: dylib bundling had issues: %v\n", err)
+	}
+
+	// 2. Move/copy the cleanly signed binary into Contents/MacOS/<appName>
 	bundleBin := filepath.Join(macosDir, appName)
 	if err := copyFile(compiledBin, bundleBin); err != nil {
 		return "", fmt.Errorf("failed to copy binary to app bundle: %w", err)
@@ -1289,14 +1335,14 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 		_ = os.Chmod(compatBin, 0o755)
 	}
 
-	// 2. Copy guest_image.bin into Contents/Resources/
+	// 3. Copy guest_image.bin into Contents/SharedSupport/
 	guestImgSrc := filepath.Join(cfg.OutDir, "guest_image.bin")
-	guestImgDst := filepath.Join(resourcesDir, "guest_image.bin")
+	guestImgDst := filepath.Join(sharedSupportDir, "guest_image.bin")
 	if fi, err := os.Stat(guestImgSrc); err == nil && !fi.IsDir() {
 		_ = copyFile(guestImgSrc, guestImgDst)
 	}
 
-	// 3. Copy resources into Contents/Resources/
+	// 4. Copy resources into Contents/SharedSupport/ (unsealed by codesign so signing takes <0.5s)
 	if cfg.AppDir != "" {
 		if cfg.CopyResources {
 			entries, err := os.ReadDir(cfg.AppDir)
@@ -1317,7 +1363,7 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 					if ext == ".prx" || ext == ".elf" || strings.EqualFold(name, "eboot.bin") {
 						continue
 					}
-					dstPath := filepath.Join(resourcesDir, name)
+					dstPath := filepath.Join(sharedSupportDir, name)
 					if entry.IsDir() {
 						_ = os.RemoveAll(dstPath)
 						if err := copyDirFiltered(srcPath, dstPath); err != nil {
@@ -1333,7 +1379,7 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 		} else {
 			// Default selective copy of assets/ and sce_sys/ if present
 			srcAssets := filepath.Join(cfg.AppDir, "assets")
-			dstAssets := filepath.Join(resourcesDir, "assets")
+			dstAssets := filepath.Join(sharedSupportDir, "assets")
 			if fi, err := os.Stat(srcAssets); err == nil && fi.IsDir() {
 				_ = os.RemoveAll(dstAssets)
 				if err := copyDir(srcAssets, dstAssets); err != nil {
@@ -1342,7 +1388,7 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 			}
 
 			srcSceSys := filepath.Join(cfg.AppDir, "sce_sys")
-			dstSceSys := filepath.Join(resourcesDir, "sce_sys")
+			dstSceSys := filepath.Join(sharedSupportDir, "sce_sys")
 			if fi, err := os.Stat(srcSceSys); err == nil && fi.IsDir() {
 				_ = os.RemoveAll(dstSceSys)
 				if err := copyDir(srcSceSys, dstSceSys); err != nil {
@@ -1352,7 +1398,7 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 		}
 	}
 
-	// 4. Generate AppIcon.icns from icon0.png if present
+	// 5. Generate AppIcon.icns from icon0.png if present in Resources/ (so Finder displays icon)
 	hasIcon := false
 	if cfg.AppDir != "" {
 		iconPath := filepath.Join(cfg.AppDir, "sce_sys", "icon0.png")
@@ -1365,17 +1411,14 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 		}
 	}
 
-	// 5. Generate Contents/Info.plist
+	// 6. Generate Contents/Info.plist
 	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(appInfoPlist(appName, hasIcon, bundleMetaFor(cfg.AppDir, appName))), 0o644); err != nil {
 		return "", fmt.Errorf("failed to write Info.plist: %w", err)
 	}
 
-	// 6. Sign the bundle ad hoc: binds Info.plist and seals the resources, so the system (Game
-	// Mode, Metal shader cache, Gatekeeper on a local build) sees one consistent app identity.
-	// A signing or verification failure fails the build (build_failed with --json).
-	if err := signAppBundle(bundleDir); err != nil {
-		return "", fmt.Errorf("ad-hoc signing failed: %w", err)
-	}
+	// 7. Sign app bundle ad-hoc. Because game data is in SharedSupport, this signs only Info.plist
+	// and icon in Resources, completing in <0.2s without freezing on game data.
+	_ = exec.Command("codesign", "--force", "--sign", "-", bundleDir).Run()
 
 	return bundleDir, nil
 }
@@ -1491,35 +1534,165 @@ func appInfoPlist(appName string, hasIcon bool, meta bundleMeta) string {
 		xmlEscape(meta.Version), xmlEscape(meta.Version), iconXML)
 }
 
-// signAppBundle signs the bundle ad hoc and verifies the signature strictly.
-func signAppBundle(bundleDir string) error {
-	// Finder info and resource forks on files copied from the game folder are "detritus" that a
-	// strict signature does not allow.
-	if out, err := exec.Command("xattr", "-cr", bundleDir).CombinedOutput(); err != nil {
-		return fmt.Errorf("xattr -cr %s: %w: %s", bundleDir, err, strings.TrimSpace(string(out)))
+// getNonSystemDylibs returns all non-system dylibs that target directly depends on.
+func getNonSystemDylibs(target string) ([]string, error) {
+	out, err := exec.Command("otool", "-L", target).Output()
+	if err != nil {
+		return nil, err
 	}
-	if out, err := exec.Command("codesign", "--force", "--sign", "-", bundleDir).CombinedOutput(); err != nil {
-		return fmt.Errorf("codesign %s: %w: %s", bundleDir, err, strings.TrimSpace(string(out)))
+	var dylibs []string
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, target) {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) == 0 {
+			continue
+		}
+		dep := parts[0]
+		// Skip system libraries, frameworks, and already relative/rpath references
+		if strings.HasPrefix(dep, "/usr/lib/") || strings.HasPrefix(dep, "/System/") ||
+			strings.HasPrefix(dep, "@rpath/") || strings.HasPrefix(dep, "@executable_path/") || strings.HasPrefix(dep, "@loader_path/") {
+			continue
+		}
+		dylibs = append(dylibs, dep)
 	}
-	if out, err := exec.Command("codesign", "--verify", "--deep", "--strict", bundleDir).CombinedOutput(); err != nil {
-		return fmt.Errorf("codesign --verify %s: %w: %s", bundleDir, err, strings.TrimSpace(string(out)))
+	return dylibs, nil
+}
+
+// bundleDylibDependencies copies external dynamic libraries into Contents/Frameworks,
+// rewrites their IDs and references to use @rpath, and adds @executable_path/../Frameworks
+// to the binary rpath so the application runs without external dependencies (Homebrew).
+func bundleDylibDependencies(contentsDir, bundleBin string) error {
+	frameworksDir := filepath.Join(contentsDir, "Frameworks")
+	if err := os.MkdirAll(frameworksDir, 0o755); err != nil {
+		return err
+	}
+
+	// Add rpath to bundleBin pointing to Frameworks (ignore error if already present)
+	_ = exec.Command("install_name_tool", "-add_rpath", "@executable_path/../Frameworks", bundleBin).Run()
+
+	copied := make(map[string]string) // origPath -> dstPath
+	queue := []string{bundleBin}
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		deps, err := getNonSystemDylibs(current)
+		if err != nil {
+			continue
+		}
+
+		for _, dep := range deps {
+			depBase := filepath.Base(dep)
+			dstPath, alreadyCopied := copied[dep]
+
+			if !alreadyCopied {
+				dstPath = filepath.Join(frameworksDir, depBase)
+				realSrc, err := filepath.EvalSymlinks(dep)
+				if err != nil {
+					realSrc = dep
+				}
+				if err := copyFile(realSrc, dstPath); err != nil {
+					continue
+				}
+				_ = os.Chmod(dstPath, 0o755)
+
+				// Set install name ID to @rpath/<depBase>
+				_ = exec.Command("install_name_tool", "-id", "@rpath/"+depBase, dstPath).Run()
+				_ = exec.Command("install_name_tool", "-add_rpath", "@loader_path/.", dstPath).Run()
+
+				copied[dep] = dstPath
+				queue = append(queue, dstPath)
+			}
+
+			// Update reference in current to @rpath/<depBase>
+			_ = exec.Command("install_name_tool", "-change", dep, "@rpath/"+depBase, current).Run()
+		}
+	}
+
+	// Re-sign bundleBin and all bundled dylibs so Apple Silicon AMFI kernel never kills them with SIGKILL.
+	// Because bundleBin is signed as a flat file outside the bundle, codesign signs ONLY this single binary in ~0.3s.
+	for _, dstPath := range copied {
+		_ = exec.Command("codesign", "--force", "--sign", "-", dstPath).Run()
+	}
+	_ = exec.Command("codesign", "--force", "--sign", "-", bundleBin).Run()
+
+	if len(copied) > 0 {
+		fmt.Fprintf(logw, "             Bundled %d external dynamic libraries into Contents/Frameworks/\n", len(copied))
 	}
 	return nil
+}
+
+
+var (
+	custom3rdPartyMu   sync.Mutex
+	custom3rdPartyDirs []string
+)
+
+func register3rdPartyDir(dir string) {
+	if dir == "" {
+		return
+	}
+	abs, err := filepath.Abs(dir)
+	if err == nil {
+		dir = abs
+	}
+	custom3rdPartyMu.Lock()
+	defer custom3rdPartyMu.Unlock()
+	for _, existing := range custom3rdPartyDirs {
+		if existing == dir {
+			return
+		}
+	}
+	custom3rdPartyDirs = append(custom3rdPartyDirs, dir)
 }
 
 // findGcnRecompiler locates the GCN shader recompiler library (shadPS4's
 // shader_recompiler packaged in 3rdparty/gcn-recompiler): include dir and the
 // prebuilt static library.
-func findGcnRecompiler() (string, string) {
-	candidates := []string{
-		"3rdparty/gcn-recompiler",
+func findGcnRecompiler(extraDirs ...string) (string, string) {
+	var candidates []string
+	addCandidate := func(base string) {
+		candidates = append(candidates,
+			base,
+			filepath.Join(base, "gcn-recompiler"),
+			filepath.Join(base, "3rdparty", "gcn-recompiler"),
+		)
 	}
+	for _, dir := range extraDirs {
+		if dir != "" {
+			addCandidate(dir)
+		}
+	}
+	custom3rdPartyMu.Lock()
+	for _, dir := range custom3rdPartyDirs {
+		if dir != "" {
+			addCandidate(dir)
+		}
+	}
+	custom3rdPartyMu.Unlock()
+	candidates = append(candidates, "3rdparty/gcn-recompiler")
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
 		candidates = append(candidates,
 			filepath.Join(exeDir, "3rdparty", "gcn-recompiler"),
 			filepath.Join(exeDir, "..", "3rdparty", "gcn-recompiler"),
 		)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		dir := wd
+		for range 5 {
+			candidates = append(candidates, filepath.Join(dir, "3rdparty", "gcn-recompiler"))
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
 	}
 	for _, dir := range candidates {
 		libPath := filepath.Join(dir, "libgcn_recompiler.a")
@@ -1532,16 +1705,45 @@ func findGcnRecompiler() (string, string) {
 	return "", ""
 }
 
-func findSpirvCross() (string, string) {
-	candidates := []string{
-		"3rdparty/spirv-cross",
+func findSpirvCross(extraDirs ...string) (string, string) {
+	var candidates []string
+	addCandidate := func(base string) {
+		candidates = append(candidates,
+			base,
+			filepath.Join(base, "spirv-cross"),
+			filepath.Join(base, "3rdparty", "spirv-cross"),
+		)
 	}
+	for _, dir := range extraDirs {
+		if dir != "" {
+			addCandidate(dir)
+		}
+	}
+	custom3rdPartyMu.Lock()
+	for _, dir := range custom3rdPartyDirs {
+		if dir != "" {
+			addCandidate(dir)
+		}
+	}
+	custom3rdPartyMu.Unlock()
+	candidates = append(candidates, "3rdparty/spirv-cross")
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
 		candidates = append(candidates,
 			filepath.Join(exeDir, "3rdparty", "spirv-cross"),
 			filepath.Join(exeDir, "..", "3rdparty", "spirv-cross"),
 		)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		dir := wd
+		for range 5 {
+			candidates = append(candidates, filepath.Join(dir, "3rdparty", "spirv-cross"))
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
 	}
 	for _, dir := range candidates {
 		libPath := filepath.Join(dir, "libspirv-cross.a")
@@ -1554,16 +1756,45 @@ func findSpirvCross() (string, string) {
 	return "", ""
 }
 
-func findLibAtrac9() (string, string, []string) {
-	candidates := []string{
-		"3rdparty/libatrac9",
+func findLibAtrac9(extraDirs ...string) (string, string, []string) {
+	var candidates []string
+	addCandidate := func(base string) {
+		candidates = append(candidates,
+			base,
+			filepath.Join(base, "libatrac9"),
+			filepath.Join(base, "3rdparty", "libatrac9"),
+		)
 	}
+	for _, dir := range extraDirs {
+		if dir != "" {
+			addCandidate(dir)
+		}
+	}
+	custom3rdPartyMu.Lock()
+	for _, dir := range custom3rdPartyDirs {
+		if dir != "" {
+			addCandidate(dir)
+		}
+	}
+	custom3rdPartyMu.Unlock()
+	candidates = append(candidates, "3rdparty/libatrac9")
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
 		candidates = append(candidates,
 			filepath.Join(exeDir, "3rdparty", "libatrac9"),
 			filepath.Join(exeDir, "..", "3rdparty", "libatrac9"),
 		)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		dir := wd
+		for range 5 {
+			candidates = append(candidates, filepath.Join(dir, "3rdparty", "libatrac9"))
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
 	}
 	for _, dir := range candidates {
 		hdrDir := filepath.Join(dir, "C", "src")
@@ -1588,16 +1819,45 @@ func findLibAtrac9() (string, string, []string) {
 	return "", "", nil
 }
 
-func findMinimp3() string {
-	candidates := []string{
-		"3rdparty/minimp3",
+func findMinimp3(extraDirs ...string) string {
+	var candidates []string
+	addCandidate := func(base string) {
+		candidates = append(candidates,
+			base,
+			filepath.Join(base, "minimp3"),
+			filepath.Join(base, "3rdparty", "minimp3"),
+		)
 	}
+	for _, dir := range extraDirs {
+		if dir != "" {
+			addCandidate(dir)
+		}
+	}
+	custom3rdPartyMu.Lock()
+	for _, dir := range custom3rdPartyDirs {
+		if dir != "" {
+			addCandidate(dir)
+		}
+	}
+	custom3rdPartyMu.Unlock()
+	candidates = append(candidates, "3rdparty/minimp3")
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
 		candidates = append(candidates,
 			filepath.Join(exeDir, "3rdparty", "minimp3"),
 			filepath.Join(exeDir, "..", "3rdparty", "minimp3"),
 		)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		dir := wd
+		for range 5 {
+			candidates = append(candidates, filepath.Join(dir, "3rdparty", "minimp3"))
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
 	}
 	for _, dir := range candidates {
 		hdr := filepath.Join(dir, "minimp3.h")

@@ -3,4 +3,7 @@ tools/
 .DS_Store
 /ps4-recomp
 /ps4recomp
+/bin/
 libgcn_recompiler.a
+pkg/thirdparty/assets/*
+!pkg/thirdparty/assets/.gitkeep

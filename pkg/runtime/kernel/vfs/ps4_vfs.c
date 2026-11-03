@@ -45,7 +45,7 @@ static char *discover_app_root(const char *hint) {
   }
 
 #if defined(__APPLE__)
-  // 2. Check if running inside macOS .app bundle: <exe_dir>/../Resources
+  // 2. Check if running inside macOS .app bundle: <exe_dir>/../SharedSupport
   char exec_path[1024] = {0};
   uint32_t size = sizeof(exec_path);
   if (_NSGetExecutablePath(exec_path, &size) == 0) {
@@ -56,10 +56,17 @@ static char *discover_app_root(const char *hint) {
       dir_buf[sizeof(dir_buf) - 1] = '\0';
       char *dir = dirname(dir_buf);
 
-      // Check inside macOS .app bundle: <exe_dir>/../Resources
+      // Check inside macOS .app bundle: <exe_dir>/../SharedSupport
       char test_path[1024];
-      snprintf(test_path, sizeof(test_path), "%s/../Resources", dir);
+      snprintf(test_path, sizeof(test_path), "%s/../SharedSupport", dir);
       char canonical_res[1024];
+      if (realpath(test_path, canonical_res) != NULL &&
+          access(canonical_res, F_OK) == 0) {
+        return strdup(canonical_res);
+      }
+
+      // Check inside macOS .app bundle: <exe_dir>/../Resources
+      snprintf(test_path, sizeof(test_path), "%s/../Resources", dir);
       if (realpath(test_path, canonical_res) != NULL &&
           access(canonical_res, F_OK) == 0) {
         return strdup(canonical_res);

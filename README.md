@@ -50,71 +50,61 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 git clone --recursive https://github.com/wie-project/PS4Recomp.git
 cd PS4Recomp
 
-# 2. Build 3rd-party dependencies
-# SPIRV-Cross:
-cd 3rdparty/spirv-cross
-clang++ -O3 -std=c++17 -c spirv_cross.cpp spirv_cross_parsed_ir.cpp spirv_parser.cpp spirv_glsl.cpp spirv_msl.cpp spirv_cfg.cpp spirv_cross_c.cpp
-ar rcs libspirv-cross.a *.o && rm -f *.o
-cd ../..
-
-# LibAtrac9:
-cd 3rdparty/libatrac9
-clang -O3 -c C/src/*.c
-ar rcs libatrac9.a *.o && rm -f *.o
-cd ../..
-
-# GCN Shader Recompiler:
-cd 3rdparty/gcn-recompiler
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-ninja -C build
-cp build/libgcn_recompiler.a .
-cd ../..
-
-# 3. Build ps4-recomp CLI
-go build -o ps4-recomp ./cmd/ps4-recomp
+# 2. Build standalone ps4-recomp binary
+./scripts/build.sh
 ```
+
+`scripts/build.sh` automatically checks submodules, builds required C/C++ static libraries (`gcn-recompiler`, `spirv-cross`, `libatrac9`), embeds runtime assets, and produces a single self-contained executable at `bin/ps4-recomp`.
 
 ---
 
 ## Usage
 
-### Analyze an Executable
+### Analyze an Executable or Game Folder
 
-Analyze CFG, control flow, instruction compatibility, and referenced PRX modules:
+Inspect CFG, control flow, instruction compatibility, and referenced PRX modules:
 
 ```bash
-./ps4-recomp analyze path/to/game/eboot.bin
+./bin/ps4-recomp analyze path/to/game
+# or directly on eboot.bin:
+./bin/ps4-recomp analyze path/to/game/eboot.bin
 ```
 
-### Recompile & Run
+### Recompile & Build Game
 
-Recompile the game into a standalone macOS `.app` bundle:
+PS4Recomp automatically finds `eboot.bin` and game assets in the provided game directory:
 
 ```bash
-# Basic compilation to native ARM64
-./ps4-recomp path/to/game/eboot.bin -o build -compile
+# Basic compilation to native ARM64 macOS .app bundle:
+./bin/ps4-recomp build path/to/game -o path/to/build
 
-# Standalone macOS .app bundle with assets mapped and copied
-./ps4-recomp path/to/game/eboot.bin \
-  --app-dir path/to/game \
-  --copy-resources \
-  -o build \
-  -compile -run
+# Fully standalone macOS .app bundle (bundles all game assets and dylibs for distribution):
+./bin/ps4-recomp build path/to/game -o path/to/build --standalone
+
+# Compile and immediately run the game:
+./bin/ps4-recomp build path/to/game -o path/to/build -run
+```
+
+Once built, launch the game by double-clicking `<GameName>.app` in Finder, or run from terminal:
+
+```bash
+./build/ps4_app
 ```
 
 ### Key CLI Options
 
-| Flag                 | Description                                                    | Default       |
-| -------------------- | -------------------------------------------------------------- | ------------- |
-| `-o`, `-out <dir>`   | Output directory for generated code and binaries               | `"build"`     |
-| `-c`, `-compile`     | Compile emitted assembly to native ARM64 binary with Clang     | `true`        |
-| `-j`, `-jobs <num>`  | Number of parallel Clang assembler workers                     | `NumCPU`      |
-| `-O`, `-opt <level>` | Clang optimization level (`0`, `1`, `2`, `3`, `s`, `z`)        | `"2"`         |
-| `-r`, `-run`         | Run the compiled binary after successful compilation           | `false`       |
-| `--tso`              | x86 Total Store Order memory model (acquire/release semantics) | `true`        |
-| `--app-dir <dir>`    | Host directory mapping to `/app0` for game assets              | Auto-detected |
-| `--copy-resources`   | Copy game assets into the macOS `.app` bundle `Resources/`     | `false`       |
-| `--asan`             | Compile runtime with AddressSanitizer and LeakSanitizer        | `false`       |
+| Flag                    | Description                                                                   | Default       |
+| ----------------------- | ----------------------------------------------------------------------------- | ------------- |
+| `-o`, `-out <dir>`      | Output directory for generated code, runtime, and `.app` bundle               | `"build"`     |
+| `-e`, `-elf <file/dir>` | Path to input PS4 ELF binary or extracted game directory                      | Positional    |
+| `-c`, `-compile`        | Compile emitted assembly to native ARM64 binary with Clang                    | `true`        |
+| `-j`, `-jobs <num>`     | Number of parallel Clang assembler workers                                    | `NumCPU`      |
+| `-O`, `-opt <level>`    | Clang optimization level (`0`, `1`, `2`, `3`, `s`, `z`)                       | `"2"`         |
+| `-r`, `-run`            | Run the compiled binary after successful compilation                          | `false`       |
+| `--standalone`          | Create a self-contained macOS `.app` bundle with bundled dylibs and resources | `false`       |
+| `--tso`                 | x86 Total Store Order memory model (acquire/release semantics)                | `true`        |
+| `--app-dir <dir>`       | Host directory mapping to `/app0` for game assets                             | Auto-detected |
+| `--asan`                | Compile runtime with AddressSanitizer and LeakSanitizer                       | `false`       |
 
 ---
 
@@ -159,8 +149,7 @@ When playing without a physical controller, built-in keyboard emulation is activ
 ```text
 ├── cmd/
 │   ├── ps4-recomp/              # Main CLI entry point
-│   └── lifter-difftest-asm/     # AMD64 vs ARM64 differential test harness
-├── docs/                        # Guides (PKG extraction, dumping)
+│   └── lifter-difftest-asm/     # AMD64 vs ARM64 differential test harness                      # Guides (PKG extraction, dumping)
 └── pkg/
     ├── analyzer/                # Reachable CFG & instruction coverage analyzer
     ├── disasm/                  # Instruction decoder & jump-table recovery
