@@ -14,7 +14,7 @@ NCPU="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
 
 echo "=== [ps4-recomp] 1/5: Checking 3rdparty submodules ==="
 if [ -f .gitmodules ] && command -v git &>/dev/null; then
-    if [ ! -f "3rdparty/spirv-cross/CMakeLists.txt" ] || [ ! -f "3rdparty/libatrac9/C/src/libatrac9.h" ] || [ ! -f "3rdparty/minimp3/minimp3.h" ]; then
+    if [ ! -f "3rdparty/spirv-cross/CMakeLists.txt" ] || [ ! -f "3rdparty/libatrac9/C/src/libatrac9.h" ] || [ ! -f "3rdparty/minimp3/minimp3.h" ] || [ ! -f "3rdparty/gcn-recompiler/CMakeLists.txt" ]; then
         echo "Updating git submodules..."
         git submodule update --init --recursive
     fi
@@ -30,6 +30,7 @@ fi
 # 2. LibAtrac9
 if [ ! -f "3rdparty/libatrac9/libatrac9.a" ]; then
     echo "Building libatrac9 static library..."
+    mkdir -p 3rdparty/libatrac9/C/obj_static 3rdparty/libatrac9/C/bin
     make -C 3rdparty/libatrac9/C bin/libatrac9.a -j"$NCPU"
     cp 3rdparty/libatrac9/C/bin/libatrac9.a 3rdparty/libatrac9/libatrac9.a
 fi
@@ -39,8 +40,12 @@ if [ ! -f "3rdparty/gcn-recompiler/libgcn_recompiler.a" ]; then
     echo "Building gcn-recompiler static library..."
     GCN_BUILD_DIR="${TMPDIR:-/tmp}/gcn_recompiler_build"
     mkdir -p "$GCN_BUILD_DIR"
-    cmake -B "$GCN_BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release 3rdparty/gcn-recompiler
-    ninja -C "$GCN_BUILD_DIR" gcn_recompiler
+    CMAKE_GEN=()
+    if command -v ninja &>/dev/null; then
+        CMAKE_GEN=(-G Ninja)
+    fi
+    cmake -B "$GCN_BUILD_DIR" "${CMAKE_GEN[@]}" -DCMAKE_BUILD_TYPE=Release -DGCN_BUILD_TOOLS=OFF 3rdparty/gcn-recompiler
+    cmake --build "$GCN_BUILD_DIR" --target gcn_recompiler -j"$NCPU"
     cp "$GCN_BUILD_DIR/libgcn_recompiler.a" 3rdparty/gcn-recompiler/libgcn_recompiler.a
 fi
 
