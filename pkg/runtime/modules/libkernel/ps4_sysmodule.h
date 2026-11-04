@@ -57,6 +57,7 @@ bool recomp_module_text_contains(uint64_t addr);
 void recomp_register_guest_modules(void);
 void recomp_module_start(GuestContext *ctx, int32_t handle);
 void recomp_modules_start_preloaded(GuestContext *ctx);
+bool recomp_module_has_preloaded_inits(const char *filename);
 uint64_t recomp_resolve_symbol(const char *module_name, const char *symbol);
 
 // Module enumeration for sceKernelGetModuleList / sceKernelGetModuleInfo.

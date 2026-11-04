@@ -305,6 +305,20 @@ void recomp_modules_start_preloaded(GuestContext *ctx) {
     }
 }
 
+bool recomp_module_has_preloaded_inits(const char *filename) {
+    if (!filename) return false;
+    pthread_mutex_lock(&g_sysmodule_mutex);
+    for (int i = 0; i < g_prx_count; i++) {
+        if (g_prx[i].in_use && g_prx[i].inits && g_prx[i].init_count > 0 &&
+            strcmp(g_prx[i].filename, filename) == 0) {
+            pthread_mutex_unlock(&g_sysmodule_mutex);
+            return true;
+        }
+    }
+    pthread_mutex_unlock(&g_sysmodule_mutex);
+    return false;
+}
+
 int32_t sceSysmoduleLoadModule(uint16_t moduleId) {
     pthread_mutex_lock(&g_sysmodule_mutex);
     for (int i = 0; i < g_loaded_modules_count; i++) {

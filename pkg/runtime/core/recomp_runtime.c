@@ -746,45 +746,46 @@ void recomp_init_process_param(GuestContext *ctx, uint64_t proc_param_addr) {
            (unsigned long long)libc_param_addr, (unsigned long long)lp_size, lp_maj, lp_min,
            (unsigned long long)malloc_replace_addr, (unsigned long long)new_replace_addr);
 
-    if (malloc_replace_addr != 0 &&
-        malloc_replace_addr + 0x20 <= ctx->mem_size) {
-      uint64_t mr_size = *(uint64_t *)(ctx->mem_base + malloc_replace_addr);
-      uint64_t init_func =
-          *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x10ULL);
-      uint64_t malloc_func = *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x20ULL);
-      printf("[ps4-mem] SceLibcMallocReplace at 0x%llx: size=0x%llx init=0x%llx malloc=0x%llx\n",
-             (unsigned long long)malloc_replace_addr, (unsigned long long)mr_size,
-             (unsigned long long)init_func, (unsigned long long)malloc_func);
-      if (init_func != 0 && init_func < ctx->mem_size) {
-        printf("[ps4-recomp] Initializing custom memory allocator via "
-               "SceLibcParam at 0x%llx...\n",
-               (unsigned long long)init_func);
-        recomp_call_guest(ctx, init_func);
+    // If libc.prx is linked as a guest module with inits, its init functions
+    // (specifically __libc_init -> _malloc_init) will run in recomp_modules_start_preloaded()
+    // and initialize the heap API and replacements according to the PS4 ABI.
+    // We only perform fallback initialization here if libc.prx has no preloaded inits.
+    if (!recomp_module_has_preloaded_inits("libc.prx")) {
+      uint64_t malloc_init_addr = recomp_resolve_symbol("libc.prx", "z8GPiQwaAEY");
+      if (!malloc_init_addr) {
+        malloc_init_addr = recomp_resolve_symbol("libc.prx", "_malloc_init");
       }
-    }
-
-    // Standard PS4 libc startup: call _malloc_init (NID z8GPiQwaAEY).
-    // In PS4 ABI, libc _malloc_init reads SceLibcParam via sceKernelGetProcParam(),
-    // registers the application heap API with rtld, and invokes _new_setup(new_replace).
-    uint64_t malloc_init_addr = recomp_resolve_symbol("libc.prx", "z8GPiQwaAEY");
-    if (!malloc_init_addr) {
-      malloc_init_addr = recomp_resolve_symbol("libc.prx", "_malloc_init");
-    }
-    if (malloc_init_addr != 0) {
-      printf("[ps4-recomp] Initializing libc malloc subsystem via _malloc_init at 0x%llx...\n",
-             (unsigned long long)malloc_init_addr);
-      recomp_call_guest(ctx, malloc_init_addr);
-    } else if (new_replace_addr != 0) {
-      // Fallback: directly invoke _new_setup (NID KNNNbyRieqQ) if _malloc_init was not in libc exports
-      uint64_t new_setup_addr = recomp_resolve_symbol("libc.prx", "KNNNbyRieqQ");
-      if (!new_setup_addr) {
-        new_setup_addr = recomp_resolve_symbol("libc.prx", "_new_setup");
-      }
-      if (new_setup_addr != 0) {
-        printf("[ps4-recomp] Initializing C++ operator new replacements via _new_setup at 0x%llx...\n",
-               (unsigned long long)new_setup_addr);
-        ctx->rdi = new_replace_addr;
-        recomp_call_guest(ctx, new_setup_addr);
+      if (malloc_init_addr != 0) {
+        printf("[ps4-recomp] Initializing libc malloc subsystem via _malloc_init at 0x%llx...\n",
+               (unsigned long long)malloc_init_addr);
+        recomp_call_guest(ctx, malloc_init_addr);
+      } else if (malloc_replace_addr != 0 &&
+                 malloc_replace_addr + 0x20 <= ctx->mem_size) {
+        uint64_t mr_size = *(uint64_t *)(ctx->mem_base + malloc_replace_addr);
+        uint64_t init_func =
+            *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x10ULL);
+        uint64_t malloc_func = *(uint64_t *)(ctx->mem_base + malloc_replace_addr + 0x20ULL);
+        printf("[ps4-mem] SceLibcMallocReplace at 0x%llx: size=0x%llx init=0x%llx malloc=0x%llx\n",
+               (unsigned long long)malloc_replace_addr, (unsigned long long)mr_size,
+               (unsigned long long)init_func, (unsigned long long)malloc_func);
+        if (init_func != 0 && init_func < ctx->mem_size) {
+          printf("[ps4-recomp] Initializing custom memory allocator via "
+                 "SceLibcParam at 0x%llx...\n",
+                 (unsigned long long)init_func);
+          recomp_call_guest(ctx, init_func);
+        }
+      } else if (new_replace_addr != 0) {
+        // Fallback: directly invoke _new_setup (NID KNNNbyRieqQ) if _malloc_init was not in libc exports
+        uint64_t new_setup_addr = recomp_resolve_symbol("libc.prx", "KNNNbyRieqQ");
+        if (!new_setup_addr) {
+          new_setup_addr = recomp_resolve_symbol("libc.prx", "_new_setup");
+        }
+        if (new_setup_addr != 0) {
+          printf("[ps4-recomp] Initializing C++ operator new replacements via _new_setup at 0x%llx...\n",
+                 (unsigned long long)new_setup_addr);
+          ctx->rdi = new_replace_addr;
+          recomp_call_guest(ctx, new_setup_addr);
+        }
       }
     }
   }

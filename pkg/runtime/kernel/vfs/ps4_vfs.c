@@ -45,20 +45,20 @@ static char *discover_app_root(const char *hint) {
   }
 
 #if defined(__APPLE__)
-  // 2. Check if running inside macOS .app bundle: <exe_dir>/../SharedSupport
+  // 2. Check if running inside macOS .app bundle: <exe_dir>/../SharedSupport or Resources
   char exec_path[1024] = {0};
   uint32_t size = sizeof(exec_path);
+  char exe_dir_buf[1024] = {0};
+  char *exe_dir = NULL;
   if (_NSGetExecutablePath(exec_path, &size) == 0) {
     char canonical_exec[1024];
     if (realpath(exec_path, canonical_exec) != NULL) {
-      char dir_buf[1024];
-      strncpy(dir_buf, canonical_exec, sizeof(dir_buf) - 1);
-      dir_buf[sizeof(dir_buf) - 1] = '\0';
-      char *dir = dirname(dir_buf);
+      strncpy(exe_dir_buf, canonical_exec, sizeof(exe_dir_buf) - 1);
+      exe_dir = dirname(exe_dir_buf);
 
       // Check inside macOS .app bundle: <exe_dir>/../SharedSupport
       char test_path[1024];
-      snprintf(test_path, sizeof(test_path), "%s/../SharedSupport", dir);
+      snprintf(test_path, sizeof(test_path), "%s/../SharedSupport", exe_dir);
       char canonical_res[1024];
       if (realpath(test_path, canonical_res) != NULL &&
           access(canonical_res, F_OK) == 0) {
@@ -66,52 +66,28 @@ static char *discover_app_root(const char *hint) {
       }
 
       // Check inside macOS .app bundle: <exe_dir>/../Resources
-      snprintf(test_path, sizeof(test_path), "%s/../Resources", dir);
+      snprintf(test_path, sizeof(test_path), "%s/../Resources", exe_dir);
       if (realpath(test_path, canonical_res) != NULL &&
           access(canonical_res, F_OK) == 0) {
         return strdup(canonical_res);
-      }
-
-      // Check <exe_dir>/assets
-      snprintf(test_path, sizeof(test_path), "%s/assets", dir);
-      if (access(test_path, F_OK) == 0) {
-        if (realpath(dir, canonical_res) != NULL) {
-          return strdup(canonical_res);
-        }
-        return strdup(dir);
-      }
-
-      // Check parent directory hierarchy up to 4 levels for assets/
-      char cur[1024];
-      strncpy(cur, dir, sizeof(cur) - 1);
-      cur[sizeof(cur) - 1] = '\0';
-      for (int i = 0; i < 4; i++) {
-        char *parent = dirname(cur);
-        snprintf(test_path, sizeof(test_path), "%s/assets", parent);
-        if (access(test_path, F_OK) == 0) {
-          if (realpath(parent, canonical_res) != NULL) {
-            return strdup(canonical_res);
-          }
-          return strdup(parent);
-        }
-        strncpy(cur, parent, sizeof(cur) - 1);
-        cur[sizeof(cur) - 1] = '\0';
       }
     }
   }
 #endif
 
-  // 3. Check compile-time hint if provided and contains valid assets
+  // 3. Check compile-time hint if provided and contains valid game assets/markers
   if (hint && *hint && access(hint, F_OK) == 0) {
     char check_path[1024];
-    snprintf(check_path, sizeof(check_path), "%s/Media", hint);
-    int has_media = (access(check_path, F_OK) == 0);
     snprintf(check_path, sizeof(check_path), "%s/sce_sys", hint);
     int has_sce_sys = (access(check_path, F_OK) == 0);
     snprintf(check_path, sizeof(check_path), "%s/param.sfo", hint);
     int has_sfo = (access(check_path, F_OK) == 0);
+    snprintf(check_path, sizeof(check_path), "%s/eboot.bin", hint);
+    int has_eboot = (access(check_path, F_OK) == 0);
+    snprintf(check_path, sizeof(check_path), "%s/Media", hint);
+    int has_media = (access(check_path, F_OK) == 0);
 
-    if (has_media || has_sce_sys || has_sfo) {
+    if (has_sce_sys || has_sfo || has_eboot || has_media) {
       char canonical_hint[1024];
       if (realpath(hint, canonical_hint) != NULL) {
         return strdup(canonical_hint);
@@ -119,6 +95,51 @@ static char *discover_app_root(const char *hint) {
       return strdup(hint);
     }
   }
+
+#if defined(__APPLE__)
+  if (exe_dir) {
+    char test_path[1024];
+    char canonical_res[1024];
+
+    // Check if <exe_dir> is itself a self-contained game folder with markers
+    snprintf(test_path, sizeof(test_path), "%s/param.sfo", exe_dir);
+    if (access(test_path, F_OK) == 0) {
+      if (realpath(exe_dir, canonical_res) != NULL) return strdup(canonical_res);
+      return strdup(exe_dir);
+    }
+    snprintf(test_path, sizeof(test_path), "%s/sce_sys", exe_dir);
+    if (access(test_path, F_OK) == 0) {
+      if (realpath(exe_dir, canonical_res) != NULL) return strdup(canonical_res);
+      return strdup(exe_dir);
+    }
+
+    // Check <exe_dir>/assets
+    snprintf(test_path, sizeof(test_path), "%s/assets", exe_dir);
+    if (access(test_path, F_OK) == 0) {
+      if (realpath(exe_dir, canonical_res) != NULL) {
+        return strdup(canonical_res);
+      }
+      return strdup(exe_dir);
+    }
+
+    // Check parent directory hierarchy up to 4 levels for assets/
+    char cur[1024];
+    strncpy(cur, exe_dir, sizeof(cur) - 1);
+    cur[sizeof(cur) - 1] = '\0';
+    for (int i = 0; i < 4; i++) {
+      char *parent = dirname(cur);
+      snprintf(test_path, sizeof(test_path), "%s/assets", parent);
+      if (access(test_path, F_OK) == 0) {
+        if (realpath(parent, canonical_res) != NULL) {
+          return strdup(canonical_res);
+        }
+        return strdup(parent);
+      }
+      strncpy(cur, parent, sizeof(cur) - 1);
+      cur[sizeof(cur) - 1] = '\0';
+    }
+  }
+#endif
 
   // 4. Check current working directory ./assets or ./Media
   if (access("assets", F_OK) == 0 || access("Media", F_OK) == 0) {
@@ -615,9 +636,6 @@ ssize_t ps4_vfs_read(int fd, void *buf, size_t count) {
     VirtualPakFile *vf = &g_vfiles[slot];
     if ((uint64_t)vf->cur_offset >= vf->file_size) {
       pthread_mutex_unlock(&g_vfile_mutex);
-      printf(
-          "[ps4-vfs] Virtual read: vfd=%d EOF (cur_offset=%lld, size=%llu)\n",
-          fd, (long long)vf->cur_offset, (unsigned long long)vf->file_size);
       return 0; // EOF
     }
 
@@ -626,18 +644,55 @@ ssize_t ps4_vfs_read(int fd, void *buf, size_t count) {
       to_read = (size_t)(vf->file_size - (uint64_t)vf->cur_offset);
     }
 
-    ssize_t ret = pread(vf->pak_fd, buf, to_read,
-                        (off_t)(vf->data_offset + (uint64_t)vf->cur_offset));
-    if (ret > 0) {
-      vf->cur_offset += ret;
+    size_t total = 0;
+    char *p = (char *)buf;
+    while (total < to_read) {
+      ssize_t ret = pread(vf->pak_fd, p + total, to_read - total,
+                          (off_t)(vf->data_offset + (uint64_t)vf->cur_offset + total));
+      if (ret < 0) {
+        if (errno == EINTR)
+          continue;
+        if (total > 0)
+          break;
+        pthread_mutex_unlock(&g_vfile_mutex);
+        return -1;
+      }
+      if (ret == 0)
+        break;
+      total += (size_t)ret;
     }
-    printf("[ps4-vfs] Virtual read: vfd=%d count=%zu (to_read=%zu, "
-           "cur_offset=%lld) -> ret=%zd\n",
-           fd, count, to_read, (long long)vf->cur_offset, ret);
+    vf->cur_offset += (off_t)total;
     pthread_mutex_unlock(&g_vfile_mutex);
-    return ret;
+    return (ssize_t)total;
   }
-  return read(fd, buf, count);
+
+  struct stat st;
+  if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+    size_t total = 0;
+    char *p = (char *)buf;
+    while (total < count) {
+      ssize_t n = read(fd, p + total, count - total);
+      if (n < 0) {
+        if (errno == EINTR)
+          continue;
+        if (total > 0) {
+          if (fd == 20) printf("[ps4-vfs] read fd=20 count=%zu -> total=%zu (partial err)\n", count, total);
+          return (ssize_t)total;
+        }
+        if (fd == 20) printf("[ps4-vfs] read fd=20 count=%zu -> error=%d\n", count, errno);
+        return -1;
+      }
+      if (n == 0)
+        break;
+      total += (size_t)n;
+    }
+    if (fd == 20) printf("[ps4-vfs] read fd=20 count=%zu -> total=%zu\n", count, total);
+    return (ssize_t)total;
+  }
+
+  ssize_t n = read(fd, buf, count);
+  if (fd == 20) printf("[ps4-vfs] non-reg read fd=20 count=%zu -> %zd\n", count, n);
+  return n;
 }
 
 ssize_t ps4_vfs_pread(int fd, void *buf, size_t count, off_t offset) {
@@ -660,18 +715,55 @@ ssize_t ps4_vfs_pread(int fd, void *buf, size_t count, off_t offset) {
       to_read = (size_t)(vf->file_size - (uint64_t)offset);
     }
 
-    ssize_t ret = pread(vf->pak_fd, buf, to_read,
-                        (off_t)(vf->data_offset + (uint64_t)offset));
-    printf("[ps4-vfs] Virtual pread: vfd=%d count=%zu offset=%lld "
-           "(to_read=%zu) -> ret=%zd\n",
-           fd, count, (long long)offset, to_read, ret);
+    size_t total = 0;
+    char *p = (char *)buf;
+    while (total < to_read) {
+      ssize_t ret = pread(vf->pak_fd, p + total, to_read - total,
+                          (off_t)(vf->data_offset + (uint64_t)offset + total));
+      if (ret < 0) {
+        if (errno == EINTR)
+          continue;
+        if (total > 0)
+          break;
+        pthread_mutex_unlock(&g_vfile_mutex);
+        return -1;
+      }
+      if (ret == 0)
+        break;
+      total += (size_t)ret;
+    }
     pthread_mutex_unlock(&g_vfile_mutex);
-    return ret;
+    return (ssize_t)total;
   }
-  return pread(fd, buf, count, offset);
+
+  struct stat st;
+  if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+    size_t total = 0;
+    char *p = (char *)buf;
+    while (total < count) {
+      ssize_t n = pread(fd, p + total, count - total, offset + (off_t)total);
+      if (n < 0) {
+        if (errno == EINTR)
+          continue;
+        if (total > 0)
+          return (ssize_t)total;
+        return -1;
+      }
+      if (n == 0)
+        break;
+      total += (size_t)n;
+    }
+    if (fd == 20) printf("[ps4-vfs] pread fd=20 count=%zu offset=%lld -> total=%zu\n", count, (long long)offset, total);
+    return (ssize_t)total;
+  }
+
+  ssize_t n = pread(fd, buf, count, offset);
+  if (fd == 20) printf("[ps4-vfs] non-reg pread fd=20 count=%zu offset=%lld -> %zd\n", count, (long long)offset, n);
+  return n;
 }
 
 off_t ps4_vfs_lseek(int fd, off_t offset, int whence) {
+  if (fd == 20) printf("[ps4-vfs] lseek fd=20 offset=%lld whence=%d\n", (long long)offset, whence);
   if (ps4_vfs_is_virtual_fd(fd)) {
     int slot = fd - PS4_VFS_VIRTUAL_FD_BASE;
     pthread_mutex_lock(&g_vfile_mutex);

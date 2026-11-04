@@ -638,10 +638,15 @@ void shim_sceFontCreateString(GuestContext *ctx) {
             uint64_t parserFn = (uint64_t)(uintptr_t)src->textParser;
             uint64_t nodeAllocGuest = strGuest + 0x200;
             uint64_t prevNodeGuest = 0;
+            uint64_t orderPtrGuest = strGuest + 0x80;
+            uint64_t parseResultGuest = strGuest + 0x100;
+
+            *(uint64_t *)(ctx->mem_base + orderPtrGuest) = 0;
+            memset(ctx->mem_base + parseResultGuest, 0, sizeof(OrbisFontTextParseResult));
+
+            pthread_mutex_unlock(&g_font_mutex);
 
             for (uint32_t i = 0; i < 256; i++) {
-                uint64_t orderPtrGuest = strGuest + 0x80;
-                uint64_t parseResultGuest = strGuest + 0x100;
                 memset(ctx->mem_base + parseResultGuest, 0, sizeof(OrbisFontTextParseResult));
 
                 GuestContext sub = *ctx;
@@ -681,6 +686,8 @@ void shim_sceFontCreateString(GuestContext *ctx) {
                     break;
                 }
             }
+
+            pthread_mutex_lock(&g_font_mutex);
         }
     }
     pthread_mutex_unlock(&g_font_mutex);
