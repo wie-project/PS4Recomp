@@ -16,6 +16,13 @@ int32_t sceUserServiceInitialize(const OrbisUserServiceInitializeParams *params)
     return 0;
 }
 
+int32_t sceUserServiceInitialize2(void) {
+    pthread_mutex_lock(&g_user_service_mutex);
+    g_user_service_initialized = 1;
+    pthread_mutex_unlock(&g_user_service_mutex);
+    return 0;
+}
+
 int32_t sceUserServiceGetInitialUser(int32_t *userId) {
     if (!userId) {
         return -EINVAL;
@@ -82,6 +89,13 @@ void shim_sceUserServiceInitialize(GuestContext *ctx) {
         paramsGuest ? (const OrbisUserServiceInitializeParams *)(ctx->mem_base + paramsGuest) : NULL;
 
     int32_t ret = sceUserServiceInitialize(params);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_sceUserServiceInitialize2(GuestContext *ctx) {
+    (void)ctx;
+    int32_t ret = sceUserServiceInitialize2();
     ctx->rax = (uint64_t)(int64_t)ret;
     SHIM_RETURN();
 }

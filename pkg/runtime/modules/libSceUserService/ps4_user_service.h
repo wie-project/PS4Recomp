@@ -41,6 +41,7 @@ extern "C" {
 #endif
 
 int32_t sceUserServiceInitialize(const OrbisUserServiceInitializeParams *params);
+int32_t sceUserServiceInitialize2(void);
 int32_t sceUserServiceGetInitialUser(int32_t *userId);
 int32_t sceUserServiceGetLoginUserIdList(OrbisUserServiceLoginUserIdList *list);
 int32_t sceUserServiceGetUserName(int32_t userId, char *userName, const size_t size);
@@ -52,6 +53,7 @@ int32_t sceUserServiceGetUserColor(int32_t userId, int32_t *color);
 
 // Guest ABI shims
 void shim_sceUserServiceInitialize(GuestContext *ctx);
+void shim_sceUserServiceInitialize2(GuestContext *ctx);
 void shim_sceUserServiceGetInitialUser(GuestContext *ctx);
 void shim_sceUserServiceGetLoginUserIdList(GuestContext *ctx);
 void shim_sceUserServiceGetUserName(GuestContext *ctx);

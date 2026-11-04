@@ -250,6 +250,15 @@ typedef struct SdDirNameSearchResult {
 bool ps4_savedata_read_dir_info(int32_t user_id, const char *dir_name,
                                 Ps4SaveDataParam *out_param, uint64_t *out_bytes);
 
+typedef struct SdTransferringMount {
+    int32_t userId;
+    uint32_t _pad;
+    uint64_t titleId;       // SdTitleId*
+    uint64_t dirName;       // SdDirName*
+    uint64_t fingerprint;   // SdFingerprint*
+    uint8_t _reserved[32];
+} SdTransferringMount;
+
 // C API
 int32_t sceSaveDataInitialize(const void *param);
 int32_t sceSaveDataInitialize2(const void *param);
@@ -258,6 +267,8 @@ int32_t sceSaveDataTerminate(void);
 
 int32_t sceSaveDataMount(GuestContext *ctx, const SdMount *mount, SdMountResult *result);
 int32_t sceSaveDataMount2(GuestContext *ctx, const SdMount2 *mount, SdMountResult *result);
+int32_t sceSaveDataTransferringMount(GuestContext *ctx, const SdTransferringMount *mount, SdMountResult *result);
+int32_t sceSaveDataGetEventResult(GuestContext *ctx, uint64_t param_addr, uint64_t event_addr);
 int32_t sceSaveDataUmount(GuestContext *ctx, uint64_t mount_point_addr);
 int32_t sceSaveDataUmountWithBackup(GuestContext *ctx, uint64_t mount_point_addr);
 int32_t sceSaveDataSetParam(GuestContext *ctx, uint64_t mount_point_addr, uint32_t param_type,
@@ -293,6 +304,8 @@ void shim_sceSaveDataTerminate(GuestContext *ctx);
 
 void shim_sceSaveDataMount(GuestContext *ctx);
 void shim_sceSaveDataMount2(GuestContext *ctx);
+void shim_sceSaveDataTransferringMount(GuestContext *ctx);
+void shim_sceSaveDataGetEventResult(GuestContext *ctx);
 void shim_sceSaveDataUmount(GuestContext *ctx);
 void shim_sceSaveDataUmountWithBackup(GuestContext *ctx);
 void shim_sceSaveDataSetParam(GuestContext *ctx);

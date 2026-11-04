@@ -775,33 +775,59 @@ void shim_sceKernelAvailableDirectMemorySize(GuestContext *ctx) {
 
     if (startOutGuest != 0 || sizeOutGuest != 0) {
         // PS4 SDK convention:
-        // int sceKernelAvailableDirectMemorySize(off_t searchStart, off_t searchEnd, int flags, off_t *startOut, size_t *sizeOut)
+        // int sceKernelAvailableDirectMemorySize(off_t searchStart, off_t searchEnd, size_t alignment, off_t *startOut, size_t *sizeOut)
         // Returns 0 on success, writes free block start and size.
-        off_t searchStart = (off_t)ctx->rdi;
-        off_t searchEnd = (off_t)ctx->rsi;
-        (void)searchEnd;
+        // Returns 0x8002000c (SCE_KERNEL_ERROR_ENOMEM) if no free block is available in range.
+        uint64_t searchStart = ctx->rdi;
+        uint64_t searchEnd = ctx->rsi;
+        uint64_t alignment = ctx->rdx;
 
         ps4_direct_mem_init();
         pthread_mutex_lock(&g_direct_mutex);
-        size_t free_total = 0;
-        off_t best_start = searchStart;
-        DirectMemBlock *curr = g_direct_blocks;
-        while (curr) {
-            if (curr->is_free) {
-                free_total += curr->size;
-                if (best_start == 0) best_start = curr->phys_offset;
+        size_t total_size = get_total_direct_mem_size();
+        if (searchEnd == 0 || searchEnd > total_size) {
+            searchEnd = total_size;
+        }
+
+        uint64_t best_start = 0;
+        uint64_t best_size = 0;
+
+        if (searchStart < searchEnd) {
+            DirectMemBlock *curr = g_direct_blocks;
+            while (curr) {
+                if (curr->is_free) {
+                    uint64_t b_start = (uint64_t)curr->phys_offset;
+                    uint64_t b_end = b_start + curr->size;
+
+                    if (b_end > searchStart && b_start < searchEnd) {
+                        uint64_t cand_start = b_start < searchStart ? searchStart : b_start;
+                        if (alignment > 0) {
+                            cand_start = (cand_start + alignment - 1) & ~(alignment - 1);
+                        }
+                        uint64_t cand_end = b_end > searchEnd ? searchEnd : b_end;
+                        if (cand_start < cand_end) {
+                            best_start = cand_start;
+                            best_size = cand_end - cand_start;
+                            break;
+                        }
+                    }
+                }
+                curr = curr->next;
             }
-            curr = curr->next;
         }
         pthread_mutex_unlock(&g_direct_mutex);
 
-        if (startOutGuest && startOutGuest < ctx->mem_size) {
-            *(off_t *)(ctx->mem_base + startOutGuest) = best_start;
+        if (startOutGuest && startOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+            *(uint64_t *)(ctx->mem_base + startOutGuest) = best_start;
         }
-        if (sizeOutGuest && sizeOutGuest < ctx->mem_size) {
-            *(size_t *)(ctx->mem_base + sizeOutGuest) = free_total;
+        if (sizeOutGuest && sizeOutGuest + sizeof(uint64_t) <= ctx->mem_size) {
+            *(uint64_t *)(ctx->mem_base + sizeOutGuest) = best_size;
         }
-        ctx->rax = 0; // SCE_OK
+        if (best_size == 0) {
+            ctx->rax = 0x8002000cULL; // SCE_KERNEL_ERROR_ENOMEM
+        } else {
+            ctx->rax = 0; // SCE_OK
+        }
     } else {
         ctx->rax = (uint64_t)sceKernelAvailableDirectMemorySize();
     }

@@ -38,6 +38,37 @@ int32_t sceRtcGetCurrentClockLocalTime(OrbisDateTime *timeOut) {
     return 0;
 }
 
+int32_t sceRtcGetCurrentClock(OrbisDateTime *timeOut, int timeZone) {
+    if (!timeOut) {
+        return -EINVAL;
+    }
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    time_t sec = tv.tv_sec + (time_t)timeZone * 60;
+    struct tm tm;
+    gmtime_r(&sec, &tm);
+
+    timeOut->year = (uint16_t)(tm.tm_year + 1900);
+    timeOut->month = (uint16_t)(tm.tm_mon + 1);
+    timeOut->day = (uint16_t)tm.tm_mday;
+    timeOut->hour = (uint16_t)tm.tm_hour;
+    timeOut->minute = (uint16_t)tm.tm_min;
+    timeOut->second = (uint16_t)tm.tm_sec;
+    timeOut->microsecond = (uint32_t)tv.tv_usec;
+    return 0;
+}
+
+int32_t sceRtcConvertUtcToLocalTime(const OrbisRtcTick *pTickUtc, OrbisRtcTick *pTickLocal) {
+    if (!pTickUtc || !pTickLocal) {
+        return -EINVAL;
+    }
+    time_t sec = (time_t)(pTickUtc->tick / 1000000ULL);
+    struct tm tm;
+    localtime_r(&sec, &tm);
+    pTickLocal->tick = pTickUtc->tick + (int64_t)tm.tm_gmtoff * 1000000LL;
+    return 0;
+}
+
 int32_t sceRtcGetTick(const OrbisDateTime *timeIn, OrbisRtcTick *tick) {
     if (!timeIn || !tick) {
         return -EINVAL;
@@ -115,6 +146,25 @@ void shim_sceRtcGetCurrentClockLocalTime(GuestContext *ctx) {
     uint64_t timeGuest = ctx->rdi;
     OrbisDateTime *timeOut = timeGuest ? (OrbisDateTime *)(ctx->mem_base + timeGuest) : NULL;
     int32_t ret = sceRtcGetCurrentClockLocalTime(timeOut);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_sceRtcGetCurrentClock(GuestContext *ctx) {
+    uint64_t timeGuest = ctx->rdi;
+    int timeZone = (int)ctx->rsi;
+    OrbisDateTime *timeOut = timeGuest ? (OrbisDateTime *)(ctx->mem_base + timeGuest) : NULL;
+    int32_t ret = sceRtcGetCurrentClock(timeOut, timeZone);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_sceRtcConvertUtcToLocalTime(GuestContext *ctx) {
+    uint64_t utcGuest = ctx->rdi;
+    uint64_t localGuest = ctx->rsi;
+    const OrbisRtcTick *pUtc = utcGuest ? (const OrbisRtcTick *)(ctx->mem_base + utcGuest) : NULL;
+    OrbisRtcTick *pLocal = localGuest ? (OrbisRtcTick *)(ctx->mem_base + localGuest) : NULL;
+    int32_t ret = sceRtcConvertUtcToLocalTime(pUtc, pLocal);
     ctx->rax = (uint64_t)(int64_t)ret;
     SHIM_RETURN();
 }

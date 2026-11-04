@@ -1035,6 +1035,190 @@ void shim_pthread_rwlock_destroy(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+typedef struct GuestRwlockAttr {
+  int pshared;
+  int type;
+} GuestRwlockAttr;
+
+void shim_scePthreadRwlockattrInit(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  if (!attr_addr || !ctx->mem_base) {
+    ctx->rax = 0x80020016; // SCE_KERNEL_ERROR_EINVAL
+    SHIM_RETURN();
+  }
+  GuestRwlockAttr *attr = (GuestRwlockAttr *)calloc(1, sizeof(GuestRwlockAttr));
+  if (!attr) {
+    ctx->rax = 0x8002000c; // SCE_KERNEL_ERROR_ENOMEM
+    SHIM_RETURN();
+  }
+  attr->pshared = 0;
+  attr->type = 0;
+  *(uint64_t *)(ctx->mem_base + attr_addr) = (uint64_t)(uintptr_t)attr;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_rwlockattr_init(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  if (!attr_addr || !ctx->mem_base) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  GuestRwlockAttr *attr = (GuestRwlockAttr *)calloc(1, sizeof(GuestRwlockAttr));
+  if (!attr) {
+    ctx->rax = (uint64_t)ENOMEM;
+    SHIM_RETURN();
+  }
+  attr->pshared = 0;
+  attr->type = 0;
+  *(uint64_t *)(ctx->mem_base + attr_addr) = (uint64_t)(uintptr_t)attr;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadRwlockattrDestroy(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  if (attr_addr && ctx->mem_base) {
+    uint64_t ptr_val = *(uint64_t *)(ctx->mem_base + attr_addr);
+    GuestRwlockAttr *attr = (GuestRwlockAttr *)(uintptr_t)ptr_val;
+    if (attr) {
+      free(attr);
+      *(uint64_t *)(ctx->mem_base + attr_addr) = 0;
+    }
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_rwlockattr_destroy(GuestContext *ctx) {
+  shim_scePthreadRwlockattrDestroy(ctx);
+}
+
+void shim_scePthreadRwlockattrSettype(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  int type = (int)ctx->rsi;
+  if (!attr_addr || !ctx->mem_base) {
+    ctx->rax = 0x80020016;
+    SHIM_RETURN();
+  }
+  uint64_t ptr_val = *(uint64_t *)(ctx->mem_base + attr_addr);
+  GuestRwlockAttr *attr = (GuestRwlockAttr *)(uintptr_t)ptr_val;
+  if (!attr || type < 0 || type > 2) {
+    ctx->rax = 0x80020016;
+    SHIM_RETURN();
+  }
+  attr->type = type;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_rwlockattr_settype_np(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  int type = (int)ctx->rsi;
+  if (!attr_addr || !ctx->mem_base) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  uint64_t ptr_val = *(uint64_t *)(ctx->mem_base + attr_addr);
+  GuestRwlockAttr *attr = (GuestRwlockAttr *)(uintptr_t)ptr_val;
+  if (!attr || type < 0 || type > 2) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  attr->type = type;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadRwlockattrGettype(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t out_addr = ctx->rsi;
+  if (!attr_addr || !out_addr || !ctx->mem_base) {
+    ctx->rax = 0x80020016;
+    SHIM_RETURN();
+  }
+  uint64_t ptr_val = *(uint64_t *)(ctx->mem_base + attr_addr);
+  GuestRwlockAttr *attr = (GuestRwlockAttr *)(uintptr_t)ptr_val;
+  if (!attr) {
+    ctx->rax = 0x80020016;
+    SHIM_RETURN();
+  }
+  *(int *)(ctx->mem_base + out_addr) = attr->type;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_rwlockattr_gettype_np(GuestContext *ctx) {
+  shim_scePthreadRwlockattrGettype(ctx);
+}
+
+void shim_scePthreadRwlockattrSetpshared(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  int pshared = (int)ctx->rsi;
+  if (!attr_addr || !ctx->mem_base || pshared != 0) {
+    ctx->rax = 0x80020016;
+    SHIM_RETURN();
+  }
+  uint64_t ptr_val = *(uint64_t *)(ctx->mem_base + attr_addr);
+  GuestRwlockAttr *attr = (GuestRwlockAttr *)(uintptr_t)ptr_val;
+  if (!attr) {
+    ctx->rax = 0x80020016;
+    SHIM_RETURN();
+  }
+  attr->pshared = pshared;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_rwlockattr_setpshared(GuestContext *ctx) {
+  shim_scePthreadRwlockattrSetpshared(ctx);
+}
+
+void shim_scePthreadRwlockattrGetpshared(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t out_addr = ctx->rsi;
+  if (!attr_addr || !out_addr || !ctx->mem_base) {
+    ctx->rax = 0x80020016;
+    SHIM_RETURN();
+  }
+  uint64_t ptr_val = *(uint64_t *)(ctx->mem_base + attr_addr);
+  GuestRwlockAttr *attr = (GuestRwlockAttr *)(uintptr_t)ptr_val;
+  if (!attr) {
+    ctx->rax = 0x80020016;
+    SHIM_RETURN();
+  }
+  *(int *)(ctx->mem_base + out_addr) = attr->pshared;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_pthread_rwlockattr_getpshared(GuestContext *ctx) {
+  shim_scePthreadRwlockattrGetpshared(ctx);
+}
+
+void shim_scePthreadRwlockInit(GuestContext *ctx) {
+  uint64_t rw_addr = ctx->rdi;
+  (void)get_host_rwlock(sync_handle(ctx, rw_addr, 1));
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadRwlockDestroy(GuestContext *ctx) {
+  shim_pthread_rwlock_destroy(ctx);
+}
+
+void shim_scePthreadRwlockRdlock(GuestContext *ctx) {
+  shim_pthread_rwlock_rdlock(ctx);
+}
+
+void shim_scePthreadRwlockWrlock(GuestContext *ctx) {
+  shim_pthread_rwlock_wrlock(ctx);
+}
+
+void shim_scePthreadRwlockUnlock(GuestContext *ctx) {
+  shim_pthread_rwlock_unlock(ctx);
+}
+
 static pthread_mutex_t g_once_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_once_cond = PTHREAD_COND_INITIALIZER;
 

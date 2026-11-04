@@ -36,6 +36,8 @@ int32_t sceRtcFormatRFC3339(char *pszDateTime, const OrbisRtcTick *pTickUtc, int
 int32_t sceRtcParseRFC3339(OrbisRtcTick *pTickUtc, const char *pszDateTime);
 int32_t sceRtcGetCurrentNetworkTick(OrbisRtcTick *tick);
 int32_t sceRtcSetTime_t(OrbisDateTime *out, int64_t time, uint32_t sdk_version);
+int32_t sceRtcGetCurrentClock(OrbisDateTime *timeOut, int timeZone);
+int32_t sceRtcConvertUtcToLocalTime(const OrbisRtcTick *pTickUtc, OrbisRtcTick *pTickLocal);
 int32_t sceRtcFormatRFC3339LocalTime(char *out, const OrbisRtcTick *tick_utc);
 // Ticks in this module count microseconds since the Unix epoch; real PS4 ticks (since year 1)
 // are accepted as well.
@@ -47,7 +49,9 @@ void shim_sceRtcGetCurrentTick(GuestContext *ctx);
 void shim_sceRtcGetTick(GuestContext *ctx);
 void shim_sceRtcSetTick(GuestContext *ctx);
 void shim_sceRtcGetTickResolution(GuestContext *ctx);
+void shim_sceRtcGetCurrentClock(GuestContext *ctx);
 void shim_sceRtcGetCurrentClockLocalTime(GuestContext *ctx);
+void shim_sceRtcConvertUtcToLocalTime(GuestContext *ctx);
 void shim_sceRtcGetDayOfWeek(GuestContext *ctx);
 void shim_sceRtcIsLeapYear(GuestContext *ctx);
 void shim_sceRtcGetTime_t(GuestContext *ctx);

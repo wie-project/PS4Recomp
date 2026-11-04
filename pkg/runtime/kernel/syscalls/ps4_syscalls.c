@@ -287,6 +287,57 @@ void shim_mmap(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+// sceKernelMmap
+void shim_sceKernelMmap(GuestContext *ctx) {
+  uint64_t addr = ctx->rdi;
+  size_t len = (size_t)ctx->rsi;
+  int prot = (int)ctx->rdx;
+  int flags = (int)ctx->rcx;
+  int fd = (int)ctx->r8;
+  off_t offset = (off_t)ctx->r9;
+  uint64_t res_out = 0;
+  if (ctx->rsp && ctx->mem_base && ctx->rsp + 8 <= ctx->mem_size) {
+    res_out = *(uint64_t *)(ctx->mem_base + ctx->rsp + 8);
+  }
+
+  printf("[ps4-sys] sceKernelMmap: addr=0x%llx len=%zu prot=0x%x flags=0x%x fd=%d offset=%lld res_out=0x%llx\n",
+         (unsigned long long)addr, len, prot, flags, fd, (long long)offset, (unsigned long long)res_out);
+  fflush(stdout);
+
+  if (len == 0 || !res_out) {
+    ctx->rax = 0x80020016; // SCE_KERNEL_ERROR_EINVAL
+    SHIM_RETURN();
+  }
+
+  size_t align = 65536;
+  size_t aligned_len = (len + align - 1) & ~(align - 1);
+
+  uint64_t alloc_addr = (uint64_t)-1;
+  if (addr != 0) {
+    alloc_addr = recomp_vm_alloc_fixed(ctx, addr, aligned_len, prot, flags, "sceKernelMmap");
+  }
+  if (alloc_addr == (uint64_t)-1) {
+    alloc_addr = recomp_vm_alloc_named_aligned(ctx, aligned_len, align, prot, flags, "sceKernelMmap");
+  }
+
+  if (alloc_addr == (uint64_t)-1) {
+    ctx->rax = 0x8002000c; // SCE_KERNEL_ERROR_ENOMEM
+  } else {
+    if (!(flags & 0x1000) && fd >= 0) { // Not MAP_ANONYMOUS
+      ssize_t nread = ps4_vfs_pread(fd, ctx->mem_base + alloc_addr, len, offset);
+      if (nread < 0) {
+        int err = errno;
+        recomp_vm_free(ctx, alloc_addr, aligned_len);
+        ctx->rax = sce_kernel_error(err);
+        SHIM_RETURN();
+      }
+    }
+    *(uint64_t *)(ctx->mem_base + res_out) = alloc_addr;
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
 // munmap
 void shim_munmap(GuestContext *ctx) {
   uint64_t addr = ctx->rdi;
@@ -658,6 +709,30 @@ void shim_sceKernelOpen(GuestContext *ctx) {
          path ? path : "(null)", flags, host_flags, ret,
          (unsigned long long)ctx->rax);
   fflush(stdout);
+  SHIM_RETURN();
+}
+
+// sceKernelCheckReachability
+void shim_sceKernelCheckReachability(GuestContext *ctx) {
+  uint64_t path_addr = ctx->rdi;
+  if (!path_addr || !ctx->mem_base) {
+    ctx->rax = 0x8002000e; // SCE_KERNEL_ERROR_EFAULT
+    SHIM_RETURN();
+  }
+  const char *path = (const char *)(ctx->mem_base + path_addr);
+  if (strlen(path) > 255) {
+    ctx->rax = 0x8002003f; // SCE_KERNEL_ERROR_ENAMETOOLONG
+    SHIM_RETURN();
+  }
+  if (strcmp(path, "/") == 0) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+  if (ps4_vfs_access(path, F_OK) == 0) {
+    ctx->rax = 0;
+  } else {
+    ctx->rax = 0x80020002; // SCE_KERNEL_ERROR_ENOENT
+  }
   SHIM_RETURN();
 }
 

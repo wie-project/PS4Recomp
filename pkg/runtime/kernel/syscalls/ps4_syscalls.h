@@ -61,6 +61,8 @@ void shim_getdents(GuestContext *ctx);
 void shim_getdirentries(GuestContext *ctx);
 void shim_sceKernelGetdirentries(GuestContext *ctx);
 void shim_sceKernelSleep(GuestContext *ctx);
+void shim_sceKernelCheckReachability(GuestContext *ctx);
+void shim_sceKernelMmap(GuestContext *ctx);
 void shim_sceKernelStopUnloadModule(GuestContext *ctx);
 void shim_sceKernelGetPrtAperture(GuestContext *ctx);
 void shim_ioctl(GuestContext *ctx);

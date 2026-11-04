@@ -630,6 +630,18 @@ int32_t sceSaveDataMount2(GuestContext *ctx, const SdMount2 *mount, SdMountResul
     return sd_mount_internal(ctx, mount->userId, dir_name, mount->blocks, mount->mountMode, result);
 }
 
+int32_t sceSaveDataTransferringMount(GuestContext *ctx, const SdTransferringMount *mount, SdMountResult *result) {
+    if (!mount || !result) return SD_ERR_PARAMETER;
+    char dir_name[SD_DIRNAME_SIZE];
+    if (!sd_copy_dirname(ctx, mount->dirName, dir_name)) return SD_ERR_PARAMETER;
+    return sd_mount_internal(ctx, mount->userId, dir_name, 0, SD_MOUNT_MODE_RDONLY, result);
+}
+
+int32_t sceSaveDataGetEventResult(GuestContext *ctx, uint64_t param_addr, uint64_t event_addr) {
+    (void)ctx; (void)param_addr; (void)event_addr;
+    return 0x809f0004; // SCE_SAVE_DATA_ERROR_NOT_FOUND
+}
+
 int32_t sceSaveDataUmount(GuestContext *ctx, uint64_t mount_point_addr) {
     if (!mount_point_addr) return SD_ERR_PARAMETER;
     pthread_mutex_lock(&g_savedata_mutex);
@@ -1464,6 +1476,18 @@ void shim_sceSaveDataMount2(GuestContext *ctx) {
     const SdMount2 *mount = (const SdMount2 *)recomp_guest_to_host(ctx, ctx->rdi);
     SdMountResult *result = (SdMountResult *)recomp_guest_to_host(ctx, ctx->rsi);
     ctx->rax = (uint64_t)(int64_t)sceSaveDataMount2(ctx, mount, result);
+    SHIM_RETURN();
+}
+
+void shim_sceSaveDataTransferringMount(GuestContext *ctx) {
+    const SdTransferringMount *mount = (const SdTransferringMount *)recomp_guest_to_host(ctx, ctx->rdi);
+    SdMountResult *result = (SdMountResult *)recomp_guest_to_host(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceSaveDataTransferringMount(ctx, mount, result);
+    SHIM_RETURN();
+}
+
+void shim_sceSaveDataGetEventResult(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSaveDataGetEventResult(ctx, ctx->rdi, ctx->rsi);
     SHIM_RETURN();
 }
 
