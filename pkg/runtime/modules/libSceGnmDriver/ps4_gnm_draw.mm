@@ -588,26 +588,6 @@ struct PassKey {
                sample_locs == o.sample_locs;
     }
     bool operator!=(const PassKey& o) const { return !(*this == o); }
-    bool CanSubsume(const PassKey& child) const {
-        if (sample_locs != child.sample_locs) return false;
-        if (child.depth) {
-            if (!depth || depth != child.depth || depth_slice != child.depth_slice) return false;
-        }
-        if (!depth && !child.depth) {
-            bool any_color = false;
-            for (int i = 0; i < 8; ++i) {
-                if (color[i] || child.color[i]) { any_color = true; break; }
-            }
-            if (!any_color && (width != child.width || height != child.height)) return false;
-        }
-        for (int i = 0; i < 8; ++i) {
-            if (child.color[i]) {
-                if (!color[i] || color[i] != child.color[i] || color_slice[i] != child.color_slice[i])
-                    return false;
-            }
-        }
-        return true;
-    }
 };
 
 struct MetaState {
@@ -2604,7 +2584,6 @@ uint64_t SeqsInFlight() {
 void Commit();
 void FlushPendingTess();
 void FlushDeferredHleCopies();
-bool HasDeferredHleCopies();
 
 // Encoder: commits held work once its bound or the backlog says so.
 void ReleaseHeldCompute() {
@@ -6864,14 +6843,7 @@ bool BeginPass(const PassKey& key, const ClearReq& clr, id<MTLTexture> const* ho
     if (g_gms.chain_open) GmCloseChain();
     const GnmEncoder open = S.be->OpenEncoder();
     if (open == GnmEncoder::Compute) S.be->EndEncoder();
-    if (open == GnmEncoder::Render && S.pass.CanSubsume(key) && !clr.any() && !HasDeferredHleCopies()) {
-        if (hold) {
-            for (int i = 0; i < 9; ++i) {
-                if (hold[i] && !S.pass_hold[i]) S.pass_hold[i] = hold[i];
-            }
-        }
-        return true;
-    }
+    if (open == GnmEncoder::Render && S.pass == key && !clr.any()) return true;
     if (open == GnmEncoder::Render) {
         S.be->EndEncoder();
         ResolveEqaaPass();
@@ -7941,7 +7913,6 @@ struct DeferredHleCopyBatch {
 
 static std::vector<DeferredHleCopyBatch>& g_deferred_hle_copies = *new std::vector<DeferredHleCopyBatch>;
 bool g_flushing_hle_copies = false;
-bool HasDeferredHleCopies() { return !g_deferred_hle_copies.empty(); }
 
 void FlushDeferredHleCopies() {
     if (g_deferred_hle_copies.empty() || g_flushing_hle_copies) return;
@@ -10677,9 +10648,11 @@ struct TessTargetSig {
 TessTargetSig MakeTessTargetSig(const DrawRec& r) {
     TessTargetSig sig{};
     const RenderState& rs = r.rs;
+    const uint32_t mrt_mask = r.ps ? r.ps->info.mrt_mask : 0;
+    sig.mrt_mask = mrt_mask;
     for (int i = 0; i < 8; ++i) {
         const ColorTarget& c = rs.color[i];
-        if (!c.enabled || !c.mtl_format) continue;
+        if (!c.enabled || !(mrt_mask & (1u << i)) || !c.mtl_format) continue;
         sig.color_addr[i] = c.address;
         sig.color_slice[i] = c.base_slice;
         sig.color_fmt[i] = c.mtl_format;
@@ -10910,7 +10883,7 @@ void EncodeTessDraw(DrawRec& r) {
     const uint32_t mrt_mask = ps ? ps->info.mrt_mask : 0;
     for (int i = 0; i < 8; ++i) {
         const ColorTarget& c = rs.color[i];
-        if (!c.enabled) continue;
+        if (!c.enabled || !(mrt_mask & (1u << i))) continue;
         if (!c.mtl_format) continue;
         if (c.fast_clear || c.compression) RegisterMeta(c.cmask_address);
         const bool pending_write = c.num_samples == 1 && S.detile_pso != nil &&
@@ -10935,9 +10908,8 @@ void EncodeTessDraw(DrawRec& r) {
                                  ? std::min<uint32_t>(c.base_slice, (uint32_t)t.arrayLength - 1)
                                  : 0;
         hold[i] = t;
-        const bool writes_to_target = (mrt_mask & (1u << i)) != 0;
-        color_fmt[i] = writes_to_target ? (uint32_t)t.pixelFormat : 0;
-        write_mask[i] = writes_to_target ? c.mtl_write_mask : 0;
+        color_fmt[i] = (uint32_t)t.pixelFormat;
+        write_mask[i] = c.mtl_write_mask;
         rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
         rt_h = std::min<uint32_t>(rt_h, (uint32_t)t.height);
         any_rt = true;
@@ -11402,7 +11374,7 @@ void EncodeGsDraw(DrawRec& r) {
     const uint32_t mrt_mask = ps ? ps->info.mrt_mask : 0;
     for (int i = 0; i < 8; ++i) {
         const ColorTarget& c = rs.color[i];
-        if (!c.enabled) continue;
+        if (!c.enabled || !(mrt_mask & (1u << i))) continue;
         if (!c.mtl_format) continue;
         if (c.fast_clear || c.compression) RegisterMeta(c.cmask_address);
         const bool pending_write = c.num_samples == 1 && S.detile_pso != nil &&
@@ -11427,9 +11399,8 @@ void EncodeGsDraw(DrawRec& r) {
                                  ? std::min<uint32_t>(c.base_slice, (uint32_t)t.arrayLength - 1)
                                  : 0;
         hold[i] = t;
-        const bool writes_to_target = (mrt_mask & (1u << i)) != 0;
-        color_fmt[i] = writes_to_target ? (uint32_t)t.pixelFormat : 0;
-        write_mask[i] = writes_to_target ? c.mtl_write_mask : 0;
+        color_fmt[i] = (uint32_t)t.pixelFormat;
+        write_mask[i] = c.mtl_write_mask;
         rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
         rt_h = std::min<uint32_t>(rt_h, (uint32_t)t.height);
         any_rt = true;
@@ -12055,7 +12026,7 @@ void DrawEncode(DrawRec& r) {
         const uint32_t mrt_mask = ps ? ps->info.mrt_mask : 0;
         for (int i = 0; i < 8; ++i) {
             const ColorTarget& c = rs.color[i];
-            if (!c.enabled) continue;
+            if (!c.enabled || !(mrt_mask & (1u << i))) continue;
             if (!c.mtl_format) {
                 RLog("rt-fmt", "%s: color target %d format %u/%u unsupported", args.name, i, c.raw_format, c.raw_number_type);
                 continue;
@@ -12086,9 +12057,8 @@ void DrawEncode(DrawRec& r) {
                                      ? std::min<uint32_t>(c.base_slice, (uint32_t)t.arrayLength - 1)
                                      : 0;
             hold[i] = t;
-            const bool writes_to_target = (mrt_mask & (1u << i)) != 0;
-            color_fmt[i] = writes_to_target ? (uint32_t)t.pixelFormat : 0;
-            write_mask[i] = writes_to_target ? c.mtl_write_mask : 0;
+            color_fmt[i] = (uint32_t)t.pixelFormat;
+            write_mask[i] = c.mtl_write_mask;
             rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
             rt_h = std::min<uint32_t>(rt_h, (uint32_t)t.height);
             any_rt = true;
