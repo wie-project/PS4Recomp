@@ -972,19 +972,19 @@ int32_t sceRazorIsLoaded(void) {
 }
 
 int32_t sceRazorCaptureImmediate(void) {
-    return 0;
+    return ORBIS_GNM_ERROR_CAPTURE_FAILED_INTERNAL;
 }
 
 int32_t sceRazorCaptureSinceLastFlip(void) {
-    return 0;
+    return ORBIS_GNM_ERROR_CAPTURE_FAILED_INTERNAL;
 }
 
 int32_t sceRazorCaptureCommandBuffersOnlyImmediate(void) {
-    return 0;
+    return ORBIS_GNM_ERROR_CAPTURE_FAILED_INTERNAL;
 }
 
 int32_t sceRazorCaptureCommandBuffersOnlySinceLastFlip(void) {
-    return 0;
+    return ORBIS_GNM_ERROR_CAPTURE_FAILED_INTERNAL;
 }
 
 int32_t sceRazorCpuJobManagerSequence(void) {

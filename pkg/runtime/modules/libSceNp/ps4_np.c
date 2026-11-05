@@ -1021,6 +1021,21 @@ void shim_sceNpScoreWaitAsync(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_sceNpScoreCensorCommentAsync(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetFriendsRanking(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetRankingByNpId(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
 //=============================================================================
 // libSceNpTus
 //=============================================================================
@@ -1102,6 +1117,36 @@ void shim_sceNpTusPollAsync(GuestContext *ctx) {
 
 void shim_sceNpTusWaitAsync(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpTusWaitAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusAbortRequest(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusSetMultiSlotVariableAsync(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusSetDataAsync(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusAddAndGetVariableAsync(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusGetMultiSlotVariableAsync(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusGetDataAsync(GuestContext *ctx) {
+    ctx->rax = 0;
     SHIM_RETURN();
 }
 

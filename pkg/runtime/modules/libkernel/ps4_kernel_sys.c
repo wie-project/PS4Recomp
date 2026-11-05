@@ -76,6 +76,18 @@ int32_t sceKernelGettimeofday(OrbisKernelTimeval *tv) {
     return ret;
 }
 
+int32_t sceKernelGettimezone(OrbisKernelTimezone *tz) {
+    if (!tz) return -EINVAL;
+    time_t t = time(NULL);
+    struct tm tm_loc;
+    localtime_r(&t, &tm_loc);
+    int32_t dst_sec = tm_loc.tm_isdst > 0 ? 3600 : 0;
+    int32_t standard_offset_sec = (int32_t)tm_loc.tm_gmtoff - dst_sec;
+    tz->tz_minuteswest = -standard_offset_sec / 60;
+    tz->tz_dsttime = dst_sec / 60;
+    return 0;
+}
+
 int32_t sceKernelGetCurrentCpu(void) {
     if (g_current_ctx) {
         return (int32_t)(g_current_ctx->thread_id % 8);
@@ -156,6 +168,23 @@ void shim_sceKernelGettimeofday(GuestContext *ctx) {
         memcpy(ctx->mem_base + tv_guest, &tv, sizeof(tv));
     }
     ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelGettimezone(GuestContext *ctx) {
+    uint64_t tz_guest = ctx->rdi;
+    if (!tz_guest || !ctx->mem_base) {
+        ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+        SHIM_RETURN();
+    }
+    OrbisKernelTimezone tz = {0};
+    int32_t rc = sceKernelGettimezone(&tz);
+    if (rc == 0) {
+        memcpy(ctx->mem_base + tz_guest, &tz, sizeof(tz));
+        ctx->rax = 0;
+    } else {
+        ctx->rax = 0x80020016;
+    }
     SHIM_RETURN();
 }
 

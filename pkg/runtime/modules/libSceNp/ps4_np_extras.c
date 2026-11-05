@@ -569,4 +569,15 @@ void shim_sceNpMatching2SignalingGetPingInfo(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_sceNpMatching2SignalingGetConnectionInfo(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)NPX_SIGNALING_ERROR_CONN_NOT_FOUND;
+    SHIM_RETURN();
+}
+
+void shim_sceNpWebApiGetErrorCode(GuestContext *ctx) {
+    ctx->rax = 0; // ORBIS_OK: no pending WebAPI error
+    SHIM_RETURN();
+}
+
+
 

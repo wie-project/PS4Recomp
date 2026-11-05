@@ -1005,3 +1005,64 @@ func TestSwitchCountUnprovenWhenIndexWrittenOnOnePath(t *testing.T) {
 		t.Errorf("targets %v, want 0x%x and 0x%x (the count of one path is not proven)", got, c0, c4)
 	}
 }
+
+// TestSwitchTableBaseInPredecessorBlock tests a jump table where the base register (e.g. r14)
+// is loaded in an ancestor block across many intervening blocks (as in Yakuza 0 eboot 0xc962d0).
+func TestSwitchTableBaseInPredecessorBlock(t *testing.T) {
+	a := &switchAsm{img: make([]byte, 0x1000), pc: 0x100}
+	const table = 0x800
+
+	// Block 0: load table base into r14
+	entry := a.pc
+	leaAt := a.put(0x4c, 0x8d, 0x35, 0, 0, 0, 0) // lea r14, [rip+table]
+	binary.LittleEndian.PutUint32(a.img[leaAt+3:], uint32(int32(int64(table)-int64(leaAt+7))))
+
+	// Chain of 25 basic blocks to test search depth > 16
+	for i := 0; i < 25; i++ {
+		j := a.jcc8(0xeb) // jmp next
+		target := a.pc
+		a.patch8(j, target)
+		a.put(0x90) // nop
+	}
+
+	// Bounds check block: cmp eax, 4; ja def
+	a.put(0x83, 0xf8, 0x04)
+	jaDef := a.jcc8(0x77)
+
+	// Switch block: movsxd rcx, [r14+rax*4]; add rcx, r14; jmp rcx
+	a.put(0x49, 0x63, 0x0c, 0x86) // movsxd rcx, [r14+rax*4]
+	a.put(0x4c, 0x01, 0xf1)       // add rcx, r14
+	jmp := a.put(0xff, 0xe1)      // jmp rcx
+
+	c0 := a.put(0xc3)
+	c1 := a.put(0xc3)
+	c2 := a.put(0xc3)
+	c3 := a.put(0xc3)
+	c4 := a.put(0xc3)
+	def := a.put(0xc3)
+	a.patch8(jaDef, def)
+
+	a.table(table, c0, c1, c2, c3, c4)
+
+	d, err := NewDisassembler(switchTestELF(a.img))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AnalyzeReachable([]uint64{entry}); err != nil {
+		t.Fatal(err)
+	}
+	fn := d.Functions[entry]
+	if fn == nil {
+		t.Fatal("function not recovered")
+	}
+	got := map[uint64]bool{}
+	for _, tg := range fn.JumpTables[jmp] {
+		got[tg] = true
+	}
+	for i, c := range []uint64{c0, c1, c2, c3, c4} {
+		if !got[c] {
+			t.Errorf("case %d (0x%x) not found in switch targets %v", i, c, got)
+		}
+	}
+}
+

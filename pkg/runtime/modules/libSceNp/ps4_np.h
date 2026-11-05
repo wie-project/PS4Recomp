@@ -305,6 +305,7 @@ void shim_sceNpMatching2Initialize(GuestContext *ctx);
 void shim_sceNpMatching2Terminate(GuestContext *ctx);
 void shim_sceNpMatching2CreateContext(GuestContext *ctx);
 void shim_sceNpMatching2CreateContextA(GuestContext *ctx);
+void shim_sceNpMatching2SignalingGetConnectionInfo(GuestContext *ctx);
 
 void shim_sceNpSignalingInitialize(GuestContext *ctx);
 void shim_sceNpSignalingTerminate(GuestContext *ctx);
@@ -321,6 +322,7 @@ void shim_sceNpWebApiCreateRequest(GuestContext *ctx);
 void shim_sceNpWebApiSendRequest(GuestContext *ctx);
 void shim_sceNpWebApiSendRequest2(GuestContext *ctx);
 void shim_sceNpWebApiDeleteRequest(GuestContext *ctx);
+void shim_sceNpWebApiGetErrorCode(GuestContext *ctx);
 
 void shim_sceNpScoreCreateNpTitleCtx(GuestContext *ctx);
 void shim_sceNpScoreCreateNpTitleCtxA(GuestContext *ctx);
@@ -329,6 +331,9 @@ void shim_sceNpScoreCreateRequest(GuestContext *ctx);
 void shim_sceNpScoreDeleteRequest(GuestContext *ctx);
 void shim_sceNpScorePollAsync(GuestContext *ctx);
 void shim_sceNpScoreWaitAsync(GuestContext *ctx);
+void shim_sceNpScoreCensorCommentAsync(GuestContext *ctx);
+void shim_sceNpScoreGetFriendsRanking(GuestContext *ctx);
+void shim_sceNpScoreGetRankingByNpId(GuestContext *ctx);
 
 void shim_sceNpTusCreateNpTitleCtx(GuestContext *ctx);
 void shim_sceNpTusCreateNpTitleCtxA(GuestContext *ctx);
@@ -337,6 +342,12 @@ void shim_sceNpTusCreateRequest(GuestContext *ctx);
 void shim_sceNpTusDeleteRequest(GuestContext *ctx);
 void shim_sceNpTusPollAsync(GuestContext *ctx);
 void shim_sceNpTusWaitAsync(GuestContext *ctx);
+void shim_sceNpTusAbortRequest(GuestContext *ctx);
+void shim_sceNpTusSetMultiSlotVariableAsync(GuestContext *ctx);
+void shim_sceNpTusSetDataAsync(GuestContext *ctx);
+void shim_sceNpTusAddAndGetVariableAsync(GuestContext *ctx);
+void shim_sceNpTusGetMultiSlotVariableAsync(GuestContext *ctx);
+void shim_sceNpTusGetDataAsync(GuestContext *ctx);
 
 void shim_sceNpCommerceDialogInitialize(GuestContext *ctx);
 void shim_sceNpCommerceDialogTerminate(GuestContext *ctx);

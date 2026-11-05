@@ -111,3 +111,33 @@ void shim_sceGameLiveStreamingCheckCallback(GuestContext *ctx) {
   ctx->rax = ORBIS_OK;
   SHIM_RETURN();
 }
+
+void shim_sceGameLiveStreamingSetCameraFrameSetting(GuestContext *ctx) {
+  ctx->rax = ORBIS_OK;
+  SHIM_RETURN();
+}
+
+void shim_sceGameLiveStreamingGetProgramInfo(GuestContext *ctx) {
+  ctx->rax = ORBIS_OK;
+  SHIM_RETURN();
+}
+
+void shim_sceGameLiveStreamingSetInvitationSessionId(GuestContext *ctx) {
+  ctx->rax = ORBIS_OK;
+  SHIM_RETURN();
+}
+
+void shim_sceGameLiveStreamingSetMetadata(GuestContext *ctx) {
+  ctx->rax = ORBIS_OK;
+  SHIM_RETURN();
+}
+
+void shim_sceGameLiveStreamingSetMaxBitrate(GuestContext *ctx) {
+  ctx->rax = ORBIS_OK;
+  SHIM_RETURN();
+}
+
+void shim_sceGameLiveStreamingEnableSocialFeedback(GuestContext *ctx) {
+  ctx->rax = ORBIS_OK;
+  SHIM_RETURN();
+}

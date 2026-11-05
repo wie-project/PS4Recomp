@@ -233,6 +233,11 @@ int32_t sceImeDialogGetPanelSizeExtended(const OrbisImeDialogParam *param,
     return 0;
 }
 
+int32_t sceImeDialogGetPanelSize(const OrbisImeDialogParam *param,
+                                 uint32_t *width, uint32_t *height) {
+    return sceImeDialogGetPanelSizeExtended(param, NULL, width, height);
+}
+
 // Shims
 void shim_sceImeDialogInit(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceImeDialogInit(
@@ -262,6 +267,15 @@ void shim_sceImeDialogAbort(GuestContext *ctx) {
 
 void shim_sceImeDialogTerm(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceImeDialogTerm();
+    SHIM_RETURN();
+}
+
+void shim_sceImeDialogGetPanelSize(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceImeDialogGetPanelSize(
+        ctx->rdi ? (const OrbisImeDialogParam *)(ctx->mem_base + ctx->rdi) : NULL,
+        ctx->rsi ? (uint32_t *)(ctx->mem_base + ctx->rsi) : NULL,
+        ctx->rdx ? (uint32_t *)(ctx->mem_base + ctx->rdx) : NULL
+    );
     SHIM_RETURN();
 }
 

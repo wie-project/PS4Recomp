@@ -96,6 +96,8 @@ OrbisImeDialogStatus sceImeDialogGetStatus(void);
 int32_t sceImeDialogGetResult(OrbisImeDialogResult *result);
 int32_t sceImeDialogAbort(void);
 int32_t sceImeDialogTerm(void);
+int32_t sceImeDialogGetPanelSize(const OrbisImeDialogParam *param,
+                                 uint32_t *width, uint32_t *height);
 int32_t sceImeDialogGetPanelSizeExtended(const OrbisImeDialogParam *param,
                                         const OrbisImeParamExtended *extended,
                                         uint32_t *width, uint32_t *height);
@@ -106,6 +108,7 @@ void shim_sceImeDialogGetStatus(GuestContext *ctx);
 void shim_sceImeDialogGetResult(GuestContext *ctx);
 void shim_sceImeDialogAbort(GuestContext *ctx);
 void shim_sceImeDialogTerm(GuestContext *ctx);
+void shim_sceImeDialogGetPanelSize(GuestContext *ctx);
 void shim_sceImeDialogGetPanelSizeExtended(GuestContext *ctx);
 
 #ifdef __cplusplus

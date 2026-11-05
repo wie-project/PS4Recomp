@@ -24,8 +24,9 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 
 | Title                                    | Title ID    | Engine / Type       | Status                 | Notes                                                                                           |
 | ---------------------------------------- | ----------- | ------------------- | ---------------------- | ----------------------------------------------------------------------------------------------- |
+| **Yakuza 0**                             | `CUSA05070` | Kiwami Engine       | **Playble**            | Starts, settings works, cutscenes and gameplay works in first mission                           |
 | **Bloodborne: Game of the Year Edition** | `CUSA03173` | FromSoftware Engine | **In-Game**            | Starts, settings, cutscenes and character editor works. The gameplay starts, but with artefacts |
-| **The Last of Us Remastered**            | `CUSA00557` | Naughty Dog Engine  | **Bootable / In-Game** | Boots, renders 3D graphics and audio; gameplay verification in progress                         |
+| **The Last of Us Remastered**            | `CUSA00557` | Naughty Dog Engine  | **Bootable / In-Game** | Boots, renders 3D graphics and audio                                                            |
 | **Hollow Knight: Silksong**              | —           | Unity 6             | **Suspended**          | Paused pending guest C++ exception unwinding in ARM64 backend                                   |
 | **Hogwarts Legacy**                      | `CUSA12824` | Unreal Engine 4     | **In Progress**        | Recompiles; halts during early engine startup                                                   |
 

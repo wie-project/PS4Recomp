@@ -541,7 +541,10 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 					// Tail call to another function
 					discoveredCalls = append(discoveredCalls, target)
 				}
-			} else if sw, ok := d.ResolveJumpTable(insts[:i+1], nil, nil, entryAddr, fnEnd); ok && len(sw.Targets) > 0 {
+			} else if sw, ok := d.ResolveJumpTable(insts[:i+1], func(reg x86asm.Reg) (uint64, bool) {
+				addr, found, _ := traceLEA(insts, i, reg)
+				return addr, found
+			}, nil, entryAddr, fnEnd); ok && len(sw.Targets) > 0 {
 				// An indirect jmp through a jump table.
 				fn.JumpTables[inst.Address] = sw.Targets
 				for _, target := range sw.Targets {
@@ -777,27 +780,52 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 						edge(uint64(int64(nextPC) + int64(rel)))
 					} else {
 						findTableAddr := func(reg x86asm.Reg) (uint64, bool) {
-							visited := make(map[uint64]bool)
-							queue := append([]uint64(nil), blockPreds[blockStart]...)
-							for _, q := range queue {
-								visited[q] = true
+							type item struct {
+								block uint64
+								reg   x86asm.Reg
+							}
+							visited := make(map[item]bool)
+							var queue []item
+							for _, p := range blockPreds[blockStart] {
+								it := item{p, reg}
+								if !visited[it] {
+									visited[it] = true
+									queue = append(queue, it)
+								}
 							}
 							depth := 0
-							for len(queue) > 0 && depth < 16 {
+							for len(queue) > 0 && depth < 256 {
 								depth++
-								var nextQueue []uint64
-								for _, pred := range queue {
-									insts := blockInsts[pred]
+								var nextQueue []item
+								for _, it := range queue {
+									insts := blockInsts[it.block]
+									cur := it.reg
+									killed := false
 									for i := len(insts) - 1; i >= 0; i-- {
 										dst, target, isLEA := leaRIPTarget(insts[i])
-										if isLEA && sameGPR(dst, reg) {
+										if isLEA && sameGPR(dst, cur) {
 											return target, true
 										}
+										if insts[i].Inst.Op == x86asm.MOV {
+											d, ok0 := insts[i].Inst.Args[0].(x86asm.Reg)
+											s, ok1 := insts[i].Inst.Args[1].(x86asm.Reg)
+											if ok0 && ok1 && sameGPR(d, cur) && d >= x86asm.RAX && d <= x86asm.R15 {
+												cur = s
+												continue
+											}
+										}
+										if modifiesReg(insts[i].Inst, cur) {
+											killed = true
+											break
+										}
 									}
-									for _, p := range blockPreds[pred] {
-										if !visited[p] {
-											visited[p] = true
-											nextQueue = append(nextQueue, p)
+									if !killed {
+										for _, p := range blockPreds[it.block] {
+											nit := item{p, cur}
+											if !visited[nit] {
+												visited[nit] = true
+												nextQueue = append(nextQueue, nit)
+											}
 										}
 									}
 								}
@@ -836,7 +864,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 								return 0, false
 							}
 							found := 0
-							for depth := 0; len(queue) > 0 && depth < 16; depth++ {
+							for depth := 0; len(queue) > 0 && depth < 256; depth++ {
 								var nextQueue []edgeTo
 								for _, e := range queue {
 									insts := blockInsts[e.pred]
@@ -887,7 +915,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 								}
 							}
 							found := 0
-							for depth := 0; len(queue) > 0 && depth < 16; depth++ {
+							for depth := 0; len(queue) > 0 && depth < 256; depth++ {
 								var next []item
 								for _, it := range queue {
 									c, from, killed := byteIndexCapKill(blockInsts[it.block], it.reg)

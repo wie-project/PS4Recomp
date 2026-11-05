@@ -18,5 +18,11 @@ void shim_sceGameLiveStreamingClearSpoilerTag(GuestContext *ctx);
 void shim_sceGameLiveStreamingStartSocialFeedbackMessageFiltering(GuestContext *ctx);
 void shim_sceGameLiveStreamingStopSocialFeedbackMessageFiltering(GuestContext *ctx);
 void shim_sceGameLiveStreamingCheckCallback(GuestContext *ctx);
+void shim_sceGameLiveStreamingSetCameraFrameSetting(GuestContext *ctx);
+void shim_sceGameLiveStreamingGetProgramInfo(GuestContext *ctx);
+void shim_sceGameLiveStreamingSetInvitationSessionId(GuestContext *ctx);
+void shim_sceGameLiveStreamingSetMetadata(GuestContext *ctx);
+void shim_sceGameLiveStreamingSetMaxBitrate(GuestContext *ctx);
+void shim_sceGameLiveStreamingEnableSocialFeedback(GuestContext *ctx);
 
 #endif // PS4_GAMELIVESTREAMING_H

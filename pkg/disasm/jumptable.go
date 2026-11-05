@@ -136,7 +136,17 @@ func traceLEA(window []Instruction, before int, reg x86asm.Reg) (uint64, bool, x
 	return 0, false, cur
 }
 
-// modifiesReg reports whether inst writes reg; a call counts as writing every register.
+// isCalleeSaved reports whether reg is preserved across calls under System V AMD64 ABI:
+// rbx, rsp, rbp, r12, r13, r14, r15.
+func isCalleeSaved(r x86asm.Reg) bool {
+	switch gprFamily(r) {
+	case 4, 5, 6, 13, 14, 15, 16: // RBX, RSP, RBP, R12, R13, R14, R15
+		return true
+	}
+	return false
+}
+
+// modifiesReg reports whether inst writes reg; a call clobbers caller-saved registers.
 func modifiesReg(inst x86asm.Inst, reg x86asm.Reg) bool {
 	if reg == 0 {
 		return false
@@ -154,7 +164,7 @@ func modifiesReg(inst x86asm.Inst, reg x86asm.Reg) bool {
 		}
 		return false
 	case x86asm.CALL:
-		return true
+		return !isCalleeSaved(reg)
 	default:
 		if len(inst.Args) > 0 {
 			if dst, ok := inst.Args[0].(x86asm.Reg); ok && sameGPR(dst, reg) {
