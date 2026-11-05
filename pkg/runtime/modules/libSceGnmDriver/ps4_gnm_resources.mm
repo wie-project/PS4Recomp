@@ -2435,16 +2435,12 @@ void DecodeRenderState(const uint32_t* regs, RenderState* rs) {
             // Metal: x_w = (x_ndc+1)*w/2 + ox, y_w = (1-y_ndc)*h/2 + oy.
             v.origin_x = xoffset - xscale;
             v.width = 2.0 * xscale;
-            if (yscale <= 0.f) {
-                v.height = -2.0 * yscale; // usual D3D-style negative yscale -> positive height
-                v.origin_y = yoffset + yscale;
-                v.flip_y = false;
-            } else {
-                // would need a negative height; instead negate y in the VS (flip_y) which also
-                // flips the facing (handled by the caller: swap winding when flip_y).
-                v.height = 2.0 * yscale;
-                v.origin_y = yoffset - yscale;
-                v.flip_y = true;
+            v.height = -2.0 * yscale;
+            v.origin_y = yoffset + yscale;
+            v.flip_y = false;
+            if (yscale > 0.f) {
+                // Inverting viewport Y inverts the screen-space polygon winding
+                r.winding = (r.winding == MTLWindingClockwise) ? MTLWindingCounterClockwise : MTLWindingClockwise;
             }
         }
         ScissorRect s = rs->scissor;

@@ -126,17 +126,26 @@ typedef struct OrbisFontStyleFrame {
 } OrbisFontStyleFrame;
 
 typedef struct OrbisFontTextCharacter {
-    uint32_t characterCode;
-    uint32_t flags;
-    void *textOrder;
-    OrbisFontHandle font;
-    struct OrbisFontTextCharacter *next;
-    struct OrbisFontTextCharacter *prev;
-    int8_t synthetic;
-    uint8_t clusterKind;
-    uint16_t clusterIndex;
-    uint32_t reserved;
+    struct OrbisFontTextCharacter *prev;       // 0x00
+    struct OrbisFontTextCharacter *next;       // 0x08
+    void *textOrder;                           // 0x10
+    OrbisFontHandle font;                      // 0x18
+    void *shapeEntry;                          // 0x20
+    uint32_t characterCode;                    // 0x28
+    uint8_t reserved_0x2c[4];                  // 0x2c
+    uint8_t clusterSpan;                       // 0x30
+    uint8_t clusterIndex;                      // 0x31
+    uint8_t clusterKind;                       // 0x32
+    int8_t synthetic;                          // 0x33
+    uint8_t reserved_0x34[4];                  // 0x34
+    uint64_t flags;                            // 0x38
+    uint8_t reserved_0x40[136];                // 0x40
 } OrbisFontTextCharacter;
+_Static_assert(sizeof(OrbisFontTextCharacter) == 0xC8, "OrbisFontTextCharacter size must be 200 bytes");
+_Static_assert(offsetof(OrbisFontTextCharacter, font) == 0x18, "font offset must be 0x18");
+_Static_assert(offsetof(OrbisFontTextCharacter, characterCode) == 0x28, "characterCode offset must be 0x28");
+_Static_assert(offsetof(OrbisFontTextCharacter, flags) == 0x38, "flags offset must be 0x38");
+
 
 typedef union OrbisFontTextParseResult {
     void *reserved[4];

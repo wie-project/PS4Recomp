@@ -53,6 +53,7 @@ typedef struct InternalWriting {
     uint64_t guest_addr;
     uint64_t string_guest;
     uint64_t current_node_guest;
+    uint64_t step_char_node_guest;
     uint32_t current_index;
     float cursor_x;
     float cursor_y;
@@ -616,7 +617,7 @@ void shim_sceFontCreateString(GuestContext *ctx) {
     }
 
     OrbisFontTextSource *src = (OrbisFontTextSource *)(ctx->mem_base + srcGuest);
-    uint64_t strGuest = recomp_vm_alloc_named(ctx, 0x4000, PROT_READ | PROT_WRITE, 0, "font_string");
+    uint64_t strGuest = recomp_vm_alloc_named(ctx, 0x10000, PROT_READ | PROT_WRITE, 0, "font_string");
     if (!strGuest) {
         *(uint64_t *)(ctx->mem_base + pStringGuest) = 0;
         ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_ALLOCATION_FAILED;
@@ -663,11 +664,19 @@ void shim_sceFontCreateString(GuestContext *ctx) {
 
                     OrbisFontTextCharacter *node = (OrbisFontTextCharacter *)(ctx->mem_base + nodeGuest);
                     memset(node, 0, sizeof(*node));
-                    node->characterCode = res->FontCode.code;
-                    node->font = res->FontCode.font ? res->FontCode.font : (OrbisFontHandle)(uintptr_t)s->default_font_guest;
-                    node->textOrder = (void *)(uintptr_t)order;
                     node->prev = prevNodeGuest ? (OrbisFontTextCharacter *)(uintptr_t)prevNodeGuest : NULL;
                     node->next = NULL;
+                    node->textOrder = (void *)(uintptr_t)order;
+                    node->font = res->FontCode.font ? res->FontCode.font : (OrbisFontHandle)(uintptr_t)s->default_font_guest;
+                    node->shapeEntry = NULL;
+                    node->characterCode = res->FontCode.code;
+                    node->clusterSpan = 1;
+                    node->clusterIndex = 0;
+                    node->clusterKind = 0;
+                    node->synthetic = 0;
+                    uint32_t code = res->FontCode.code;
+                    bool is_ws = (code == 0x20 || code == 0x09 || code == 0x0a || code == 0x0b || code == 0x0c || code == 0x0d || code == 0x3000 || (code >= 0x2000 && code <= 0x200a));
+                    node->flags = (is_ws ? 0x0EULL : 0ULL) << 8;
 
                     if (prevNodeGuest) {
                         OrbisFontTextCharacter *prev = (OrbisFontTextCharacter *)(ctx->mem_base + prevNodeGuest);
@@ -689,6 +698,9 @@ void shim_sceFontCreateString(GuestContext *ctx) {
 
             pthread_mutex_lock(&g_font_mutex);
         }
+        fprintf(stderr, "[ps4-font] sceFontCreateString: src=0x%llx parser=0x%llx count=%u\n",
+                (unsigned long long)srcGuest, (unsigned long long)(src ? (uintptr_t)src->textParser : 0),
+                s ? s->character_count : 0);
     }
     pthread_mutex_unlock(&g_font_mutex);
 
@@ -708,6 +720,9 @@ void shim_sceFontDestroyString(GuestContext *ctx) {
             s->in_use = 0;
         }
         pthread_mutex_unlock(&g_font_mutex);
+        if (strGuest) {
+            recomp_vm_free(ctx, strGuest, 0x10000);
+        }
         *(uint64_t *)(ctx->mem_base + pStringGuest) = 0;
     }
     ctx->rax = ORBIS_FONT_OK;
@@ -717,7 +732,7 @@ void shim_sceFontDestroyString(GuestContext *ctx) {
 // 23. sceFontStringRefersTextCharacters
 void shim_sceFontStringRefersTextCharacters(GuestContext *ctx) {
     uint64_t strGuest = ctx->rdi;
-    uint64_t pCountGuest = ctx->rcx;
+    uint64_t pCountGuest = ctx->rsi;
 
     pthread_mutex_lock(&g_font_mutex);
     InternalString *s = get_string(strGuest);
@@ -760,7 +775,44 @@ void shim_sceFontStringGetTerminateCode(GuestContext *ctx) {
 
 // 26. sceFontStringRefersRenderCharacters
 void shim_sceFontStringRefersRenderCharacters(GuestContext *ctx) {
-    shim_sceFontStringRefersTextCharacters(ctx);
+    uint64_t strGuest = ctx->rdi;
+    uint64_t startCharGuest = ctx->rsi;
+    uint64_t lastCharGuest = ctx->rdx;
+    uint64_t pCountGuest = ctx->rcx;
+
+    pthread_mutex_lock(&g_font_mutex);
+    InternalString *s = get_string(strGuest);
+    uint64_t head = s ? s->head_node_guest : 0;
+    uint64_t retNode = startCharGuest ? startCharGuest : head;
+    uint32_t count = 0;
+
+    if (s && retNode && ctx->mem_base) {
+        uint64_t curr = retNode;
+        while (curr) {
+            OrbisFontTextCharacter *node = (OrbisFontTextCharacter *)(ctx->mem_base + curr);
+            if (node->clusterIndex == 0) {
+                count++;
+            }
+            if (curr == lastCharGuest) {
+                break;
+            }
+            curr = (uint64_t)(uintptr_t)node->next;
+        }
+        if (lastCharGuest && curr != lastCharGuest) {
+            count = 0;
+            retNode = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_font_mutex);
+
+    if (pCountGuest && ctx->mem_base) {
+        *(uint32_t *)(ctx->mem_base + pCountGuest) = count;
+    }
+    fprintf(stderr, "[ps4-font] sceFontStringRefersRenderCharacters: str=0x%llx count=%u ret=0x%llx start=0x%llx last=0x%llx\n",
+            (unsigned long long)strGuest, count, (unsigned long long)retNode,
+            (unsigned long long)startCharGuest, (unsigned long long)lastCharGuest);
+    ctx->rax = retNode;
+    SHIM_RETURN();
 }
 
 // 27. sceFontStringGetWritingForm
@@ -829,13 +881,15 @@ void shim_sceFontWritingLineRefersRenderStep(GuestContext *ctx) {
 void shim_sceFontWritingInit(GuestContext *ctx) {
     uint64_t writingGuest = ctx->rdi;
     uint64_t stringGuest = ctx->rsi;
+    uint64_t startCharGuest = ctx->rdx;
 
     pthread_mutex_lock(&g_font_mutex);
     InternalWriting *w = find_or_create_writing(writingGuest);
     if (w) {
         w->string_guest = stringGuest;
         InternalString *s = get_string(stringGuest);
-        w->current_node_guest = s ? s->head_node_guest : 0;
+        w->current_node_guest = startCharGuest ? startCharGuest : (s ? s->head_node_guest : 0);
+        w->step_char_node_guest = 0;
         w->current_index = 0;
         w->cursor_x = 0.0f;
         w->cursor_y = 0.0f;
@@ -894,11 +948,16 @@ void shim_sceFontWritingRefersRenderStep(GuestContext *ctx) {
         w->current_step.font = node->font;
         w->current_step.glyphCode = node->characterCode;
         w->current_step.Profile.characterCount = 1;
+        w->current_step.Positioning.x = w->cursor_x;
+        w->current_step.Positioning.y = w->cursor_y;
         w->current_step.GlyphMetrics.width = adv;
         w->current_step.GlyphMetrics.height = h ? h->scale_h : 16.0f;
         w->current_step.GlyphMetrics.Horizontal.advance = adv;
+        w->current_step.GlyphMetrics.Horizontal.bearingX = 0.0f;
+        w->current_step.GlyphMetrics.Horizontal.bearingY = 0.0f;
 
         w->cursor_x += adv;
+        w->step_char_node_guest = w->current_node_guest;
         w->current_node_guest = (uint64_t)(uintptr_t)node->next;
         w->current_index++;
 
@@ -921,6 +980,7 @@ void shim_sceFontWritingRefersRenderStepCharacter(GuestContext *ctx) {
     pthread_mutex_lock(&g_font_mutex);
     InternalWriting *w = get_writing(writingGuest);
     if (w && ctx->mem_base) {
+        retCharGuest = w->step_char_node_guest;
         if (letterStepGuest) {
             OrbisFontWritingLetterStep *ls = (OrbisFontWritingLetterStep *)(ctx->mem_base + letterStepGuest);
             memset(ls, 0, sizeof(*ls));

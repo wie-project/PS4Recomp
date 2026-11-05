@@ -245,8 +245,8 @@ func (l *Arm64Lifter) liftMmxBinary(inst disasm.Instruction, nextPC uint64, line
 			"    uxtl v20.8h, v16.8b",
 			"    sxtl v21.8h, v17.8b",
 			"    mul  v22.8h, v20.8h, v21.8h",
-			"    trn1 v23.4h, v22.4h, v22.4h",
-			"    trn2 v24.4h, v22.4h, v22.4h",
+			"    uzp1 v23.8h, v22.8h, v22.8h",
+			"    uzp2 v24.8h, v22.8h, v22.8h",
 			"    sqadd v16.4h, v23.4h, v24.4h",
 		)
 	case x86asm.PMULHUW:

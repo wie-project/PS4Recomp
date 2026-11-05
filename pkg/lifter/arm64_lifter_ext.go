@@ -100,7 +100,8 @@ func (l *Arm64Lifter) liftMaskmov(inst disasm.Instruction, nextPC uint64, lines 
 				movOp = "mov"
 			}
 			for i := 0; i < numLanes; i++ {
-				lblSkip := fmt.Sprintf("L_maskmov_s_skip_%x_%d", inst.Address, baseOffset+i)
+				l.labelCounter++
+				lblSkip := fmt.Sprintf("L_maskmov_s_skip_%x_%d_%d", inst.Address, baseOffset+i, l.labelCounter)
 				lines = append(lines,
 					fmt.Sprintf("    %s  x17, %s.%s[%d]", movOp, maskV, elemStr, i),
 					fmt.Sprintf("    tbz  x17, #%d, %s", bit, lblSkip),
@@ -138,8 +139,10 @@ func (l *Arm64Lifter) liftMaskmov(inst disasm.Instruction, nextPC uint64, lines 
 				movOp = "mov"
 			}
 			for i := 0; i < numLanes; i++ {
-				lblZero := fmt.Sprintf("L_maskmov_l_zero_%x_%d", inst.Address, baseOffset+i)
-				lblDone := fmt.Sprintf("L_maskmov_l_done_%x_%d", inst.Address, baseOffset+i)
+				l.labelCounter++
+				id := l.labelCounter
+				lblZero := fmt.Sprintf("L_maskmov_l_zero_%x_%d_%d", inst.Address, baseOffset+i, id)
+				lblDone := fmt.Sprintf("L_maskmov_l_done_%x_%d_%d", inst.Address, baseOffset+i, id)
 				lines = append(lines,
 					fmt.Sprintf("    %s  x17, %s.%s[%d]", movOp, maskV, elemStr, i),
 					fmt.Sprintf("    tbz  x17, #%d, %s", bit, lblZero),
@@ -195,8 +198,10 @@ func (l *Arm64Lifter) liftMaskmovdqu(inst disasm.Instruction, nextPC uint64, lin
 		lines = append(lines, "    add  x16, x28, x24")
 	}
 
-	lblDone := fmt.Sprintf("L_maskmovdqu_done_%x", inst.Address)
-	lblHigh := fmt.Sprintf("L_maskmovdqu_high_%x", inst.Address)
+	l.labelCounter++
+	id := l.labelCounter
+	lblDone := fmt.Sprintf("L_maskmovdqu_done_%x_%d", inst.Address, id)
+	lblHigh := fmt.Sprintf("L_maskmovdqu_high_%x_%d", inst.Address, id)
 
 	// Low 8 bytes
 	lines = append(lines,
@@ -204,7 +209,8 @@ func (l *Arm64Lifter) liftMaskmovdqu(inst disasm.Instruction, nextPC uint64, lin
 		fmt.Sprintf("    cbz  x17, %s", lblHigh),
 	)
 	for i := 0; i < 8; i++ {
-		lblSkip := fmt.Sprintf("L_maskmovdqu_skip_%x_%d", inst.Address, i)
+		l.labelCounter++
+		lblSkip := fmt.Sprintf("L_maskmovdqu_skip_%x_%d_%d", inst.Address, i, l.labelCounter)
 		lines = append(lines,
 			fmt.Sprintf("    tbz  x17, #%d, %s", i*8+7, lblSkip),
 			fmt.Sprintf("    umov w5, %s.b[%d]", dLowV, i),
@@ -220,7 +226,8 @@ func (l *Arm64Lifter) liftMaskmovdqu(inst disasm.Instruction, nextPC uint64, lin
 		fmt.Sprintf("    cbz  x17, %s", lblDone),
 	)
 	for i := 0; i < 8; i++ {
-		lblSkip := fmt.Sprintf("L_maskmovdqu_skip_%x_%d", inst.Address, i+8)
+		l.labelCounter++
+		lblSkip := fmt.Sprintf("L_maskmovdqu_skip_%x_%d_%d", inst.Address, i+8, l.labelCounter)
 		lines = append(lines,
 			fmt.Sprintf("    tbz  x17, #%d, %s", i*8+7, lblSkip),
 			fmt.Sprintf("    umov w5, %s.b[%d]", dLowV, i+8),
@@ -286,15 +293,15 @@ func (l *Arm64Lifter) liftPmaddupsw(inst disasm.Instruction, nextPC uint64, line
 			fmt.Sprintf("    uxtl v20.8h, %s.8b", s1Lane),
 			fmt.Sprintf("    sxtl v21.8h, %s.8b", s2Lane),
 			"    mul  v22.8h, v20.8h, v21.8h",
-			"    trn1 v23.4h, v22.4h, v22.4h",
-			"    trn2 v24.4h, v22.4h, v22.4h",
+			"    uzp1 v23.8h, v22.8h, v22.8h",
+			"    uzp2 v24.8h, v22.8h, v22.8h",
 			"    sqadd v25.4h, v23.4h, v24.4h",
 			// High 8 bytes
 			fmt.Sprintf("    uxtl2 v20.8h, %s.16b", s1Lane),
 			fmt.Sprintf("    sxtl2 v21.8h, %s.16b", s2Lane),
 			"    mul   v22.8h, v20.8h, v21.8h",
-			"    trn1  v23.4h, v22.4h, v22.4h",
-			"    trn2  v24.4h, v22.4h, v22.4h",
+			"    uzp1  v23.8h, v22.8h, v22.8h",
+			"    uzp2  v24.8h, v22.8h, v22.8h",
 			"    sqadd v26.4h, v23.4h, v24.4h",
 			// Combine into destination
 			fmt.Sprintf("    mov %s.d[0], v25.d[0]", dLane),
@@ -662,7 +669,8 @@ func (l *Arm64Lifter) liftLoop(inst disasm.Instruction, nextPC uint64, fn *disas
 	}
 	localLbl := localLabel(fn, target)
 	local := localLbl != ""
-	skip := fmt.Sprintf("L_%s_skip_%x", strings.ToLower(op.String()), inst.Address)
+	l.labelCounter++
+	skip := fmt.Sprintf("L_%s_skip_%x_%d", strings.ToLower(op.String()), inst.Address, l.labelCounter)
 	far := func() { lines = append(lines, l.branchTo(fn, target)...) }
 
 	switch op {

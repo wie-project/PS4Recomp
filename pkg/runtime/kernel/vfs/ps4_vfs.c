@@ -675,24 +675,18 @@ ssize_t ps4_vfs_read(int fd, void *buf, size_t count) {
       if (n < 0) {
         if (errno == EINTR)
           continue;
-        if (total > 0) {
-          if (fd == 20) printf("[ps4-vfs] read fd=20 count=%zu -> total=%zu (partial err)\n", count, total);
+        if (total > 0)
           return (ssize_t)total;
-        }
-        if (fd == 20) printf("[ps4-vfs] read fd=20 count=%zu -> error=%d\n", count, errno);
         return -1;
       }
       if (n == 0)
         break;
       total += (size_t)n;
     }
-    if (fd == 20) printf("[ps4-vfs] read fd=20 count=%zu -> total=%zu\n", count, total);
     return (ssize_t)total;
   }
 
-  ssize_t n = read(fd, buf, count);
-  if (fd == 20) printf("[ps4-vfs] non-reg read fd=20 count=%zu -> %zd\n", count, n);
-  return n;
+  return read(fd, buf, count);
 }
 
 ssize_t ps4_vfs_pread(int fd, void *buf, size_t count, off_t offset) {
@@ -753,17 +747,13 @@ ssize_t ps4_vfs_pread(int fd, void *buf, size_t count, off_t offset) {
         break;
       total += (size_t)n;
     }
-    if (fd == 20) printf("[ps4-vfs] pread fd=20 count=%zu offset=%lld -> total=%zu\n", count, (long long)offset, total);
     return (ssize_t)total;
   }
 
-  ssize_t n = pread(fd, buf, count, offset);
-  if (fd == 20) printf("[ps4-vfs] non-reg pread fd=20 count=%zu offset=%lld -> %zd\n", count, (long long)offset, n);
-  return n;
+  return pread(fd, buf, count, offset);
 }
 
 off_t ps4_vfs_lseek(int fd, off_t offset, int whence) {
-  if (fd == 20) printf("[ps4-vfs] lseek fd=20 offset=%lld whence=%d\n", (long long)offset, whence);
   if (ps4_vfs_is_virtual_fd(fd)) {
     int slot = fd - PS4_VFS_VIRTUAL_FD_BASE;
     pthread_mutex_lock(&g_vfile_mutex);
