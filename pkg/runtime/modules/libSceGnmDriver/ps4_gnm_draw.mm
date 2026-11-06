@@ -577,10 +577,17 @@ struct Shader {
 struct PassKey {
     __unsafe_unretained id<MTLTexture> color[8] = {};
     uint32_t color_slice[8] = {}; // CB_COLOR_VIEW.SLICE_START
+    uint64_t color_addr[8] = {};
+    uint64_t color_size[8] = {};
     __unsafe_unretained id<MTLTexture> depth = nil;
     uint32_t depth_slice = 0; // DB_DEPTH_VIEW.SLICE_START
+    uint64_t depth_addr = 0;
+    uint64_t depth_size = 0;
+    uint64_t stencil_addr = 0;
+    uint64_t stencil_size = 0;
     uint32_t width = 0, height = 0;
     uint32_t sample_locs = 0; // PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0 of multisampled passes
+    bool has_hazard = false;
     bool operator==(const PassKey& o) const {
         for (int i = 0; i < 8; ++i)
             if (color[i] != o.color[i] || color_slice[i] != o.color_slice[i]) return false;
@@ -588,6 +595,25 @@ struct PassKey {
                sample_locs == o.sample_locs;
     }
     bool operator!=(const PassKey& o) const { return !(*this == o); }
+    bool CanSubsume(const PassKey& child) const {
+        if (child.has_hazard) return false;
+        if (sample_locs != child.sample_locs) return false;
+        if (depth != child.depth || depth_slice != child.depth_slice) return false;
+        if (!depth && !child.depth) {
+            bool any_color = false;
+            for (int i = 0; i < 8; ++i) {
+                if (color[i] || child.color[i]) { any_color = true; break; }
+            }
+            if (!any_color && (width != child.width || height != child.height)) return false;
+        }
+        for (int i = 0; i < 8; ++i) {
+            if (child.color[i]) {
+                if (!color[i] || color[i] != child.color[i] || color_slice[i] != child.color_slice[i])
+                    return false;
+            }
+        }
+        return true;
+    }
 };
 
 struct MetaState {
@@ -2584,6 +2610,7 @@ uint64_t SeqsInFlight() {
 void Commit();
 void FlushPendingTess();
 void FlushDeferredHleCopies();
+bool HasDeferredHleCopies();
 
 // Encoder: commits held work once its bound or the backlog says so.
 void ReleaseHeldCompute() {
@@ -6698,6 +6725,64 @@ gcn_push_data MakePushData(const Regs& regs) {
     return p;
 }
 
+bool StageHasAttachmentHazard(const PassKey& pass, const Shader* s, const std::vector<uint32_t>& flat) {
+    if (!s || s->imgs.empty()) return false;
+    for (uint32_t i = 0; i < s->imgs.size(); ++i) {
+        ImageDesc img;
+        uint64_t approx = 0;
+        if (!StageImage(s, flat, i, &img, &approx) || !img.valid || !img.address) continue;
+        const uint64_t img_start = img.address;
+        const uint64_t img_end = img.address + std::max<uint64_t>(approx, 1);
+
+        if (pass.depth) {
+            if (pass.depth_addr) {
+                const uint64_t d_start = pass.depth_addr;
+                const uint64_t d_end = pass.depth_addr + std::max<uint64_t>(pass.depth_size, 1);
+                if (img_start < d_end && img_end > d_start) return true;
+            }
+            if (pass.stencil_addr) {
+                const uint64_t s_start = pass.stencil_addr;
+                const uint64_t s_end = pass.stencil_addr + std::max<uint64_t>(pass.stencil_size, 1);
+                if (img_start < s_end && img_end > s_start) return true;
+            }
+        }
+        for (int c = 0; c < 8; ++c) {
+            if (!pass.color[c] || !pass.color_addr[c]) continue;
+            const uint64_t c_start = pass.color_addr[c];
+            const uint64_t c_end = pass.color_addr[c] + std::max<uint64_t>(pass.color_size[c], 1);
+            if (img_start < c_end && img_end > c_start) return true;
+        }
+        if (S.tex) {
+            if (pass.depth) {
+                if (id<MTLTexture> dt = S.tex->FindDepthTarget(img.address)) {
+                    if (dt == pass.depth || (dt.parentTexture && dt.parentTexture == pass.depth) ||
+                        (pass.depth.parentTexture && dt == pass.depth.parentTexture))
+                        return true;
+                }
+            }
+            for (int c = 0; c < 8; ++c) {
+                if (!pass.color[c]) continue;
+                if (id<MTLTexture> ct = S.tex->FindColorTarget(img.address)) {
+                    if (ct == pass.color[c] || (ct.parentTexture && ct.parentTexture == pass.color[c]) ||
+                        (pass.color[c].parentTexture && ct == pass.color[c].parentTexture))
+                        return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool HasPassAttachmentHazard(const PassKey& pass, const Shader* vs, const std::vector<uint32_t>& vs_flat,
+                             const Shader* ps, const std::vector<uint32_t>& ps_flat) {
+    if (!pass.depth && !pass.color[0] && !pass.color[1] && !pass.color[2] && !pass.color[3] &&
+        !pass.color[4] && !pass.color[5] && !pass.color[6] && !pass.color[7])
+        return false;
+    if (StageHasAttachmentHazard(pass, vs, vs_flat)) return true;
+    if (StageHasAttachmentHazard(pass, ps, ps_flat)) return true;
+    return false;
+}
+
 // =====================================================================================
 // Render passes
 // =====================================================================================
@@ -6837,14 +6922,51 @@ void ResolveEqaaPass() {
     LogWork("EQAA write-back");
 }
 
+struct PassSplitStats {
+    uint64_t clr_any = 0;
+    uint64_t depth_diff = 0;
+    uint64_t color_subset = 0;
+    uint64_t color_diff = 0;
+    uint64_t dim_diff = 0;
+    uint64_t hazard = 0;
+};
+static PassSplitStats g_pass_splits;
+
 // game_draw: the pass is begun for a game draw (it may count for an occlusion query), not for a
 // clear alone.
 bool BeginPass(const PassKey& key, const ClearReq& clr, id<MTLTexture> const* hold, bool game_draw) {
     if (g_gms.chain_open) GmCloseChain();
     const GnmEncoder open = S.be->OpenEncoder();
     if (open == GnmEncoder::Compute) S.be->EndEncoder();
-    if (open == GnmEncoder::Render && S.pass == key && !clr.any()) return true;
+    if (open == GnmEncoder::Render && S.pass.CanSubsume(key) && !clr.any() && !HasDeferredHleCopies()) {
+        if (hold) {
+            for (int i = 0; i < 9; ++i) {
+                if (hold[i] && !S.pass_hold[i]) S.pass_hold[i] = hold[i];
+            }
+        }
+        return true;
+    }
     if (open == GnmEncoder::Render) {
+        if (clr.any()) {
+            g_pass_splits.clr_any++;
+        } else if (key.has_hazard) {
+            g_pass_splits.hazard++;
+        } else if (key.depth != S.pass.depth || key.depth_slice != S.pass.depth_slice) {
+            g_pass_splits.depth_diff++;
+        } else if (key.sample_locs != S.pass.sample_locs || (!key.depth && !S.pass.depth && (key.width != S.pass.width || key.height != S.pass.height))) {
+            g_pass_splits.dim_diff++;
+        } else {
+            bool is_subset = true;
+            bool is_diff = false;
+            for (int i = 0; i < 8; ++i) {
+                if (key.color[i] != S.pass.color[i] || key.color_slice[i] != S.pass.color_slice[i]) {
+                    if (key.color[i] != nil && S.pass.color[i] != nil) is_diff = true;
+                    if (key.color[i] != nil && S.pass.color[i] == nil) is_subset = false;
+                }
+            }
+            if (is_diff || !is_subset) g_pass_splits.color_diff++;
+            else g_pass_splits.color_subset++;
+        }
         S.be->EndEncoder();
         ResolveEqaaPass();
         S.pass = PassKey{};
@@ -7913,6 +8035,7 @@ struct DeferredHleCopyBatch {
 
 static std::vector<DeferredHleCopyBatch>& g_deferred_hle_copies = *new std::vector<DeferredHleCopyBatch>;
 bool g_flushing_hle_copies = false;
+bool HasDeferredHleCopies() { return !g_deferred_hle_copies.empty(); }
 
 void FlushDeferredHleCopies() {
     if (g_deferred_hle_copies.empty() || g_flushing_hle_copies) return;
@@ -10739,6 +10862,9 @@ void FlushPendingTess() {
         p.vs_img.flat = p.vs_flat.data();
         p.ps_img.flat = p.ps_flat.data();
         StageImagesScope images(&p.vs_img, &p.ps_img, nullptr);
+        if (S.be->OpenEncoder() == GnmEncoder::Render) {
+            p.key.has_hazard = HasPassAttachmentHazard(S.pass, p.vs, p.vs_flat, p.ps, p.ps_flat);
+        }
         if (!BeginPass(p.key, p.clr, p.hold, true)) {
             NoteSkip(SkipReason::PassBegin);
             continue;
@@ -10907,6 +11033,9 @@ void EncodeTessDraw(DrawRec& r) {
         key.color_slice[i] = t.textureType == MTLTextureType2DArray
                                  ? std::min<uint32_t>(c.base_slice, (uint32_t)t.arrayLength - 1)
                                  : 0;
+        key.color_addr[i] = c.address;
+        key.color_size[i] = c.slice_bytes ? (uint64_t)c.slice_bytes * std::max(1u, c.num_slices)
+                                          : (uint64_t)c.pitch * c.height * 4;
         hold[i] = t;
         color_fmt[i] = (uint32_t)t.pixelFormat;
         write_mask[i] = c.mtl_write_mask;
@@ -10953,6 +11082,11 @@ void EncodeTessDraw(DrawRec& r) {
             key.depth_slice = t.textureType == MTLTextureType2DArray
                                   ? std::min<uint32_t>(db.base_slice, (uint32_t)t.arrayLength - 1)
                                   : 0;
+            key.depth_addr = db.z_read_address;
+            key.depth_size = db.slice_bytes ? (uint64_t)db.slice_bytes * std::max(1u, db.num_slices)
+                                            : (uint64_t)db.pitch * db.height * 4;
+            key.stencil_addr = db.stencil_read_address;
+            key.stencil_size = key.depth_size;
             hold[8] = t;
             depth_fmt = (uint32_t)t.pixelFormat;
             rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
@@ -11398,6 +11532,9 @@ void EncodeGsDraw(DrawRec& r) {
         key.color_slice[i] = t.textureType == MTLTextureType2DArray
                                  ? std::min<uint32_t>(c.base_slice, (uint32_t)t.arrayLength - 1)
                                  : 0;
+        key.color_addr[i] = c.address;
+        key.color_size[i] = c.slice_bytes ? (uint64_t)c.slice_bytes * std::max(1u, c.num_slices)
+                                          : (uint64_t)c.pitch * c.height * 4;
         hold[i] = t;
         color_fmt[i] = (uint32_t)t.pixelFormat;
         write_mask[i] = c.mtl_write_mask;
@@ -11444,6 +11581,11 @@ void EncodeGsDraw(DrawRec& r) {
             key.depth_slice = t.textureType == MTLTextureType2DArray
                                   ? std::min<uint32_t>(db.base_slice, (uint32_t)t.arrayLength - 1)
                                   : 0;
+            key.depth_addr = db.z_read_address;
+            key.depth_size = db.slice_bytes ? (uint64_t)db.slice_bytes * std::max(1u, db.num_slices)
+                                            : (uint64_t)db.pitch * db.height * 4;
+            key.stencil_addr = db.stencil_read_address;
+            key.stencil_size = key.depth_size;
             hold[8] = t;
             depth_fmt = (uint32_t)t.pixelFormat;
             rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
@@ -11883,6 +12025,9 @@ void EncodeGsDraw(DrawRec& r) {
     }
 
     // ---- Step 2: Render Pass (Pass-Through VS + PS)
+    if (S.be->OpenEncoder() == GnmEncoder::Render) {
+        key.has_hazard = HasPassAttachmentHazard(S.pass, es, r.ls_es_flat, ps, r.ps_flat);
+    }
     if (!BeginPass(key, clr, hold, true)) {
         NoteSkip(SkipReason::PassBegin);
         return;
@@ -12056,6 +12201,9 @@ void DrawEncode(DrawRec& r) {
             key.color_slice[i] = t.textureType == MTLTextureType2DArray
                                      ? std::min<uint32_t>(c.base_slice, (uint32_t)t.arrayLength - 1)
                                      : 0;
+            key.color_addr[i] = c.address;
+            key.color_size[i] = c.slice_bytes ? (uint64_t)c.slice_bytes * std::max(1u, c.num_slices)
+                                              : (uint64_t)c.pitch * c.height * 4;
             hold[i] = t;
             color_fmt[i] = (uint32_t)t.pixelFormat;
             write_mask[i] = c.mtl_write_mask;
@@ -12121,6 +12269,11 @@ void DrawEncode(DrawRec& r) {
                 key.depth_slice = t.textureType == MTLTextureType2DArray
                                       ? std::min<uint32_t>(db.base_slice, (uint32_t)t.arrayLength - 1)
                                       : 0;
+                key.depth_addr = db.z_read_address;
+                key.depth_size = db.slice_bytes ? (uint64_t)db.slice_bytes * std::max(1u, db.num_slices)
+                                                : (uint64_t)db.pitch * db.height * 4;
+                key.stencil_addr = db.stencil_read_address;
+                key.stencil_size = key.depth_size;
                 hold[8] = t;
                 depth_fmt = (uint32_t)t.pixelFormat;
                 rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
@@ -12460,6 +12613,9 @@ void DrawEncode(DrawRec& r) {
             if (ps) ResolveTextureHazards(ps, ps_flat);
             PrepareDepthCompanions(vs, vs_flat);
             if (ps) PrepareDepthCompanions(ps, ps_flat);
+        }
+        if (S.be->OpenEncoder() == GnmEncoder::Render) {
+            key.has_hazard = HasPassAttachmentHazard(S.pass, vs, vs_flat, ps, ps_flat);
         }
         if (!BeginPass(key, clr, hold, true)) {
             NoteSkip(SkipReason::PassBegin);
@@ -14096,6 +14252,11 @@ template <class Describe> void PresentStats(Describe&& describe) {
                     (held - held0) / 300.0, (by_time - time0) / 300.0, (by_backlog - backlog0) / 300.0);
             held0 = held, time0 = by_time, backlog0 = by_backlog;
         }
+        fprintf(stderr, "[gnm-draw] pass splits per frame: clr=%.1f, depth=%.1f, color_subset=%.1f, color_diff=%.1f, dim=%.1f, hazard=%.1f\n",
+                g_pass_splits.clr_any / 300.0, g_pass_splits.depth_diff / 300.0,
+                g_pass_splits.color_subset / 300.0, g_pass_splits.color_diff / 300.0,
+                g_pass_splits.dim_diff / 300.0, g_pass_splits.hazard / 300.0);
+        g_pass_splits = {};
         S.n_passes = S.n_depth_loads = S.n_cencs = S.n_cbarriers = S.n_cdisp = S.n_occl_splits = 0;
         S.n_occl_events = S.n_occl_draws = S.n_occl_missed = 0;
         {
