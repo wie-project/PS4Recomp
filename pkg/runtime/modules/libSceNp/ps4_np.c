@@ -1263,3 +1263,15 @@ void shim_sceNpGameIntentTerminate(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpGameIntentTerminate();
     SHIM_RETURN();
 }
+
+void shim_sceNpWebApiCheckTimeout(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpWebApiSetRequestTimeout(GuestContext *ctx) {
+    (void)ctx->rdi;
+    (void)ctx->rsi;
+    ctx->rax = 0;
+    SHIM_RETURN();
+}

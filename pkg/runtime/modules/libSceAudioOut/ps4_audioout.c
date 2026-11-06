@@ -1418,3 +1418,19 @@ void shim_sceAudioOutSetMixLevelPadSpk(GuestContext *ctx) {
   ctx->rax = (uint64_t)(int64_t)r;
   SHIM_RETURN();
 }
+
+typedef struct OrbisAudioOutSystemState {
+  uint32_t flags;
+  uint32_t reserved;
+} OrbisAudioOutSystemState;
+
+void shim_sceAudioOutGetSystemState(GuestContext *ctx) {
+  if (!ctx->rdi) {
+    ctx->rax = (uint64_t)0x80260002; // ORBIS_AUDIO_OUT_ERROR_INVALID_POINTER
+    SHIM_RETURN();
+  }
+  OrbisAudioOutSystemState *s = (OrbisAudioOutSystemState *)(ctx->mem_base + ctx->rdi);
+  memset(s, 0, sizeof(*s));
+  ctx->rax = 0;
+  SHIM_RETURN();
+}

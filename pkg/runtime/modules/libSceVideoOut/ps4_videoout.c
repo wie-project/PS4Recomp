@@ -1110,6 +1110,53 @@ int32_t sceVideoOutCursorDisable(int32_t handle) {
     return 0;
 }
 
+int32_t sceVideoOutCursorEnable(int32_t handle) {
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+    pthread_mutex_unlock(&g_video_table_mutex);
+    return 0;
+}
+
+int32_t sceVideoOutCursorSetPosition(int32_t handle, int32_t x, int32_t y) {
+    (void)x; (void)y;
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+    pthread_mutex_unlock(&g_video_table_mutex);
+    return 0;
+}
+
+int32_t sceVideoOutCursorSetHotSpot(int32_t handle, int32_t x, int32_t y) {
+    (void)x; (void)y;
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+    pthread_mutex_unlock(&g_video_table_mutex);
+    return 0;
+}
+
+int32_t sceVideoOutCursorSetImageAddress(int32_t handle, uint64_t addr) {
+    (void)addr;
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+    pthread_mutex_unlock(&g_video_table_mutex);
+    return 0;
+}
+
 void shim_sceVideoOutSetWindowModeMargins(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVideoOutSetWindowModeMargins((int32_t)ctx->rdi, (int32_t)ctx->rsi, (int32_t)ctx->rdx);
     SHIM_RETURN();
@@ -1117,6 +1164,26 @@ void shim_sceVideoOutSetWindowModeMargins(GuestContext *ctx) {
 
 void shim_sceVideoOutCursorDisable(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVideoOutCursorDisable((int32_t)ctx->rdi);
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutCursorEnable(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceVideoOutCursorEnable((int32_t)ctx->rdi);
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutCursorSetPosition(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceVideoOutCursorSetPosition((int32_t)ctx->rdi, (int32_t)ctx->rsi, (int32_t)ctx->rdx);
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutCursorSetHotSpot(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceVideoOutCursorSetHotSpot((int32_t)ctx->rdi, (int32_t)ctx->rsi, (int32_t)ctx->rdx);
+    SHIM_RETURN();
+}
+
+void shim_sceVideoOutCursorSetImageAddress(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceVideoOutCursorSetImageAddress((int32_t)ctx->rdi, ctx->rsi);
     SHIM_RETURN();
 }
 

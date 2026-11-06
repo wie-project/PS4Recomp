@@ -1259,3 +1259,31 @@ func TestMaskmovdqu(t *testing.T) {
 	}
 }
 
+func TestLongConditionalBranch(t *testing.T) {
+	lifter := NewArm64Lifter(map[uint64]bool{0x1000: true})
+	fn := &disasm.Function{
+		EntryAddr: 0x1000,
+		EndAddr:   0x20000,
+		Blocks: map[uint64]*disasm.BasicBlock{
+			0x1000:  {StartAddr: 0x1000, EndAddr: 0x1006},
+			0x11006: {StartAddr: 0x11006, EndAddr: 0x11020},
+		},
+	}
+
+	// 0F 84 rel32: JZ +0x10000 (from 0x1006 to 0x11006, diff = 65536 > 16384)
+	rel32Bytes := []byte{0x0f, 0x84, 0x00, 0x00, 0x01, 0x00}
+	inst, err := x86asm.Decode(rel32Bytes, 64)
+	if err != nil {
+		t.Fatalf("decode jz rel32 failed: %v", err)
+	}
+	dInst := disasm.Instruction{Address: 0x1000, Inst: inst, CarryDead: true}
+	lines, err := lifter.LiftInstructionToBuf(dInst, 0x1006, fn, nil)
+	if err != nil {
+		t.Fatalf("lift jz rel32 failed: %v", err)
+	}
+	joined := strings.Join(lines, "\n")
+	// Must contain inverted branch (b.ne skip) and unconditional long branch (b L_fn_...)
+	if !strings.Contains(joined, "b.ne") || !strings.Contains(joined, "b L_fn_0x1000_loc_0x11006") {
+		t.Fatalf("expected inverted b.ne and unconditional jump for far target, got:\n%s", joined)
+	}
+}

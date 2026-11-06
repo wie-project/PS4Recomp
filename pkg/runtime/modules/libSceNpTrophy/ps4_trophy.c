@@ -352,3 +352,9 @@ void shim_sceNpTrophyGetTrophyInfo(GuestContext *ctx) {
     ctx->rax = 0;
     SHIM_RETURN();
 }
+
+void shim_sceNpTrophyAbortHandle(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = 0;
+    SHIM_RETURN();
+}

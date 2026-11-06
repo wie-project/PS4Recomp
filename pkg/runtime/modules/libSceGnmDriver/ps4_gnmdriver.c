@@ -1513,6 +1513,12 @@ void shim_sceGnmInsertSetMarker(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_sceGnmRegisterOwnerForSystem(GuestContext *ctx) {
+    // Retail firmware error
+    ctx->rax = (uint64_t)0x80010001;
+    SHIM_RETURN();
+}
+
 void shim_sceGnmInsertSetColorMarker(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceGnmInsertSetColorMarker();
     SHIM_RETURN();

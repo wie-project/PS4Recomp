@@ -1596,3 +1596,16 @@ void shim_sceSaveDataSyncSaveDataMemory(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceSaveDataSyncSaveDataMemory(ctx, syncParam);
     SHIM_RETURN();
 }
+
+void shim_sceSaveDataCheckBackupData(GuestContext *ctx) {
+    (void)ctx->rdi;
+    // Returns ORBIS_SAVE_DATA_ERROR_NOT_FOUND (0x809f0003) as no backup exists
+    ctx->rax = (uint64_t)0x809f0003;
+    SHIM_RETURN();
+}
+
+void shim_sceSaveDataRestoreBackupData(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)0x809f0003;
+    SHIM_RETURN();
+}

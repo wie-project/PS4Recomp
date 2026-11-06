@@ -1960,7 +1960,24 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 			if rel, ok := args[0].(x86asm.Rel); ok {
 				target := uint64(int64(nextPC) + int64(rel))
 				if lbl := localLabel(fn, target); lbl != "" {
-					lines = append(lines, fmt.Sprintf("    b.%s %s", cond, lbl))
+					dist := int64(target) - int64(nextPC)
+					if dist < 0 {
+						dist = -dist
+					}
+					// ARM64 conditional branches (b.<cond>) have a 19-bit signed offset (+/- 1 MiB).
+					// In huge functions (> 16 KiB guest code), expanded ARM64 instructions can exceed
+					// +/- 1 MiB, causing assembler "fixup value out of range" errors.
+					// For far targets, invert the condition and jump over an unconditional branch (+/- 128 MiB).
+					if dist > 16384 {
+						inv := invertArm64Cond(cond)
+						skipLabel := fmt.Sprintf("L_fn_0x%x_skip_%d", fn.EntryAddr, l.labelCounter)
+						l.labelCounter++
+						lines = append(lines, fmt.Sprintf("    b.%s %s", inv, skipLabel))
+						lines = append(lines, fmt.Sprintf("    b %s", lbl))
+						lines = append(lines, fmt.Sprintf("%s:", skipLabel))
+					} else {
+						lines = append(lines, fmt.Sprintf("    b.%s %s", cond, lbl))
+					}
 				} else {
 					inv := invertArm64Cond(cond)
 					skipLabel := fmt.Sprintf("L_fn_0x%x_skip_%d", fn.EntryAddr, l.labelCounter)
