@@ -2,9 +2,10 @@
 
 A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates PlayStation 4 (x86-64 ELF) binaries into native ARM64 executables and standalone `.app` bundles. No JIT, virtual machines, or MoltenVK required.
 
-|                                      |                                      |
-| :----------------------------------: | :----------------------------------: |
-| ![Blood 1](images/blood_test_01.jpg) | ![Blood 2](images/blood_test_02.jpg) |
+|                                        |                                        |
+| :------------------------------------: | :------------------------------------: |
+|  ![Blood 1](images/blood_test_01.jpg)  |  ![Blood 2](images/blood_test_02.jpg)  |
+| ![Yakuza 1](images/yakuza_test_01.jpg) | ![Yakuza 2](images/yakuza_test_02.jpg) |
 
 ---
 
