@@ -251,12 +251,42 @@ const RecompUnresolvedSym *recomp_lookup_unresolved(uint64_t addr) {
   return NULL;
 }
 
+__attribute__((weak)) bool ps4_nptoolkit2_dispatch(GuestContext *ctx, const char *nid) {
+  (void)ctx;
+  (void)nid;
+  return false;
+}
+
 void shim_unresolved_stub(GuestContext *ctx) {
   uint64_t caller_rip = 0;
   if (ctx && ctx->mem_base && ctx->rsp + 8 <= ctx->mem_size) {
     caller_rip = *(uint64_t *)(ctx->mem_base + ctx->rsp);
   }
   const RecompUnresolvedSym *sym = recomp_lookup_unresolved(ctx ? ctx->rip : 0);
+  if (sym && sym->lib_name) {
+    if (strcmp(sym->lib_name, "libSceNpToolkit2") == 0) {
+      extern bool ps4_nptoolkit2_dispatch(GuestContext *ctx, const char *nid);
+      if (ps4_nptoolkit2_dispatch(ctx, sym->nid)) {
+        return;
+      }
+    }
+    if (strcmp(sym->lib_name, "libSceVoiceQoS") == 0 ||
+        strcmp(sym->lib_name, "libSceCoredump") == 0 ||
+        strcmp(sym->lib_name, "libSceAudiodec") == 0 ||
+        strcmp(sym->lib_name, "libSceNgs2") == 0) {
+      fprintf(stderr,
+              "[ps4-recomp] Stub: %s (NID: %s, Lib: %s) called from RIP=0x%llx -> 0\n",
+              sym->sym_name ? sym->sym_name : "unknown",
+              sym->nid ? sym->nid : "unknown",
+              sym->lib_name,
+              (unsigned long long)caller_rip);
+      if (ctx) {
+        ctx->rax = 0;
+        ctx->rsp += 8;
+      }
+      return;
+    }
+  }
   if (sym && sym->sym_name && sym->sym_name[0]) {
     fprintf(stderr,
             "[ps4-recomp] WARN: Called unimplemented function '%s' (NID: %s, "

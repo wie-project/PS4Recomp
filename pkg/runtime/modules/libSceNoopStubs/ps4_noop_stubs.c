@@ -60,3 +60,9 @@ void shim_sceNpToolkit2InitParams(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+NOOP_SHIM(sceNpToolkit2Generic)
+
+#include "../libSceNpToolkit2/ps4_nptoolkit2.c"
+
+
+

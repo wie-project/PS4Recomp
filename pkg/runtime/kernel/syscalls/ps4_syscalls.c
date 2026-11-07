@@ -300,8 +300,10 @@ void shim_sceKernelMmap(GuestContext *ctx) {
     res_out = *(uint64_t *)(ctx->mem_base + ctx->rsp + 8);
   }
 
-  printf("[ps4-sys] sceKernelMmap: addr=0x%llx len=%zu prot=0x%x flags=0x%x fd=%d offset=%lld res_out=0x%llx\n",
-         (unsigned long long)addr, len, prot, flags, fd, (long long)offset, (unsigned long long)res_out);
+  printf("[ps4-sys] sceKernelMmap: addr=0x%llx len=%zu prot=0x%x flags=0x%x "
+         "fd=%d offset=%lld res_out=0x%llx\n",
+         (unsigned long long)addr, len, prot, flags, fd, (long long)offset,
+         (unsigned long long)res_out);
   fflush(stdout);
 
   if (len == 0 || !res_out) {
@@ -314,17 +316,20 @@ void shim_sceKernelMmap(GuestContext *ctx) {
 
   uint64_t alloc_addr = (uint64_t)-1;
   if (addr != 0) {
-    alloc_addr = recomp_vm_alloc_fixed(ctx, addr, aligned_len, prot, flags, "sceKernelMmap");
+    alloc_addr = recomp_vm_alloc_fixed(ctx, addr, aligned_len, prot, flags,
+                                       "sceKernelMmap");
   }
   if (alloc_addr == (uint64_t)-1) {
-    alloc_addr = recomp_vm_alloc_named_aligned(ctx, aligned_len, align, prot, flags, "sceKernelMmap");
+    alloc_addr = recomp_vm_alloc_named_aligned(ctx, aligned_len, align, prot,
+                                               flags, "sceKernelMmap");
   }
 
   if (alloc_addr == (uint64_t)-1) {
     ctx->rax = 0x8002000c; // SCE_KERNEL_ERROR_ENOMEM
   } else {
     if (!(flags & 0x1000) && fd >= 0) { // Not MAP_ANONYMOUS
-      ssize_t nread = ps4_vfs_pread(fd, ctx->mem_base + alloc_addr, len, offset);
+      ssize_t nread =
+          ps4_vfs_pread(fd, ctx->mem_base + alloc_addr, len, offset);
       if (nread < 0) {
         int err = errno;
         recomp_vm_free(ctx, alloc_addr, aligned_len);
@@ -1778,7 +1783,8 @@ void shim___stack_chk_fail(GuestContext *ctx) {
   fprintf(
       stderr,
       "*** stack smashing detected ***: terminated (caller=0x%llx, rsp=0x%llx, "
-      "rbp=0x%llx, r14=0x%llx, *r14=0x%llx, [rbp-0x30]=0x%llx, [rbp-0x28]=0x%llx, rax=0x%llx, rcx=0x%llx)\n",
+      "rbp=0x%llx, r14=0x%llx, *r14=0x%llx, [rbp-0x30]=0x%llx, "
+      "[rbp-0x28]=0x%llx, rax=0x%llx, rcx=0x%llx)\n",
       (unsigned long long)ret_addr, (unsigned long long)(ctx ? ctx->rsp : 0),
       (unsigned long long)(ctx ? ctx->rbp : 0),
       (unsigned long long)(ctx ? ctx->r14 : 0), (unsigned long long)r14_val,
