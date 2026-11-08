@@ -331,7 +331,8 @@ static bool parse_pak_file(const char *pak_path) {
     return true;
 }
 
-static void scan_dir_for_paks(const char *dir_path) {
+static void scan_dir_for_paks_recursive(const char *dir_path, int depth) {
+    if (depth > 4) return;
     DIR *dir = opendir(dir_path);
     if (!dir) return;
 
@@ -342,9 +343,21 @@ static void scan_dir_for_paks(const char *dir_path) {
         char path[1024];
         snprintf(path, sizeof(path), "%s/%s", dir_path, de->d_name);
 
-        size_t nlen = strlen(de->d_name);
-        if (nlen > 4 && strcasecmp(de->d_name + nlen - 4, ".pak") == 0) {
-            parse_pak_file(path);
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            if (S_ISDIR(st.st_mode)) {
+                if (strcasecmp(de->d_name, "sce_module") == 0 ||
+                    strcasecmp(de->d_name, "sce_sys") == 0 ||
+                    strcasecmp(de->d_name, "deepfiles") == 0) {
+                    continue;
+                }
+                scan_dir_for_paks_recursive(path, depth + 1);
+            } else if (S_ISREG(st.st_mode)) {
+                size_t nlen = strlen(de->d_name);
+                if (nlen > 4 && strcasecmp(de->d_name + nlen - 4, ".pak") == 0) {
+                    parse_pak_file(path);
+                }
+            }
         }
     }
     closedir(dir);
@@ -359,23 +372,7 @@ void ps4_pak_init(const char *app_root) {
 
     if (!app_root || !*app_root) app_root = ".";
 
-    // Scan standard candidate directories for .pak files
-    char test_dir[1024];
-
-    // 1. <app_root>/phoenix/content/paks
-    snprintf(test_dir, sizeof(test_dir), "%s/phoenix/content/paks", app_root);
-    scan_dir_for_paks(test_dir);
-
-    // 2. <app_root>/content/paks
-    snprintf(test_dir, sizeof(test_dir), "%s/content/paks", app_root);
-    scan_dir_for_paks(test_dir);
-
-    // 3. <app_root>/paks
-    snprintf(test_dir, sizeof(test_dir), "%s/paks", app_root);
-    scan_dir_for_paks(test_dir);
-
-    // 4. <app_root> directly
-    scan_dir_for_paks(app_root);
+    scan_dir_for_paks_recursive(app_root, 0);
 
     printf("[ps4-pak] Total indexed files across all paks: %zu\n", g_entry_count);
     pthread_mutex_unlock(&g_pak_mutex);
