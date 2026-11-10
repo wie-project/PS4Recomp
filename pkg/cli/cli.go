@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"debug/macho"
 	"encoding/xml"
 	"errors"
 	"flag"
@@ -1542,32 +1543,188 @@ func appInfoPlist(appName string, hasIcon bool, meta bundleMeta) string {
 		xmlEscape(meta.Version), xmlEscape(meta.Version), iconXML)
 }
 
+const (
+	machoLoadCmdReqDyld       macho.LoadCmd = 0x80000000
+	machoLoadCmdLoadWeakDylib macho.LoadCmd = 0x18 | machoLoadCmdReqDyld
+	machoLoadCmdReexportDylib macho.LoadCmd = 0x1f | machoLoadCmdReqDyld
+	machoLoadCmdLazyLoadDylib macho.LoadCmd = 0x20
+	machoLoadCmdLoadUpward    macho.LoadCmd = 0x23 | machoLoadCmdReqDyld
+)
+
+func openMachOFile(path string) (*macho.File, func(), error) {
+	f, err := macho.Open(path)
+	if err == nil {
+		return f, func() { _ = f.Close() }, nil
+	}
+	fat, fatErr := macho.OpenFat(path)
+	if fatErr != nil {
+		return nil, nil, err
+	}
+	for _, arch := range fat.Arches {
+		if arch.Cpu == macho.CpuArm64 {
+			return arch.File, func() { _ = fat.Close() }, nil
+		}
+	}
+	if len(fat.Arches) > 0 {
+		return fat.Arches[0].File, func() { _ = fat.Close() }, nil
+	}
+	_ = fat.Close()
+	return nil, nil, fmt.Errorf("empty fat binary: %s", path)
+}
+
+func isSystemDylib(dep string) bool {
+	return dep == "" || strings.HasPrefix(dep, "/usr/lib/") || strings.HasPrefix(dep, "/System/")
+}
+
+func readMachODepsAndRpaths(path string) ([]string, []string, error) {
+	f, closeFn, err := openMachOFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer closeFn()
+
+	var deps []string
+	var rpaths []string
+	for _, load := range f.Loads {
+		switch l := load.(type) {
+		case *macho.Dylib:
+			if !isSystemDylib(l.Name) {
+				deps = append(deps, l.Name)
+			}
+		case *macho.Rpath:
+			if l.Path != "" {
+				rpaths = append(rpaths, l.Path)
+			}
+		case macho.LoadBytes:
+			if len(l) < 16 {
+				continue
+			}
+			cmd := macho.LoadCmd(f.ByteOrder.Uint32(l[0:4]))
+			if cmd != machoLoadCmdLoadWeakDylib && cmd != machoLoadCmdReexportDylib &&
+				cmd != machoLoadCmdLazyLoadDylib && cmd != machoLoadCmdLoadUpward {
+				continue
+			}
+			nameOff := f.ByteOrder.Uint32(l[8:12])
+			if int(nameOff) >= len(l) {
+				continue
+			}
+			raw := l[nameOff:]
+			if end := bytes.IndexByte(raw, 0); end >= 0 {
+				raw = raw[:end]
+			}
+			dep := string(raw)
+			if !isSystemDylib(dep) {
+				deps = append(deps, dep)
+			}
+		}
+	}
+	return deps, rpaths, nil
+}
+
 // getNonSystemDylibs returns all non-system dylibs that target directly depends on.
 func getNonSystemDylibs(target string) ([]string, error) {
-	out, err := exec.Command("otool", "-L", target).Output()
-	if err != nil {
-		return nil, err
+	deps, _, err := readMachODepsAndRpaths(target)
+	return deps, err
+}
+
+type dylibQueueItem struct {
+	bundlePath   string
+	origDeclPath string
+	origRealPath string
+	parentRpaths []string
+}
+
+func evalSymlinksOrSelf(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
 	}
-	var dylibs []string
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, target) {
-			continue
-		}
-		parts := strings.Fields(line)
-		if len(parts) == 0 {
-			continue
-		}
-		dep := parts[0]
-		// Skip system libraries, frameworks, and already relative/rpath references
-		if strings.HasPrefix(dep, "/usr/lib/") || strings.HasPrefix(dep, "/System/") ||
-			strings.HasPrefix(dep, "@rpath/") || strings.HasPrefix(dep, "@executable_path/") || strings.HasPrefix(dep, "@loader_path/") {
-			continue
-		}
-		dylibs = append(dylibs, dep)
+	return path
+}
+
+func appendUniqueDir(dst []string, dir string) []string {
+	if dir == "" {
+		return dst
 	}
-	return dylibs, nil
+	clean := filepath.Clean(dir)
+	if !slices.Contains(dst, clean) {
+		return append(dst, clean)
+	}
+	return dst
+}
+
+func expandRpaths(rawRpaths []string, loaderRealDir, loaderDeclDir, exeDir string, inherited []string) []string {
+	var out []string
+	for _, rp := range rawRpaths {
+		switch {
+		case strings.HasPrefix(rp, "@loader_path"):
+			suffix := strings.TrimPrefix(rp, "@loader_path")
+			out = appendUniqueDir(out, loaderRealDir+suffix)
+			if loaderDeclDir != "" && loaderDeclDir != loaderRealDir {
+				out = appendUniqueDir(out, loaderDeclDir+suffix)
+			}
+		case strings.HasPrefix(rp, "@executable_path"):
+			suffix := strings.TrimPrefix(rp, "@executable_path")
+			out = appendUniqueDir(out, exeDir+suffix)
+		case filepath.IsAbs(rp):
+			out = appendUniqueDir(out, rp)
+		}
+	}
+	for _, p := range inherited {
+		out = appendUniqueDir(out, p)
+	}
+	return out
+}
+
+func checkCandidateFile(path string) (declPath, realPath string, ok bool) {
+	if path == "" {
+		return "", "", false
+	}
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return "", "", false
+	}
+	return path, evalSymlinksOrSelf(path), true
+}
+
+func resolveDylibDep(dep string, item dylibQueueItem, rpaths []string, exeDir string) (declPath, realPath string, ok bool) {
+	if filepath.IsAbs(dep) {
+		return checkCandidateFile(dep)
+	}
+	if strings.HasPrefix(dep, "@loader_path/") {
+		rel := strings.TrimPrefix(dep, "@loader_path/")
+		if d, r, found := checkCandidateFile(filepath.Join(filepath.Dir(item.origRealPath), rel)); found {
+			return d, r, true
+		}
+		if d, r, found := checkCandidateFile(filepath.Join(filepath.Dir(item.origDeclPath), rel)); found {
+			return d, r, true
+		}
+		return "", "", false
+	}
+	if strings.HasPrefix(dep, "@executable_path/") {
+		rel := strings.TrimPrefix(dep, "@executable_path/")
+		return checkCandidateFile(filepath.Join(exeDir, rel))
+	}
+	if strings.HasPrefix(dep, "@rpath/") {
+		rel := strings.TrimPrefix(dep, "@rpath/")
+		for _, rpDir := range rpaths {
+			if d, r, found := checkCandidateFile(filepath.Join(rpDir, rel)); found {
+				return d, r, true
+			}
+		}
+		// Fallback: check the referencing dylib's own directory and standard Homebrew prefixes.
+		for _, dir := range []string{
+			filepath.Dir(item.origRealPath),
+			filepath.Dir(item.origDeclPath),
+			"/opt/homebrew/lib",
+			"/usr/local/lib",
+		} {
+			if d, r, found := checkCandidateFile(filepath.Join(dir, rel)); found {
+				return d, r, true
+			}
+		}
+		return "", "", false
+	}
+	return checkCandidateFile(dep)
 }
 
 // bundleDylibDependencies copies external dynamic libraries into Contents/Frameworks,
@@ -1598,55 +1755,81 @@ func bundleDylibDependencies(contentsDir, bundleBin string) error {
 		_ = exec.Command("install_name_tool", "-add_rpath", rpath, bundleBin).Run()
 	}
 
-	copied := make(map[string]string) // origPath -> dstPath
-	queue := []string{bundleBin}
+	exeDir := filepath.Dir(bundleBin)
+	copiedByReal := make(map[string]string) // resolved source path -> dstPath
+	copiedByBase := make(map[string]string) // framework basename -> dstPath
+	queue := []dylibQueueItem{{
+		bundlePath:   bundleBin,
+		origDeclPath: bundleBin,
+		origRealPath: evalSymlinksOrSelf(bundleBin),
+	}}
 
 	for len(queue) > 0 {
 		current := queue[0]
 		queue = queue[1:]
 
-		deps, err := getNonSystemDylibs(current)
+		deps, rawRpaths, err := readMachODepsAndRpaths(current.origRealPath)
 		if err != nil {
 			continue
 		}
+		allRpaths := expandRpaths(
+			rawRpaths,
+			filepath.Dir(current.origRealPath),
+			filepath.Dir(current.origDeclPath),
+			exeDir,
+			current.parentRpaths,
+		)
 
 		for _, dep := range deps {
 			depBase := filepath.Base(dep)
-			dstPath, alreadyCopied := copied[dep]
+			dstPath, alreadyCopied := copiedByBase[depBase]
 
 			if !alreadyCopied {
-				dstPath = filepath.Join(frameworksDir, depBase)
-				realSrc, err := filepath.EvalSymlinks(dep)
-				if err != nil {
-					realSrc = dep
-				}
-				if err := copyFile(realSrc, dstPath); err != nil {
+				declSrc, realSrc, found := resolveDylibDep(dep, current, allRpaths, exeDir)
+				if !found {
 					continue
 				}
-				_ = os.Chmod(dstPath, 0o755)
+				if existing, ok := copiedByReal[realSrc]; ok {
+					dstPath = existing
+					alreadyCopied = true
+				} else {
+					dstPath = filepath.Join(frameworksDir, depBase)
+					if err := copyFile(realSrc, dstPath); err != nil {
+						continue
+					}
+					_ = os.Chmod(dstPath, 0o755)
 
-				// Set install name ID to @rpath/<depBase>
-				_ = exec.Command("install_name_tool", "-id", "@rpath/"+depBase, dstPath).Run()
-				_ = exec.Command("install_name_tool", "-add_rpath", "@loader_path/.", dstPath).Run()
+					// Set install name ID to @rpath/<depBase>
+					_ = exec.Command("install_name_tool", "-id", "@rpath/"+depBase, dstPath).Run()
+					_ = exec.Command("install_name_tool", "-add_rpath", "@loader_path/.", dstPath).Run()
 
-				copied[dep] = dstPath
-				queue = append(queue, dstPath)
+					copiedByReal[realSrc] = dstPath
+					copiedByBase[depBase] = dstPath
+					queue = append(queue, dylibQueueItem{
+						bundlePath:   dstPath,
+						origDeclPath: declSrc,
+						origRealPath: realSrc,
+						parentRpaths: allRpaths,
+					})
+				}
 			}
 
 			// Update reference in current to @rpath/<depBase>
-			_ = exec.Command("install_name_tool", "-change", dep, "@rpath/"+depBase, current).Run()
+			if wantRef := "@rpath/" + depBase; dep != wantRef {
+				_ = exec.Command("install_name_tool", "-change", dep, wantRef, current.bundlePath).Run()
+			}
 		}
 	}
 
 	// Re-sign bundleBin and all bundled dylibs so Apple Silicon AMFI kernel never kills them with SIGKILL.
 	// Because bundleBin is signed as a flat file outside the bundle, codesign signs ONLY this single binary in ~0.3s.
-	for _, dstPath := range copied {
+	for _, dstPath := range copiedByBase {
 		_ = exec.Command("codesign", "--force", "--sign", "-", dstPath).Run()
 	}
 	_ = exec.Command("codesign", "--force", "--sign", "-", bundleBin).Run()
 
-	if len(copied) > 0 {
-		fmt.Fprintf(logw, "             Bundled %d external dynamic libraries into Contents/Frameworks/\n", len(copied))
+	if len(copiedByBase) > 0 {
+		fmt.Fprintf(logw, "             Bundled %d external dynamic libraries into Contents/Frameworks/\n", len(copiedByBase))
 	}
 	return nil
 }

@@ -8,7 +8,9 @@ import (
 	"flag"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -242,3 +244,98 @@ func TestIsRuntimeSource(t *testing.T) {
 		}
 	}
 }
+
+func TestBundleDylibDependenciesRpathAndLoaderPath(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Mach-O dylib bundling is macOS-specific")
+	}
+	if _, err := exec.LookPath("clang"); err != nil {
+		t.Skip("clang not available")
+	}
+
+	oldLog := logw
+	logw = io.Discard
+	defer func() { logw = oldLog }()
+
+	tmp := t.TempDir()
+	extLibDir := filepath.Join(tmp, "ext", "pkg", "lib")
+	if err := os.MkdirAll(extLibDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	commonSrc := filepath.Join(tmp, "common.c")
+	decSrc := filepath.Join(tmp, "dec.c")
+	helperSrc := filepath.Join(tmp, "helper.c")
+	mainSrc := filepath.Join(tmp, "main.c")
+
+	if err := os.WriteFile(commonSrc, []byte("int common_val(void) { return 40; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(decSrc, []byte("int common_val(void); int dec_val(void) { return common_val() + 2; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(helperSrc, []byte("int common_val(void); int helper_val(void) { return common_val() + 3; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainSrc, []byte("int dec_val(void); int helper_val(void); int main(void) { return (dec_val() == 42 && helper_val() == 43) ? 0 : 1; }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	commonDylib := filepath.Join(extLibDir, "libfakecommon.1.dylib")
+	decDylib := filepath.Join(extLibDir, "libfakedec.1.dylib")
+	helperDylib := filepath.Join(extLibDir, "libfakehelper.1.dylib")
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	// Build libfakecommon with @rpath install_name (mirrors Homebrew brotli's libbrotlicommon).
+	run("clang", "-shared", "-Wl,-install_name,@rpath/libfakecommon.1.dylib", commonSrc, "-o", commonDylib)
+	// Build libfakedec depending on @rpath/libfakecommon.1.dylib with LC_RPATH @loader_path/../lib.
+	run("clang", "-shared", "-Wl,-install_name,"+decDylib, "-Wl,-rpath,@loader_path/../lib", decSrc, commonDylib, "-o", decDylib)
+	// Build libfakehelper depending directly on @loader_path/libfakecommon.1.dylib.
+	run("clang", "-shared", "-Wl,-install_name,"+helperDylib, helperSrc, commonDylib, "-o", helperDylib)
+	run("install_name_tool", "-change", "@rpath/libfakecommon.1.dylib", "@loader_path/libfakecommon.1.dylib", helperDylib)
+
+	binPath := filepath.Join(tmp, "ps4_app")
+	run("clang", "-Wl,-headerpad_max_install_names", mainSrc, decDylib, helperDylib, "-o", binPath)
+
+	contentsDir := filepath.Join(tmp, "Test.app", "Contents")
+	macosDir := filepath.Join(contentsDir, "MacOS")
+	if err := os.MkdirAll(macosDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := bundleDylibDependencies(contentsDir, binPath); err != nil {
+		t.Fatalf("bundleDylibDependencies failed: %v", err)
+	}
+
+	bundledBin := filepath.Join(macosDir, "Test")
+	if err := copyFile(binPath, bundledBin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(bundledBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run("codesign", "--force", "--sign", "-", bundledBin)
+
+	// Remove original external libraries so dyld can only succeed using Contents/Frameworks.
+	if err := os.RemoveAll(filepath.Join(tmp, "ext")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"libfakecommon.1.dylib", "libfakedec.1.dylib", "libfakehelper.1.dylib"} {
+		if _, err := os.Stat(filepath.Join(contentsDir, "Frameworks", name)); err != nil {
+			t.Errorf("expected bundled library %s in Contents/Frameworks: %v", name, err)
+		}
+	}
+
+	if out, err := exec.Command(bundledBin).CombinedOutput(); err != nil {
+		t.Fatalf("bundled app execution failed: %v\n%s", err, out)
+	}
+}
+
