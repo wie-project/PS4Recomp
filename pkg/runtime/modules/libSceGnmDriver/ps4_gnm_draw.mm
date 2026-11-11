@@ -94,6 +94,8 @@ extern "C" int32_t sceKernelIsNeoMode(void);
 namespace ps4draw {
 using namespace ps4gnm;
 
+struct DrawRec;
+
 namespace {
 
 // =====================================================================================
@@ -274,9 +276,15 @@ void GmCloseChain();
 // presents) wait for the queue to drain. PS4_GNM_SYNC_ENCODE=1 runs everything inline.
 // =====================================================================================
 namespace encq {
+enum class JobKind : uint8_t { Break, Draw, PassTransparent };
+struct Job {
+    std::function<void()> fn;
+    DrawRec* draw = nullptr; // non-null only for queued VsPs DrawEncode jobs
+    JobKind kind = JobKind::Break;
+};
 std::mutex mu;
 std::condition_variable cv_work, cv_idle;
-std::vector<std::function<void()>> q;
+std::vector<Job> q;
 bool busy = false, sleeping = false;
 std::atomic<uint64_t> pushed{0}, done{0}, busy_ns{0};
 // busy_ns split (the perf line): the encoder thread's CPU time while running jobs, and the wall time
@@ -286,6 +294,8 @@ std::atomic<uint64_t> cpu_ns{0}, throttle_ns{0}, room_ns{0}, begin_ns{0};
 std::atomic<bool> async{false};
 thread_local bool t_worker = false;
 thread_local bool t_in_job = false; // running encoder work inline (PS4_GNM_SYNC_ENCODE)
+thread_local const std::vector<Job>* t_batch = nullptr;
+thread_local size_t t_batch_idx = 0;
 constexpr size_t kMaxQueued = 16384;
 
 // The encoder's state (S, g_gmem: everything encoder work touches) belongs to whoever holds
@@ -338,7 +348,7 @@ void Worker() {
     pthread_setname_np("GNM Encoder");
     // on the frame's critical path: keep it off the efficiency cores
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-    std::vector<std::function<void()>> batch; // swapped with q: both keep their capacity
+    std::vector<Job> batch; // swapped with q: both keep their capacity
     for (;;) {
         batch.clear();
         {
@@ -355,16 +365,22 @@ void Worker() {
         const double t0 = CFAbsoluteTimeGetCurrent();
         const uint64_t c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
         size_t n = 0;
+        t_batch = &batch;
         while (n < batch.size()) {
             @autoreleasepool {
                 Locked lk; // free for the service thread between chunks of jobs
                 for (size_t k = 0; k < 64 && n < batch.size(); ++k, ++n) {
-                    batch[n]();
-                    batch[n] = nullptr;
+                    t_batch_idx = n;
+                    batch[n].fn();
+                    batch[n].fn = nullptr;
+                    batch[n].draw = nullptr;
+                    batch[n].kind = JobKind::Break;
                     if (g_gms.miss.load(std::memory_order_relaxed)) GmService();
                 }
             }
         }
+        t_batch = nullptr;
+        t_batch_idx = 0;
         busy_ns.fetch_add((uint64_t)((CFAbsoluteTimeGetCurrent() - t0) * 1e9), std::memory_order_relaxed);
         cpu_ns.fetch_add(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - c0, std::memory_order_relaxed);
         {
@@ -406,7 +422,8 @@ void Start() {
     fprintf(stderr, "[gnm-draw] encoder thread started\n");
 }
 
-void Defer(std::function<void()> f) {
+void DeferDraw(std::function<void()> f, DrawRec* draw, JobKind kind = JobKind::Break) {
+    const JobKind k = draw ? JobKind::Draw : kind;
     if (Inline()) {
         Locked lk;
         const bool was = t_in_job;
@@ -420,12 +437,15 @@ void Defer(std::function<void()> f) {
     {
         std::unique_lock<std::mutex> lk(mu);
         if (q.size() >= kMaxQueued) cv_idle.wait(lk, [] { return q.size() < kMaxQueued; });
-        q.push_back(std::move(f));
+        q.push_back(Job{std::move(f), draw, k});
         pushed.fetch_add(1, std::memory_order_relaxed);
         wake = sleeping;
     }
     if (wake) cv_work.notify_one(); // a running worker takes the new work with its next batch
 }
+
+void Defer(std::function<void()> f) { DeferDraw(std::move(f), nullptr, JobKind::Break); }
+void DeferTransparent(std::function<void()> f) { DeferDraw(std::move(f), nullptr, JobKind::PassTransparent); }
 
 // Waits until everything queued so far has run.
 void Sync() {
@@ -439,7 +459,7 @@ void Nudge() {
     if (!async.load(std::memory_order_relaxed) || t_worker) return;
     {
         std::lock_guard<std::mutex> lk(mu);
-        q.push_back([] {});
+        q.push_back(Job{[] {}, nullptr, JobKind::PassTransparent});
         pushed.fetch_add(1, std::memory_order_relaxed);
     }
     cv_work.notify_one();
@@ -586,30 +606,38 @@ struct PassKey {
     uint64_t stencil_addr = 0;
     uint64_t stencil_size = 0;
     uint32_t width = 0, height = 0;
+    uint32_t samples = 1;
     uint32_t sample_locs = 0; // PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0 of multisampled passes
     bool has_hazard = false;
     bool operator==(const PassKey& o) const {
         for (int i = 0; i < 8; ++i)
             if (color[i] != o.color[i] || color_slice[i] != o.color_slice[i]) return false;
         return depth == o.depth && depth_slice == o.depth_slice && width == o.width && height == o.height &&
-               sample_locs == o.sample_locs;
+               samples == o.samples && sample_locs == o.sample_locs;
     }
     bool operator!=(const PassKey& o) const { return !(*this == o); }
-    bool CanSubsume(const PassKey& child) const {
+    bool CanSubsume(const PassKey& child, bool allow_depth_omit = false) const {
         if (child.has_hazard) return false;
-        if (sample_locs != child.sample_locs) return false;
-        if (depth != child.depth || depth_slice != child.depth_slice) return false;
-        if (!depth && !child.depth) {
-            bool any_color = false;
-            for (int i = 0; i < 8; ++i) {
-                if (color[i] || child.color[i]) { any_color = true; break; }
-            }
-            if (!any_color && (width != child.width || height != child.height)) return false;
+        if (sample_locs != child.sample_locs || samples != child.samples) return false;
+        bool parent_has_rt = (depth != nil);
+        bool child_has_rt = (child.depth != nil);
+        for (int i = 0; i < 8; ++i) {
+            if (color[i]) parent_has_rt = true;
+            if (child.color[i]) child_has_rt = true;
+        }
+        if (parent_has_rt != child_has_rt) return false;
+        if (!parent_has_rt) return width == child.width && height == child.height;
+        if (allow_depth_omit && depth && !child.depth) {
+            // Retain open depth only while all active attachments remain consistent.
+        } else if (depth != child.depth || depth_slice != child.depth_slice) {
+            return false;
         }
         for (int i = 0; i < 8; ++i) {
             if (child.color[i]) {
                 if (!color[i] || color[i] != child.color[i] || color_slice[i] != child.color_slice[i])
                     return false;
+            } else if (!allow_depth_omit && color[i]) {
+                return false;
             }
         }
         return true;
@@ -740,6 +768,10 @@ struct State {
     // the SRT program of the shader recorded here (all permutations of a program share it)
     const Shader* flat_from[7] = {};
     bool pending = false;
+    struct CopyWriteSpan {
+        uint64_t lo = 0, hi = 0;
+    };
+    std::vector<CopyWriteSpan> copy_writes;
     UploadArena arena;
     std::vector<GpuWrite> gpu_written; // guest ranges written by work in `cmd`
     uint32_t gpu_written_slot[64] = {}; // NoteGpuWrite: index of a range in gpu_written, by hash
@@ -1264,11 +1296,6 @@ struct GmCpState {
     int queue = kQueueGfx;        // the queue of the draw / dispatch being prepared
 } g_gm_cp;
 
-// CP thread: the queue synchronizes (ComputeBarrier).
-void GmCpSync(int queue) {
-    g_gm_cp.visible[queue] = g_gms.issued.load(std::memory_order_relaxed);
-}
-
 // CP thread: the draw / dispatch prepared next is for this queue.
 void GmCpQueue(int queue) {
     g_gm_cp.queue = queue;
@@ -1394,6 +1421,9 @@ bool GuestAddressMapped(void* c, uint64_t addr) {
 // NULL page area (ps4_gnm_guest_window.h).
 // =====================================================================================
 const uint64_t kWindow = PS4_GNM_WINDOW_SIZE;
+const uint64_t kSubWindow = 16ull << 20;
+const uint64_t kCrossWindowAlign = 2ull << 20;
+const uint64_t kAcctWindow = 2ull << 20;
 
 // Guest ranges whose host pages were replaced (direct memory remapped/unmapped by the
 // kernel layer). A no-copy MTLBuffer keeps referencing the pages it was created over,
@@ -1404,10 +1434,12 @@ std::atomic<bool> g_remap_pending{false};
 
 // The windows looked up last: most draws hit the same few.
 struct GuestBufMru {
-    uint64_t key = ~0ull;
-    GuestWin* win = nullptr; // into S.guest_bufs (the MRU is reset whenever entries are erased)
+    uint64_t base = 0;
+    uint64_t end = 0;
+    GuestWin* win = nullptr; // into S.guest_bufs (the MRU is cleared whenever entries are erased)
 };
 GuestBufMru g_guest_buf_mru[4];
+uint32_t g_guest_buf_mru_next = 0;
 
 // GPU memory telemetry and budget (ps4_gnm_membudget.h, docs/gpu-memory-budget.md). A sampler
 // thread measures wired memory, the process footprint, MTLDevice.currentAllocatedSize and the
@@ -1459,10 +1491,20 @@ GpuMem g_mem;
 // The texture cache as seen by the sampler thread (set once the cache exists).
 std::atomic<TextureCache*> g_mem_tex{nullptr};
 
-// Window span of a guest_bufs key (base | windows << 48).
-inline void KeyWindows(uint64_t key, uint64_t* first, uint64_t* n) {
-    *first = (key & ((1ull << 48) - 1)) / kWindow;
-    *n = key >> 48;
+// Packed span key for guest_bufs: both base and length are 16 KiB aligned (low 14 bits zero).
+inline uint64_t PackGuestWinKey(uint64_t base, uint64_t end) {
+    return (base >> 14) | (((end - base) >> 14) << 36);
+}
+inline void KeySpan(uint64_t key, uint64_t* base, uint64_t* end) {
+    const uint64_t b = (key & ((1ull << 36) - 1)) << 14;
+    *base = b;
+    *end = b + ((key >> 36) << 14);
+}
+inline void KeySlotRange(uint64_t key, uint64_t grain, uint64_t* first, uint64_t* n) {
+    uint64_t base, end;
+    KeySpan(key, &base, &end);
+    *first = base / grain;
+    *n = (end > base) ? ((end - 1) / grain - *first + 1) : 0;
 }
 
 void TakeGpuMemSample(ps4_gpumem_sample* s) {
@@ -1479,7 +1521,8 @@ void StartGpuMemSampler(uint64_t mem_size) {
     ps4_gpumem_policy_init(&g_mem.policy, ps4_gpumem_mem_total(), getenv("PS4_GNM_GPU_BUDGET_PCT"),
                            getenv("PS4_GNM_GPU_BUDGET_MB"), getenv("PS4_GNM_GPU_WINDOW_IDLE_S"));
     ps4_texcache_policy_init(&g_mem.texpol, &g_mem.policy, getenv("PS4_GNM_TEX_CACHE_MB"), getenv("PS4_GNM_TEX_KEEP_MS"));
-    if (!ps4_gpumem_windows_init(&g_mem.wins, mem_size, kWindow)) return;
+    g_mem.tick = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    if (!ps4_gpumem_windows_init(&g_mem.wins, mem_size, kAcctWindow)) return;
     g_mem.wired_base = ps4_gpumem_wired_bytes();
     g_mem.on = true;
     const char* lv = getenv("PS4_GNM_MEM_LOG");
@@ -1565,6 +1608,10 @@ void AliasPruneReleased();
 
 // Drops a window from guest_bufs; its accounting goes when the GPU can no longer use it.
 std::unordered_map<uint64_t, GuestWin>::iterator ReleaseWindow(std::unordered_map<uint64_t, GuestWin>::iterator it) {
+    GuestWin* wptr = &it->second;
+    for (auto& m : g_guest_buf_mru) {
+        if (m.win == wptr) m = GuestBufMru{};
+    }
     S.be->Evict(it->second.buf, OpenSeqMax()); // the open command buffer may still use it
     AliasWindowReleased(it->second, it->first);
     if (g_mem.on) g_mem.pending.push_back({it->first, (uint64_t)it->second.buf.length, OpenSeqMax()});
@@ -1578,7 +1625,7 @@ void RetirePendingWindows() {
     while (!g_mem.pending.empty() && g_mem.pending.front().seq <= done) {
         const GpuMem::Pending& p = g_mem.pending.front();
         uint64_t first, n;
-        KeyWindows(p.key, &first, &n);
+        KeySlotRange(p.key, kAcctWindow, &first, &n);
         ps4_gpumem_windows_remove(&g_mem.wins, first, n, p.length);
         g_mem.pending.pop_front();
     }
@@ -1593,8 +1640,8 @@ void DropRemappedWindows() {
         g_remap_pending.store(false, std::memory_order_release);
     }
     for (auto it = S.guest_bufs.begin(); it != S.guest_bufs.end();) {
-        const uint64_t base = it->first & ((1ull << 48) - 1);
-        const uint64_t end = (base & ~(kWindow - 1)) + (it->first >> 48) * kWindow;
+        uint64_t base, end;
+        KeySpan(it->first, &base, &end);
         bool hit = false;
         for (auto& r : ranges)
             if (r.first < end && r.first + r.second > base) { hit = true; break; }
@@ -1874,7 +1921,7 @@ void AliasWindowCreated(GuestWin& w, uint64_t key) {
     if (!g_alias.on) return;
     w.alias = std::make_shared<AliasState>();
     uint64_t first, n;
-    KeyWindows(key, &first, &n);
+    KeySlotRange(key, kWindow, &first, &n);
     if (g_alias.cover.size() < first + n) g_alias.cover.resize(first + n);
     for (uint64_t s = first; s < first + n; ++s) g_alias.cover[s].push_back(w.alias);
 }
@@ -1884,7 +1931,7 @@ bool AliasDropIfIdle(const std::shared_ptr<AliasState>& a, uint64_t key, uint64_
     a->Prune(done);
     if (!a->Idle() || a->job == g_alias.job) return false;
     uint64_t first, n;
-    KeyWindows(key, &first, &n);
+    KeySlotRange(key, kWindow, &first, &n);
     for (uint64_t s = first; s < first + n && s < g_alias.cover.size(); ++s) {
         auto& c = g_alias.cover[s];
         for (size_t i = 0; i < c.size(); ++i)
@@ -2024,18 +2071,56 @@ bool GuestBuffer(uint64_t addr, uint64_t size, GuestAccess access, __strong id<M
     GuestContext* ctx = S.ctx;
     if (g_remap_pending.load(std::memory_order_acquire)) DropRemappedWindows();
     if (!ctx) return false;
-    uint64_t base, end, nwin;
-    if (!ps4_gnm_guest_window_range(addr, size, ctx->mem_size, &base, &end, &nwin)) return false;
-    const uint64_t key = base | (nwin << 48);
-    GuestBufMru& mru = g_guest_buf_mru[(base / kWindow + nwin) & 3];
-    if (mru.key == key) {
-        mru.win->last_use = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-        *out = mru.win->buf;
-        *offset = addr - base;
-        NoteWindowUse(*mru.win, addr, size, access);
-        return true;
+    uint64_t base64, end64, nwin64;
+    if (!ps4_gnm_guest_window_range(addr, size, ctx->mem_size, &base64, &end64, &nwin64)) return false;
+
+    if (allow_copy) {
+        for (int i = 0; i < 4; ++i) {
+            const GuestBufMru& m = g_guest_buf_mru[i];
+            if (m.win && addr >= m.base && addr <= m.end && size <= m.end - addr) {
+                m.win->last_use = g_mem.tick;
+                *out = m.win->buf;
+                *offset = addr - m.base;
+                NoteWindowUse(*m.win, addr, size, access);
+                return true;
+            }
+        }
+    } else {
+        for (int i = 0; i < 4; ++i) {
+            const GuestBufMru& m = g_guest_buf_mru[i];
+            if (m.win && m.base == base64 && m.end == end64) {
+                m.win->last_use = g_mem.tick;
+                *out = m.win->buf;
+                *offset = addr - base64;
+                NoteWindowUse(*m.win, addr, size, access);
+                return true;
+            }
+        }
     }
-    auto it = S.guest_bufs.find(key);
+
+    uint64_t base = base64, end = end64;
+    auto it = S.guest_bufs.end();
+    if (allow_copy) {
+        if (nwin64 == 1) it = S.guest_bufs.find(PackGuestWinKey(base64, end64));
+        if (it == S.guest_bufs.end()) {
+            const uint64_t mem_end = ctx->mem_size & ~16383ull;
+            if ((addr & ~(kSubWindow - 1)) == ((addr + size - 1) & ~(kSubWindow - 1))) {
+                const uint64_t aligned = addr & ~(kSubWindow - 1);
+                base = std::max<uint64_t>(aligned, PS4_GNM_WINDOW0_BASE);
+                end = std::min<uint64_t>(aligned + kSubWindow, mem_end);
+            } else if (size <= (32ull << 20)) {
+                const uint64_t aligned = addr & ~(kCrossWindowAlign - 1);
+                base = std::max<uint64_t>(aligned, PS4_GNM_WINDOW0_BASE);
+                end = std::min<uint64_t>((addr + size + kCrossWindowAlign - 1) & ~(kCrossWindowAlign - 1), mem_end);
+            }
+            if (end <= addr || end - addr < size) {
+                base = base64;
+                end = end64;
+            }
+        }
+    }
+    const uint64_t key = PackGuestWinKey(base, end);
+    if (it == S.guest_bufs.end()) it = S.guest_bufs.find(key);
     if (it == S.guest_bufs.end()) {
         auto rit = g_mem.refused.find(key);
         if (rit != g_mem.refused.end())
@@ -2073,11 +2158,21 @@ bool GuestBuffer(uint64_t addr, uint64_t size, GuestAccess access, __strong id<M
         it = S.guest_bufs.emplace(key, GuestWin{b, 0, nullptr}).first;
         AliasWindowCreated(it->second, key);
         S.be->MakeResident(b, GnmResidencyClass::Guest); // until ReleaseWindow
-        if (g_mem.on) ps4_gpumem_windows_add(&g_mem.wins, base / kWindow, nwin, end - base);
+        if (g_mem.on) {
+            uint64_t first, nw;
+            KeySlotRange(key, kAcctWindow, &first, &nw);
+            ps4_gpumem_windows_add(&g_mem.wins, first, nw, end - base);
+        }
     }
-    it->second.last_use = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-    mru.key = key;
-    mru.win = &it->second;
+    it->second.last_use = g_mem.tick;
+    bool in_mru = false;
+    for (int i = 0; i < 4; ++i) {
+        if (g_guest_buf_mru[i].win == &it->second) {
+            in_mru = true;
+            break;
+        }
+    }
+    if (!in_mru) g_guest_buf_mru[g_guest_buf_mru_next++ & 3] = GuestBufMru{base, end, &it->second};
     *out = it->second.buf;
     *offset = addr - base;
     NoteWindowUse(it->second, addr, size, access);
@@ -2277,6 +2372,7 @@ void EndEncoders() {
     }
     const GnmEncoder open = S.be->OpenEncoder();
     if (open != GnmEncoder::None) S.be->EndEncoder();
+    S.copy_writes.clear();
     if (open == GnmEncoder::Render) ResolveEqaaPass();
     S.pass = PassKey{};
     for (auto& t : S.pass_hold) t = nil;
@@ -4902,7 +4998,7 @@ struct GuestMemoryState {
     bool table_bound = false;
     std::vector<std::pair<uint64_t, id<MTLBuffer>>> old_tables; // (command buffer sequence, table)
     std::vector<uint32_t> pages;     // mapped 64 MiB pages
-    std::vector<uint64_t> last_used; // per page: present index of its last access (0: not mapped)
+    std::vector<uint64_t> last_used; // per page: g_mem.tick timestamp of its last access (0: not mapped)
     uint64_t wrong_guesses = 0;      // passes that met a page their probe had not reported
     id<MTLComputePipelineState> gate_pso = nil, harvest_pso = nil;
     id<MTLCommandQueue> queue2 = nil; // re-runs of missed tickets
@@ -4917,10 +5013,6 @@ struct GuestMemoryState {
     uint64_t draw_harvested = ~0ull; // present index of the last harvest of draw_slot
 } g_gmem;
 
-
-// A mapped page no dispatch accessed for this many presents is dropped from the table (its
-// window is then released by the usual idle sweep unless something else uses it).
-constexpr uint64_t kGuestPageIdlePresents = 600;
 
 // One threadgroup each; fault words and summary as above. GM_* come from GmLibrarySource.
 static const char* kGmKernels = R"(
@@ -5190,16 +5282,16 @@ bool GmMapPages(const GmPages& pages, const char* queue, uint64_t code_addr, siz
             return false;
         }
         if (!g_gmem.last_used[p]) g_gmem.pages.push_back(p);
-        g_gmem.last_used[p] = std::max<uint64_t>(S.present_idx, 1);
+        g_gmem.last_used[p] = g_mem.tick ? g_mem.tick : 1;
         if (mapped) ++*mapped;
     }
     return ok;
 }
 
 // The page table with an entry for every mapped page; each window is (re)created through
-// GuestBuffer (windows idle for a while are released) and made resident on the encoder. Pages
-// idle for kGuestPageIdlePresents are dropped first. A table that changes after it was bound is
-// copied first (passes encoded earlier keep theirs).
+// GuestBuffer (windows idle for a while are released) and made resident on the encoder. Idle pages
+// are dropped first by time so stale loading/menu windows do not remain pinned for 30s at low fps.
+// A table that changes after it was bound is copied first (passes encoded earlier keep theirs).
 bool BindGuestPageTable(Binder& b, __strong id<MTLBuffer>* out) {
     if (!EnsureGuestMemoryState()) return false;
     // draw stages only load through guest memory: their windows are used read-only
@@ -5216,10 +5308,13 @@ bool BindGuestPageTable(Binder& b, __strong id<MTLBuffer>* out) {
     want.clear();
     windows.clear();
     const uint64_t* cur = (const uint64_t*)g_gmem.table.contents;
+    const uint64_t now = g_mem.tick;
+    const uint64_t page_idle_ns =
+        g_mem.over.load(std::memory_order_relaxed) ? 4000000000ull : g_mem.policy.idle_ns;
     bool change = false;
     size_t n = 0;
     for (uint32_t p : g_gmem.pages) {
-        if (S.present_idx > g_gmem.last_used[p] + kGuestPageIdlePresents) {
+        if (page_idle_ns && now > g_gmem.last_used[p] && now - g_gmem.last_used[p] >= page_idle_ns) {
             g_gmem.last_used[p] = 0;
             want.push_back({p, 0});
             change |= cur[p] != 0;
@@ -5274,10 +5369,11 @@ std::string GuestStatusText(uint32_t st) {
 
 // Marks the 64 MiB pages of the 1 MiB pages read / written as used now.
 void TouchGuestPages(const GmResult& r) {
+    const uint64_t now = g_mem.tick ? g_mem.tick : 1;
     for (const GmPages* v : {&r.read, &r.written})
         for (uint32_t t : *v) {
             const uint32_t p = t >> (GCN_GUEST_PAGE_SHIFT - GCN_GUEST_TRACK_SHIFT);
-            if (g_gmem.last_used[p]) g_gmem.last_used[p] = std::max<uint64_t>(S.present_idx, 1);
+            if (g_gmem.last_used[p]) g_gmem.last_used[p] = now;
         }
 }
 
@@ -5548,7 +5644,7 @@ id<MTLBuffer> GmDrawSlot() {
     }
     if (g_gmem.draw_harvested != S.present_idx) {
         g_gmem.draw_harvested = S.present_idx;
-        const uint64_t now = std::max<uint64_t>(S.present_idx, 1);
+        const uint64_t now = g_mem.tick ? g_mem.tick : 1;
         constexpr uint32_t kTrackPerPage = 1u << (GCN_GUEST_PAGE_SHIFT - GCN_GUEST_TRACK_SHIFT); // 64
         for (uint32_t i = 0; i < GCN_GUEST_TRACK_PAGES / 32; ++i) {
             if (!__atomic_load_n(&f[GCN_GUEST_READ + i], __ATOMIC_RELAXED)) continue;
@@ -5585,8 +5681,9 @@ bool BindStage(const Shader* s, const uint32_t ud[16], const std::vector<uint32_
     memset(pd.buf_sizes, bounds_off ? 0xff : 0, sizeof(pd.buf_sizes));
     // Shaders with more buffers than Metal slots reach their guest buffers through an argument
     // buffer: a table of GPU addresses (gcn_shader_info.msl_argument_buffer).
-    std::vector<uint64_t> argtab(s->info.msl_argument_buffer >= 0 ? s->info.msl_argument_buffer_entries : 0,
-                                 S.dummy.gpuAddress);
+    static thread_local std::vector<uint64_t> argtab;
+    const size_t argtab_n = s->info.msl_argument_buffer >= 0 ? s->info.msl_argument_buffer_entries : 0;
+    argtab.assign(argtab_n, S.dummy.gpuAddress);
     if (!argtab.empty()) b.Use(S.dummy, false);
     for (uint32_t i = 0; i < s->bufs.size(); ++i) {
         const gcn_buffer_binding& bb = s->bufs[i];
@@ -5915,15 +6012,17 @@ bool StageImage(const Shader* s, const std::vector<uint32_t>& flat, uint32_t i, 
 
 // Installs the tables of a draw / dispatch for the encoder while it is being encoded.
 struct StageImagesScope {
+    const StageImages* prev_[4];
     StageImagesScope(const StageImages* a, const StageImages* b, const StageImages* c,
                      const StageImages* d = nullptr) {
+        for (int i = 0; i < 4; ++i) prev_[i] = t_stage_images[i];
         t_stage_images[0] = a;
         t_stage_images[1] = b;
         t_stage_images[2] = c;
         t_stage_images[3] = d;
     }
     ~StageImagesScope() {
-        t_stage_images[0] = t_stage_images[1] = t_stage_images[2] = t_stage_images[3] = nullptr;
+        for (int i = 0; i < 4; ++i) t_stage_images[i] = prev_[i];
     }
 };
 
@@ -6929,16 +7028,30 @@ struct PassSplitStats {
     uint64_t color_diff = 0;
     uint64_t dim_diff = 0;
     uint64_t hazard = 0;
+    uint64_t la_calls = 0;
+    uint64_t la_no_next = 0;
+    uint64_t la_added = 0;
+    uint64_t la_stop_nondraw = 0;
+    uint64_t la_stop_clr = 0;
+    uint64_t la_stop_pend = 0;
+    uint64_t la_stop_diff = 0;
+    uint64_t la_stop_sc = 0;
+    uint64_t la_stop_haz = 0;
 };
 static PassSplitStats g_pass_splits;
 
 // game_draw: the pass is begun for a game draw (it may count for an occlusion query), not for a
 // clear alone.
-bool BeginPass(const PassKey& key, const ClearReq& clr, id<MTLTexture> const* hold, bool game_draw) {
+bool BeginPass(const PassKey& key, const ClearReq& clr, id<MTLTexture> const* hold, bool game_draw,
+               bool allow_depth_omit = false) {
     if (g_gms.chain_open) GmCloseChain();
     const GnmEncoder open = S.be->OpenEncoder();
-    if (open == GnmEncoder::Compute) S.be->EndEncoder();
-    if (open == GnmEncoder::Render && S.pass.CanSubsume(key) && !clr.any() && !HasDeferredHleCopies()) {
+    if (open != GnmEncoder::None && open != GnmEncoder::Render) {
+        S.be->EndEncoder();
+        S.copy_writes.clear();
+    }
+    if (open == GnmEncoder::Render && S.pass.CanSubsume(key, allow_depth_omit) && !clr.any() &&
+        !HasDeferredHleCopies()) {
         if (hold) {
             for (int i = 0; i < 9; ++i) {
                 if (hold[i] && !S.pass_hold[i]) S.pass_hold[i] = hold[i];
@@ -7080,6 +7193,9 @@ void ComputeEncoder() {
         ResolveEqaaPass(); // EQAA stand-ins write sample 0 back before compute reads the targets
         S.pass = PassKey{};
         for (auto& t : S.pass_hold) t = nil;
+    } else if (S.be->OpenEncoder() != GnmEncoder::None && S.be->OpenEncoder() != GnmEncoder::Compute) {
+        S.be->EndEncoder();
+        S.copy_writes.clear();
     }
     EnsureCmd();
     if (S.be->OpenEncoder() != GnmEncoder::Compute) {
@@ -7112,6 +7228,18 @@ uint64_t CmaskSliceBytesOf(const ColorTarget& c) {
 // frame whose array has not grown yet must leave the clear pending for slices 1..n. Each covered
 // slice takes the clear once; it stays pending until all of them have (as the HTILE of a slice
 // no draw touched stays cleared on the GPU).
+bool IsMetaClearedPending(uint64_t addr, uint32_t slice = 0, uint64_t slice_bytes = 0) {
+    auto it = S.meta.find(addr);
+    if (it == S.meta.end() || !it->second.cleared) return false;
+    const MetaState& m = it->second;
+    uint64_t covered = 1;
+    if (slice_bytes)
+        covered = std::max<uint64_t>(1, std::min<uint64_t>(64, m.cleared_bytes == kAllMeta ? 64 : m.cleared_bytes / slice_bytes));
+    else if (m.cleared_bytes == kAllMeta)
+        covered = 64;
+    return slice < covered && !(m.taken_slices >> slice & 1);
+}
+
 bool TakeMetaCleared(uint64_t addr, uint64_t* seq = nullptr, uint32_t slice = 0, uint64_t slice_bytes = 0) {
     auto it = S.meta.find(addr);
     if (it == S.meta.end() || !it->second.cleared) return false;
@@ -9269,16 +9397,22 @@ void ComputeBarrierImpl(int queue) {
     // a compute ring's barrier goes where its work goes: AsyncCompute's open compute encoder
     std::optional<AsyncScope> scope;
     if (g_async_compute && queue == kQueueCompute && !S.async.compute_joined && S.async.open) scope.emplace(false);
-    if (S.be->OpenEncoder() != GnmEncoder::Compute) return;
+    if (S.be->OpenEncoder() != GnmEncoder::Compute || !S.be->EncoderDirty()) return;
     S.be->Barrier(kGnmStageDispatch | kGnmStageBlit, kGnmStageDispatch | kGnmStageBlit,
                   kGnmScopeBuffers | kGnmScopeTextures);
+    S.be->ClearEncoderDirty();
     S.n_cbarriers++;
     S.cbarriers_total++;
 }
 
+// CP thread: the queue synchronizes (ComputeBarrier).
+void GmCpSync(int queue) {
+    g_gm_cp.visible[queue] = g_gms.issued.load(std::memory_order_relaxed);
+}
+
 void ComputeBarrier(int queue) {
     GmCpSync(queue);
-    encq::Defer([queue] { ComputeBarrierImpl(queue); });
+    encq::DeferTransparent([queue] { ComputeBarrierImpl(queue); });
 }
 
 // GPU surfaces marked guest newer by AsyncCompute work's write of [addr, addr + n) (FlushBufferStores)
@@ -9287,6 +9421,13 @@ void NoteBufferWriteMarking(uint64_t addr, uint64_t n) {
     const size_t marked = S.async.in_scope ? S.tex->GuestNewerCount() : 0;
     S.tex->NoteBufferWrite(addr, n, S.write_epoch);
     if (S.async.in_scope && S.tex->GuestNewerCount() > marked) S.async.marked_surfaces = true;
+}
+
+static bool CopyOverlapsOpenWrites(uint64_t lo, uint64_t hi) {
+    for (const auto& w : S.copy_writes) {
+        if (lo < w.hi && w.lo < hi) return true;
+    }
+    return false;
 }
 
 bool GpuDmaImpl(bool src_gds, bool src_fill, uint64_t src, uint32_t fill_value, bool dst_gds, uint64_t dst, uint32_t n,
@@ -9348,12 +9489,23 @@ bool GpuDmaImpl(bool src_gds, bool src_fill, uint64_t src, uint32_t fill_value, 
         }
         ComputeOnMain(why);
     }
-    EndEncoders();
-    EnsureCmd();
-    S.be->BeginCopies();
+    constexpr uint64_t kGdsAddrSpace = 1ULL << 60;
+    const uint64_t dst_lo = dst_gds ? (kGdsAddrSpace + dst) : dst;
+    const uint64_t dst_hi = dst_lo + n;
+    const uint64_t src_lo = src_gds ? (kGdsAddrSpace + src) : src;
+    const uint64_t src_hi = src_lo + n;
+    bool reuse_copy = S.be->OpenEncoder() == GnmEncoder::Copy && S.copy_writes.size() < 64 &&
+                      !CopyOverlapsOpenWrites(dst_lo, dst_hi) &&
+                      (src_fill || !CopyOverlapsOpenWrites(src_lo, src_hi));
+    if (!reuse_copy) {
+        EndEncoders();
+        EnsureCmd();
+        S.be->BeginCopies();
+    }
     if (src_fill && !sb) S.be->FillBuffer(db, doff, n, (uint8_t)(fill_value & 0xFF));
     else S.be->CopyBuffer(sb, soff, db, doff, n);
-    S.be->EndEncoder();
+    S.copy_writes.push_back({dst_lo, dst_hi});
+    S.pending = true;
     if (src_fill && sb) S.be->Evict(sb, OpenSeqMax()); // the pattern: used by the open seq only
     LogWork("dma");
     if (!dst_gds) {
@@ -9532,7 +9684,7 @@ void AfterGpu(std::function<void()> fn, int queue) {
         AfterGpuImpl(std::move(fn), queue);
         return;
     }
-    encq::Defer([f = std::move(fn), queue]() mutable { AfterGpuImpl(std::move(f), queue); });
+    encq::DeferTransparent([f = std::move(fn), queue]() mutable { AfterGpuImpl(std::move(f), queue); });
 }
 void AfterGpu(std::function<void()> fn) { AfterGpu(std::move(fn), kQueueGfx); }
 
@@ -9576,7 +9728,7 @@ void AfterGpuLabel(uint64_t addr, uint64_t value, const char* packet, int queue,
         }, queue);
     };
     if (encq::Inline()) at_encoder();
-    else encq::Defer(std::move(at_encoder));
+    else encq::DeferTransparent(std::move(at_encoder));
 }
 
 // ---- occlusion queries (ZpassDone, ps4_gnm_draw.h)
@@ -10736,10 +10888,11 @@ bool Draw(GuestContext* ctx, const uint32_t* regs, const DrawArgs& args) {
         }
         r.regs.Capture(regs);
         table_read.armed = false; // DrawEncode ends it
-        encq::Defer([rec = rp.release()] {
-            DrawEncode(*rec);
-            g_draw_recs.Put(rec);
-        });
+        DrawRec* raw_rec = rp.release();
+        encq::DeferDraw([raw_rec] {
+            DrawEncode(*raw_rec);
+            g_draw_recs.Put(raw_rec);
+        }, raw_rec);
     }
     return true;
 }
@@ -12129,6 +12282,207 @@ void EncodeGsDraw(DrawRec& r) {
     }
 }
 
+// Peeks ahead through contiguous single-pass VsPs draws queued in encq::t_batch so a pass
+// opening on a subset of attachments (e.g., Z-only prepass or depthless color draw) can pre-attach
+// upcoming color/depth targets with write_mask = 0 (or depth_test = false) and merge subsequent
+// draws into one Metal RenderPass without mid-frame load/store splits.
+void ApplyPassLookahead(const DrawRec& cur, PassKey& key, __strong id<MTLTexture> hold[9], uint32_t color_fmt[8],
+                        uint32_t& depth_fmt, const MTLScissorRect& cur_sc, uint32_t max_lookahead = 16) {
+    static const bool no_lookahead = getenv("PS4_GNM_NO_PASS_LOOKAHEAD") != nullptr;
+    if (no_lookahead) return;
+    g_pass_splits.la_calls++;
+    if (!encq::t_batch || encq::t_batch_idx + 1 >= encq::t_batch->size()) {
+        g_pass_splits.la_no_next++;
+        return;
+    }
+    static const bool eqaa_twins = getenv("PS4_GNM_EQAA_VIEWPORT") == nullptr;
+
+    const size_t end = std::min(encq::t_batch->size(), encq::t_batch_idx + 1 + (size_t)max_lookahead);
+    for (size_t i = encq::t_batch_idx + 1; i < end; ++i) {
+        const encq::Job& job = (*encq::t_batch)[i];
+        if (job.kind == encq::JobKind::PassTransparent) continue;
+        const DrawRec* nx = job.draw;
+        if (job.kind != encq::JobKind::Draw || !nx || nx->stage_mode != 0 ||
+            (nx->args.indirect_addr && nx->rs.raster.prim == PrimitiveType::QuadList)) {
+            g_pass_splits.la_stop_nondraw++;
+            break;
+        }
+
+        const RenderState& nrs = nx->rs;
+        const uint32_t nx_mrt = nx->ps ? nx->ps->info.mrt_mask : 0;
+
+        PassKey cand{};
+        id<MTLTexture> cand_color[8] = {};
+        uint32_t cand_cslice[8] = {};
+        uint64_t cand_caddr[8] = {}, cand_csize[8] = {};
+        id<MTLTexture> cand_depth = nil;
+        uint32_t cand_dslice = 0;
+        uint64_t cand_daddr = 0, cand_saddr = 0, cand_dsize = 0;
+        bool nx_any_rt = false;
+        bool stop = false;
+
+        for (int c = 0; c < 8; ++c) {
+            const ColorTarget& ct = nrs.color[c];
+            if (!ct.enabled || !(nx_mrt & (1u << c)) || !ct.mtl_format) continue;
+            if (ct.num_samples > 1) {
+                g_pass_splits.la_stop_diff++;
+                stop = true;
+                break;
+            }
+            const uint32_t cmask_sl = std::min<uint32_t>(ct.base_slice, 63);
+            if (ct.fast_clear && IsMetaClearedPending(ct.cmask_address, cmask_sl, CmaskSliceBytesOf(ct))) {
+                g_pass_splits.la_stop_clr++;
+                stop = true;
+                break;
+            }
+            const bool pending_write = S.detile_pso != nil && BackendHas(kGnmCapCompute | kGnmCapCopies) &&
+                                       OverlapsPendingWrite(ct.address, std::max<uint64_t>(ct.slice_bytes, 1));
+            id<MTLTexture> grown_from = nil;
+            id<MTLTexture> t = S.tex->GetColorTarget(ct, true, false, pending_write, &grown_from);
+            if (!t || grown_from || t.sampleCount != 1) {
+                g_pass_splits.la_stop_diff++;
+                stop = true;
+                break;
+            }
+            const uint32_t sl =
+                t.textureType == MTLTextureType2DArray ? std::min<uint32_t>(ct.base_slice, (uint32_t)t.arrayLength - 1) : 0;
+            nx_any_rt = true;
+            if (key.color[c]) {
+                if (key.color[c] != t || key.color_slice[c] != sl) {
+                    g_pass_splits.la_stop_diff++;
+                    stop = true;
+                    break;
+                }
+            } else {
+                if (cur_sc.x + cur_sc.width > t.width || cur_sc.y + cur_sc.height > t.height) {
+                    g_pass_splits.la_stop_sc++;
+                    stop = true;
+                    break;
+                }
+                cand_color[c] = t;
+                cand_cslice[c] = sl;
+                cand_caddr[c] = ct.address;
+                cand_csize[c] =
+                    ct.slice_bytes ? (uint64_t)ct.slice_bytes * std::max(1u, ct.num_slices) : (uint64_t)ct.pitch * ct.height * 4;
+                cand.color[c] = t;
+                cand.color_slice[c] = sl;
+                cand.color_addr[c] = cand_caddr[c];
+                cand.color_size[c] = cand_csize[c];
+            }
+        }
+        if (stop) break;
+
+        const bool nx_want_depth = nrs.ds.depth_test || nrs.ds.stencil_test;
+        if (nx_want_depth && nrs.depth.bound && nrs.depth.mtl_format) {
+            const DepthTarget& ndb = nrs.depth;
+            if (ndb.num_samples > 1) {
+                g_pass_splits.la_stop_diff++;
+                break;
+            }
+            const uint32_t nx_aa = 1u << (nx->regs[0xA2F8] & 7);
+            if (eqaa_twins && nx_aa > 1 && nx_aa <= 4 && !nrs.ds.stencil_test && S.dev.programmableSamplePositionsSupported) {
+                g_pass_splits.la_stop_diff++;
+                break;
+            }
+            id<MTLTexture> grown_from = nil;
+            id<MTLTexture> dt = S.tex->GetDepthTarget(ndb, &grown_from, false);
+            if (!dt || grown_from || dt.sampleCount != 1) {
+                g_pass_splits.la_stop_diff++;
+                break;
+            }
+            const uint32_t dc = nx->regs[0xA200];
+            const bool d_en = (dc >> 1) & 1, d_wr = (dc >> 2) & 1;
+            const uint32_t htile_sl = std::min<uint32_t>(ndb.base_slice, 63);
+            const bool htile_pending =
+                ndb.htile_enable && IsMetaClearedPending(ndb.htile_address, htile_sl, HtileSliceBytesOf(ndb));
+            if ((ndb.depth_clear_enable && d_en && d_wr) || htile_pending ||
+                (ndb.stencil_clear_enable && HasStencil(dt.pixelFormat))) {
+                g_pass_splits.la_stop_clr++;
+                break;
+            }
+            const uint32_t dsl = dt.textureType == MTLTextureType2DArray
+                                     ? std::min<uint32_t>(ndb.base_slice, (uint32_t)dt.arrayLength - 1)
+                                     : 0;
+            nx_any_rt = true;
+            if (key.depth) {
+                if (key.depth != dt || key.depth_slice != dsl) {
+                    g_pass_splits.la_stop_diff++;
+                    break;
+                }
+            } else {
+                if (cur_sc.x + cur_sc.width > dt.width || cur_sc.y + cur_sc.height > dt.height) {
+                    g_pass_splits.la_stop_sc++;
+                    break;
+                }
+                cand_depth = dt;
+                cand_dslice = dsl;
+                cand_daddr = ndb.z_read_address;
+                cand_saddr = ndb.stencil_read_address;
+                cand_dsize = ndb.slice_bytes ? (uint64_t)ndb.slice_bytes * std::max(1u, ndb.num_slices)
+                                             : (uint64_t)ndb.pitch * ndb.height * 4;
+                cand.depth = dt;
+                cand.depth_slice = dsl;
+                cand.depth_addr = cand_daddr;
+                cand.depth_size = cand_dsize;
+                cand.stencil_addr = cand_saddr;
+                cand.stencil_size = cand_dsize;
+            }
+        }
+        if (!nx_any_rt) {
+            g_pass_splits.la_stop_nondraw++;
+            break;
+        }
+
+        {
+            StageImagesScope nx_images(&nx->vs_img, &nx->ps_img, nullptr);
+            if (HasPassAttachmentHazard(key, nx->vs, nx->vs_flat, nx->ps, nx->ps_flat)) {
+                g_pass_splits.la_stop_haz++;
+                break;
+            }
+        }
+
+        const bool has_new = cand_depth != nil || cand.color[0] || cand.color[1] || cand.color[2] || cand.color[3] ||
+                             cand.color[4] || cand.color[5] || cand.color[6] || cand.color[7];
+        if (has_new) {
+            bool conflict = false;
+            for (size_t j = encq::t_batch_idx; j <= i; ++j) {
+                const DrawRec* dj = (j == encq::t_batch_idx) ? &cur : (*encq::t_batch)[j].draw;
+                if (!dj) continue;
+                StageImagesScope dj_images(&dj->vs_img, &dj->ps_img, nullptr);
+                if (HasPassAttachmentHazard(cand, dj->vs, dj->vs_flat, dj->ps, dj->ps_flat)) {
+                    conflict = true;
+                    break;
+                }
+            }
+            if (conflict) {
+                g_pass_splits.la_stop_haz++;
+                break;
+            }
+            for (int c = 0; c < 8; ++c) {
+                if (!cand_color[c]) continue;
+                key.color[c] = cand_color[c];
+                key.color_slice[c] = cand_cslice[c];
+                key.color_addr[c] = cand_caddr[c];
+                key.color_size[c] = cand_csize[c];
+                hold[c] = cand_color[c];
+                color_fmt[c] = (uint32_t)cand_color[c].pixelFormat;
+                g_pass_splits.la_added++;
+            }
+            if (cand_depth) {
+                key.depth = cand_depth;
+                key.depth_slice = cand_dslice;
+                key.depth_addr = cand_daddr;
+                key.depth_size = cand_dsize;
+                key.stencil_addr = cand_saddr;
+                key.stencil_size = cand_dsize;
+                hold[8] = cand_depth;
+                depth_fmt = (uint32_t)cand_depth.pixelFormat;
+                g_pass_splits.la_added++;
+            }
+        }
+    }
+}
+
 void DrawEncode(DrawRec& r) {
     const AliasJob alias_job;
     const TableReadEncoded table_read(r.table_snap);
@@ -12343,8 +12697,72 @@ void DrawEncode(DrawRec& r) {
                 rt_h = std::max(1u, std::min(16384u, rs.scissor.y + rs.scissor.height));
             }
         }
+        key.samples = samples;
         key.width = any_rt ? 0 : rt_w;
         key.height = any_rt ? 0 : rt_h;
+
+        // ---- viewport / scissor
+        MTLViewport vp;
+        MTLScissorRect sc;
+        const uint32_t pw = any_rt ? rt_w : key.width, ph = any_rt ? rt_h : key.height;
+        if (rs.num_viewports > 0) {
+            const Viewport& v = rs.viewports[0];
+            if (v.flip_y) RLog("flip-y", "%s: positive viewport yscale (y flip) not supported; drawn mirrored", args.name);
+            vp = ToMTLViewport(v);
+            vp.znear = std::min(1.0, std::max(0.0, vp.znear));
+            vp.zfar = std::min(1.0, std::max(0.0, vp.zfar));
+            sc = ToMTLScissor(rs.scissors[0], pw, ph);
+        } else {
+            vp = MTLViewport{0, 0, (double)pw, (double)ph, 0, 1};
+            sc = ToMTLScissor(rs.scissor, pw, ph);
+        }
+        // EQAA (multisampled rasterization, single-sample targets): coverage and depth are
+        // evaluated at the location of sample 0, so rasterize the single-sample pass there
+        // (Metal has no custom sample positions for single-sample passes).
+        if (aa_samples > 1 && samples == 1) {
+            const uint32_t b = regs[0xA2FE] & 0xFF;
+            const int sx = (int)((b & 0xF) ^ 8) - 8, sy = (int)(((b >> 4) & 0xF) ^ 8) - 8;
+            vp.originX -= sx / 16.0;
+            vp.originY -= sy / 16.0;
+        }
+        if (sc.width == 0 || sc.height == 0) {
+            RLog("scissor-empty", "%s: empty scissor (%u,%u %ux%u) on %ux%u target; skipped", args.name,
+                 rs.scissor.x, rs.scissor.y, rs.scissor.width, rs.scissor.height, pw, ph);
+            NoteSkip(SkipReason::ScissorEmpty);
+            return;
+        }
+
+        const bool base_omit_ok = (samples == 1 && !key.sample_locs && any_rt);
+        bool allow_depth_omit = false;
+        if (base_omit_ok && S.be->OpenEncoder() == GnmEncoder::Render) {
+            uint32_t pass_w = UINT32_MAX, pass_h = UINT32_MAX;
+            bool pass_has_rt = false;
+            for (int i = 0; i < 8; ++i) {
+                if (S.pass.color[i]) {
+                    pass_w = std::min<uint32_t>(pass_w, (uint32_t)S.pass.color[i].width);
+                    pass_h = std::min<uint32_t>(pass_h, (uint32_t)S.pass.color[i].height);
+                    pass_has_rt = true;
+                }
+            }
+            if (S.pass.depth) {
+                pass_w = std::min<uint32_t>(pass_w, (uint32_t)S.pass.depth.width);
+                pass_h = std::min<uint32_t>(pass_h, (uint32_t)S.pass.depth.height);
+                pass_has_rt = true;
+            }
+            allow_depth_omit = !pass_has_rt || (sc.x + sc.width <= pass_w && sc.y + sc.height <= pass_h);
+        }
+        const bool can_subsume_open =
+            allow_depth_omit && S.be->OpenEncoder() == GnmEncoder::Render && S.pass.CanSubsume(key, true) &&
+            !clr.any() && !HasDeferredHleCopies() &&
+            !HasPassAttachmentHazard(S.pass, vs, r.vs_flat, ps, r.ps_flat);
+        if (can_subsume_open) {
+            for (int i = 0; i < 8; ++i) {
+                if (!color_fmt[i] && S.pass.color[i]) color_fmt[i] = (uint32_t)S.pass.color[i].pixelFormat;
+            }
+            if (!depth_fmt && S.pass.depth) depth_fmt = (uint32_t)S.pass.depth.pixelFormat;
+        } else if (base_omit_ok) {
+            ApplyPassLookahead(r, key, hold, color_fmt, depth_fmt, sc);
+        }
 
         // ---- vertex inputs (shadPS4 GraphicsPipeline::GetVertexInputs / BindVertexBuffers)
         // reused from draw to draw (only the encoder runs DrawEncode)
@@ -12421,37 +12839,6 @@ void DrawEncode(DrawRec& r) {
             } else {
                 NoteSkip(SkipReason::PipelineFailed); // its build failed (logged)
             }
-            return;
-        }
-
-        // ---- viewport / scissor
-        MTLViewport vp;
-        MTLScissorRect sc;
-        const uint32_t pw = any_rt ? rt_w : key.width, ph = any_rt ? rt_h : key.height;
-        if (rs.num_viewports > 0) {
-            const Viewport& v = rs.viewports[0];
-            if (v.flip_y) RLog("flip-y", "%s: positive viewport yscale (y flip) not supported; drawn mirrored", args.name);
-            vp = ToMTLViewport(v);
-            vp.znear = std::min(1.0, std::max(0.0, vp.znear));
-            vp.zfar = std::min(1.0, std::max(0.0, vp.zfar));
-            sc = ToMTLScissor(rs.scissors[0], pw, ph);
-        } else {
-            vp = MTLViewport{0, 0, (double)pw, (double)ph, 0, 1};
-            sc = ToMTLScissor(rs.scissor, pw, ph);
-        }
-        // EQAA (multisampled rasterization, single-sample targets): coverage and depth are
-        // evaluated at the location of sample 0, so rasterize the single-sample pass there
-        // (Metal has no custom sample positions for single-sample passes).
-        if (aa_samples > 1 && samples == 1) {
-            const uint32_t b = regs[0xA2FE] & 0xFF;
-            const int sx = (int)((b & 0xF) ^ 8) - 8, sy = (int)(((b >> 4) & 0xF) ^ 8) - 8;
-            vp.originX -= sx / 16.0;
-            vp.originY -= sy / 16.0;
-        }
-        if (sc.width == 0 || sc.height == 0) {
-            RLog("scissor-empty", "%s: empty scissor (%u,%u %ux%u) on %ux%u target; skipped", args.name,
-                 rs.scissor.x, rs.scissor.y, rs.scissor.width, rs.scissor.height, pw, ph);
-            NoteSkip(SkipReason::ScissorEmpty);
             return;
         }
 
@@ -12595,7 +12982,12 @@ void DrawEncode(DrawRec& r) {
         std::vector<uint32_t>& vs_flat = r.vs_flat;
         std::vector<uint32_t>& ps_flat = r.ps_flat;
         for (int i = 0; i < 8; ++i)
-            if (key.color[i]) RefreshGuestNewer(rs.color[i].address, key.color[i], true);
+            if (key.color[i]) {
+                const bool written_by_r =
+                    rs.color[i].enabled && (mrt_mask & (1u << i)) && rs.color[i].mtl_format &&
+                    key.color_addr[i] == rs.color[i].address;
+                RefreshGuestNewer(key.color_addr[i], key.color[i], written_by_r);
+            }
         if (cap::g_pass) cap::NoteTargets(key, rs, clr.depth, clr.stencil);
         const TableStage table_stages[2] = {{vs, vs_ud, &r.vs_rt, &vs_flat, &r.vs_img},
                                             {ps, ps_ud, &r.ps_rt, &ps_flat, &r.ps_img}};
@@ -12617,11 +13009,54 @@ void DrawEncode(DrawRec& r) {
         if (S.be->OpenEncoder() == GnmEncoder::Render) {
             key.has_hazard = HasPassAttachmentHazard(S.pass, vs, vs_flat, ps, ps_flat);
         }
-        if (!BeginPass(key, clr, hold, true)) {
+        if (!BeginPass(key, clr, hold, true, allow_depth_omit)) {
             NoteSkip(SkipReason::PassBegin);
             return;
         }
         meta_undo.Keep(); // the pass's load actions hold the clears now
+        if (!g_only_clears && S.be->OpenEncoder() == GnmEncoder::Render) {
+            bool fmt_changed = false;
+            for (int i = 0; i < 8; ++i) {
+                const uint32_t af = S.pass.color[i] ? (uint32_t)S.pass.color[i].pixelFormat : 0;
+                if (af != color_fmt[i]) {
+                    color_fmt[i] = af;
+                    fmt_changed = true;
+                }
+            }
+            const uint32_t adf = S.pass.depth ? (uint32_t)S.pass.depth.pixelFormat : 0;
+            if (adf != depth_fmt) {
+                depth_fmt = adf;
+                fmt_changed = true;
+            }
+            if (fmt_changed) {
+                if (rect) {
+                    RenderState crs = rs;
+                    crs.raster.rasterizer_discard = true;
+                    rect_capture = GetGfxPipeline(rect->capture, nullptr, crs, color_fmt, write_mask, depth_fmt,
+                                                  samples, vattrs, vlocs, false);
+                    if (!rect_capture) {
+                        if (PipelineCompiling()) {
+                            NoteDrawPendingCompile();
+                            g_hitch.pending_draws++;
+                        } else {
+                            NoteSkip(SkipReason::PipelineFailed);
+                        }
+                        return;
+                    }
+                }
+                pso = GetGfxPipeline(rect ? rect->expand : vs, ps, rs, color_fmt, write_mask, depth_fmt, samples,
+                                     rect ? no_attrs : vattrs, rect ? no_locs : vlocs, a2c);
+                if (!pso) {
+                    if (PipelineCompiling()) {
+                        NoteDrawPendingCompile();
+                        g_hitch.pending_draws++;
+                    } else {
+                        NoteSkip(SkipReason::PipelineFailed);
+                    }
+                    return;
+                }
+            }
+        }
         if (g_only_clears) { // debug (Metal 4 without draws): the pass's clears happen, the draw does not
             S.n_clear_only++;
             return;
@@ -14256,6 +14691,11 @@ template <class Describe> void PresentStats(Describe&& describe) {
                 g_pass_splits.clr_any / 300.0, g_pass_splits.depth_diff / 300.0,
                 g_pass_splits.color_subset / 300.0, g_pass_splits.color_diff / 300.0,
                 g_pass_splits.dim_diff / 300.0, g_pass_splits.hazard / 300.0);
+        fprintf(stderr, "[gnm-draw] lookahead per frame: calls=%.1f no_next=%.1f added=%.1f stop(nondraw=%.1f clr=%.1f pend=%.1f diff=%.1f sc=%.1f haz=%.1f)\n",
+                g_pass_splits.la_calls / 300.0, g_pass_splits.la_no_next / 300.0, g_pass_splits.la_added / 300.0,
+                g_pass_splits.la_stop_nondraw / 300.0, g_pass_splits.la_stop_clr / 300.0,
+                g_pass_splits.la_stop_pend / 300.0, g_pass_splits.la_stop_diff / 300.0,
+                g_pass_splits.la_stop_sc / 300.0, g_pass_splits.la_stop_haz / 300.0);
         g_pass_splits = {};
         S.n_passes = S.n_depth_loads = S.n_cencs = S.n_cbarriers = S.n_cdisp = S.n_occl_splits = 0;
         S.n_occl_events = S.n_occl_draws = S.n_occl_missed = 0;

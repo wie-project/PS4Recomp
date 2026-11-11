@@ -1106,9 +1106,13 @@ private:
     void SupersededLocked(std::vector<Entry*>* v, std::vector<char>* sup) const;
     // last use stamped on lookups (SetUse); before the first commit, command buffer 1
     std::atomic<uint64_t> use_seq_{1}, use_ns_{0};
-    // EvictSampled scratch, kept to avoid allocations per pass
+    // EvictSampled / SupersededLocked scratch, kept to avoid allocations per pass
     std::vector<ps4_texcache_item> evict_items_;
     std::vector<std::unordered_multimap<uint64_t, Entry*>::iterator> evict_its_;
+    mutable std::vector<Entry*> sup_v_;
+    mutable std::vector<char> sup_flags_;
+    mutable std::vector<uint64_t> sup_max_end_;
+    mutable std::vector<std::pair<uint64_t, uint64_t>> sup_cover_;
 };
 #endif
 

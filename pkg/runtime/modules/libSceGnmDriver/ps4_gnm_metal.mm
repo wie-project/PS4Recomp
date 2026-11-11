@@ -552,6 +552,7 @@ static void HandleDmaData(GuestContext *ctx, const uint32_t *p, uint32_t payload
         ps4draw::GpuDma(src_gds, src_sel == 2, src_sel == 2 ? 0 : (src_gds ? p[1] : src), p[1], dst_gds,
                         dst_gds ? p[3] : dst, n, CpQueue()))
         return;
+    ps4draw::GmCpSync(CpQueue());
     SyncGpu(4);
     if (src_sel == 2) {
         uint32_t v = p[1];
@@ -987,7 +988,6 @@ static bool ProcessGfxPackets(GuestContext *ctx, GfxStream &st) {
                 HandleWriteData(ctx, payload, payload_dw);
                 break;
             case PM4_OP_DMA_DATA:
-                ps4draw::ComputeBarrier(ps4draw::kQueueGfx);
                 HandleDmaData(ctx, payload, payload_dw);
                 break;
             case PM4_OP_INDIRECT_BUFFER: {
@@ -1234,7 +1234,6 @@ static bool ProcessComputePackets(ComputeSubmit &sub, bool skip_wait) {
             }
             break;
         case PM4_OP_DMA_DATA:
-            ps4draw::ComputeBarrier(ps4draw::kQueueCompute);
             HandleDmaData(ctx, payload, payload_dw);
             break;
         case PM4_OP_SET_SH_REG: {

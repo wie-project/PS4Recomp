@@ -45,10 +45,10 @@ void ps4_gpumem_policy_init(ps4_gpumem_policy *p, uint64_t mem_total, const char
     }
     p->nocopy_warn = 1ull << 30;
     p->nocopy_max = 2ull << 30;
-    const uint64_t idle = idle_s ? parse_u64(idle_s) : 30;
+    const uint64_t idle = idle_s ? parse_u64(idle_s) : 6;
     // "0" disables idle release; junk keeps the default
     const int idle_zero = idle_s && idle_s[0] == '0' && idle_s[1] == 0;
-    p->idle_ns = idle_zero ? 0 : (idle ? idle : 30) * 1000000000ull;
+    p->idle_ns = idle_zero ? 0 : (idle ? idle : 6) * 1000000000ull;
     p->press_ns = 250000000ull;
 }
 
@@ -94,8 +94,13 @@ uint64_t ps4_texcache_select(ps4_texcache_item *items, uint64_t n, uint64_t tota
         items[m++] = it;
     }
     qsort(items, (size_t)m, sizeof(*items), texcache_lru_cmp);
+    const uint64_t target =
+        (gpu_over && p->low_water != UINT64_MAX) ? p->low_water / 2 : p->low_water;
+    const uint64_t max_count = (p->budget != UINT64_MAX && total > p->budget * 2) ? UINT64_MAX : 64ull;
+    const uint64_t max_bytes = (p->budget != UINT64_MAX && total > p->budget * 2) ? UINT64_MAX : (32ull << 20);
     uint64_t k = 0;
-    while (k < m && (gpu_over || (*freed < total && total - *freed > p->low_water))) *freed += items[k++].bytes;
+    while (k < m && *freed < total && total - *freed > target && k < max_count && *freed < max_bytes)
+        *freed += items[k++].bytes;
     return k;
 }
 

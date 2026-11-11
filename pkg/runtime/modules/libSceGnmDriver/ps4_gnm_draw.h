@@ -145,6 +145,7 @@ AsyncComputeCounts GetAsyncComputeCounts();
 // queue whose packet it is; from here on the CP reads that queue does for its later draws and
 // dispatches see what the guest memory dispatches handed out so far write.
 void ComputeBarrier(int queue);
+void GmCpSync(int queue);
 // Commit the open command buffer; wait for all submitted work to finish when `wait`.
 void Flush(bool wait);
 // The end of a compute submission (CP thread): its work is committed now, or held in the open

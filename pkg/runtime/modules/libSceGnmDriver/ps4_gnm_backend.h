@@ -249,6 +249,8 @@ public:
     // whether work was encoded there between two looks (the renderer's asynchronous compute routing).
     uint64_t EncoderSerialOf(GnmCmdTarget t) const { return enc_[(int)t].serial; }
     uint64_t CommandsOf(GnmCmdTarget t) const { return enc_[(int)t].commands; }
+    bool EncoderDirty() const { return enc_[(int)enc_target_].dirty_for_barrier; }
+    void ClearEncoderDirty() { enc_[(int)enc_target_].dirty_for_barrier = false; }
     virtual bool BeginRender(const GnmPassDesc& d) = 0;
     virtual void BeginCompute(bool serial) = 0; // serial: dispatches in order (PS4_GNM_SERIAL_COMPUTE, uploads)
     virtual void BeginCopies() = 0;
@@ -349,7 +351,9 @@ public:
 protected:
     GnmBindOps ops_{};
     void BeforeCommand() {
-        enc_[(int)enc_target_].commands++;
+        EncoderTrack& x = enc_[(int)enc_target_];
+        x.commands++;
+        x.dirty_for_barrier = true;
         if (before_cmd_) before_cmd_(before_ctx_);
     }
     GnmBeforeCommandFn before_cmd_ = nullptr;
@@ -364,14 +368,20 @@ protected:
         EncoderTrack& x = enc_[(int)enc_target_];
         x.open = e;
         x.serial = ++serials_;
+        x.dirty_for_barrier = false;
     }
-    void NoteEncoderEnded() { enc_[(int)enc_target_].open = GnmEncoder::None; }
+    void NoteEncoderEnded() {
+        EncoderTrack& x = enc_[(int)enc_target_];
+        x.open = GnmEncoder::None;
+        x.dirty_for_barrier = false;
+    }
 
 private:
     struct EncoderTrack {
         GnmEncoder open = GnmEncoder::None;
         uint64_t serial = 0;
         uint64_t commands = 0;
+        bool dirty_for_barrier = false;
     };
     EncoderTrack enc_[3]{}; // per GnmCmdTarget
     uint64_t serials_ = 0;

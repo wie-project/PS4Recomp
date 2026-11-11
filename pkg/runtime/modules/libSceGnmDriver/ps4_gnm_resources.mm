@@ -3021,24 +3021,23 @@ void TextureCache::SupersededLocked(std::vector<Entry*>* v, std::vector<char>* s
         if (kv.second->kind != Entry::Sampled) v->push_back(kv.second);
     std::sort(v->begin(), v->end(), [](const Entry* a, const Entry* b) { return a->address < b->address; });
     auto end_of = [](const Entry* e) { return e->address + std::max<uint64_t>(e->size, 1); };
-    std::vector<uint64_t> max_end(v->size()); // max end over v[0..i]
-    for (size_t i = 0; i < v->size(); ++i) max_end[i] = std::max(i ? max_end[i - 1] : 0, end_of((*v)[i]));
+    sup_max_end_.resize(v->size()); // max end over v[0..i]
+    for (size_t i = 0; i < v->size(); ++i) sup_max_end_[i] = std::max(i ? sup_max_end_[i - 1] : 0, end_of((*v)[i]));
     sup->assign(v->size(), 0);
-    std::vector<std::pair<uint64_t, uint64_t>> cover;
     for (size_t i = 0; i < v->size(); ++i) {
         const Entry* e = (*v)[i];
         const uint64_t a = e->address, b = end_of(e);
-        cover.clear();
+        sup_cover_.clear();
         auto take = [&](const Entry* o) {
             if (o != e && o->last_write_seq > e->last_seq && o->write_lo < b && o->write_hi > a)
-                cover.push_back({std::max(o->write_lo, a), std::min(o->write_hi, b)});
+                sup_cover_.push_back({std::max(o->write_lo, a), std::min(o->write_hi, b)});
         };
         for (size_t j = i + 1; j < v->size() && (*v)[j]->address < b; ++j) take((*v)[j]);
-        for (size_t j = i; j-- > 0 && max_end[j] > a;) take((*v)[j]); // earlier starts reaching into A
-        if (cover.empty()) continue;
-        std::sort(cover.begin(), cover.end());
+        for (size_t j = i; j-- > 0 && sup_max_end_[j] > a;) take((*v)[j]); // earlier starts reaching into A
+        if (sup_cover_.empty()) continue;
+        std::sort(sup_cover_.begin(), sup_cover_.end());
         uint64_t reach = a;
-        for (const auto& c : cover) {
+        for (const auto& c : sup_cover_) {
             if (c.first > reach) break;
             reach = std::max(reach, c.second);
         }
@@ -3071,18 +3070,16 @@ void TextureCache::TakeRetired(std::vector<id<MTLTexture>>* out) {
 TextureCache::GpuOwnedStats TextureCache::GetGpuOwnedStats(uint64_t idle_ns) const {
     GpuOwnedStats g;
     TimedLock lk(mutex_);
-    std::vector<Entry*> v;
-    std::vector<char> sup;
-    SupersededLocked(&v, &sup);
+    SupersededLocked(&sup_v_, &sup_flags_);
     const uint64_t now = use_ns_.load(std::memory_order_relaxed);
-    for (size_t i = 0; i < v.size(); ++i) {
-        if (sup[i]) {
+    for (size_t i = 0; i < sup_v_.size(); ++i) {
+        if (sup_flags_[i]) {
             g.superseded_count++;
-            g.superseded_bytes += v[i]->alloc_bytes;
+            g.superseded_bytes += sup_v_[i]->alloc_bytes;
         }
-        if (now > v[i]->last_ns && now - v[i]->last_ns >= idle_ns) {
+        if (now > sup_v_[i]->last_ns && now - sup_v_[i]->last_ns >= idle_ns) {
             g.idle_count++;
-            g.idle_bytes += v[i]->alloc_bytes;
+            g.idle_bytes += sup_v_[i]->alloc_bytes;
         }
     }
     return g;
@@ -3091,12 +3088,10 @@ TextureCache::GpuOwnedStats TextureCache::GetGpuOwnedStats(uint64_t idle_ns) con
 TextureCache::EvictResult TextureCache::EvictSuperseded(uint64_t idle_ns, uint64_t now_ns, uint64_t completed_seq) {
     EvictResult r;
     TimedLock lk(mutex_);
-    std::vector<Entry*> v;
-    std::vector<char> sup;
-    SupersededLocked(&v, &sup);
-    for (size_t i = 0; i < v.size(); ++i) {
-        Entry* e = v[i];
-        if (!sup[i] || e->last_seq > completed_seq || now_ns < e->last_ns || now_ns - e->last_ns < idle_ns) continue;
+    SupersededLocked(&sup_v_, &sup_flags_);
+    for (size_t i = 0; i < sup_v_.size(); ++i) {
+        Entry* e = sup_v_[i];
+        if (!sup_flags_[i] || e->last_seq > completed_seq || now_ns < e->last_ns || now_ns - e->last_ns < idle_ns) continue;
         auto range = entries_.equal_range(e->address);
         for (auto it = range.first; it != range.second; ++it) {
             if (it->second != e) continue;
