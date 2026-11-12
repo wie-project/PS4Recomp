@@ -23,6 +23,18 @@ void shim_sceVoiceQoSConnect(GuestContext *ctx);
 void shim_sceVoiceQoSDisconnect(GuestContext *ctx);
 void shim_sceVoiceQoSGetStatus(GuestContext *ctx);
 
+void shim_sceVoiceQoSCreateLocalEndpoint(GuestContext *ctx);
+void shim_sceVoiceQoSDeleteLocalEndpoint(GuestContext *ctx);
+void shim_sceVoiceQoSCreateRemoteEndpoint(GuestContext *ctx);
+void shim_sceVoiceQoSDeleteRemoteEndpoint(GuestContext *ctx);
+void shim_sceVoiceQoSSetLocalEndpointAttribute(GuestContext *ctx);
+void shim_sceVoiceQoSGetLocalEndpointAttribute(GuestContext *ctx);
+void shim_sceVoiceQoSSetRemoteEndpointAttribute(GuestContext *ctx);
+void shim_sceVoiceQoSGetRemoteEndpointAttribute(GuestContext *ctx);
+void shim_sceVoiceQoSGetConnectionAttribute(GuestContext *ctx);
+void shim_sceVoiceQoSReadPacket(GuestContext *ctx);
+void shim_sceVoiceQoSWritePacket(GuestContext *ctx);
+
 #ifdef __cplusplus
 }
 #endif

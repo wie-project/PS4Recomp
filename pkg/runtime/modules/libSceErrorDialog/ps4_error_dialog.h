@@ -45,6 +45,7 @@ int32_t sceErrorDialogInitialize(void);
 int32_t sceErrorDialogOpen(const OrbisErrorDialogParam *param);
 OrbisCommonDialogStatus sceErrorDialogUpdateStatus(void);
 OrbisCommonDialogStatus sceErrorDialogGetStatus(void);
+int32_t sceErrorDialogClose(void);
 int32_t sceErrorDialogTerminate(void);
 
 // Shims
@@ -52,6 +53,7 @@ void shim_sceErrorDialogInitialize(GuestContext *ctx);
 void shim_sceErrorDialogOpen(GuestContext *ctx);
 void shim_sceErrorDialogUpdateStatus(GuestContext *ctx);
 void shim_sceErrorDialogGetStatus(GuestContext *ctx);
+void shim_sceErrorDialogClose(GuestContext *ctx);
 void shim_sceErrorDialogTerminate(GuestContext *ctx);
 
 #ifdef __cplusplus

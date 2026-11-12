@@ -99,6 +99,17 @@ OrbisCommonDialogStatus sceErrorDialogUpdateStatus(void) {
     return final_st;
 }
 
+int32_t sceErrorDialogClose(void) {
+    pthread_mutex_lock(&g_error_mutex);
+    if (g_error_status != ORBIS_COMMON_DIALOG_STATUS_RUNNING) {
+        pthread_mutex_unlock(&g_error_mutex);
+        return (int32_t)0x80b8000b; // NOT_RUNNING
+    }
+    g_error_status = ORBIS_COMMON_DIALOG_STATUS_FINISHED;
+    pthread_mutex_unlock(&g_error_mutex);
+    return 0;
+}
+
 int32_t sceErrorDialogTerminate(void) {
     pthread_mutex_lock(&g_error_mutex);
     g_error_status = ORBIS_COMMON_DIALOG_STATUS_NONE;
@@ -127,6 +138,11 @@ void shim_sceErrorDialogUpdateStatus(GuestContext *ctx) {
 
 void shim_sceErrorDialogGetStatus(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceErrorDialogGetStatus();
+    SHIM_RETURN();
+}
+
+void shim_sceErrorDialogClose(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceErrorDialogClose();
     SHIM_RETURN();
 }
 

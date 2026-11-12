@@ -43,6 +43,11 @@ int32_t sceScreenShotSetOverlayImageWithOrigin(const char *filePath, int32_t pos
     return 0;
 }
 
+int32_t sceScreenShotSetParam(const void *param) {
+    (void)param;
+    return 0;
+}
+
 // Shims
 void shim_sceScreenShotEnable(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceScreenShotEnable();
@@ -63,5 +68,13 @@ void shim_sceScreenShotSetOverlayImage(GuestContext *ctx) {
 void shim_sceScreenShotSetOverlayImageWithOrigin(GuestContext *ctx) {
     const char *filePath = ctx->rdi ? (const char *)(ctx->mem_base + ctx->rdi) : NULL;
     ctx->rax = (uint64_t)sceScreenShotSetOverlayImageWithOrigin(filePath, (int32_t)ctx->rsi, (int32_t)ctx->rdx, (int32_t)ctx->rcx);
+    SHIM_RETURN();
+}
+
+void shim_sceScreenShotSetParam(GuestContext *ctx) {
+    const void *param = (ctx && ctx->rdi && ctx->mem_base && ctx->rdi < ctx->mem_size)
+                            ? (const void *)(ctx->mem_base + ctx->rdi)
+                            : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceScreenShotSetParam(param);
     SHIM_RETURN();
 }

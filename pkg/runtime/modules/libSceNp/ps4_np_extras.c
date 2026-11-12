@@ -579,5 +579,135 @@ void shim_sceNpWebApiGetErrorCode(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+//=============================================================================
+// Catherine / Offline NpScore, NpMatching2, NpTus additions
+//=============================================================================
+
+void shim_sceNpScoreRecordGameDataAsync(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreRecordScoreAsync(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetRankingByAccountId(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetGameDataByAccountId(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetRankingByRangeA(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetGameDataByAccountIdAsync(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetRankingByAccountIdAsync(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetFriendsRankingA(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpScoreGetRankingByRangeAAsync(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2RegisterLobbyMessageCallback(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2RegisterRoomMessageCallback(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2AbortContextStart(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2SignalingGetConnectionInfoA(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)NPX_SIGNALING_ERROR_CONN_NOT_FOUND;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2GetRoomDataExternalList(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2GetRoomMemberDataInternal(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2GetUserInfoListA(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2SendRoomMessage(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2CreateJoinRoomA(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2JoinRoomA(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusSetDataAAsync(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusGetDataAAsync(GuestContext *ctx) {
+    (void)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    SHIM_RETURN();
+}
+
 
 

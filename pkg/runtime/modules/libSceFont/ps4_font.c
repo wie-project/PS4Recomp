@@ -6,28 +6,44 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
-#include <errno.h>
 
-#define MAX_FONTS 32
+#define MAX_FONTS 128
 #define MAX_STRINGS 128
 #define MAX_WRITINGS 64
+
+typedef struct FontBacking {
+    uint8_t *data;
+    size_t size;
+    uint32_t subfont_index;
+    int refs;
+} FontBacking;
 
 typedef struct InternalFontHandle {
     int in_use;
     uint64_t guest_addr;
     uint32_t magic; // 0x0F02
+    uint32_t scale_unit; // 0 = pixel, 1 = point
     float scale_w;
     float scale_h;
     float render_scale_w;
     float render_scale_h;
+    float weight_x;
+    float weight_y;
+    float slant;
+    float render_weight_x;
+    float render_weight_y;
+    float render_slant;
     uint32_t dpi_x;
     uint32_t dpi_y;
     uint64_t renderer_guest;
     FT_Face ft_face;
+    FontBacking *backing;
     uint64_t library_guest;
 } InternalFontHandle;
 
@@ -89,6 +105,41 @@ static FT_Face load_system_fallback_face(FT_Library ft_lib) {
     return NULL;
 }
 
+static FontBacking *backing_retain(FontBacking *b) {
+    if (b) b->refs++;
+    return b;
+}
+
+static void backing_release(FontBacking *b) {
+    if (!b) return;
+    b->refs--;
+    if (b->refs <= 0) {
+        free(b->data);
+        free(b);
+    }
+}
+
+static void font_compute_pixel_scale(const InternalFontHandle *h, int use_render,
+                                     float *out_w, float *out_h) {
+    float w = use_render ? h->render_scale_w : h->scale_w;
+    float ht = use_render ? h->render_scale_h : h->scale_h;
+    if (!use_render && h->scale_unit != 0) {
+        if (h->dpi_x != 0) w *= (float)h->dpi_x / 72.0f;
+        if (h->dpi_y != 0) ht *= (float)h->dpi_y / 72.0f;
+    }
+    if (w <= 0.0f) w = 16.0f;
+    if (ht <= 0.0f) ht = 16.0f;
+    if (out_w) *out_w = w;
+    if (out_h) *out_h = ht;
+}
+
+static void font_apply_ft_size(InternalFontHandle *h, int use_render) {
+    if (!h || !h->ft_face) return;
+    float pw = 16.0f, ph = 16.0f;
+    font_compute_pixel_scale(h, use_render, &pw, &ph);
+    FT_Set_Pixel_Sizes(h->ft_face, (FT_UInt)(pw + 0.5f), (FT_UInt)(ph + 0.5f));
+}
+
 static InternalFontHandle *find_or_create_font(uint64_t guest_addr) {
     for (int i = 0; i < MAX_FONTS; i++) {
         if (g_fonts[i].in_use && g_fonts[i].guest_addr == guest_addr) {
@@ -101,10 +152,15 @@ static InternalFontHandle *find_or_create_font(uint64_t guest_addr) {
             g_fonts[i].in_use = 1;
             g_fonts[i].guest_addr = guest_addr;
             g_fonts[i].magic = 0x0F02;
+            g_fonts[i].scale_unit = 0;
             g_fonts[i].scale_w = 16.0f;
             g_fonts[i].scale_h = 16.0f;
             g_fonts[i].render_scale_w = 16.0f;
             g_fonts[i].render_scale_h = 16.0f;
+            g_fonts[i].weight_x = 1.0f;
+            g_fonts[i].weight_y = 1.0f;
+            g_fonts[i].render_weight_x = 1.0f;
+            g_fonts[i].render_weight_y = 1.0f;
             g_fonts[i].dpi_x = 72;
             g_fonts[i].dpi_y = 72;
             return &g_fonts[i];
@@ -433,8 +489,15 @@ void shim_sceFontCloseFont(GuestContext *ctx) {
     pthread_mutex_lock(&g_font_mutex);
     InternalFontHandle *h = get_font(fontGuest);
     if (h) {
+        if (h->ft_face) {
+            FT_Done_Face(h->ft_face);
+            h->ft_face = NULL;
+        }
+        if (h->backing) {
+            backing_release(h->backing);
+            h->backing = NULL;
+        }
         h->in_use = 0;
-        h->ft_face = NULL;
     }
     if (fontGuest && ctx->mem_base) {
         *(uint16_t *)(ctx->mem_base + fontGuest) = 0;
@@ -494,9 +557,7 @@ void shim_sceFontSetupRenderScalePixel(GuestContext *ctx) {
     if (h) {
         h->render_scale_w = scale_w > 0.0f ? scale_w : 16.0f;
         h->render_scale_h = scale_h > 0.0f ? scale_h : 16.0f;
-        if (h->ft_face) {
-            FT_Set_Pixel_Sizes(h->ft_face, (FT_UInt)h->render_scale_w, (FT_UInt)h->render_scale_h);
-        }
+        font_apply_ft_size(h, 1);
     }
     pthread_mutex_unlock(&g_font_mutex);
     ctx->rax = ORBIS_FONT_OK;
@@ -511,11 +572,10 @@ void shim_sceFontSetScalePixel(GuestContext *ctx) {
     pthread_mutex_lock(&g_font_mutex);
     InternalFontHandle *h = get_font(fontGuest);
     if (h) {
+        h->scale_unit = 0;
         h->scale_w = scale_w > 0.0f ? scale_w : 16.0f;
         h->scale_h = scale_h > 0.0f ? scale_h : 16.0f;
-        if (h->ft_face) {
-            FT_Set_Pixel_Sizes(h->ft_face, (FT_UInt)h->scale_w, (FT_UInt)h->scale_h);
-        }
+        font_apply_ft_size(h, 0);
     }
     pthread_mutex_unlock(&g_font_mutex);
     ctx->rax = ORBIS_FONT_OK;
@@ -1098,8 +1158,50 @@ void shim_sceFontWordsFindWordCharacters(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-// 48. sceFontRenderCharGlyphImageHorizontal
-void shim_sceFontRenderCharGlyphImageHorizontal(GuestContext *ctx) {
+static int32_t font_register_opened_handle(GuestContext *ctx, uint64_t libGuest,
+                                           uint64_t preallocFontGuest, FT_Face face,
+                                           FontBacking *backing, const InternalFontHandle *copy_from,
+                                           uint64_t *out_handle_guest) {
+    uint64_t fontGuest = preallocFontGuest;
+    if (!fontGuest) {
+        fontGuest = recomp_vm_alloc_named(ctx, 0x1000, PROT_READ | PROT_WRITE, 0, "font_handle");
+        if (!fontGuest) {
+            return ORBIS_FONT_ERROR_ALLOCATION_FAILED;
+        }
+    }
+    uint8_t *hPtr = (uint8_t *)(ctx->mem_base + fontGuest);
+    memset(hPtr, 0, 0x100);
+    *(uint16_t *)(hPtr + 0x00) = 0x0F02;
+    *(uint64_t *)(hPtr + 0x28) = libGuest;
+
+    InternalFontHandle *h = find_or_create_font(fontGuest);
+    if (!h) {
+        return ORBIS_FONT_ERROR_ALLOCATION_FAILED;
+    }
+    h->library_guest = libGuest;
+    h->ft_face = face;
+    h->backing = backing;
+    if (copy_from) {
+        h->scale_unit = copy_from->scale_unit;
+        h->scale_w = copy_from->scale_w;
+        h->scale_h = copy_from->scale_h;
+        h->render_scale_w = copy_from->render_scale_w;
+        h->render_scale_h = copy_from->render_scale_h;
+        h->weight_x = copy_from->weight_x;
+        h->weight_y = copy_from->weight_y;
+        h->slant = copy_from->slant;
+        h->render_weight_x = copy_from->render_weight_x;
+        h->render_weight_y = copy_from->render_weight_y;
+        h->render_slant = copy_from->render_slant;
+        h->dpi_x = copy_from->dpi_x;
+        h->dpi_y = copy_from->dpi_y;
+    }
+    font_apply_ft_size(h, 0);
+    *out_handle_guest = fontGuest;
+    return ORBIS_FONT_OK;
+}
+
+static void font_render_glyph_common(GuestContext *ctx, int add_baseline) {
     uint64_t fontGuest = ctx->rdi;
     uint32_t code = (uint32_t)ctx->rsi;
     uint64_t surfGuest = ctx->rdx;
@@ -1108,51 +1210,100 @@ void shim_sceFontRenderCharGlyphImageHorizontal(GuestContext *ctx) {
     uint64_t metricsGuest = ctx->rcx;
     uint64_t resultGuest = ctx->r8;
 
-    (void)x;
-    (void)y;
     (void)resultGuest;
 
-    if (!fontGuest || !surfGuest || !ctx->mem_base) {
+    if (!fontGuest || !ctx->mem_base) {
         ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    if (code == 0) {
+        if (metricsGuest) memset(ctx->mem_base + metricsGuest, 0, sizeof(OrbisFontGlyphMetrics));
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_NO_SUPPORT_CODE;
+        SHIM_RETURN();
+    }
+    if (!surfGuest) {
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
         SHIM_RETURN();
     }
 
     pthread_mutex_lock(&g_font_mutex);
     InternalFontHandle *h = get_font(fontGuest);
-    float adv = h ? h->render_scale_w : 16.0f;
-    float hgt = h ? h->render_scale_h : 16.0f;
+    if (!h) {
+        pthread_mutex_unlock(&g_font_mutex);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
 
-    if (h && h->ft_face && code != 0) {
+    float adv = h->render_scale_w;
+    float hgt = h->render_scale_h;
+    float gw = adv;
+    float gh = hgt;
+    float bx = 0.0f;
+    float by = hgt;
+
+    if (h->ft_face) {
+        font_apply_ft_size(h, 1);
+        float active_slant = h->render_slant != 0.0f ? h->render_slant : h->slant;
+        if (active_slant != 0.0f) {
+            FT_Matrix mat;
+            mat.xx = 0x10000L;
+            mat.xy = (FT_Fixed)(active_slant * 65536.0f);
+            mat.yx = 0;
+            mat.yy = 0x10000L;
+            FT_Set_Transform(h->ft_face, &mat, NULL);
+        } else {
+            FT_Set_Transform(h->ft_face, NULL, NULL);
+        }
+
+        float y_used = y;
+        if (add_baseline) {
+            float asc = (float)(h->ft_face->size->metrics.ascender >> 6);
+            if (asc <= 0.0f) asc = hgt * 0.8f;
+            y_used = y + asc;
+        }
+
         FT_UInt glyph_idx = FT_Get_Char_Index(h->ft_face, code);
         if (glyph_idx != 0 && FT_Load_Glyph(h->ft_face, glyph_idx, FT_LOAD_DEFAULT) == 0) {
             FT_Render_Glyph(h->ft_face->glyph, FT_RENDER_MODE_NORMAL);
             FT_GlyphSlot slot = h->ft_face->glyph;
             adv = (float)(slot->advance.x >> 6);
             if (adv <= 0.0f) adv = h->render_scale_w;
+            gw = (float)(slot->metrics.width >> 6);
+            gh = (float)(slot->metrics.height >> 6);
+            bx = (float)slot->bitmap_left;
+            by = (float)slot->bitmap_top;
 
-            // Draw bitmap into surface if surface has buffer
             OrbisFontRenderSurface *surf = (OrbisFontRenderSurface *)(ctx->mem_base + surfGuest);
             if (surf && surf->buffer && slot->bitmap.buffer) {
+                int sx0 = (int)surf->sc_x0;
+                int sy0 = (int)surf->sc_y0;
+                int sx1 = (int)surf->sc_x1;
+                int sy1 = (int)surf->sc_y1;
+                if (sx0 < 0) sx0 = 0;
+                if (sy0 < 0) sy0 = 0;
+                if (sx1 > surf->width) sx1 = surf->width;
+                if (sy1 > surf->height) sy1 = surf->height;
+
                 int dst_x0 = (int)x + slot->bitmap_left;
-                int dst_y0 = (int)y - slot->bitmap_top;
+                int dst_y0 = (int)y_used - slot->bitmap_top;
                 uint8_t *dst_buf = (uint8_t *)(ctx->mem_base + (uintptr_t)surf->buffer);
                 int bpp = surf->pixelSizeByte > 0 ? surf->pixelSizeByte : 4;
 
                 for (unsigned int row = 0; row < slot->bitmap.rows; row++) {
-                    int py = dst_y0 + row;
-                    if (py < 0 || py >= surf->height) continue;
+                    int py = dst_y0 + (int)row;
+                    if (py < sy0 || py >= sy1) continue;
                     for (unsigned int col = 0; col < slot->bitmap.width; col++) {
-                        int px = dst_x0 + col;
-                        if (px < 0 || px >= surf->width) continue;
+                        int px = dst_x0 + (int)col;
+                        if (px < sx0 || px >= sx1) continue;
                         uint8_t alpha = slot->bitmap.buffer[row * slot->bitmap.pitch + col];
                         if (alpha == 0) continue;
 
                         uint8_t *dst_pixel = dst_buf + py * surf->widthByte + px * bpp;
                         if (bpp == 4) {
-                            dst_pixel[0] = alpha; // B
-                            dst_pixel[1] = alpha; // G
-                            dst_pixel[2] = alpha; // R
-                            dst_pixel[3] = alpha; // A
+                            dst_pixel[0] = alpha;
+                            dst_pixel[1] = alpha;
+                            dst_pixel[2] = alpha;
+                            dst_pixel[3] = alpha;
                         } else if (bpp == 1) {
                             dst_pixel[0] = alpha;
                         }
@@ -1163,16 +1314,568 @@ void shim_sceFontRenderCharGlyphImageHorizontal(GuestContext *ctx) {
     }
     pthread_mutex_unlock(&g_font_mutex);
 
-    if (metricsGuest && ctx->mem_base) {
+    if (metricsGuest) {
         OrbisFontGlyphMetrics *m = (OrbisFontGlyphMetrics *)(ctx->mem_base + metricsGuest);
         memset(m, 0, sizeof(*m));
-        m->width = adv;
-        m->height = hgt;
+        m->width = gw;
+        m->height = gh;
         m->Horizontal.advance = adv;
-        m->Horizontal.bearingX = 0.0f;
-        m->Horizontal.bearingY = hgt;
+        m->Horizontal.bearingX = bx;
+        m->Horizontal.bearingY = by;
     }
 
     ctx->rax = ORBIS_FONT_OK;
+    SHIM_RETURN();
+}
+
+// 48. sceFontRenderCharGlyphImageHorizontal
+void shim_sceFontRenderCharGlyphImageHorizontal(GuestContext *ctx) {
+    font_render_glyph_common(ctx, 0);
+}
+
+// 49. sceFontRenderCharGlyphImage
+void shim_sceFontRenderCharGlyphImage(GuestContext *ctx) {
+    font_render_glyph_common(ctx, 1);
+}
+
+// 50. sceFontOpenFontFile
+void shim_sceFontOpenFontFile(GuestContext *ctx) {
+    uint64_t libGuest = ctx->rdi;
+    uint64_t pathGuest = ctx->rsi;
+    uint32_t openMode = (uint32_t)ctx->rdx;
+    uint64_t openDetailGuest = ctx->rcx;
+    uint64_t pFontHandleGuest = ctx->r8;
+    (void)openMode;
+
+    if (!libGuest || !ctx->mem_base) {
+        if (pFontHandleGuest && ctx->mem_base) *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = 0;
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_LIBRARY;
+        SHIM_RETURN();
+    }
+    if (!pFontHandleGuest || !pathGuest) {
+        if (pFontHandleGuest) *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = 0;
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+
+    const char *guestPath = (const char *)(ctx->mem_base + pathGuest);
+    uint32_t subfont_index = 0;
+    if (openDetailGuest) {
+        const OrbisFontOpenParams *params = (const OrbisFontOpenParams *)(ctx->mem_base + openDetailGuest);
+        subfont_index = params->subfont_index;
+    }
+
+    uint64_t prealloc = *(uint64_t *)(ctx->mem_base + pFontHandleGuest);
+    uint8_t *fileBuf = NULL;
+    size_t fileSize = 0;
+
+    int fd = ps4_vfs_open(guestPath, O_RDONLY, 0);
+    if (fd >= 0) {
+        struct stat st;
+        if (ps4_vfs_fstat(fd, &st) == 0 && st.st_size > 0) {
+            fileSize = (size_t)st.st_size;
+            fileBuf = (uint8_t *)malloc(fileSize);
+            if (fileBuf) {
+                size_t got = 0;
+                while (got < fileSize) {
+                    ssize_t r = ps4_vfs_read(fd, fileBuf + got, fileSize - got);
+                    if (r <= 0) break;
+                    got += (size_t)r;
+                }
+                if (got != fileSize) {
+                    free(fileBuf);
+                    fileBuf = NULL;
+                }
+            }
+        }
+        ps4_vfs_close(fd);
+    }
+
+    pthread_mutex_lock(&g_font_mutex);
+    if (!g_ft_library) {
+        FT_Init_FreeType(&g_ft_library);
+    }
+    FT_Face face = NULL;
+    FontBacking *backing = NULL;
+    if (fileBuf) {
+        if (FT_New_Memory_Face(g_ft_library, fileBuf, (FT_Long)fileSize, (FT_Long)subfont_index, &face) == 0) {
+            backing = (FontBacking *)calloc(1, sizeof(FontBacking));
+            if (backing) {
+                backing->data = fileBuf;
+                backing->size = fileSize;
+                backing->subfont_index = subfont_index;
+                backing->refs = 1;
+            } else {
+                FT_Done_Face(face);
+                face = NULL;
+                free(fileBuf);
+            }
+        } else {
+            free(fileBuf);
+        }
+    }
+    if (!face) {
+        pthread_mutex_unlock(&g_font_mutex);
+        *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = 0;
+        fprintf(stderr, "[ps4-font] sceFontOpenFontFile failed: path=%s\n", guestPath);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_FS_OPEN_FAILED;
+        SHIM_RETURN();
+    }
+
+    uint64_t outHandle = 0;
+    int32_t rc = font_register_opened_handle(ctx, libGuest, prealloc, face, backing, NULL, &outHandle);
+    if (rc != ORBIS_FONT_OK) {
+        FT_Done_Face(face);
+        backing_release(backing);
+        outHandle = 0;
+    }
+    pthread_mutex_unlock(&g_font_mutex);
+
+    *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = outHandle;
+    fprintf(stderr, "[ps4-font] sceFontOpenFontFile: path=%s sub=%u -> handle=0x%llx (rc=0x%x)\n",
+            guestPath, subfont_index, (unsigned long long)outHandle, (unsigned int)rc);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+// 51. sceFontOpenFontMemory
+void shim_sceFontOpenFontMemory(GuestContext *ctx) {
+    uint64_t libGuest = ctx->rdi;
+    uint64_t fontAddr = ctx->rsi;
+    uint32_t fontSize = (uint32_t)ctx->rdx;
+    uint64_t openParamsGuest = ctx->rcx;
+    uint64_t pFontHandleGuest = ctx->r8;
+
+    if (!libGuest || !ctx->mem_base) {
+        if (pFontHandleGuest && ctx->mem_base) *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = 0;
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_LIBRARY;
+        SHIM_RETURN();
+    }
+    if (!fontAddr || fontSize == 0 || !pFontHandleGuest || fontAddr >= ctx->mem_size ||
+        fontSize > ctx->mem_size - fontAddr) {
+        if (pFontHandleGuest) *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = 0;
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+
+    uint32_t subfont_index = 0;
+    if (openParamsGuest) {
+        const OrbisFontOpenParams *params = (const OrbisFontOpenParams *)(ctx->mem_base + openParamsGuest);
+        subfont_index = params->subfont_index;
+    }
+
+    uint8_t *memCopy = (uint8_t *)malloc(fontSize);
+    if (!memCopy) {
+        *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = 0;
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_ALLOCATION_FAILED;
+        SHIM_RETURN();
+    }
+    memcpy(memCopy, ctx->mem_base + fontAddr, fontSize);
+
+    uint64_t prealloc = *(uint64_t *)(ctx->mem_base + pFontHandleGuest);
+
+    pthread_mutex_lock(&g_font_mutex);
+    if (!g_ft_library) {
+        FT_Init_FreeType(&g_ft_library);
+    }
+    FT_Face face = NULL;
+    FontBacking *backing = NULL;
+    if (FT_New_Memory_Face(g_ft_library, memCopy, (FT_Long)fontSize, (FT_Long)subfont_index, &face) == 0) {
+        backing = (FontBacking *)calloc(1, sizeof(FontBacking));
+        if (backing) {
+            backing->data = memCopy;
+            backing->size = fontSize;
+            backing->subfont_index = subfont_index;
+            backing->refs = 1;
+        } else {
+            FT_Done_Face(face);
+            face = NULL;
+            free(memCopy);
+        }
+    } else {
+        free(memCopy);
+    }
+
+    if (!face) {
+        pthread_mutex_unlock(&g_font_mutex);
+        *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = 0;
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_FONT_OPEN_FAILED;
+        SHIM_RETURN();
+    }
+
+    uint64_t outHandle = 0;
+    int32_t rc = font_register_opened_handle(ctx, libGuest, prealloc, face, backing, NULL, &outHandle);
+    if (rc != ORBIS_FONT_OK) {
+        FT_Done_Face(face);
+        backing_release(backing);
+        outHandle = 0;
+    }
+    pthread_mutex_unlock(&g_font_mutex);
+
+    *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = outHandle;
+    fprintf(stderr, "[ps4-font] sceFontOpenFontMemory: addr=0x%llx size=%u sub=%u -> handle=0x%llx\n",
+            (unsigned long long)fontAddr, fontSize, subfont_index, (unsigned long long)outHandle);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+// 52. sceFontOpenFontInstance
+void shim_sceFontOpenFontInstance(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    uint64_t setupFontGuest = ctx->rsi;
+    uint64_t pFontHandleGuest = ctx->rdx;
+
+    if (!fontGuest || !ctx->mem_base) {
+        if (pFontHandleGuest && ctx->mem_base) *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = 0;
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    if (!setupFontGuest && !pFontHandleGuest) {
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *src = get_font(fontGuest);
+    if (!src) {
+        pthread_mutex_unlock(&g_font_mutex);
+        if (pFontHandleGuest) *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = 0;
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+
+    InternalFontHandle copy_cfg = *src;
+    FT_Face new_face = NULL;
+    FontBacking *backing = NULL;
+    if (src->backing && g_ft_library) {
+        if (FT_New_Memory_Face(g_ft_library, src->backing->data, (FT_Long)src->backing->size,
+                               (FT_Long)src->backing->subfont_index, &new_face) == 0) {
+            backing = backing_retain(src->backing);
+        }
+    }
+    if (!new_face && src->ft_face) {
+        FT_Reference_Face(src->ft_face);
+        new_face = src->ft_face;
+    }
+
+    uint64_t outHandle = 0;
+    int32_t rc = font_register_opened_handle(ctx, copy_cfg.library_guest, setupFontGuest,
+                                             new_face, backing, &copy_cfg, &outHandle);
+    if (rc != ORBIS_FONT_OK) {
+        if (new_face) FT_Done_Face(new_face);
+        backing_release(backing);
+        outHandle = 0;
+    }
+    pthread_mutex_unlock(&g_font_mutex);
+
+    if (pFontHandleGuest) {
+        *(uint64_t *)(ctx->mem_base + pFontHandleGuest) = outHandle;
+    }
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+// 53. sceFontSetResolutionDpi
+void shim_sceFontSetResolutionDpi(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    uint32_t h_dpi = (uint32_t)ctx->rsi;
+    uint32_t v_dpi = (uint32_t)ctx->rdx;
+
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *h = get_font(fontGuest);
+    if (!h) {
+        pthread_mutex_unlock(&g_font_mutex);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    h->dpi_x = h_dpi ? h_dpi : 72;
+    h->dpi_y = v_dpi ? v_dpi : 72;
+    font_apply_ft_size(h, 0);
+    pthread_mutex_unlock(&g_font_mutex);
+
+    ctx->rax = ORBIS_FONT_OK;
+    SHIM_RETURN();
+}
+
+// 54. sceFontSetScalePoint
+void shim_sceFontSetScalePoint(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    float w = ctx->xmm[0].f32[0];
+    float h_pt = ctx->xmm[1].f32[0];
+
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *h = get_font(fontGuest);
+    if (!h) {
+        pthread_mutex_unlock(&g_font_mutex);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    h->scale_unit = 1;
+    h->scale_w = w > 0.0f ? w : 16.0f;
+    h->scale_h = h_pt > 0.0f ? h_pt : 16.0f;
+    font_apply_ft_size(h, 0);
+    pthread_mutex_unlock(&g_font_mutex);
+
+    ctx->rax = ORBIS_FONT_OK;
+    SHIM_RETURN();
+}
+
+// 55. sceFontGetScalePixel
+void shim_sceFontGetScalePixel(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    uint64_t outWGuest = ctx->rsi;
+    uint64_t outHGuest = ctx->rdx;
+
+    if (!fontGuest || !ctx->mem_base) {
+        if (outWGuest && ctx->mem_base) *(float *)(ctx->mem_base + outWGuest) = 0.0f;
+        if (outHGuest && ctx->mem_base) *(float *)(ctx->mem_base + outHGuest) = 0.0f;
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    if (!outWGuest && !outHGuest) {
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *h = get_font(fontGuest);
+    if (!h) {
+        pthread_mutex_unlock(&g_font_mutex);
+        if (outWGuest) *(float *)(ctx->mem_base + outWGuest) = 0.0f;
+        if (outHGuest) *(float *)(ctx->mem_base + outHGuest) = 0.0f;
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    float px_w = 0.0f, px_h = 0.0f;
+    font_compute_pixel_scale(h, 0, &px_w, &px_h);
+    pthread_mutex_unlock(&g_font_mutex);
+
+    if (outWGuest) *(float *)(ctx->mem_base + outWGuest) = px_w;
+    if (outHGuest) *(float *)(ctx->mem_base + outHGuest) = px_h;
+    ctx->rax = ORBIS_FONT_OK;
+    SHIM_RETURN();
+}
+
+// 56. sceFontSetEffectWeight
+void shim_sceFontSetEffectWeight(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    float weightX = ctx->xmm[0].f32[0];
+    float weightY = ctx->xmm[1].f32[0];
+    uint32_t mode = (uint32_t)ctx->rsi;
+
+    if (mode != 0) {
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *h = get_font(fontGuest);
+    if (!h) {
+        pthread_mutex_unlock(&g_font_mutex);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    h->weight_x = weightX;
+    h->weight_y = weightY;
+    pthread_mutex_unlock(&g_font_mutex);
+
+    ctx->rax = ORBIS_FONT_OK;
+    SHIM_RETURN();
+}
+
+// 57. sceFontSetEffectSlant
+void shim_sceFontSetEffectSlant(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    float slantRatio = ctx->xmm[0].f32[0];
+
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *h = get_font(fontGuest);
+    if (!h) {
+        pthread_mutex_unlock(&g_font_mutex);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    h->slant = slantRatio;
+    pthread_mutex_unlock(&g_font_mutex);
+
+    ctx->rax = ORBIS_FONT_OK;
+    SHIM_RETURN();
+}
+
+// 58. sceFontSetupRenderEffectWeight
+void shim_sceFontSetupRenderEffectWeight(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    float weightX = ctx->xmm[0].f32[0];
+    float weightY = ctx->xmm[1].f32[0];
+    uint32_t mode = (uint32_t)ctx->rsi;
+
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *h = get_font(fontGuest);
+    if (!h) {
+        pthread_mutex_unlock(&g_font_mutex);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    if (!h->renderer_guest) {
+        pthread_mutex_unlock(&g_font_mutex);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_NOT_BOUND_RENDERER;
+        SHIM_RETURN();
+    }
+    if (mode != 0) {
+        pthread_mutex_unlock(&g_font_mutex);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+    h->render_weight_x = weightX;
+    h->render_weight_y = weightY;
+    pthread_mutex_unlock(&g_font_mutex);
+
+    ctx->rax = ORBIS_FONT_OK;
+    SHIM_RETURN();
+}
+
+// 59. sceFontSetupRenderEffectSlant
+void shim_sceFontSetupRenderEffectSlant(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    float slantRatio = ctx->xmm[0].f32[0];
+
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *h = get_font(fontGuest);
+    if (!h) {
+        pthread_mutex_unlock(&g_font_mutex);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    if (!h->renderer_guest) {
+        pthread_mutex_unlock(&g_font_mutex);
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_NOT_BOUND_RENDERER;
+        SHIM_RETURN();
+    }
+    h->render_slant = slantRatio;
+    pthread_mutex_unlock(&g_font_mutex);
+
+    ctx->rax = ORBIS_FONT_OK;
+    SHIM_RETURN();
+}
+
+// 60. sceFontGetHorizontalLayout
+void shim_sceFontGetHorizontalLayout(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    uint64_t layoutGuest = ctx->rsi;
+
+    if (!fontGuest || !ctx->mem_base) {
+        if (layoutGuest && ctx->mem_base) memset(ctx->mem_base + layoutGuest, 0, sizeof(OrbisFontHorizontalLayout));
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+    if (!layoutGuest) {
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *h = get_font(fontGuest);
+    if (!h) {
+        pthread_mutex_unlock(&g_font_mutex);
+        memset(ctx->mem_base + layoutGuest, 0, sizeof(OrbisFontHorizontalLayout));
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+        SHIM_RETURN();
+    }
+
+    float px_w = 16.0f, px_h = 16.0f;
+    font_compute_pixel_scale(h, 0, &px_w, &px_h);
+    float asc = px_h * 0.8f;
+    float desc = -px_h * 0.2f;
+    float line_adv = px_h;
+
+    if (h->ft_face) {
+        font_apply_ft_size(h, 0);
+        if (h->ft_face->size) {
+            float ft_asc = (float)h->ft_face->size->metrics.ascender / 64.0f;
+            float ft_desc = (float)h->ft_face->size->metrics.descender / 64.0f;
+            float ft_hgt = (float)h->ft_face->size->metrics.height / 64.0f;
+            if (ft_asc > 0.0f) asc = ft_asc;
+            if (ft_desc <= 0.0f) desc = ft_desc;
+            line_adv = (ft_hgt > 0.0f) ? ft_hgt : (asc - desc);
+        }
+    }
+    pthread_mutex_unlock(&g_font_mutex);
+
+    OrbisFontHorizontalLayout *layout = (OrbisFontHorizontalLayout *)(ctx->mem_base + layoutGuest);
+    layout->baselineOffset = asc;
+    layout->lineAdvance = line_adv;
+    layout->decorationExtent = (desc < 0.0f) ? -desc : 0.0f;
+
+    ctx->rax = ORBIS_FONT_OK;
+    SHIM_RETURN();
+}
+
+// 61. sceFontRenderSurfaceSetScissor
+void shim_sceFontRenderSurfaceSetScissor(GuestContext *ctx) {
+    uint64_t surfGuest = ctx->rdi;
+    int32_t x0 = (int32_t)ctx->rsi;
+    int32_t y0 = (int32_t)ctx->rdx;
+    int32_t w = (int32_t)ctx->rcx;
+    int32_t h = (int32_t)ctx->r8;
+
+    if (!surfGuest || !ctx->mem_base) {
+        SHIM_RETURN();
+    }
+
+    OrbisFontRenderSurface *surf = (OrbisFontRenderSurface *)(ctx->mem_base + surfGuest);
+    const uint32_t surface_w = (uint32_t)surf->width;
+    if (surface_w != 0) {
+        uint32_t x1, x0_out;
+        uint32_t w_u = (uint32_t)w;
+        if (x0 < 0) {
+            x1 = w_u + (uint32_t)x0;
+            if (surface_w < x1) x1 = surface_w;
+            if (w_u <= (uint32_t)(-x0)) x1 = 0;
+            x0_out = 0;
+        } else {
+            x1 = surface_w;
+            x0_out = surface_w;
+            if ((uint32_t)x0 <= surface_w) {
+                if (surface_w < w_u) w_u = surface_w;
+                x1 = w_u + (uint32_t)x0;
+                x0_out = (uint32_t)x0;
+                if (surface_w < x1) x1 = surface_w;
+            }
+        }
+        surf->sc_x0 = x0_out;
+        surf->sc_x1 = x1;
+    }
+
+    const uint32_t surface_h = (uint32_t)surf->height;
+    if (surface_h == 0) {
+        SHIM_RETURN();
+    }
+
+    uint32_t y0_out;
+    uint32_t y1 = surface_h;
+    uint32_t h_u = (uint32_t)h;
+    if (y0 < 0) {
+        y0_out = 0;
+        if (h_u <= (uint32_t)(-y0)) {
+            surf->sc_y0 = 0;
+            surf->sc_y1 = 0;
+            SHIM_RETURN();
+        }
+    } else {
+        y0_out = surface_h;
+        if (surface_h < (uint32_t)y0) {
+            surf->sc_y0 = y0_out;
+            surf->sc_y1 = y1;
+            SHIM_RETURN();
+        }
+        y0_out = (uint32_t)y0;
+        if (surface_h < h_u) h_u = surface_h;
+    }
+
+    const uint32_t y1_candidate = h_u + (uint32_t)y0;
+    if (y1_candidate <= surface_h) {
+        y1 = y1_candidate;
+    }
+    surf->sc_y0 = y0_out;
+    surf->sc_y1 = y1;
     SHIM_RETURN();
 }

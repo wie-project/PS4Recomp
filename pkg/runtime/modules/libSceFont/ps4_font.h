@@ -27,6 +27,8 @@ extern "C" {
 #define ORBIS_FONT_ERROR_INVALID_STRING       ((int32_t)0x8054000b)
 #define ORBIS_FONT_ERROR_ALREADY_SPECIFIED    ((int32_t)0x8054000c)
 #define ORBIS_FONT_ERROR_NO_SUPPORT_CODE      ((int32_t)0x80540010)
+#define ORBIS_FONT_ERROR_FS_OPEN_FAILED       ((int32_t)0x80460011)
+#define ORBIS_FONT_ERROR_NOT_BOUND_RENDERER   ((int32_t)0x80460061)
 
 typedef void *OrbisFontLib;
 typedef void *OrbisFontHandle;
@@ -303,7 +305,26 @@ void shim_sceFontCharacterRefersTextNext(GuestContext *ctx);
 void shim_sceFontCharactersRefersTextCodes(GuestContext *ctx);
 void shim_sceFontTextCodesStepNext(GuestContext *ctx);
 void shim_sceFontWordsFindWordCharacters(GuestContext *ctx);
+typedef struct OrbisFontHorizontalLayout {
+    float baselineOffset;
+    float lineAdvance;
+    float decorationExtent;
+} OrbisFontHorizontalLayout;
+
 void shim_sceFontRenderCharGlyphImageHorizontal(GuestContext *ctx);
+void shim_sceFontRenderCharGlyphImage(GuestContext *ctx);
+void shim_sceFontOpenFontFile(GuestContext *ctx);
+void shim_sceFontOpenFontMemory(GuestContext *ctx);
+void shim_sceFontOpenFontInstance(GuestContext *ctx);
+void shim_sceFontSetResolutionDpi(GuestContext *ctx);
+void shim_sceFontSetScalePoint(GuestContext *ctx);
+void shim_sceFontGetScalePixel(GuestContext *ctx);
+void shim_sceFontSetEffectWeight(GuestContext *ctx);
+void shim_sceFontSetEffectSlant(GuestContext *ctx);
+void shim_sceFontSetupRenderEffectWeight(GuestContext *ctx);
+void shim_sceFontSetupRenderEffectSlant(GuestContext *ctx);
+void shim_sceFontGetHorizontalLayout(GuestContext *ctx);
+void shim_sceFontRenderSurfaceSetScissor(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

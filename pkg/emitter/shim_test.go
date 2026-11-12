@@ -532,3 +532,101 @@ func TestAudiodecShimsByNID(t *testing.T) {
 		}
 	}
 }
+
+func TestCatherineFullBodyShimsByNID(t *testing.T) {
+	cases := []struct{ plain, nid string }{
+		// libSceZlib (5)
+		{"sceZlibInitialize", "m1YErdIXCp4"},
+		{"sceZlibInflate", "TLar1HULv1Q"},
+		{"sceZlibWaitForDone", "uB8VlDD4e0s"},
+		{"sceZlibGetResult", "2eDcGHC0YaM"},
+		{"sceZlibFinalize", "6na+Sa-B83w"},
+		// libSceFont (13)
+		{"sceFontRenderCharGlyphImage", "3G4zhgKuxE8"},
+		{"sceFontGetScalePixel", "CkVmLoCNN-8"},
+		{"sceFontSetResolutionDpi", "I1acwR7Qp8E"},
+		{"sceFontOpenFontInstance", "JzCH3SCFnAU"},
+		{"sceFontOpenFontMemory", "KXUpebrFk1U"},
+		{"sceFontOpenFontFile", "RvXyHMUiLhE"},
+		{"sceFontSetEffectSlant", "TMtqoFQjjbA"},
+		{"sceFontSetupRenderEffectWeight", "XIGorvLusDQ"},
+		{"sceFontGetHorizontalLayout", "imxVx8lm+KM"},
+		{"sceFontSetupRenderEffectSlant", "lz9y9UFO2UU"},
+		{"sceFontSetScalePoint", "sw65+7wXCKE"},
+		{"sceFontSetEffectWeight", "v0phZwa4R5o"},
+		{"sceFontRenderSurfaceSetScissor", "vRxf4d0ulPs"},
+		// libSceVideodec2 (9 from Catherine + extra)
+		{"sceVideodec2Decode", "852F5+q6+iM"},
+		{"sceVideodec2CreateDecoder", "CNNRoRYd8XI"},
+		{"sceVideodec2QueryComputeMemoryInfo", "RnDibcGCPKw"},
+		{"sceVideodec2ReleaseComputeQueue", "UvtA3FAiF4Y"},
+		{"sceVideodec2AllocateComputeQueue", "eD+X2SmxUt4"},
+		{"sceVideodec2DeleteDecoder", "jwImxXRGSKA"},
+		{"sceVideodec2Flush", "l1hXwscLuCY"},
+		{"sceVideodec2QueryDecoderMemoryInfo", "qqMCwlULR+E"},
+		{"sceVideodec2Reset", "wJXikG6QFN8"},
+		{"sceVideodec2GetPictureInfo", "NtXRa3dRzU0"},
+		{"sceVideodec2GetAvcPictureInfo", "kjrLbcyhEiw"},
+		{"sceVideodec2GetHevcPictureInfo", "7M+1UFqWOAI"},
+		{"sceVideodec2MapDirectMemory", "hIIZXUsMeI8"},
+		// Single-function additions (5)
+		{"sceErrorDialogClose", "ekXHb1kDBl0"},
+		{"sceGameLiveStreamingSetStandbyScreenResource", "MLvYI86FFAo"},
+		{"sceInvitationDialogClose", "WWtCL5lzi7Y"},
+		{"sceSaveDataClearProgress", "Wz-4JZfeO9g"},
+		{"sceScreenShotSetParam", "G7KlmIYFIZc"},
+		// libSceNpFriendListDialog (5 + extra)
+		{"sceNpFriendListDialogInitialize", "2L-W-ZYn2Qo"},
+		{"sceNpFriendListDialogTerminate", "ECEzk+K9L2k"},
+		{"sceNpFriendListDialogUpdateStatus", "frwz3eyuA6w"},
+		{"sceNpFriendListDialogGetStatus", "8BVP56JIZuA"},
+		{"sceNpFriendListDialogGetResultA", "hK0CCljzJmY"},
+		{"sceNpFriendListDialogOpenA", "vN9sTP63WT8"},
+		{"sceNpFriendListDialogClose", "+Y1acHGomGQ"},
+		// libSceNpScore (9)
+		{"sceNpScoreRecordGameDataAsync", "1gL5PwYzrrw"},
+		{"sceNpScoreRecordScoreAsync", "ANJssPz3mY0"},
+		{"sceNpScoreGetRankingByAccountId", "K9tlODTQx3c"},
+		{"sceNpScoreGetGameDataByAccountId", "Lmtc9GljeUA"},
+		{"sceNpScoreGetRankingByRangeA", "MA9vSt7JImY"},
+		{"sceNpScoreGetGameDataByAccountIdAsync", "PP9jx8s0574"},
+		{"sceNpScoreGetRankingByAccountIdAsync", "dRszNNyGWkw"},
+		{"sceNpScoreGetFriendsRankingA", "gMbOn+-6eXA"},
+		{"sceNpScoreGetRankingByRangeAAsync", "y5ja7WI05rs"},
+		// libSceNpMatching2 (10)
+		{"sceNpMatching2GetRoomDataExternalList", "26vWrPAWJfM"},
+		{"sceNpMatching2GetRoomMemberDataInternal", "5lhvOqheFBA"},
+		{"sceNpMatching2RegisterLobbyMessageCallback", "DnPUsBAe8oI"},
+		{"sceNpMatching2GetUserInfoListA", "GyI2f9yDUXM"},
+		{"sceNpMatching2SendRoomMessage", "Iw2h0Jrrb5U"},
+		{"sceNpMatching2CreateJoinRoomA", "V6KSpKv9XJE"},
+		{"sceNpMatching2JoinRoomA", "gQ6cUriNpgs"},
+		{"sceNpMatching2SignalingGetConnectionInfoA", "nNeC3F8-g+4"},
+		{"sceNpMatching2AbortContextStart", "pFzhpCMlJXQ"},
+		{"sceNpMatching2RegisterRoomMessageCallback", "uBESzz4CQws"},
+		// libSceNpTus (2)
+		{"sceNpTusSetDataAAsync", "4u58d6g6uwU"},
+		{"sceNpTusGetDataAAsync", "xzG8mG9YlKY"},
+		// libSceVoiceQoS (11)
+		{"sceVoiceQoSGetRemoteEndpointAttribute", "3vmrvQ4rvgs"},
+		{"sceVoiceQoSSetLocalEndpointAttribute", "F7wS7FbfumQ"},
+		{"sceVoiceQoSDeleteRemoteEndpoint", "H4zqFaDhHW4"},
+		{"sceVoiceQoSReadPacket", "PWokFqab5q4"},
+		{"sceVoiceQoSWritePacket", "SpxLratrO1Q"},
+		{"sceVoiceQoSGetConnectionAttribute", "XmvdN3atbXY"},
+		{"sceVoiceQoSSetRemoteEndpointAttribute", "cpC-zyHoMik"},
+		{"sceVoiceQoSGetLocalEndpointAttribute", "eZu2RP0Ma3w"},
+		{"sceVoiceQoSCreateRemoteEndpoint", "iqQQW2cBmWU"},
+		{"sceVoiceQoSDeleteLocalEndpoint", "kE0kdvcHTiY"},
+		{"sceVoiceQoSCreateLocalEndpoint", "lvNClhNHzxI"},
+	}
+	for _, tc := range cases {
+		if nid := elfloader.CalculateNID(tc.plain); nid != tc.nid {
+			t.Fatalf("%s NID=%s want %s", tc.plain, nid, tc.nid)
+		}
+		encoded := tc.nid + "#M#N"
+		if shim, ok := LookupShim(encoded); !ok || shim != "shim_"+tc.plain {
+			t.Fatalf("LookupShim(%s)=%q ok=%v want shim_%s", encoded, shim, ok, tc.plain)
+		}
+	}
+}

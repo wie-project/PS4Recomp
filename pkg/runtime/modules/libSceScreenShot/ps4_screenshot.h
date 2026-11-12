@@ -15,12 +15,14 @@ int32_t sceScreenShotEnable(void);
 int32_t sceScreenShotDisable(void);
 int32_t sceScreenShotSetOverlayImage(const char *filePath, int32_t posX, int32_t posY);
 int32_t sceScreenShotSetOverlayImageWithOrigin(const char *filePath, int32_t posX, int32_t posY, int32_t origin);
+int32_t sceScreenShotSetParam(const void *param);
 
 // Shims
 void shim_sceScreenShotEnable(GuestContext *ctx);
 void shim_sceScreenShotDisable(GuestContext *ctx);
 void shim_sceScreenShotSetOverlayImage(GuestContext *ctx);
 void shim_sceScreenShotSetOverlayImageWithOrigin(GuestContext *ctx);
+void shim_sceScreenShotSetParam(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

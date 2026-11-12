@@ -334,6 +334,26 @@ void shim_sceNpScoreWaitAsync(GuestContext *ctx);
 void shim_sceNpScoreCensorCommentAsync(GuestContext *ctx);
 void shim_sceNpScoreGetFriendsRanking(GuestContext *ctx);
 void shim_sceNpScoreGetRankingByNpId(GuestContext *ctx);
+void shim_sceNpScoreRecordGameDataAsync(GuestContext *ctx);
+void shim_sceNpScoreRecordScoreAsync(GuestContext *ctx);
+void shim_sceNpScoreGetRankingByAccountId(GuestContext *ctx);
+void shim_sceNpScoreGetGameDataByAccountId(GuestContext *ctx);
+void shim_sceNpScoreGetRankingByRangeA(GuestContext *ctx);
+void shim_sceNpScoreGetGameDataByAccountIdAsync(GuestContext *ctx);
+void shim_sceNpScoreGetRankingByAccountIdAsync(GuestContext *ctx);
+void shim_sceNpScoreGetFriendsRankingA(GuestContext *ctx);
+void shim_sceNpScoreGetRankingByRangeAAsync(GuestContext *ctx);
+
+void shim_sceNpMatching2GetRoomDataExternalList(GuestContext *ctx);
+void shim_sceNpMatching2GetRoomMemberDataInternal(GuestContext *ctx);
+void shim_sceNpMatching2RegisterLobbyMessageCallback(GuestContext *ctx);
+void shim_sceNpMatching2GetUserInfoListA(GuestContext *ctx);
+void shim_sceNpMatching2SendRoomMessage(GuestContext *ctx);
+void shim_sceNpMatching2CreateJoinRoomA(GuestContext *ctx);
+void shim_sceNpMatching2JoinRoomA(GuestContext *ctx);
+void shim_sceNpMatching2SignalingGetConnectionInfoA(GuestContext *ctx);
+void shim_sceNpMatching2AbortContextStart(GuestContext *ctx);
+void shim_sceNpMatching2RegisterRoomMessageCallback(GuestContext *ctx);
 
 void shim_sceNpTusCreateNpTitleCtx(GuestContext *ctx);
 void shim_sceNpTusCreateNpTitleCtxA(GuestContext *ctx);
@@ -345,9 +365,11 @@ void shim_sceNpTusWaitAsync(GuestContext *ctx);
 void shim_sceNpTusAbortRequest(GuestContext *ctx);
 void shim_sceNpTusSetMultiSlotVariableAsync(GuestContext *ctx);
 void shim_sceNpTusSetDataAsync(GuestContext *ctx);
+void shim_sceNpTusSetDataAAsync(GuestContext *ctx);
 void shim_sceNpTusAddAndGetVariableAsync(GuestContext *ctx);
 void shim_sceNpTusGetMultiSlotVariableAsync(GuestContext *ctx);
 void shim_sceNpTusGetDataAsync(GuestContext *ctx);
+void shim_sceNpTusGetDataAAsync(GuestContext *ctx);
 
 void shim_sceNpCommerceDialogInitialize(GuestContext *ctx);
 void shim_sceNpCommerceDialogTerminate(GuestContext *ctx);

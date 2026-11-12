@@ -295,6 +295,7 @@ int32_t sceSaveDataSetSaveDataMemory2(GuestContext *ctx,
                                      const OrbisSaveDataMemorySet2 *setParam);
 int32_t sceSaveDataSyncSaveDataMemory(GuestContext *ctx,
                                      OrbisSaveDataMemorySync *syncParam);
+int32_t sceSaveDataClearProgress(void);
 
 // Shims
 void shim_sceSaveDataInitialize(GuestContext *ctx);
@@ -324,6 +325,7 @@ void shim_sceSaveDataSetupSaveDataMemory2(GuestContext *ctx);
 void shim_sceSaveDataGetSaveDataMemory2(GuestContext *ctx);
 void shim_sceSaveDataSetSaveDataMemory2(GuestContext *ctx);
 void shim_sceSaveDataSyncSaveDataMemory(GuestContext *ctx);
+void shim_sceSaveDataClearProgress(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

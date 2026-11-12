@@ -141,3 +141,9 @@ void shim_sceGameLiveStreamingEnableSocialFeedback(GuestContext *ctx) {
   ctx->rax = ORBIS_OK;
   SHIM_RETURN();
 }
+
+void shim_sceGameLiveStreamingSetStandbyScreenResource(GuestContext *ctx) {
+  (void)ctx->rdi;
+  ctx->rax = ORBIS_OK;
+  SHIM_RETURN();
+}

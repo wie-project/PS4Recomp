@@ -1609,3 +1609,21 @@ void shim_sceSaveDataRestoreBackupData(GuestContext *ctx) {
     ctx->rax = (uint64_t)0x809f0003;
     SHIM_RETURN();
 }
+
+static float g_backup_progress = 0.0f;
+
+int32_t sceSaveDataClearProgress(void) {
+    pthread_mutex_lock(&g_savedata_mutex);
+    if (!g_savedata_initialized) {
+        pthread_mutex_unlock(&g_savedata_mutex);
+        return ORBIS_SAVE_DATA_ERROR_NOT_INITIALIZED;
+    }
+    g_backup_progress = 0.0f;
+    pthread_mutex_unlock(&g_savedata_mutex);
+    return 0;
+}
+
+void shim_sceSaveDataClearProgress(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSaveDataClearProgress();
+    SHIM_RETURN();
+}

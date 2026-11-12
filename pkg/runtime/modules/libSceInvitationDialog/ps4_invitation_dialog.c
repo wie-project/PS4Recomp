@@ -84,6 +84,20 @@ int32_t sceInvitationDialogGetResultA(OrbisInvitationDialogResultA *result) {
     return 0;
 }
 
+int32_t sceInvitationDialogClose(void) {
+    pthread_mutex_lock(&g_invitation_mutex);
+    if (g_invitation_status != ORBIS_COMMON_DIALOG_STATUS_RUNNING) {
+        pthread_mutex_unlock(&g_invitation_mutex);
+        return (int32_t)0x80b8000b; // NOT_RUNNING
+    }
+    g_invitation_result.callbackArg = g_invitation_callback_arg;
+    g_invitation_result.errorCode = 0;
+    g_invitation_result.result = ORBIS_COMMON_DIALOG_RESULT_OK;
+    g_invitation_status = ORBIS_COMMON_DIALOG_STATUS_FINISHED;
+    pthread_mutex_unlock(&g_invitation_mutex);
+    return 0;
+}
+
 int32_t sceInvitationDialogTerminate(void) {
     pthread_mutex_lock(&g_invitation_mutex);
     g_invitation_status = ORBIS_COMMON_DIALOG_STATUS_NONE;
@@ -120,6 +134,11 @@ void shim_sceInvitationDialogGetResultA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceInvitationDialogGetResultA(
         ctx->rdi ? (OrbisInvitationDialogResultA *)(ctx->mem_base + ctx->rdi) : NULL
     );
+    SHIM_RETURN();
+}
+
+void shim_sceInvitationDialogClose(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceInvitationDialogClose();
     SHIM_RETURN();
 }
 

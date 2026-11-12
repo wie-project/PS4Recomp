@@ -76,6 +76,7 @@ int32_t sceInvitationDialogOpenA(const OrbisInvitationDialogParamA *param);
 OrbisCommonDialogStatus sceInvitationDialogUpdateStatus(void);
 OrbisCommonDialogStatus sceInvitationDialogGetStatus(void);
 int32_t sceInvitationDialogGetResultA(OrbisInvitationDialogResultA *result);
+int32_t sceInvitationDialogClose(void);
 int32_t sceInvitationDialogTerminate(void);
 
 // Shims
@@ -84,6 +85,7 @@ void shim_sceInvitationDialogOpenA(GuestContext *ctx);
 void shim_sceInvitationDialogUpdateStatus(GuestContext *ctx);
 void shim_sceInvitationDialogGetStatus(GuestContext *ctx);
 void shim_sceInvitationDialogGetResultA(GuestContext *ctx);
+void shim_sceInvitationDialogClose(GuestContext *ctx);
 void shim_sceInvitationDialogTerminate(GuestContext *ctx);
 
 #ifdef __cplusplus
