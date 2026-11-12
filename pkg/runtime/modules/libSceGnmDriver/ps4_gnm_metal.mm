@@ -188,6 +188,7 @@ static bool WriteFenceData(GuestContext *ctx, uint64_t addr, uint32_t data_sel,
 static std::atomic<uint64_t> g_sync_counts[8];
 static const char *const kSyncNames[8] = {"eop", "release_mem", "eos", "write_data", "dma", "ce_dump", "cond_exec", "other"};
 static void SyncGpu(int reason = 7) {
+    if ((reason & 7) <= 3) ps4draw::NoteGpuFence();
     if (ps4draw::HasPendingWork()) {
         g_sync_counts[reason & 7]++;
         ps4draw::Flush(true);

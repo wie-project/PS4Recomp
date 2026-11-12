@@ -1241,6 +1241,11 @@ static void font_render_glyph_common(GuestContext *ctx, int add_baseline) {
     float bx = 0.0f;
     float by = hgt;
 
+    uint32_t upd_x = 0, upd_y = 0, upd_w = 0, upd_h = 0;
+    uint64_t surf_buf_guest = 0;
+    uint32_t surf_wb = 0;
+    uint8_t surf_bpp = 0;
+
     if (h->ft_face) {
         font_apply_ft_size(h, 1);
         float active_slant = h->render_slant != 0.0f ? h->render_slant : h->slant;
@@ -1268,13 +1273,17 @@ static void font_render_glyph_common(GuestContext *ctx, int add_baseline) {
             FT_GlyphSlot slot = h->ft_face->glyph;
             adv = (float)(slot->advance.x >> 6);
             if (adv <= 0.0f) adv = h->render_scale_w;
-            gw = (float)(slot->metrics.width >> 6);
-            gh = (float)(slot->metrics.height >> 6);
+            gw = (float)slot->bitmap.width;
+            gh = (float)slot->bitmap.rows;
             bx = (float)slot->bitmap_left;
             by = (float)slot->bitmap_top;
 
             OrbisFontRenderSurface *surf = (OrbisFontRenderSurface *)(ctx->mem_base + surfGuest);
-            if (surf && surf->buffer && slot->bitmap.buffer) {
+            if (surf && surf->buffer) {
+                surf_buf_guest = (uint64_t)(uintptr_t)surf->buffer;
+                surf_wb = (uint32_t)surf->widthByte;
+                surf_bpp = (uint8_t)(surf->pixelSizeByte > 0 ? surf->pixelSizeByte : 4);
+
                 int sx0 = (int)surf->sc_x0;
                 int sy0 = (int)surf->sc_y0;
                 int sx1 = (int)surf->sc_x1;
@@ -1286,27 +1295,40 @@ static void font_render_glyph_common(GuestContext *ctx, int add_baseline) {
 
                 int dst_x0 = (int)x + slot->bitmap_left;
                 int dst_y0 = (int)y_used - slot->bitmap_top;
-                uint8_t *dst_buf = (uint8_t *)(ctx->mem_base + (uintptr_t)surf->buffer);
-                int bpp = surf->pixelSizeByte > 0 ? surf->pixelSizeByte : 4;
+                int start_col = dst_x0 > sx0 ? dst_x0 : sx0;
+                int end_col = (dst_x0 + (int)slot->bitmap.width) < sx1 ? (dst_x0 + (int)slot->bitmap.width) : sx1;
+                int start_row = dst_y0 > sy0 ? dst_y0 : sy0;
+                int end_row = (dst_y0 + (int)slot->bitmap.rows) < sy1 ? (dst_y0 + (int)slot->bitmap.rows) : sy1;
 
-                for (unsigned int row = 0; row < slot->bitmap.rows; row++) {
-                    int py = dst_y0 + (int)row;
-                    if (py < sy0 || py >= sy1) continue;
-                    for (unsigned int col = 0; col < slot->bitmap.width; col++) {
-                        int px = dst_x0 + (int)col;
-                        if (px < sx0 || px >= sx1) continue;
-                        uint8_t alpha = slot->bitmap.buffer[row * slot->bitmap.pitch + col];
-                        if (alpha == 0) continue;
+                upd_x = (uint32_t)(start_col > 0 ? start_col : 0);
+                upd_y = (uint32_t)(start_row > 0 ? start_row : 0);
+                upd_w = (uint32_t)(end_col > start_col ? end_col - start_col : 0);
+                upd_h = (uint32_t)(end_row > start_row ? end_row - start_row : 0);
 
-                        uint8_t *dst_pixel = dst_buf + py * surf->widthByte + px * bpp;
-                        if (bpp == 4) {
-                            dst_pixel[0] = alpha;
-                            dst_pixel[1] = alpha;
-                            dst_pixel[2] = alpha;
-                            dst_pixel[3] = alpha;
-                        } else if (bpp == 1) {
-                            dst_pixel[0] = alpha;
+                if (slot->bitmap.buffer && upd_w > 0 && upd_h > 0) {
+                    uint8_t *dst_buf = (uint8_t *)(ctx->mem_base + surf_buf_guest);
+                    int bpp = (int)surf_bpp;
+                    for (int py = start_row; py < end_row; py++) {
+                        int row = py - dst_y0;
+                        for (int px = start_col; px < end_col; px++) {
+                            int col = px - dst_x0;
+                            uint8_t alpha = slot->bitmap.buffer[row * slot->bitmap.pitch + col];
+                            uint8_t *dst_pixel = dst_buf + py * surf->widthByte + px * bpp;
+                            if (bpp == 4) {
+                                dst_pixel[0] = alpha;
+                                dst_pixel[1] = alpha;
+                                dst_pixel[2] = alpha;
+                                dst_pixel[3] = alpha;
+                            } else if (bpp == 1) {
+                                dst_pixel[0] = alpha;
+                            }
                         }
+                    }
+                    extern void ps4_gnm_notify_cpu_write(uint64_t addr, uint64_t size) __attribute__((weak));
+                    if (ps4_gnm_notify_cpu_write && surf->widthByte > 0) {
+                        uint64_t base = surf_buf_guest + (uint64_t)upd_y * (uint64_t)surf->widthByte;
+                        uint64_t sz = (uint64_t)upd_h * (uint64_t)surf->widthByte;
+                        ps4_gnm_notify_cpu_write(base, sz);
                     }
                 }
             }
@@ -1322,6 +1344,29 @@ static void font_render_glyph_common(GuestContext *ctx, int add_baseline) {
         m->Horizontal.advance = adv;
         m->Horizontal.bearingX = bx;
         m->Horizontal.bearingY = by;
+    }
+
+    if (resultGuest) {
+        OrbisFontRenderOutput *res = (OrbisFontRenderOutput *)(ctx->mem_base + resultGuest);
+        memset(res, 0, sizeof(*res));
+        res->stage = NULL;
+        res->SurfaceImage.widthByte = surf_wb;
+        res->SurfaceImage.pixelSizeByte = surf_bpp;
+        res->SurfaceImage.pixelFormat = 0;
+        res->UpdateRect.x = upd_x;
+        res->UpdateRect.y = upd_y;
+        res->UpdateRect.w = upd_w;
+        res->UpdateRect.h = upd_h;
+        if (surf_buf_guest) {
+            res->SurfaceImage.address = (void *)(uintptr_t)(
+                surf_buf_guest + (uint64_t)upd_y * (uint64_t)surf_wb + (uint64_t)upd_x * (uint64_t)surf_bpp);
+        }
+        res->ImageMetrics.bearingX = bx;
+        res->ImageMetrics.bearingY = by;
+        res->ImageMetrics.advance = adv;
+        res->ImageMetrics.stride = adv;
+        res->ImageMetrics.width = upd_w;
+        res->ImageMetrics.height = upd_h;
     }
 
     ctx->rax = ORBIS_FONT_OK;

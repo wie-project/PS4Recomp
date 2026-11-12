@@ -10042,6 +10042,9 @@ void SetExtentHints(const uint32_t cb[8], uint32_t db) {
     S.db_extent = db;
 }
 
+static std::atomic<bool> g_has_gpu_fence{false};
+void NoteGpuFence() { g_has_gpu_fence.store(true, std::memory_order_relaxed); }
+
 void OnSubmit() {
     S.submit_idx++;
     // CPU stores into guest memory bypass the renderer's GPU write tracking. Copies of
@@ -10051,6 +10054,11 @@ void OnSubmit() {
     encq::Defer([] {
         if (S.tex && S.ctx) S.tex->InvalidateRange(0, S.ctx->mem_size, false);
     });
+    // Games that never emit EOP/RELEASE_MEM fences (e.g. double-buffered ring allocators without
+    // GPU fences) can overwrite guest vertex/constant memory immediately after sceGnmSubmit*
+    // returns while the background encoder thread is still reading it.
+    static const bool async_no_fence = getenv("PS4_GNM_ASYNC_NO_FENCE") != nullptr;
+    if (!async_no_fence && !g_has_gpu_fence.load(std::memory_order_relaxed)) encq::Sync();
 }
 
 // The test hooks' wait: the open command buffer waits on the GPU until ev reaches value, and
@@ -12803,6 +12811,16 @@ void DrawEncode(DrawRec& r) {
             vattrs.push_back(va);
             vlocs.push_back(a.location);
             vbufs.push_back({mb, off});
+            if (trace && getenv("PS4_GNM_TRACE_BUFS")) {
+                const uint32_t* vw = (bd.address && bd.address + 16 <= S.ctx->mem_size)
+                                         ? (const uint32_t*)(S.ctx->mem_base + (bd.address & ~3ull))
+                                         : nullptr;
+                fprintf(stderr, "[gnm-trace]    vtx[%u] loc=%u addr=0x%llx size=%u stride=%u fmt=%u/%u slot=%u off=0x%llx%s",
+                        i, a.location, (unsigned long long)bd.address, bd.size, stride, bd.raw_dfmt, bd.raw_nfmt,
+                        slot, (unsigned long long)off, mb == S.dummy ? " DUMMY" : "");
+                if (vw) fprintf(stderr, " d0=[%08x %08x %08x %08x]", vw[0], vw[1], vw[2], vw[3]);
+                fprintf(stderr, "\n");
+            }
         }
 
         // ---- pipeline
@@ -14796,6 +14814,8 @@ bool Present(GuestContext* ctx, uint64_t addr, uint32_t width, uint32_t height, 
         return true;
     }
     encq::Defer([run, f = std::move(on_done)]() mutable { run(std::move(f)); });
+    static const bool async_no_fence = getenv("PS4_GNM_ASYNC_NO_FENCE") != nullptr;
+    if (!async_no_fence && !g_has_gpu_fence.load(std::memory_order_relaxed)) encq::Sync();
     return true;
 }
 
@@ -14921,7 +14941,11 @@ bool PresentImpl(GuestContext* ctx, uint64_t addr, uint32_t width, uint32_t heig
         }
         S.screen_ms += (CFAbsoluteTimeGetCurrent() - tp0) * 1000.0;
         Commit();
+        static const bool wait_on_present = getenv("PS4_GNM_WAIT_ON_PRESENT") != nullptr;
+        static const bool async_no_fence = getenv("PS4_GNM_ASYNC_NO_FENCE") != nullptr;
         static const bool writeback_all = getenv("PS4_GNM_WRITEBACK_ALL") != nullptr;
+        const bool no_fence_wait = !async_no_fence && !g_has_gpu_fence.load(std::memory_order_relaxed);
+        if ((wait_on_present || no_fence_wait) && !writeback_all) WaitAll();
         if (writeback_all) { // experiment: make every GPU surface CPU-visible
             WaitAll();
             TextureCache* tc = S.tex;

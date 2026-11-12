@@ -85,9 +85,35 @@ typedef struct OrbisFontGlyphMetrics {
     } Vertical;
 } OrbisFontGlyphMetrics;
 
+typedef struct OrbisFontSurfaceImage {
+    void *address;
+    uint32_t widthByte;
+    uint8_t pixelSizeByte;
+    uint8_t pixelFormat;
+    uint16_t pad16;
+} OrbisFontSurfaceImage;
+
+typedef struct OrbisFontGlyphImageMetrics {
+    float bearingX;
+    float bearingY;
+    float advance;
+    float stride;
+    uint32_t width;
+    uint32_t height;
+} OrbisFontGlyphImageMetrics;
+
 typedef struct OrbisFontRenderOutput {
-    uint8_t reserved[64];
+    const void *stage;
+    OrbisFontSurfaceImage SurfaceImage;
+    struct {
+        uint32_t x;
+        uint32_t y;
+        uint32_t w;
+        uint32_t h;
+    } UpdateRect;
+    OrbisFontGlyphImageMetrics ImageMetrics;
 } OrbisFontRenderOutput;
+_Static_assert(sizeof(OrbisFontRenderOutput) == 64, "OrbisFontRenderOutput ABI size");
 
 typedef struct OrbisFontRenderSurface {
     void *buffer;
