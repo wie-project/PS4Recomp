@@ -106,7 +106,9 @@ void SetExtentHints(const uint32_t cb[8], uint32_t db);
 // Called once per sceGnmSubmit* (trace windows, stats).
 void OnSubmit();
 
-// Called when the command processor observes a GPU->CPU completion fence (EOP/RELEASE_MEM/EOS/WRITE_DATA).
+// Called when the command processor queues a GPU completion label (EOP, RELEASE_MEM, EOS: AfterGpuLabel).
+// Until the first one, every submission and present waits for the encoder and the GPU (the guest
+// has no GPU fence that would keep it from reusing memory the encoder still reads).
 void NoteGpuFence();
 
 // End of a command stream run (CP thread): waits for compute kernels that its dispatches still

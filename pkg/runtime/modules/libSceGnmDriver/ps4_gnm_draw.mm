@@ -9695,6 +9695,7 @@ void AfterGpu(std::function<void()> fn) { AfterGpu(std::move(fn), kQueueGfx); }
 bool LabelTraced(uint64_t addr) { return g_label_trace_addr && (addr & ~7ull) == g_label_trace_addr; }
 
 void AfterGpuLabel(uint64_t addr, uint64_t value, const char* packet, int queue, std::function<void()> fn) {
+    NoteGpuFence(); // the guest waits for GPU completion through this label (OnSubmit, PresentImpl)
     if (!LabelTraced(addr)) {
         AfterGpu(std::move(fn), queue);
         return;
