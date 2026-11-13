@@ -1984,6 +1984,7 @@ var knownDirectShims = []string{
 	"sceAudio3dPortGetQueueLevel",
 	"sceAudio3dPortAdvance",
 	"sceAudio3dPortPush",
+	"sceAudio3dPortFlush",
 	"sceAudio3dObjectReserve",
 	"sceAudio3dObjectUnreserve",
 	"sceAudio3dObjectSetAttributes",
