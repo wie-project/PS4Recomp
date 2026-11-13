@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "common/alignment.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/profile.h"
+
+#include <algorithm>
 
 namespace Shader::Optimization {
 
@@ -110,10 +113,21 @@ void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_
     //   * Requested shared memory size is too large for the host shared memory.
     //   * Workgroup explicit memory is not supported and multiple shared memory types are used.
     const u32 shared_memory_size = runtime_info.hw.cs.shared_memory_size;
+    // Wave64 lowering appends its scratch (one dword per subgroup, two when a subgroup reads
+    // another's value) after the shader's own LDS. Count it here: with the LDS at the host's
+    // limit the total exceeds the threadgroup memory Metal allows, while spilling the LDS
+    // leaves room for the scratch alone. The bound is conservative: the scratch may stay unused.
+    const u32 num_threads = std::max(1u, runtime_info.hw.cs.workgroup_size[0] *
+                                            runtime_info.hw.cs.workgroup_size[1] *
+                                            runtime_info.hw.cs.workgroup_size[2]);
+    const u32 num_subgroups =
+        Common::AlignUp(num_threads, 64u) / std::max(1u, profile.subgroup_size);
+    const u32 scratch_bound = Common::AlignUp(shared_memory_size, 8u) - shared_memory_size +
+                              2u * num_subgroups * u32(sizeof(u32));
+    const bool fits = shared_memory_size + scratch_bound <= profile.max_shared_memory_size;
     const auto used_types = CalculateSharedMemoryTypes(program);
-    if (used_types == IR::Type::Void || (shared_memory_size <= profile.max_shared_memory_size &&
-                                         (profile.supports_workgroup_explicit_memory_layout ||
-                                          std::popcount(static_cast<u32>(used_types)) == 1))) {
+    if (used_types == IR::Type::Void || (fits && (profile.supports_workgroup_explicit_memory_layout ||
+                                                  std::popcount(static_cast<u32>(used_types)) == 1))) {
         return;
     }
 
