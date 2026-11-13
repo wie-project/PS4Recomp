@@ -1444,6 +1444,9 @@ var knownDirectShims = []string{
 	// libSceNpTrophy
 	"sceNpTrophyGetGameInfo",
 	"sceNpTrophyGetTrophyInfo",
+	"sceNpTrophyGetGameIcon",
+	"sceNpTrophyGetGroupIcon",
+	"sceNpTrophyGetTrophyIcon",
 	// libSceNpMatching2
 	"sceNpMatching2SetDefaultRequestOptParam",
 	"sceNpMatching2ContextStop",
