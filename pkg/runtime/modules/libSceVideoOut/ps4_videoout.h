@@ -49,7 +49,8 @@ typedef struct OrbisVideoOutFlipStatus {
     uint64_t ptime;
     uint64_t stime;
     int64_t flipArg;
-    uint64_t reserved[2];
+    uint64_t submit_tsc;
+    uint64_t reserved0;
     int32_t numGpuFlipPending;
     int32_t numFlipPending;
     int32_t currentBuffer;

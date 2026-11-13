@@ -1,5 +1,6 @@
 #include "ps4_videoout.h"
 #include "ps4_metal_screen.h"
+#include "ps4_kernel_sys.h"
 
 int ps4_gnm_metal_present(GuestContext *ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch,
                           uint32_t tiling_mode, uint32_t pixel_format, void (*on_reached)(void *),
@@ -68,20 +69,12 @@ static pthread_t g_vblank_thread;
 static int g_vblank_thread_started = 0;
 static volatile int g_vblank_thread_running = 1;
 
-static uint64_t get_time_usec(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
+static inline uint64_t get_time_usec(void) {
+    return sceKernelGetProcessTime();
 }
 
-static uint64_t get_fake_tsc(void) {
-#if defined(__aarch64__)
-    uint64_t val;
-    asm volatile("mrs %0, cntvct_el0" : "=r"(val));
-    return val;
-#else
-    return get_time_usec() * 2000ULL;
-#endif
+static inline uint64_t get_fake_tsc(void) {
+    return sceKernelReadTsc();
 }
 
 static void *vblank_thread_func(void *arg) {
@@ -484,6 +477,7 @@ int32_t ps4_videoout_submit_flip(GuestContext *ctx, int32_t handle, int32_t buff
     if (gpu_flip && bufferIndex >= 0 && flip_labels_locked(ctx, vh)) lock = &vh->labels[bufferIndex];
     vh->flipStatus.numFlipPending++;
     vh->flipStatus.numGpuFlipPending++;
+    vh->flipStatus.submit_tsc = sceKernelReadTsc();
     pthread_mutex_unlock(&vh->mutex);
     pthread_mutex_unlock(&g_video_table_mutex);
 
