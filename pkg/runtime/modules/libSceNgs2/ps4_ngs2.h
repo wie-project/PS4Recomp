@@ -144,6 +144,149 @@ typedef struct OrbisNgs2WaveformInfo {
     OrbisNgs2WaveformBlock aBlock[4];
 } OrbisNgs2WaveformInfo;
 
+// Rack ids (sceNgs2RackCreate*).
+#define ORBIS_NGS2_RACK_ID_SAMPLER 0x1000
+#define ORBIS_NGS2_RACK_ID_SUBMIXER 0x2000
+#define ORBIS_NGS2_RACK_ID_REVERB 0x2001
+#define ORBIS_NGS2_RACK_ID_MASTERING 0x3000
+
+// Voice state flags.
+#define ORBIS_NGS2_VOICE_STATE_FLAG_INUSE 0x1
+#define ORBIS_NGS2_VOICE_STATE_FLAG_PLAYING 0x2
+#define ORBIS_NGS2_VOICE_STATE_FLAG_PAUSED 0x4
+#define ORBIS_NGS2_VOICE_STATE_FLAG_EMPTY 0x20
+
+// Waveform types: sampler data and render buffers.
+#define ORBIS_NGS2_WAVEFORM_TYPE_PCM_I16L 0x12
+#define ORBIS_NGS2_WAVEFORM_TYPE_PCM_I24L 0x14
+#define ORBIS_NGS2_WAVEFORM_TYPE_PCM_F32L 0x18
+#define ORBIS_NGS2_WAVEFORM_TYPE_ATRAC9 0x40
+
+// sceNgs2VoiceControl parameter ids. Common to every voice:
+#define ORBIS_NGS2_VOICE_PARAM_MATRIX_LEVELS 0x1
+#define ORBIS_NGS2_VOICE_PARAM_PORT_VOLUME 0x2
+#define ORBIS_NGS2_VOICE_PARAM_PORT_MATRIX 0x3
+#define ORBIS_NGS2_VOICE_PARAM_PATCH 0x5
+#define ORBIS_NGS2_VOICE_PARAM_EVENT 0x6
+// Sampler voices:
+#define ORBIS_NGS2_SAMPLER_VOICE_PARAM_SETUP 0x10000000
+#define ORBIS_NGS2_SAMPLER_VOICE_PARAM_WAVEFORM_BLOCKS 0x10000001
+#define ORBIS_NGS2_SAMPLER_VOICE_PARAM_PITCH 0x10000005
+// Submixer voices:
+#define ORBIS_NGS2_SUBMIXER_VOICE_PARAM_SETUP 0x20000000
+// Mastering voices:
+#define ORBIS_NGS2_MASTERING_VOICE_PARAM_SETUP 0x30000000
+#define ORBIS_NGS2_MASTERING_VOICE_PARAM_LIMITER 0x30000003
+#define ORBIS_NGS2_MASTERING_VOICE_PARAM_GAIN 0x30000004
+#define ORBIS_NGS2_MASTERING_VOICE_PARAM_OUTPUT 0x30000005
+
+// Voice events (ORBIS_NGS2_VOICE_PARAM_EVENT).
+#define ORBIS_NGS2_VOICE_EVENT_PLAY 0
+#define ORBIS_NGS2_VOICE_EVENT_STOP 1
+#define ORBIS_NGS2_VOICE_EVENT_STOP_IMM 2
+#define ORBIS_NGS2_VOICE_EVENT_KILL 3
+#define ORBIS_NGS2_VOICE_EVENT_PAUSE 4
+#define ORBIS_NGS2_VOICE_EVENT_RESUME 5
+
+// Waveform blocks param flag: the blocks are queued after the voice's pending ones. A list
+// without the flag and without blocks means no more data: the voice ends after its queue.
+#define ORBIS_NGS2_WAVEFORM_BLOCKS_FLAG_QUEUE 0x1
+
+// Guest pointers in the parameters below are guest addresses (uint64_t).
+typedef struct OrbisNgs2VoiceMatrixLevelsParam {
+    OrbisNgs2VoiceParamHeader header;
+    uint32_t matrixId;
+    uint32_t numLevels;
+    uint64_t aLevel; // const float[numLevels], level[out * numInputChannels + in]
+} OrbisNgs2VoiceMatrixLevelsParam;
+
+typedef struct OrbisNgs2VoicePortVolumeParam {
+    OrbisNgs2VoiceParamHeader header;
+    uint32_t port;
+    float level;
+} OrbisNgs2VoicePortVolumeParam;
+
+typedef struct OrbisNgs2VoicePortMatrixParam {
+    OrbisNgs2VoiceParamHeader header;
+    uint32_t port;
+    int32_t matrixId; // -1: no matrix
+} OrbisNgs2VoicePortMatrixParam;
+
+typedef struct OrbisNgs2VoicePatchParam {
+    OrbisNgs2VoiceParamHeader header;
+    uint32_t port;
+    uint32_t destInputId;
+    OrbisNgs2Handle destHandle; // a voice, or a rack (its first voice); 0 disconnects the port
+} OrbisNgs2VoicePatchParam;
+
+typedef struct OrbisNgs2VoiceEventParam {
+    OrbisNgs2VoiceParamHeader header;
+    uint32_t eventId;
+} OrbisNgs2VoiceEventParam;
+
+typedef struct OrbisNgs2SamplerVoiceSetupParam {
+    OrbisNgs2VoiceParamHeader header;
+    OrbisNgs2WaveformFormat format;
+    uint32_t flags;
+    uint32_t reserved;
+} OrbisNgs2SamplerVoiceSetupParam;
+
+typedef struct OrbisNgs2SamplerVoiceWaveformBlocksParam {
+    OrbisNgs2VoiceParamHeader header;
+    uint64_t data; // the blocks' dataOffset counts from here
+    uint32_t flags;
+    uint32_t numBlocks;
+    uint64_t aBlock; // const OrbisNgs2WaveformBlock[numBlocks]
+} OrbisNgs2SamplerVoiceWaveformBlocksParam;
+
+typedef struct OrbisNgs2SamplerVoicePitchParam {
+    OrbisNgs2VoiceParamHeader header;
+    float ratio;
+    uint32_t reserved;
+} OrbisNgs2SamplerVoicePitchParam;
+
+typedef struct OrbisNgs2SubmixerVoiceSetupParam {
+    OrbisNgs2VoiceParamHeader header;
+    uint32_t numIoChannels;
+    uint32_t flags;
+} OrbisNgs2SubmixerVoiceSetupParam;
+
+typedef struct OrbisNgs2MasteringVoiceSetupParam {
+    OrbisNgs2VoiceParamHeader header;
+    uint32_t numInputChannels;
+    uint32_t flags;
+} OrbisNgs2MasteringVoiceSetupParam;
+
+typedef struct OrbisNgs2MasteringVoiceLimiterParam {
+    OrbisNgs2VoiceParamHeader header;
+    uint32_t enableFlag;
+    float threshold;
+} OrbisNgs2MasteringVoiceLimiterParam;
+
+typedef struct OrbisNgs2MasteringVoiceGainParam {
+    OrbisNgs2VoiceParamHeader header;
+    float fbwLevel;
+    float lfeLevel;
+} OrbisNgs2MasteringVoiceGainParam;
+
+typedef struct OrbisNgs2MasteringVoiceOutputParam {
+    OrbisNgs2VoiceParamHeader header;
+    uint32_t outputId; // index into sceNgs2SystemRender's buffer array
+    uint32_t reserved;
+} OrbisNgs2MasteringVoiceOutputParam;
+
+// sceNgs2VoiceGetState of a sampler voice. Other voices fill stateFlags only.
+typedef struct OrbisNgs2SamplerVoiceState {
+    uint32_t stateFlags;
+    float envelopeHeight;
+    float peakHeight;
+    uint32_t reserved;
+    uint64_t numDecodedSamples;
+    uint64_t numDecodedBytes;
+    uint64_t userData;       // userData of the block being played
+    uint64_t waveformData;   // guest address of the block being played (data + dataOffset)
+} OrbisNgs2SamplerVoiceState;
+
 // Error codes
 #define ORBIS_NGS2_ERROR_FAIL 0x804A0001
 #define ORBIS_NGS2_ERROR_INVALID_MAX_GRAIN_SAMPLES 0x804A0050
