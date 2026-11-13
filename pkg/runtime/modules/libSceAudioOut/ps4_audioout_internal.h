@@ -10,6 +10,7 @@
 // Return values follow the guest ABI: >= 0 on success, a negative
 // ORBIS_AUDIO_OUT_ERROR_* code (as int32_t) on failure.
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -86,7 +87,19 @@ typedef struct {
   uint64_t first_sound_play_us;
   uint64_t first_sound_outputs;
   uint32_t ring_frames; // ring capacity in frames
+  // The lowest ring level a device period found since the first grain (UINT32_MAX: no period
+  // yet), and the longest time the guest took between an output call's return and its next call.
+  uint32_t min_queued;
+  uint64_t max_work_us;
 } Ps4AudioPortStats;
+
+// Device periods since the output started (also in the "[AudioOut] perf" line every 5 s).
+typedef struct {
+  bool running;             // a device (CoreAudio, or PS4_AUDIO_NULL's clock) consumes the rings
+  uint64_t periods;         // device periods mixed
+  uint64_t starved_periods; // periods in which a port that had output found its ring short
+} Ps4AudioDeviceStats;
+void ps4_audioout_device_stats(Ps4AudioDeviceStats *out);
 
 // Fills *out with the port's counters. Returns 0, PS4_AUDIO_OUT_ERROR_INVALID_PORT or
 // PS4_AUDIO_OUT_ERROR_INVALID_POINTER.
