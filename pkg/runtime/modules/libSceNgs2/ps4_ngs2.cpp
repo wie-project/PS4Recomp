@@ -30,6 +30,7 @@
 #include "structures.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <cmath>
 #include <cstring>
 #include <ctime>
@@ -898,6 +899,72 @@ static void ApplyParam(GuestContext* ctx, Voice& v, const uint8_t* p, uint32_t i
     WarnUnknownParam(v, id);
 }
 
+__attribute__((format(printf, 4, 5))) static void Append(char* line, size_t cap, size_t& at, const char* fmt, ...) {
+    if (at >= cap) return;
+    va_list args;
+    va_start(args, fmt);
+    at += (size_t)vsnprintf(line + at, cap - at, fmt, args);
+    va_end(args);
+}
+
+// Logs where a voice's ports lead (channels, volume, matrix levels) the first time a routing of
+// that shape is seen: the channel layout the game mixes with, for checking it by ear. Bounded.
+static void LogRoute(const Voice& v) {
+    static uint64_t seen[32];
+    static uint32_t num_seen;
+    uint64_t sig = 1469598103934665603ULL;
+    auto mix = [&sig](uint64_t x) { sig = (sig ^ x) * 1099511628211ULL; };
+    mix(v.rack->rack_id);
+    mix(v.channels);
+    mix(v.output);
+    for (uint32_t i = 0; i < MaxPorts; ++i) {
+        const Port& port = v.ports[i];
+        if (!port.dest) continue;
+        mix(i);
+        mix(port.dest->rack->rack_id);
+        mix(port.dest->channels);
+        uint32_t vol;
+        memcpy(&vol, &port.volume, 4);
+        mix(vol);
+        mix((uint32_t)port.matrix);
+        if (port.matrix >= 0 && (uint32_t)port.matrix < MaxMatrices) {
+            const uint32_t n = v.matrix_levels[port.matrix];
+            mix(n);
+            for (uint32_t k = 0; k < n; ++k) {
+                uint32_t l;
+                memcpy(&l, &v.matrix[port.matrix][k], 4);
+                mix(l);
+            }
+        }
+    }
+    for (uint32_t i = 0; i < num_seen; ++i) {
+        if (seen[i] == sig) return;
+    }
+    if (num_seen == 32) return;
+    seen[num_seen++] = sig;
+    char line[1024];
+    size_t at = (size_t)snprintf(line, sizeof(line), "[ngs2] route: rack 0x%x voice 0x%llx, %u ch", v.rack->rack_id,
+                                 (unsigned long long)v.handle, v.channels);
+    if (v.rack->kind == RackKind::Mastering) Append(line, sizeof(line), at, ", output %u", v.output);
+    bool any = false;
+    for (uint32_t i = 0; i < MaxPorts; ++i) {
+        const Port& port = v.ports[i];
+        if (!port.dest) continue;
+        any = true;
+        Append(line, sizeof(line), at, "; port %u -> rack 0x%x (%u ch) volume %.3f matrix %d", i, port.dest->rack->rack_id,
+            port.dest->channels, (double)port.volume, port.matrix);
+        if (port.matrix >= 0 && (uint32_t)port.matrix < MaxMatrices) {
+            const uint32_t n = v.matrix_levels[port.matrix];
+            Append(line, sizeof(line), at, " [%u:", n);
+            for (uint32_t k = 0; k < n; ++k) Append(line, sizeof(line), at, " %.3f", (double)v.matrix[port.matrix][k]);
+            Append(line, sizeof(line), at, "]");
+        }
+    }
+    if (!any && v.rack->kind != RackKind::Mastering) Append(line, sizeof(line), at, "; no port patched");
+    if (at >= sizeof(line)) at = sizeof(line) - 1;
+    fprintf(stderr, "%.*s\n", (int)at, line);
+}
+
 // ---- Registry ----
 
 static int32_t CallGuestAlloc(GuestContext* ctx, uint64_t fn_addr, uint64_t info_guest_addr) {
@@ -1211,9 +1278,17 @@ void shim_sceNgs2SystemRender(GuestContext *ctx) {
     }
     if (!sys.render_logged && num_buffers) {
         sys.render_logged = true;
-        fprintf(stderr, "[ngs2] SystemRender: system 0x%llx, %u samples, %u buffers, first: type 0x%x, %u channels, %llu bytes\n",
-                (unsigned long long)h, sys.option.numGrainSamples, num_buffers, bufs[0].waveformType,
-                bufs[0].numChannels, (unsigned long long)bufs[0].bufferSize);
+        fprintf(stderr, "[ngs2] SystemRender: system 0x%llx, %u samples, %u buffers\n", (unsigned long long)h,
+                sys.option.numGrainSamples, num_buffers);
+        for (uint32_t i = 0; i < num_buffers; ++i) {
+            fprintf(stderr, "[ngs2]   buffer %u: 0x%llx, type 0x%x, %u channels, %llu bytes\n", i,
+                    (unsigned long long)bufs[i].buffer, bufs[i].waveformType, bufs[i].numChannels,
+                    (unsigned long long)bufs[i].bufferSize);
+        }
+        for (Rack* r : sys.racks) {
+            if (r->kind != RackKind::Submixer && r->kind != RackKind::Mastering) continue;
+            for (const Voice& mv : r->voices) LogRoute(mv);
+        }
     }
     if (uint32_t err = PrepareRenderBuffers(ctx, bufs, num_buffers, sys.option.numGrainSamples)) {
         ctx->rax = (uint64_t)err;
@@ -1357,6 +1432,7 @@ void shim_sceNgs2VoiceControl(GuestContext *ctx) {
         SHIM_RETURN();
     }
     Voice& v = *it->second;
+    const uint32_t state_before = v.state;
 
     for (uint32_t n = 0; param_addr && n < MaxParams; ++n) {
         const uint8_t* hp = GuestRange(ctx, param_addr, sizeof(OrbisNgs2VoiceParamHeader));
@@ -1377,6 +1453,7 @@ void shim_sceNgs2VoiceControl(GuestContext *ctx) {
         if (header.next == 0) break;
         param_addr += (int64_t)header.next;
     }
+    if (!(state_before & StatePlaying) && (v.state & StatePlaying)) LogRoute(v);
 
     ctx->rax = 0;
     SHIM_RETURN();

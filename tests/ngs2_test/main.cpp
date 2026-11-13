@@ -178,7 +178,8 @@ uint32_t Flags(OrbisNgs2Handle voice) {
 constexpr uint32_t kPlaying = ORBIS_NGS2_VOICE_STATE_FLAG_INUSE | ORBIS_NGS2_VOICE_STATE_FLAG_PLAYING;
 constexpr uint32_t kEmpty = ORBIS_NGS2_VOICE_STATE_FLAG_EMPTY;
 
-// A system with sampler voices -> one stereo submixer -> one stereo mastering voice -> buffer 0.
+// A system with sampler voices -> one submixer -> one mastering voice -> buffer 0, both of
+// `mix_channels` channels (stereo by default; Gravity Rush mixes 8).
 struct Graph {
     OrbisNgs2Handle system = 0;
     OrbisNgs2Handle mastering = 0;
@@ -202,7 +203,7 @@ OrbisNgs2Handle VoiceOf(OrbisNgs2Handle rack, uint32_t index) {
     return OutHandle();
 }
 
-Graph CreateGraph(uint32_t sampler_voices = kSamplerVoices) {
+Graph CreateGraph(uint32_t sampler_voices = kSamplerVoices, uint32_t mix_channels = 2) {
     Graph g;
     SetBufferInfo(kSysBuf, kBufSize);
     CHECK(Call(shim_sceNgs2SystemCreate, 0, kInfo, kOut) == 0);
@@ -215,7 +216,7 @@ Graph CreateGraph(uint32_t sampler_voices = kSamplerVoices) {
     {
         Params p;
         OrbisNgs2MasteringVoiceSetupParam s{};
-        s.numInputChannels = 2;
+        s.numInputChannels = mix_channels;
         p.Add(ORBIS_NGS2_MASTERING_VOICE_PARAM_SETUP, s);
         OrbisNgs2MasteringVoiceOutputParam o{};
         o.outputId = 0;
@@ -225,7 +226,7 @@ Graph CreateGraph(uint32_t sampler_voices = kSamplerVoices) {
     {
         Params p;
         OrbisNgs2SubmixerVoiceSetupParam s{};
-        s.numIoChannels = 2;
+        s.numIoChannels = mix_channels;
         p.Add(ORBIS_NGS2_SUBMIXER_VOICE_PARAM_SETUP, s);
         Patch(p, 0, g.racks[0]); // a rack handle stands for its first voice
         CHECK(p.Send(g.submixer) == 0);
@@ -459,6 +460,69 @@ void TestPcm24MatrixSkipRepeat() {
     CHECK(s.numDecodedSamples == 2 * kSamples);
     CHECK(s.numDecodedBytes == 2 * (kSkip + kSamples) * 6); // each pass reads what it plays
     printf("[+] PCM24 stereo voice: matrix levels, skip, repeat and mastering gain\n");
+    DestroyGraph(g);
+}
+
+// Gravity Rush's layout: 8-channel submixer and mastering into an 8-channel float buffer. A
+// stereo stream through the game's 4-level matrix (0.3 0 0 0.3), a stereo voice without a
+// matrix and a mono voice with an 8-level centre matrix land on L, R and C, each on its own.
+void TestEightChannelRouting() {
+    Graph g = CreateGraph(kSamplerVoices, 8);
+    constexpr uint32_t kFrames = kGrain;
+    constexpr uint64_t kStereo = kWave, kMono = kWave + 0x10000;
+    WritePcm16(kStereo, kFrames, 2); // Pcm16Value differs per channel: L and R are distinct
+    WritePcm16(kMono, kFrames, 1);
+    const float stereo_levels[4] = {0.3f, 0.0f, 0.0f, 0.3f}; // level[out * 2 + in]
+    const float centre_levels[8] = {0, 0, 1.0f, 0, 0, 0, 0, 0}; // level[out]
+    memcpy(At<float>(kLevels), stereo_levels, sizeof(stereo_levels));
+    memcpy(At<float>(kLevels + 0x100), centre_levels, sizeof(centre_levels));
+    auto play = [&](OrbisNgs2Handle v, uint64_t data, uint32_t channels, uint64_t levels, uint32_t num_levels) {
+        Params p;
+        Setup(p, ORBIS_NGS2_WAVEFORM_TYPE_PCM_I16L, channels, 48000);
+        if (num_levels) {
+            OrbisNgs2VoiceMatrixLevelsParam m{};
+            m.matrixId = 0;
+            m.numLevels = num_levels;
+            m.aLevel = levels;
+            p.Add(ORBIS_NGS2_VOICE_PARAM_MATRIX_LEVELS, m);
+            OrbisNgs2VoicePortMatrixParam pm{};
+            pm.port = 0;
+            pm.matrixId = 0;
+            p.Add(ORBIS_NGS2_VOICE_PARAM_PORT_MATRIX, pm);
+        }
+        Blocks(p, data, ORBIS_NGS2_WAVEFORM_BLOCKS_FLAG_QUEUE, {Block(0, kFrames * 2 * channels, kFrames)});
+        Event(p, ORBIS_NGS2_VOICE_EVENT_PLAY);
+        CHECK(p.Send(v) == 0);
+    };
+    auto render8 = [&] {
+        CHECK(RenderTo(g, ORBIS_NGS2_WAVEFORM_TYPE_PCM_F32L, 8, kGrain * 8 * sizeof(float)) == 0);
+        return At<float>(kOutBuf);
+    };
+
+    play(g.voices[0], kStereo, 2, kLevels, 4);
+    const float *out = render8();
+    for (uint32_t f = 0; f < kGrain; ++f) {
+        CHECK(out[f * 8 + 0] == Pcm16(f, 0) * 0.3f);
+        CHECK(out[f * 8 + 1] == Pcm16(f, 1) * 0.3f);
+        for (uint32_t c = 2; c < 8; ++c) CHECK(out[f * 8 + c] == 0.0f);
+    }
+    printf("[+] 8ch mix: stereo stream through a 4-level matrix keeps L on L and R on R\n");
+
+    play(g.voices[1], kStereo, 2, 0, 0);
+    out = render8();
+    for (uint32_t f = 0; f < kGrain; ++f) {
+        CHECK(out[f * 8 + 0] == Pcm16(f, 0));
+        CHECK(out[f * 8 + 1] == Pcm16(f, 1));
+        for (uint32_t c = 2; c < 8; ++c) CHECK(out[f * 8 + c] == 0.0f);
+    }
+    printf("[+] 8ch mix: stereo voice without a matrix keeps L on L and R on R\n");
+
+    play(g.voices[2], kMono, 1, kLevels + 0x100, 8);
+    out = render8();
+    for (uint32_t f = 0; f < kGrain; ++f) {
+        for (uint32_t c = 0; c < 8; ++c) CHECK(out[f * 8 + c] == (c == 2 ? Pcm16(f, 0) : 0.0f));
+    }
+    printf("[+] 8ch mix: mono voice through a centre matrix lands on C only\n");
     DestroyGraph(g);
 }
 
@@ -767,6 +831,7 @@ int main() {
     TestCreateEntryPoints();
     TestPcm16StateAndTiming();
     TestPcm24MatrixSkipRepeat();
+    TestEightChannelRouting();
     TestPitch();
     TestPauseStopKill();
     TestRenderBuffers();
