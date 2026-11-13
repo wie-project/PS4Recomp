@@ -63,6 +63,9 @@ type Relocation struct {
 	SymName string
 	Addend  int64
 	PltAddr uint64
+	// WeakUndef reports that the referenced symbol is STB_WEAK and undefined (SHN_UNDEF) in
+	// the module that carries the relocation.
+	WeakUndef bool
 }
 
 // Symbol represents an exported or local symbol.
@@ -71,6 +74,7 @@ type Symbol struct {
 	Address uint64
 	Size    uint64
 	Type    elf.SymType
+	Bind    elf.SymBind
 	Section elf.SectionIndex
 }
 
@@ -295,6 +299,7 @@ func LoadELFBytes(data []byte) (*LoadedELF, error) {
 				Address: s.Value,
 				Size:    s.Size,
 				Type:    elf.ST_TYPE(s.Info),
+				Bind:    elf.ST_BIND(s.Info),
 				Section: s.Section,
 			})
 		}
@@ -308,6 +313,7 @@ func LoadELFBytes(data []byte) (*LoadedELF, error) {
 				Address: s.Value,
 				Size:    s.Size,
 				Type:    elf.ST_TYPE(s.Info),
+				Bind:    elf.ST_BIND(s.Info),
 				Section: s.Section,
 			}
 			loaded.DynSymbols = append(loaded.DynSymbols, sym)
@@ -440,16 +446,20 @@ func applyRelaTable(loaded *LoadedELF, relData []byte, isPlt bool) {
 		symIdx := uint32(info >> 32)
 
 		var symName string
+		weakUndef := false
 		if int(symIdx) < len(loaded.DynSymbols) {
-			symName = loaded.DynSymbols[symIdx].Name
+			sym := &loaded.DynSymbols[symIdx]
+			symName = sym.Name
+			weakUndef = symIdx != 0 && sym.Bind == elf.STB_WEAK && sym.Section == elf.SHN_UNDEF
 		}
 
 		rel := Relocation{
-			Offset:  offset,
-			Type:    relType,
-			SymIdx:  symIdx,
-			SymName: symName,
-			Addend:  addend,
+			Offset:    offset,
+			Type:      relType,
+			SymIdx:    symIdx,
+			SymName:   symName,
+			Addend:    addend,
+			WeakUndef: weakUndef,
 		}
 
 		if relType == R_X86_64_JUMP_SLOT && isPlt {
@@ -724,6 +734,7 @@ func parseSCEDynamic(loaded *LoadedELF, data []byte, file *elf.File) {
 				Address: value,
 				Size:    size,
 				Type:    elf.ST_TYPE(info),
+				Bind:    elf.ST_BIND(info),
 				Section: elf.SectionIndex(shndx),
 			}
 			loaded.DynSymbols = append(loaded.DynSymbols, sym)

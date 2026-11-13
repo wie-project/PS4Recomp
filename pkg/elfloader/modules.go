@@ -616,6 +616,13 @@ func ResolveModuleRelocations(main *LoadedELF, companionExports []Symbol) error 
 			if ok && targetAddr != 0 {
 				finalAddr := targetAddr + uint64(rel.Addend)
 				binary.LittleEndian.PutUint64(main.MemoryImage[rel.Offset:rel.Offset+8], finalAddr)
+			} else if rel.WeakUndef && !strings.Contains(rel.SymName, "#") {
+				// A weak undefined symbol with no definition resolves to 0 (ELF gABI). Only
+				// plaintext names qualify: they carry no library/module id, so no import library
+				// can provide them (PRX modules reference their optional module_start/module_stop
+				// this way). A weak NID import is still bound to a host shim or reported as
+				// unresolved: a missing shim does not mean the library lacks the symbol.
+				binary.LittleEndian.PutUint64(main.MemoryImage[rel.Offset:rel.Offset+8], 0)
 			} else {
 				// For host shims or unresolved symbols: point the GOT slot to rel.Offset (or rel.PltAddr)
 				// so indirect call recomp_dispatch(ctx, MEM_U64(rel.Offset)) dispatches to the registered shim/stub!
