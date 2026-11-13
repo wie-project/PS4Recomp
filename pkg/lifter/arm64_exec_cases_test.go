@@ -2,6 +2,7 @@ package lifter
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"testing"
@@ -411,6 +412,30 @@ func TestExecX87Fdecstp(t *testing.T) {
 			name: fmt.Sprintf("fldenv fsw=%#x; fdecstp", sw),
 			code: []string{fldenv + "20", fdecstp, fnstswAX},
 			regs: regs, mem: map[int][]byte{0x120: env},
+		})
+	}
+	runExecCases(t, cases)
+}
+
+// MOV with a 64-bit absolute address (moffs, A0-A3): loads into AL/AX (the rest of RAX kept),
+// EAX (zero-extended) and RAX, stores from each, at an unaligned address.
+func TestExecMovMoffs(t *testing.T) {
+	pattern := make([]byte, 0x40)
+	for i := range pattern {
+		pattern[i] = byte(i*29 + 0x93)
+	}
+	addr := hex.EncodeToString(le64(execMemBase + 0x203))
+	var cases []execCase
+	for _, f := range []struct{ name, op string }{
+		{"mov al, [moffs]", "a0"}, {"mov ax, [moffs]", "66a1"}, {"mov eax, [moffs]", "a1"}, {"mov rax, [moffs]", "48a1"},
+		{"mov [moffs], al", "a2"}, {"mov [moffs], ax", "66a3"}, {"mov [moffs], eax", "a3"}, {"mov [moffs], rax", "48a3"},
+	} {
+		cases = append(cases, execCase{
+			name:  f.name,
+			code:  []string{f.op + addr},
+			regs:  map[x86asm.Reg]uint64{x86asm.RAX: 0x1122334455667788},
+			flags: fCF | fSF,
+			mem:   map[int][]byte{0x200: pattern},
 		})
 	}
 	runExecCases(t, cases)

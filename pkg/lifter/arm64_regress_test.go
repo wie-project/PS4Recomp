@@ -522,7 +522,7 @@ func TestRegressX87UnusedTrap(t *testing.T) {
 
 // FS:[base+index*scale+disp] ignored base and index (0 sites); the address is now computed as
 // usual and the FS base (x27) added. Forms computeEffAddr cannot express trap (0 sites each):
-// addr32, MOV moffs64 (A0-A3), GS.
+// addr32, GS. MOV moffs64 (A0-A3) is lowered apart from it (TestRegressMovMoffs).
 func TestRegressAddressingForms(t *testing.T) {
 	requireInOrder(t, "mov rax, fs:[rax+8]", liftBlock(t, "64488b4008")[0],
 		"mov x16, x19", "add x16, x16, #8", "add x16, x16, x27", "ldr x19, [x28, x16]")
@@ -530,8 +530,6 @@ func TestRegressAddressingForms(t *testing.T) {
 		"mov x16, x19", "add x16, x16, x21, lsl #3", "add x16, x16, x27", "ldr x19, [x28, x16]")
 	requireInOrder(t, "mov rax, fs:[0x28]", liftBlock(t, "64488b042528000000")[0], "add x16, x27, #40", "ldr x19, [x28, x16]")
 	for _, tc := range []struct{ name, hex string }{
-		{"mov eax, [moffs64]", "a10000001000000000"},
-		{"mov [moffs64], rax", "48a30000001000000000"},
 		{"mov rax, gs:[0]", "65488b042500000000"},
 		{"mov eax, [edi]", "678b07"},
 		{"lea rax, [edi+eax]", "67488d0407"},
@@ -587,5 +585,19 @@ func TestRegressStdSetsDirection(t *testing.T) {
 	requireInOrder(t, "rep movsb", liftBlock(t, "f3a4")[0], "ldrb w7, [x7, #0x9e]", "sub x23, x23, x7", "sub x24, x24, x7")
 	for _, enc := range []string{"fd", "fc", "f3a4", "f348ab", "f3ac", "f3a6", "f2ae"} {
 		forbid(t, enc, liftBlock(t, enc)[0], "b _recomp_unsupported_instruction")
+	}
+}
+
+// MOV with a 64-bit absolute address (moffs) trapped as unsupported. It loads the 64-bit
+// address (plus the FS base with an FS override); ADDR32 and GS forms still trap
+// (TestExecMovMoffs runs the flat forms against x86).
+func TestRegressMovMoffs(t *testing.T) {
+	requireInOrder(t, "mov rax, [moffs]", liftBlock(t, "48a1efcdab8967452301")[0],
+		"movz x16, #0xcdef, lsl #0", "movk x16, #0x89ab, lsl #16", "movk x16, #0x4567, lsl #32", "movk x16, #0x123, lsl #48",
+		"ldapr x19, [x7]")
+	requireInOrder(t, "mov rax, fs:[moffs]", liftBlock(t, "6448a10800000000000000")[0], "add x16, x16, x27", "ldapr x19, [x7]")
+	requireInOrder(t, "mov [moffs], al", liftBlock(t, "a2efcdab8967452301")[0], "stlrb w19, [x7]")
+	for _, enc := range []string{"67a044332211", "6548a10800000000000000"} {
+		requireInOrder(t, enc, liftBlock(t, enc)[0], "b _recomp_unsupported_instruction")
 	}
 }

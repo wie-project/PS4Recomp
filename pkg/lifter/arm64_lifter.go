@@ -510,8 +510,6 @@ func unsupportedAddressing(inst x86asm.Inst) string {
 		switch {
 		case inst.AddrSize == 32:
 			return "addr32 memory operand (32-bit address wrap not lowered)"
-		case inst.Op == x86asm.MOV && inst.Opcode>>24 >= 0xa0 && inst.Opcode>>24 <= 0xa3:
-			return "mov with a 64-bit absolute address (moffs) not lowered"
 		case m.Segment == x86asm.GS:
 			return "GS segment override not lowered"
 		}
@@ -689,19 +687,34 @@ func loadImmToReg(reg x86asm.Reg, val uint64) ([]string, bool) {
 
 // readMemTo generates instructions to read memory into target ARM register.
 func readMemTo(mem x86asm.Mem, nextPC uint64, size int, targetX string, targetW string) []string {
-	var lines []string
-	lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
+	lines := computeEffAddr(mem, nextPC, "x16")
+	return append(lines, loadGuest(size, targetX, targetW, "x16"))
+}
+
+// loadGuest loads size bytes (zero-extended) from the guest address in addrReg.
+func loadGuest(size int, targetX, targetW, addrReg string) string {
 	switch size {
 	case 1:
-		lines = append(lines, fmt.Sprintf("    ldrb %s, [x28, x16]", targetW))
+		return fmt.Sprintf("    ldrb %s, [x28, %s]", targetW, addrReg)
 	case 2:
-		lines = append(lines, fmt.Sprintf("    ldrh %s, [x28, x16]", targetW))
+		return fmt.Sprintf("    ldrh %s, [x28, %s]", targetW, addrReg)
 	case 4:
-		lines = append(lines, fmt.Sprintf("    ldr %s, [x28, x16]", targetW))
-	default:
-		lines = append(lines, fmt.Sprintf("    ldr %s, [x28, x16]", targetX))
+		return fmt.Sprintf("    ldr %s, [x28, %s]", targetW, addrReg)
 	}
-	return lines
+	return fmt.Sprintf("    ldr %s, [x28, %s]", targetX, addrReg)
+}
+
+// storeGuest stores the low size bytes of the source register to the guest address in addrReg.
+func storeGuest(size int, srcX, srcW, addrReg string) string {
+	switch size {
+	case 1:
+		return fmt.Sprintf("    strb %s, [x28, %s]", srcW, addrReg)
+	case 2:
+		return fmt.Sprintf("    strh %s, [x28, %s]", srcW, addrReg)
+	case 4:
+		return fmt.Sprintf("    str %s, [x28, %s]", srcW, addrReg)
+	}
+	return fmt.Sprintf("    str %s, [x28, %s]", srcX, addrReg)
 }
 
 // writeMemFrom generates instructions to write from ARM register to guest memory.
@@ -712,17 +725,7 @@ func writeMemFrom(mem x86asm.Mem, nextPC uint64, size int, srcX string, srcW str
 		addrReg = "x17"
 	}
 	lines = append(lines, computeEffAddr(mem, nextPC, addrReg)...)
-	switch size {
-	case 1:
-		lines = append(lines, fmt.Sprintf("    strb %s, [x28, %s]", srcW, addrReg))
-	case 2:
-		lines = append(lines, fmt.Sprintf("    strh %s, [x28, %s]", srcW, addrReg))
-	case 4:
-		lines = append(lines, fmt.Sprintf("    str %s, [x28, %s]", srcW, addrReg))
-	default:
-		lines = append(lines, fmt.Sprintf("    str %s, [x28, %s]", srcX, addrReg))
-	}
-	return lines
+	return append(lines, storeGuest(size, srcX, srcW, addrReg))
 }
 
 func invertArm64Cond(cond string) string {
