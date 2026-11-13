@@ -6,10 +6,12 @@
 #include <time.h>
 
 int ps4_present_parse_mode(const char *s, ps4_present_mode *out) {
-    *out = PS4_PRESENT_UNCAPPED;
-    if (!s || !*s || !strcasecmp(s, "uncapped")) return 1;
-    if (!strcasecmp(s, "vsync")) {
-        *out = PS4_PRESENT_VSYNC;
+    // Unset means vsync: games pace their logic by the display, so an unpaced presenter makes
+    // them run ahead of their own audio and timers. Uncapped stays available for benchmarking.
+    *out = PS4_PRESENT_VSYNC;
+    if (!s || !*s || !strcasecmp(s, "vsync")) return 1;
+    if (!strcasecmp(s, "uncapped")) {
+        *out = PS4_PRESENT_UNCAPPED;
         return 1;
     }
     if (!strcasecmp(s, "mailbox")) {
