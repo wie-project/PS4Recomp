@@ -118,10 +118,13 @@ void guest_thread_entry(void);
 #define RES_THR_CHILD 0x1600
 void guest_lifted_vpcmpistri(void);
 void guest_lifted_vaeskeygenassist(void);
+void guest_lifted_fcos(void);
 #define ADDR_LIFTED_VPCMPISTRI 0x500000ULL
 #define ADDR_LIFTED_VAESKEYGENASSIST 0x500100ULL
+#define ADDR_LIFTED_FCOS 0x500400ULL
 #define RES_LIFTED_VPCMPISTRI 0x1003000ULL
 #define RES_LIFTED_VAESKEYGENASSIST 0x1003400ULL
+#define RES_LIFTED_FCOS 0x1003800ULL
 uint64_t host_enter_guest_d8_d15(GuestContext *ctx, uint64_t fn);
 
 static GuestContext *g_proc;
@@ -462,6 +465,27 @@ static void test_helpers(void) {
   const xmm_reg_t want = recomp_vaeskeygenassist_impl(src, 1);
   recomp_call_guest(g_proc, ADDR_LIFTED_VAESKEYGENASSIST);
   check_lifted("vaeskeygenassist", RES_LIFTED_VAESKEYGENASSIST, 4, &want, 20, 0, 0x60000000ULL);
+
+  // fcos: no vector register changes, NZCV stays Z|C. ST(0) = the double nearest pi/2 gives
+  // (pi66 - pi_double) / 2, the x87 result (66-bit pi), with C1 and C2 cleared; |ST(0)| >= 2^63
+  // leaves ST(0) unchanged and sets C2. TOP does not move.
+  static const struct {
+    uint64_t in, out;
+    uint16_t sw;
+  } fcos_cases[] = {{0x3ff921fb54442d18ULL, 0x3c91a60000000000ULL, 0x0000},
+                    {0x7e37e43c8800759cULL, 0x7e37e43c8800759cULL, 0x0400}};
+  for (unsigned i = 0; i < sizeof fcos_cases / sizeof fcos_cases[0]; i++) {
+    g_proc->fpu_top = 5;
+    memcpy(&g_proc->fpu_stack[5], &fcos_cases[i].in, 8);
+    g_proc->fpu_sw = 0x0600;
+    recomp_call_guest(g_proc, ADDR_LIFTED_FCOS);
+    check_lifted("fcos", RES_LIFTED_FCOS, -1, NULL, -1, -1, 0x60000000ULL);
+    uint64_t got;
+    memcpy(&got, &g_proc->fpu_stack[5], 8);
+    expect("fcos ST(0)", got, fcos_cases[i].out);
+    expect("fcos FSW", g_proc->fpu_sw, fcos_cases[i].sw);
+    expect("fcos TOP", (uint64_t)g_proc->fpu_top, 5);
+  }
 }
 
 static struct {
@@ -742,6 +766,7 @@ int main(int argc, char **argv) {
   recomp_register_fn(ADDR_THREAD_ENTRY, (recomp_fn_t)guest_thread_entry);
   recomp_register_fn(ADDR_LIFTED_VPCMPISTRI, (recomp_fn_t)guest_lifted_vpcmpistri);
   recomp_register_fn(ADDR_LIFTED_VAESKEYGENASSIST, (recomp_fn_t)guest_lifted_vaeskeygenassist);
+  recomp_register_fn(ADDR_LIFTED_FCOS, (recomp_fn_t)guest_lifted_fcos);
 
   const char *c = argv[1];
   if (strcmp(c, "fiber") == 0) {

@@ -358,6 +358,64 @@ func TestExecStringOpsBackward(t *testing.T) {
 	runExecCases(t, cases)
 }
 
+// FDECSTP: TOP = (TOP - 1) & 7, wrapping from 0 to 7, the registers keep their values (ST(i)
+// becomes ST(i+1)), and C1 is cleared. The values are read back through FLD ST(i) of registers
+// that hold one (reading an empty register is a stack fault on x86; the lifter has no tags).
+func TestExecX87Fdecstp(t *testing.T) {
+	const (
+		fldA      = "dd06"   // fld qword [rsi]
+		fldB      = "dd4608" // fld qword [rsi+8]
+		fdecstp   = "d9f6"
+		fnstswAX  = "dfe0"
+		fnstswM16 = "dd7f10" // fnstsw [rdi+16]
+		fstpM0    = "dd1f"   // fstp qword [rdi]
+		fstpM8    = "dd5f08" // fstp qword [rdi+8]
+		fldenv    = "d966"   // fldenv [rsi+disp8]
+	)
+	src, dst := uint64(execMemBase+0x100), uint64(execMemBase+0x400)
+	regs := map[x86asm.Reg]uint64{x86asm.RSI: src, x86asm.RDI: dst}
+	vals := append(le64(math.Float64bits(1.25)), le64(math.Float64bits(-3.5))...)
+	rep := func(n int, enc string) []string {
+		var c []string
+		for range n {
+			c = append(c, enc)
+		}
+		return c
+	}
+	cases := []execCase{
+		{name: "fdecstp from TOP 0 wraps to 7", code: []string{fdecstp, fnstswAX}, regs: regs},
+		{name: "fdecstp x9 from TOP 0", code: append(rep(9, fdecstp), fnstswAX), regs: regs},
+		{name: "fdecstp x8 is the identity", code: append(rep(8, fdecstp), fnstswAX), regs: regs},
+		{
+			// TOP 6 after two loads; FDECSTP: TOP 5, b = ST(1), a = ST(2).
+			name: "fld a; fld b; fdecstp; fld st(1); fstp; fld st(2); fstp",
+			code: []string{fldA, fldB, fdecstp, fnstswM16, "d9c1", fstpM0, "d9c2", fstpM8, fnstswAX},
+			regs: regs, mem: map[int][]byte{0x100: vals},
+		},
+		{
+			// FDECSTP from TOP 6 down past 0 to 7: ST(0) = a (register 7), ST(7) = b (register 6).
+			// FST and FXCH read them without a push (register 6 is full).
+			name: "fld a; fld b; fdecstp x7 (TOP 7); fst; fxch st(7); fst",
+			code: append(append([]string{fldA, fldB}, rep(7, fdecstp)...), fnstswM16, "dd17", "d9cf", "dd5708", fnstswAX),
+			regs: regs, mem: map[int][]byte{0x100: vals},
+		},
+	}
+	// FLDENV with C1 (and C3/C2/C0) set and TOP = 2, all tags empty: FDECSTP clears C1 and keeps
+	// the other condition codes, TOP = 1.
+	for _, sw := range []uint16{0x1200, 0x5700, 0x1000} {
+		env := make([]byte, 28)
+		binary.LittleEndian.PutUint16(env[0:], 0x37f)
+		binary.LittleEndian.PutUint16(env[4:], sw)
+		binary.LittleEndian.PutUint16(env[8:], 0xffff)
+		cases = append(cases, execCase{
+			name: fmt.Sprintf("fldenv fsw=%#x; fdecstp", sw),
+			code: []string{fldenv + "20", fdecstp, fnstswAX},
+			regs: regs, mem: map[int][]byte{0x120: env},
+		})
+	}
+	runExecCases(t, cases)
+}
+
 // Stack operations that address through RSP: PUSH RSP pushes the value before the decrement,
 // POP RSP loads RSP from the old top (no increment after), PUSH [RSP+X] reads its operand
 // before the decrement, POP [RSP+X] computes the address after the increment.

@@ -571,9 +571,29 @@ func (l *Arm64Lifter) liftFpu(inst disasm.Instruction, nextPC uint64, lines []st
 		}
 
 	case x86asm.FCOS:
-		// 0 sites in TLOU and U4. A libm call here would have to keep XMM0-XMM7, the YMM upper
-		// halves in v16-v31 and NZCV, which bl _cos clobbers: trap instead of lowering it wrongly.
-		lines = append(lines, l.emitUnsupported(inst, "fcos (not lowered: no call site in the supported games)")...)
+		// recomp_x87_fcos_impl (pkg/runtime/core/recomp_x87.c): the x87's 66-bit pi argument
+		// reduction, C2 = 1 and ST(0) unchanged for |ST(0)| >= 2^63. The helper entry keeps every
+		// guest register and NZCV.
+		lines = append(lines,
+			"    stp  x29, x30, [sp, #-16]!",
+			"    bl   _recomp_x87_fcos",
+			"    ldp  x29, x30, [sp], #16",
+		)
+		return lines, nil
+
+	case x86asm.FDECSTP:
+		// TOP = (TOP - 1) & 7 and C1 = 0 (Intel SDM); the registers keep their contents. Tags
+		// are not modelled, so nothing else changes.
+		lines = append(lines, loadCtxPtr("x16")...)
+		lines = append(lines,
+			"    ldr  w17, [x16, #0x2e0]", // fpu_top
+			"    sub  w17, w17, #1",
+			"    and  w17, w17, #7",
+			"    str  w17, [x16, #0x2e0]", // fpu_top
+			"    ldrh w5, [x16, #0x2e6]",  // fpu_sw
+			"    bic  w5, w5, #0x200",
+			"    strh w5, [x16, #0x2e6]", // fpu_sw
+		)
 		return lines, nil
 
 	case x86asm.FLDL2T:

@@ -1778,7 +1778,7 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		x86asm.FSCALE, x86asm.FPREM, x86asm.FPREM1,
 		x86asm.FFREE, x86asm.FFREEP,
 		x86asm.FNSTENV, x86asm.FLDENV,
-		x86asm.FCOS, x86asm.FLDL2T, x86asm.FRNDINT, x86asm.FXTRACT,
+		x86asm.FCOS, x86asm.FDECSTP, x86asm.FLDL2T, x86asm.FRNDINT, x86asm.FXTRACT,
 		x86asm.FCOM, x86asm.FCOMP, x86asm.FCOMPP, x86asm.FICOM, x86asm.FICOMP:
 		return l.liftFpu(inst, nextPC, lines)
 

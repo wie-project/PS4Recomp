@@ -131,7 +131,7 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.FADD, x86asm.FADDP, x86asm.FIADD, x86asm.FSUB, x86asm.FSUBP,
 		x86asm.FISUB, x86asm.FMUL, x86asm.FMULP, x86asm.FIMUL,
 		x86asm.FDIV, x86asm.FDIVP, x86asm.FUCOMI, x86asm.FUCOMIP,
-		x86asm.FLDCW, x86asm.FNSTCW:
+		x86asm.FLDCW, x86asm.FNSTCW, x86asm.FDECSTP, x86asm.FCOS:
 		return true
 	default:
 		return isSetcc(op) || isCmovcc(op) || IsJcc(op)

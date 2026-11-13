@@ -502,18 +502,22 @@ func TestRegressCallRspOperand(t *testing.T) {
 
 // x87 instructions with no site in TLOU or U4 (CUSA00557, CUSA04529) are not lowered: they trap
 // with a report instead of running a guessed lowering. FCOS had one that called libm's cos and
-// clobbered XMM0-XMM7, the YMM upper halves and the flags.
+// clobbered XMM0-XMM7, the YMM upper halves and the flags; it now calls _recomp_x87_fcos, which
+// keeps them (pkg/emitter TestGuestStateBoundary/helper-calls-keep-registers), and FDECSTP is
+// lowered (TestExecX87Fdecstp).
 func TestRegressX87UnusedTrap(t *testing.T) {
 	for _, tc := range []struct{ name, hex string }{
-		{"fcos", "d9ff"}, {"fsin", "d9fe"}, {"fsincos", "d9fb"}, {"fptan", "d9f2"}, {"fpatan", "d9f3"},
+		{"fsin", "d9fe"}, {"fsincos", "d9fb"}, {"fptan", "d9f2"}, {"fpatan", "d9f3"},
 		{"f2xm1", "d9f0"}, {"fyl2x", "d9f1"}, {"fyl2xp1", "d9f9"},
 		{"fbld tbyte [rax]", "df20"}, {"fbstp tbyte [rax]", "df30"},
 		{"fnsave [rax]", "dd30"}, {"frstor [rax]", "dd20"},
 		{"fxam", "d9e5"}, {"ftst", "d9e4"}, {"fucom st1", "dde1"}, {"fucomp st1", "dde9"}, {"fucompp", "dae9"},
-		{"fincstp", "d9f7"}, {"fdecstp", "d9f6"},
+		{"fincstp", "d9f7"},
 	} {
 		requireInOrder(t, tc.name, liftBlock(t, tc.hex)[0], "b _recomp_unsupported_instruction")
 	}
+	requireInOrder(t, "fcos", liftBlock(t, "d9ff")[0], "stp x29, x30, [sp, #-16]!", "bl _recomp_x87_fcos",
+		"ldp x29, x30, [sp], #16")
 }
 
 // FS:[base+index*scale+disp] ignored base and index (0 sites); the address is now computed as

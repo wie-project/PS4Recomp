@@ -713,6 +713,10 @@ xmm_reg_t recomp_vaesdeclast(xmm_reg_t s1, xmm_reg_t s2);
 xmm_reg_t recomp_vaesimc(xmm_reg_t s);
 xmm_reg_t recomp_vaeskeygenassist_impl(xmm_reg_t s, uint8_t rcon);
 
+// x87 FCOS on ST(0) of ctx's x87 stack (recomp_x87.c; the lifter calls it through
+// _recomp_x87_fcos, which keeps the guest registers).
+void recomp_x87_fcos_impl(GuestContext *ctx);
+
 // CRC32 helpers (Castagnoli 0x1EDC6F41 polynomial)
 static inline uint32_t recomp_crc32_u8(uint32_t crc, uint8_t val) {
   crc ^= val;
