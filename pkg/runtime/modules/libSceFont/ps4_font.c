@@ -133,11 +133,37 @@ static void font_compute_pixel_scale(const InternalFontHandle *h, int use_render
     if (out_h) *out_h = ht;
 }
 
+// Sizes the face to the font scale (use_render: the render scale) in 26.6 fixed point at 72 dpi,
+// so one unit is one pixel and fractional scales are kept.
 static void font_apply_ft_size(InternalFontHandle *h, int use_render) {
     if (!h || !h->ft_face) return;
     float pw = 16.0f, ph = 16.0f;
     font_compute_pixel_scale(h, use_render, &pw, &ph);
-    FT_Set_Pixel_Sizes(h->ft_face, (FT_UInt)(pw + 0.5f), (FT_UInt)(ph + 0.5f));
+    FT_Set_Char_Size(h->ft_face, (FT_F26Dot6)(pw * 64.0f + 0.5f), (FT_F26Dot6)(ph * 64.0f + 0.5f), 72, 72);
+}
+
+// Loads the unhinted outline of code at the font scale (use_render: the render scale), so the
+// metrics reported for layout and for rendering agree. Returns the glyph index, or 0 when the
+// face has no glyph for code.
+static FT_UInt font_load_glyph(InternalFontHandle *h, uint32_t code, int use_render) {
+    font_apply_ft_size(h, use_render);
+    FT_UInt glyph_idx = FT_Get_Char_Index(h->ft_face, code);
+    if (glyph_idx == 0) return 0;
+    if (FT_Load_Glyph(h->ft_face, glyph_idx, FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP) != 0) return 0;
+    return glyph_idx;
+}
+
+// Outline metrics of the glyph loaded in face's slot, in pixels.
+static void font_fill_glyph_metrics(const FT_Face face, OrbisFontGlyphMetrics *m) {
+    const FT_Glyph_Metrics *gm = &face->glyph->metrics;
+    m->width = (float)gm->width / 64.0f;
+    m->height = (float)gm->height / 64.0f;
+    m->Horizontal.bearingX = (float)gm->horiBearingX / 64.0f;
+    m->Horizontal.bearingY = (float)gm->horiBearingY / 64.0f;
+    m->Horizontal.advance = (float)gm->horiAdvance / 64.0f;
+    m->Vertical.bearingX = (float)gm->vertBearingX / 64.0f;
+    m->Vertical.bearingY = (float)gm->vertBearingY / 64.0f;
+    m->Vertical.advance = (float)gm->vertAdvance / 64.0f;
 }
 
 static InternalFontHandle *find_or_create_font(uint64_t guest_addr) {
@@ -1240,6 +1266,8 @@ static void font_render_glyph_common(GuestContext *ctx, int add_baseline) {
     float gh = hgt;
     float bx = 0.0f;
     float by = hgt;
+    OrbisFontGlyphMetrics outline;
+    int have_outline = 0;
 
     uint32_t upd_x = 0, upd_y = 0, upd_w = 0, upd_h = 0;
     uint64_t surf_buf_guest = 0;
@@ -1267,14 +1295,12 @@ static void font_render_glyph_common(GuestContext *ctx, int add_baseline) {
             y_used = y + asc;
         }
 
-        FT_UInt glyph_idx = FT_Get_Char_Index(h->ft_face, code);
-        if (glyph_idx != 0 && FT_Load_Glyph(h->ft_face, glyph_idx, FT_LOAD_DEFAULT) == 0) {
-            FT_Render_Glyph(h->ft_face->glyph, FT_RENDER_MODE_NORMAL);
+        if (font_load_glyph(h, code, 1) != 0 &&
+            FT_Render_Glyph(h->ft_face->glyph, FT_RENDER_MODE_NORMAL) == 0) {
             FT_GlyphSlot slot = h->ft_face->glyph;
-            adv = (float)(slot->advance.x >> 6);
-            if (adv <= 0.0f) adv = h->render_scale_w;
-            gw = (float)slot->bitmap.width;
-            gh = (float)slot->bitmap.rows;
+            font_fill_glyph_metrics(h->ft_face, &outline);
+            have_outline = 1;
+            adv = outline.Horizontal.advance;
             bx = (float)slot->bitmap_left;
             by = (float)slot->bitmap_top;
 
@@ -1338,12 +1364,16 @@ static void font_render_glyph_common(GuestContext *ctx, int add_baseline) {
 
     if (metricsGuest) {
         OrbisFontGlyphMetrics *m = (OrbisFontGlyphMetrics *)(ctx->mem_base + metricsGuest);
-        memset(m, 0, sizeof(*m));
-        m->width = gw;
-        m->height = gh;
-        m->Horizontal.advance = adv;
-        m->Horizontal.bearingX = bx;
-        m->Horizontal.bearingY = by;
+        if (have_outline) {
+            *m = outline;
+        } else {
+            memset(m, 0, sizeof(*m));
+            m->width = gw;
+            m->height = gh;
+            m->Horizontal.advance = adv;
+            m->Horizontal.bearingX = bx;
+            m->Horizontal.bearingY = by;
+        }
     }
 
     if (resultGuest) {
@@ -1855,6 +1885,82 @@ void shim_sceFontGetHorizontalLayout(GuestContext *ctx) {
 }
 
 // 61. sceFontRenderSurfaceSetScissor
+// sceFontGetCharGlyphMetrics(OrbisFontHandle font, uint32_t code, OrbisFontGlyphMetrics *metrics):
+// unhinted outline metrics of code in pixels at the font scale set by sceFontSetScalePixel/Point.
+void shim_sceFontGetCharGlyphMetrics(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    uint32_t code = (uint32_t)ctx->rsi;
+    uint64_t metricsGuest = ctx->rdx;
+
+    if (!metricsGuest) {
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+    OrbisFontGlyphMetrics *m = (OrbisFontGlyphMetrics *)(ctx->mem_base + metricsGuest);
+    memset(m, 0, sizeof(*m));
+
+    int32_t ret = ORBIS_FONT_OK;
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *h = get_font(fontGuest);
+    if (!h) {
+        ret = ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+    } else if (code == 0) {
+        ret = ORBIS_FONT_ERROR_NO_SUPPORT_CODE;
+    } else if (!h->ft_face) {
+        ret = ORBIS_FONT_ERROR_NO_SUPPORT_FUNCTION;
+    } else if (font_load_glyph(h, code, 0) == 0) {
+        ret = ORBIS_FONT_ERROR_NO_SUPPORT_GLYPH;
+    } else {
+        font_fill_glyph_metrics(h->ft_face, m);
+    }
+    pthread_mutex_unlock(&g_font_mutex);
+
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+// sceFontGetKerning(OrbisFontHandle font, uint32_t preCode, uint32_t code, OrbisFontKerning *kerning):
+// horizontal kerning of the pair in pixels at the font scale. A face without a kerning table, or
+// a pair it has no glyph for, has no kerning: all zero.
+void shim_sceFontGetKerning(GuestContext *ctx) {
+    uint64_t fontGuest = ctx->rdi;
+    uint32_t preCode = (uint32_t)ctx->rsi;
+    uint32_t code = (uint32_t)ctx->rdx;
+    uint64_t kerningGuest = ctx->rcx;
+
+    if (!kerningGuest) {
+        ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
+        SHIM_RETURN();
+    }
+    OrbisFontKerning *k = (OrbisFontKerning *)(ctx->mem_base + kerningGuest);
+    memset(k, 0, sizeof(*k));
+
+    int32_t ret = ORBIS_FONT_OK;
+    pthread_mutex_lock(&g_font_mutex);
+    InternalFontHandle *h = get_font(fontGuest);
+    if (!h) {
+        ret = ORBIS_FONT_ERROR_INVALID_FONT_HANDLE;
+    } else if (!h->ft_face) {
+        ret = ORBIS_FONT_ERROR_NO_SUPPORT_FUNCTION;
+    } else if (FT_HAS_KERNING(h->ft_face)) {
+        FT_UInt left = FT_Get_Char_Index(h->ft_face, preCode);
+        FT_UInt right = FT_Get_Char_Index(h->ft_face, code);
+        if (left != 0 && right != 0) {
+            font_apply_ft_size(h, 0);
+            FT_Vector delta;
+            if (FT_Get_Kerning(h->ft_face, left, right, FT_KERNING_DEFAULT, &delta) != 0) {
+                ret = ORBIS_FONT_ERROR_FATAL;
+            } else {
+                k->offsetX = (float)delta.x / 64.0f;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_font_mutex);
+
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
 void shim_sceFontRenderSurfaceSetScissor(GuestContext *ctx) {
     uint64_t surfGuest = ctx->rdi;
     int32_t x0 = (int32_t)ctx->rsi;
