@@ -15,7 +15,10 @@
 #include "ps4_present_queue.h"
 #include "ps4_vblank_clock.h"
 
+#include <mach/mach.h>
+#include <mach/thread_policy.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,25 +71,43 @@ typedef struct sim_result {
     uint64_t *not_before;
 } sim_result;
 
+// The guest side of a simulation. With cpu_s > 0 the guest works like Gravity Rush: it waits
+// for the flip of its previous frame to complete (the flip event) and then needs cpu_s to submit
+// the next one; 0 = a frame is always ready. oversleep_s: how late the presenter's sleep until
+// a vblank wakes up (timer coalescing of an ordinary thread; 0 for a real-time one).
+typedef struct sim_guest {
+    double cpu_s;
+    double oversleep_s;
+} sim_guest;
+
+static const sim_guest kAlwaysReady = {0, 0};
+
 // Presents `frames` frames from t = start_s with the given guest flip rate on display d.
-static sim_result simulate(const sim_display *d, int flip_rate, int flip_mode, int frames, double start_s) {
+static sim_result simulate_guest(const sim_display *d, int flip_rate, int flip_mode, int frames, double start_s,
+                                 sim_guest g) {
     sim_result r = {frames, calloc((size_t)frames, sizeof(double)), calloc((size_t)frames, sizeof(uint64_t))};
     ps4_flip_pacer p;
     ps4_flip_pacer_init(&p, kEpoch);
     const ps4_display_info info = {d->hz, d->variable};
-    double now = start_s;
+    double now = start_s, flip_done = start_s;
     for (int i = 0; i < frames; i++) {
         if (i >= 2) now = fmax(now, r.shown[i - 2]); // nextDrawable
+        if (g.cpu_s > 0 && i > 0) now = fmax(now, flip_done + g.cpu_s); // the guest submits it
         const ps4_present_plan plan = ps4_flip_pacer_plan(&p, PS4_PRESENT_VSYNC, flip_rate, flip_mode, info, to_ns(now));
         r.not_before[i] = plan.not_before_ns;
         if (plan.not_before_ns) {
             CHECK(plan.min_duration == 0, "a paced frame also has a minimum duration %f", plan.min_duration);
-            if (to_s(plan.not_before_ns) > now) now = to_s(plan.not_before_ns);
+            if (to_s(plan.not_before_ns) > now) now = to_s(plan.not_before_ns) + g.oversleep_s;
         }
-        r.shown[i] = shown_at(d, now + kEncodeS, i ? r.shown[i - 1] : -1, plan.min_duration);
+        flip_done = now + kEncodeS; // the presenter's command buffer completes: the flip event
+        r.shown[i] = shown_at(d, flip_done, i ? r.shown[i - 1] : -1, plan.min_duration);
         now += kCpuS;
     }
     return r;
+}
+
+static sim_result simulate(const sim_display *d, int flip_rate, int flip_mode, int frames, double start_s) {
+    return simulate_guest(d, flip_rate, flip_mode, frames, start_s, kAlwaysReady);
 }
 
 static void sim_free(sim_result *r) {
@@ -330,6 +351,74 @@ static void case_unpaced(void) {
     }
 }
 
+// Gravity Rush waits for each flip (flip event) and needs ~10 ms of CPU for the next frame. Paced
+// on the vblank timeline it keeps 60 fps on 144 and 72 Hz. A presenter whose sleep wakes late (an
+// ordinary thread: timer coalescing, measured 40-65 ms late on a 16.7 ms sleep) delays every flip,
+// and the guest, which waits for it, misses the next vblank: the frame rate halves or worse. That
+// was the in-game regression; the presenter and vblank threads are real-time now (case
+// realtime-wait checks their sleep).
+static void case_guest_waits_for_flip(void) {
+    const double hz[] = {144, 72, 165};
+    for (size_t k = 0; k < sizeof(hz) / sizeof(hz[0]); k++) {
+        const sim_display d = {hz[k], false, 0.31 / hz[k]};
+        sim_result r = simulate_guest(&d, 0, PS4_FLIP_MODE_VSYNC, 840, 0.02, (sim_guest){0.010, 0});
+        char what[64];
+        snprintf(what, sizeof(what), "%.0f Hz, guest waits for flips, 10 ms CPU", hz[k]);
+        check_rate(&r, 60, what);
+        sim_free(&r);
+        // the regression: a sleep that wakes 20 ms late
+        r = simulate_guest(&d, 0, PS4_FLIP_MODE_VSYNC, 840, 0.02, (sim_guest){0.010, 0.020});
+        const double late = steady_rate(&r);
+        CHECK(late <= 30.0 + 0.1, "%.0f Hz, presenter waking 20 ms late: %.1f frames/s, the model must halve", hz[k],
+              late);
+        sim_free(&r);
+    }
+    // 60 Hz: the display paces, no CPU sleep in the way
+    const sim_display d60 = {60, false, 0.31 / 60};
+    sim_result r = simulate_guest(&d60, 0, PS4_FLIP_MODE_VSYNC, 840, 0.02, (sim_guest){0.010, 0.020});
+    check_rate(&r, 60, "60 Hz, guest waits for flips");
+    sim_free(&r);
+}
+
+// A real-time thread (ps4_vblank_thread_realtime) gets the time-constraint policy and its sleep
+// until a deadline wakes on time. Bound: median lateness 2 ms (measured 0.02 ms; an ordinary
+// thread on the same host: 40-65 ms).
+static void *realtime_thread(void *arg) {
+    int *ok = (int *)arg;
+    ok[0] = ps4_vblank_thread_realtime();
+    thread_time_constraint_policy_data_t p;
+    mach_msg_type_number_t n = THREAD_TIME_CONSTRAINT_POLICY_COUNT;
+    boolean_t get_default = 0;
+    ok[1] = thread_policy_get(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY,
+                              (thread_policy_t)&p, &n, &get_default) == KERN_SUCCESS &&
+            !get_default && p.period > 0;
+    double late[15];
+    for (int i = 0; i < 15; i++) {
+        const uint64_t t = ps4_vblank_now_ns() + 10000000;
+        ps4_vblank_wait_until_ns(t);
+        late[i] = (double)(ps4_vblank_now_ns() - t) / 1e6;
+    }
+    for (int i = 0; i < 15; i++)
+        for (int j = i + 1; j < 15; j++)
+            if (late[j] < late[i]) {
+                const double x = late[i];
+                late[i] = late[j];
+                late[j] = x;
+            }
+    ok[2] = (int)(late[7] * 1000); // median, microseconds
+    return NULL;
+}
+
+static void case_realtime_wait(void) {
+    int ok[3] = {0, 0, 0};
+    pthread_t th;
+    pthread_create(&th, NULL, realtime_thread, ok);
+    pthread_join(th, NULL);
+    CHECK(ok[0], "ps4_vblank_thread_realtime refused");
+    CHECK(ok[1], "the thread has no time-constraint policy");
+    CHECK(ok[2] < 2000, "a real-time sleep woke %.3f ms late (median)", ok[2] / 1000.0);
+}
+
 // The real clock: the wait sleeps at least until the deadline (a lower bound only: not flaky).
 static void case_wait_until(void) {
     const uint64_t e = ps4_vblank_epoch_ns();
@@ -356,6 +445,8 @@ static const struct {
     {"late-frame", case_late_frame},
     {"unpaced", case_unpaced},
     {"wait-until", case_wait_until},
+    {"guest-waits-for-flip", case_guest_waits_for_flip},
+    {"realtime-wait", case_realtime_wait},
 };
 
 int main(int argc, char **argv) {

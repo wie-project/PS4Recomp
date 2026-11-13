@@ -1187,6 +1187,9 @@ static void presented_one(void) {
 static void *presenter_main(void *arg) {
     (void)arg;
     pthread_setname_np("Metal Present");
+    // it sleeps until guest vblanks (pace_frame): an ordinary thread wakes tens of ms late
+    if (!ps4_vblank_thread_realtime())
+        fprintf(stderr, "[metal-screen] presenter thread: no real-time policy; paced flips may come late\n");
     for (;;) {
         @autoreleasepool {
             // Get the drawable first and only then let the renderer have a slot (a credit):

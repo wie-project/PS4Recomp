@@ -85,6 +85,7 @@ static inline uint64_t get_fake_tsc(void) {
 // and posts one event, like a reader of the hardware counter.
 static void *vblank_thread_func(void *arg) {
     (void)arg;
+    if (!ps4_vblank_thread_realtime()) fprintf(stderr, "[videoout] vblank thread: no real-time policy; vblanks may come late\n");
     const uint64_t epoch = ps4_vblank_epoch_ns();
     uint64_t tick = ps4_vblank_ticks_at(epoch, ps4_vblank_now_ns());
 

@@ -8,6 +8,7 @@
 #ifndef PS4_VBLANK_CLOCK_H
 #define PS4_VBLANK_CLOCK_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -33,6 +34,12 @@ uint64_t ps4_vblank_now_ns(void);
 uint64_t ps4_vblank_epoch_ns(void);
 // Sleeps until ps4_vblank_now_ns() >= t_ns (returns at once when it already is). No spinning.
 void ps4_vblank_wait_until_ns(uint64_t t_ns);
+// Makes the calling thread a real-time thread with the vblank period (Mach time-constraint
+// policy), for a thread that sleeps until vblank ticks. An ordinary thread's timed sleep is
+// coalesced with other timers: even at QOS_CLASS_USER_INTERACTIVE it was measured waking 40-65 ms
+// after a 16.7 ms deadline, so flips landed several vblanks late (the guest, which waits for its
+// flips, halved its frame rate). Returns false if the system refuses the policy.
+bool ps4_vblank_thread_realtime(void);
 
 #ifdef __cplusplus
 }
