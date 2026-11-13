@@ -253,6 +253,15 @@ int32_t sceNpUtilityTerm(void);
 int32_t sceNpGameIntentInitialize(void);
 int32_t sceNpGameIntentTerminate(void);
 
+int32_t sceNpTssGetData(void *ctx, void *data);
+int32_t sceNpTssGetSmallStorage(void *ctx, void *storage);
+int32_t sceNpTusAddAndGetVariableVUserAsync(void);
+int32_t sceNpTusGetMultiSlotVariableVUserAsync(void);
+int32_t sceNpTssCreateNpTitleCtx(void);
+
+int32_t sceNpWebApiUnregisterServicePushEventCallback(void);
+int32_t sceNpWebApiDeleteHandle(int32_t handle);
+
 // GuestContext shims
 void shim_sceNpCheckNpAvailability(GuestContext *ctx);
 void shim_sceNpCheckNpAvailabilityA(GuestContext *ctx);
@@ -382,6 +391,15 @@ void shim_sceNpUtilityInit(GuestContext *ctx);
 void shim_sceNpUtilityTerm(GuestContext *ctx);
 void shim_sceNpGameIntentInitialize(GuestContext *ctx);
 void shim_sceNpGameIntentTerminate(GuestContext *ctx);
+
+void shim_sceNpTssGetData(GuestContext *ctx);
+void shim_sceNpTssGetSmallStorage(GuestContext *ctx);
+void shim_sceNpTusAddAndGetVariableVUserAsync(GuestContext *ctx);
+void shim_sceNpTusGetMultiSlotVariableVUserAsync(GuestContext *ctx);
+void shim_sceNpTssCreateNpTitleCtx(GuestContext *ctx);
+
+void shim_sceNpWebApiUnregisterServicePushEventCallback(GuestContext *ctx);
+void shim_sceNpWebApiDeleteHandle(GuestContext *ctx);
 
 // libSceNpParty (ps4_np_party.c)
 int32_t sceNpPartyInitialize(void);

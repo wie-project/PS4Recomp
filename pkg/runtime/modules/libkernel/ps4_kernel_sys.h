@@ -25,6 +25,18 @@ typedef struct OrbisKernelSwVersion {
     uint32_t Version;
 } OrbisKernelSwVersion;
 
+typedef struct OrbisPthreadAttr {
+    uint32_t size;
+    uint32_t flags;
+    void *stackaddr;
+    uint64_t stacksize;
+    uint64_t guardsize;
+    uint64_t schedpolicy;
+    uint64_t schedparam;
+    // Padding or reserved fields to match typical SDK sizing if necessary
+    char     reserved[32];
+} OrbisPthreadAttr;
+
 // High-resolution process timers
 uint64_t sceKernelGetProcessTimeCounter(void);
 uint64_t sceKernelGetProcessTimeCounterFrequency(void);
@@ -44,6 +56,20 @@ int32_t sceKernelGetSystemSwVersion(OrbisKernelSwVersion *version);
 int32_t sceKernelUuidCreate(void *uuid);
 int32_t sceKernelSetGPO(uint32_t gpo);
 int32_t sceKernelIsProspero(void);
+int32_t scePthreadAttrSetstackaddr(OrbisPthreadAttr *attr, uint64_t stackaddr);
+int32_t scePthreadAttrSetguardsize(OrbisPthreadAttr *attr, uint64_t guardsize);
+int32_t sceKernelAddHRTimerEvent(uint64_t arg1, uint64_t arg2, uint64_t arg3);
+int32_t sceKernelDeleteHRTimerEvent(uint64_t timer_id);
+int32_t sigreturn(void *context);
+int32_t sceKernelInstallExceptionHandler(int32_t signum, uint64_t handler);
+int32_t sceKernelRemoveExceptionHandler(int32_t signum);
+int32_t sceKernelRaiseException(uint64_t thread, int32_t signum);
+
+int32_t sceKernelGetGPI(void);
+int32_t sceKernelSetPrtAperture(uint64_t address, size_t size);
+int32_t sceKernelFutimes(const char *path, const struct timeval tv[2]);
+int32_t sceKernelAddTimerEvent(void);
+int32_t sceKernelDeleteTimerEvent(void);
 
 // Guest execution shims
 void shim_sceKernelGetProcessTimeCounter(GuestContext *ctx);
@@ -84,9 +110,6 @@ void shim_Func_E7EBCE96E92F91F8(GuestContext *ctx);
 void shim_sceKernelGetSanitizerNewReplaceExternal(GuestContext *ctx);
 void shim_sceKernelGetSanitizerMallocReplaceExternal(GuestContext *ctx);
 void shim_sceKernelIsAddressSanitizerEnabled(GuestContext *ctx);
-int32_t sceKernelInstallExceptionHandler(int32_t signum, uint64_t handler);
-int32_t sceKernelRemoveExceptionHandler(int32_t signum);
-int32_t sceKernelRaiseException(uint64_t thread, int32_t signum);
 
 void shim_sceKernelInstallExceptionHandler(GuestContext *ctx);
 void shim_sceKernelRemoveExceptionHandler(GuestContext *ctx);
@@ -105,6 +128,17 @@ void shim_getargv(GuestContext *ctx);
 void shim_getpagesize(GuestContext *ctx);
 void shim_sceLibcHeapGetTraceInfo(GuestContext *ctx);
 void shim_Need_sceLibcInternal(GuestContext *ctx);
+void shim_scePthreadAttrSetstackaddr(GuestContext *ctx);
+void shim_scePthreadAttrSetguardsize(GuestContext *ctx);
+void shim_sceKernelAddHRTimerEvent(GuestContext *ctx);
+void shim_sceKernelDeleteHRTimerEvent(GuestContext *ctx);
+void shim_sigreturn(GuestContext *ctx);
+
+void shim_sceKernelGetGPI(GuestContext *ctx);
+void shim_sceKernelSetPrtAperture(GuestContext *ctx);
+void shim_sceKernelFutimes(GuestContext *ctx);
+void shim_sceKernelAddTimerEvent(GuestContext *ctx);
+void shim_sceKernelDeleteTimerEvent(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

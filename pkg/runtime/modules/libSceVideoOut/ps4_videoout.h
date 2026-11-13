@@ -130,6 +130,7 @@ int32_t sceVideoOutDeleteFlipEvent(OrbisKernelEqueue eq, int32_t handle);
 int32_t sceVideoOutGetEventData(const OrbisKernelEvent *ev, int64_t *data);
 int32_t sceVideoOutSetWindowModeMargins(int32_t handle, int32_t top, int32_t bottom);
 int32_t sceVideoOutCursorDisable(int32_t handle);
+int32_t sceVideoOutSubmitChangeBufferAttribute(int32_t handle, uint32_t index, uint32_t attribute) ;
 
 void shim_sceVideoOutOpen(GuestContext *ctx);
 void shim_sceVideoOutClose(GuestContext *ctx);
@@ -158,6 +159,7 @@ void shim_sceVideoOutGetEventData(GuestContext *ctx);
 void shim_sceVideoOutModeSetAny_(GuestContext *ctx);
 void shim_sceVideoOutSetWindowModeMargins(GuestContext *ctx);
 void shim_sceVideoOutCursorDisable(GuestContext *ctx);
+void shim_sceVideoOutSubmitChangeBufferAttribute(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

@@ -283,6 +283,12 @@ typedef struct OrbisFontWritingMetrics {
     } Extent;
 } OrbisFontWritingMetrics;
 
+int32_t sceFontOpenFontMemory(void *library, void *memory, uint32_t size, void *handle);
+int32_t sceFontRenderCharGlyphImage(void *handle, uint32_t code, void *image);
+int32_t sceFontGetCharGlyphMetrics(void *handle, uint32_t code, void *metrics);
+int32_t sceFontGetHorizontalLayout(void *handle, void *layout);
+int32_t sceFontGetKerning(void *handle, uint32_t left, uint32_t right, void *kerning);
+
 // Guest ABI shims for libSceFont
 void shim_sceFontMemoryInit(GuestContext *ctx);
 void shim_sceFontMemoryTerm(GuestContext *ctx);
@@ -351,6 +357,9 @@ void shim_sceFontSetupRenderEffectWeight(GuestContext *ctx);
 void shim_sceFontSetupRenderEffectSlant(GuestContext *ctx);
 void shim_sceFontGetHorizontalLayout(GuestContext *ctx);
 void shim_sceFontRenderSurfaceSetScissor(GuestContext *ctx);
+
+void shim_sceFontGetCharGlyphMetrics(GuestContext *ctx);
+void shim_sceFontGetKerning(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

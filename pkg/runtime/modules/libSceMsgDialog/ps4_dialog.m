@@ -173,6 +173,13 @@ int32_t sceMsgDialogTerminate(void) {
   return 0;
 }
 
+int32_t sceGameCustomDataDialogInitialize(void) { return 0; }
+int32_t sceGameCustomDataDialogOpen(const void *param) { (void)param; return 0; }
+int32_t sceGameCustomDataDialogUpdateStatus(void) { return 0; }
+int32_t sceGameCustomDataDialogGetResult(const void *result) { (void)result; return 0; }
+int32_t sceGameCustomDataDialogClose(void) { return 0; }
+int32_t sceGameCustomDataDialogTerminate(void) { return 0; }
+
 // ---------------------------------------------------------------------------
 // Shims for Guest ABI
 // ---------------------------------------------------------------------------
@@ -285,4 +292,31 @@ void shim_sceMsgDialogProgressBarSetMsg(GuestContext *ctx) {
 void shim_sceMsgDialogProgressBarSetValue(GuestContext *ctx) {
   ctx->rax = 0;
   SHIM_RETURN();
+}
+
+void shim_sceGameCustomDataDialogInitialize(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogInitialize();
+    SHIM_RETURN();
+}
+void shim_sceGameCustomDataDialogOpen(GuestContext *ctx) {
+    const void *param = ctx->rdi ? (const void *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogOpen(param);
+    SHIM_RETURN();
+}
+void shim_sceGameCustomDataDialogUpdateStatus(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogUpdateStatus();
+    SHIM_RETURN();
+}
+void shim_sceGameCustomDataDialogGetResult(GuestContext *ctx) {
+    void *result = ctx->rdi ? (void *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogGetResult(result);
+    SHIM_RETURN();
+}
+void shim_sceGameCustomDataDialogClose(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogClose();
+    SHIM_RETURN();
+}
+void shim_sceGameCustomDataDialogTerminate(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogTerminate();
+    SHIM_RETURN();
 }

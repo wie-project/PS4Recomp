@@ -341,6 +341,13 @@ int32_t scePlayGoGetToDoList(OrbisPlayGoHandle handle, OrbisPlayGoToDo *outToDoL
     return 0;
 }
 
+int32_t scePlayGoSetToDoList(OrbisPlayGoHandle handle, const OrbisPlayGoToDo *toDoList, uint32_t numEntries) {
+    if (handle != kValidPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    return 0;
+}
+
 int32_t scePlayGoGetEta(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count, OrbisPlayGoEta *outEta) {
     if (handle != kValidPlayGoHandle) {
         return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
@@ -411,6 +418,12 @@ int32_t scePlayGoGetChunkId(OrbisPlayGoHandle handle, OrbisPlayGoChunkId *outChu
     *outEntries = numberOfEntries;
     return 0;
 }
+
+int32_t scePlayGoDialogInitialize(void) { return 0; }
+int32_t scePlayGoDialogOpen(const void *param) { return 0; }
+int32_t scePlayGoDialogUpdateStatus(void) { return 0; }
+int32_t scePlayGoDialogGetResult(const void *result) { return 0; }
+int32_t scePlayGoDialogTerminate(void) { return 0; }
 
 // Guest ABI shims
 void shim_scePlayGoInitialize(GuestContext *ctx) {
@@ -525,6 +538,17 @@ void shim_scePlayGoGetToDoList(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_scePlayGoSetToDoList(GuestContext *ctx) {
+OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
+    uint64_t toDoGuest = ctx->rsi;
+    uint32_t numEntries = (uint32_t)ctx->rdx;
+    
+    const OrbisPlayGoToDo *toDo = toDoGuest ? (const OrbisPlayGoToDo *)(ctx->mem_base + toDoGuest) : NULL;
+    
+    int32_t ret = scePlayGoSetToDoList(handle, toDo, numEntries);
+    ctx->rax = (uint64_t)(int64_t)ret;
+}
+
 void shim_scePlayGoGetEta(GuestContext *ctx) {
     OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
     uint64_t chunkIdsGuest = ctx->rsi;
@@ -561,6 +585,40 @@ void shim_scePlayGoGetChunkId(GuestContext *ctx) {
     uint32_t *outEntries = outEntriesGuest ? (uint32_t *)(ctx->mem_base + outEntriesGuest) : NULL;
 
     int32_t ret = scePlayGoGetChunkId(handle, outChunkIdList, numberOfEntries, outEntries);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogInitialize(GuestContext *ctx) {
+    int32_t ret = scePlayGoDialogInitialize();
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogOpen(GuestContext *ctx) {
+    uint64_t paramGuest = ctx->rdi;
+    const void *param = paramGuest ? (const void *)(ctx->mem_base + paramGuest) : NULL;
+    int32_t ret = scePlayGoDialogOpen(param);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogUpdateStatus(GuestContext *ctx) {
+    int32_t ret = scePlayGoDialogUpdateStatus();
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogGetResult(GuestContext *ctx) {
+    uint64_t resultGuest = ctx->rdi;
+    void *result = resultGuest ? (void *)(ctx->mem_base + resultGuest) : NULL;
+    int32_t ret = scePlayGoDialogGetResult(result);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogTerminate(GuestContext *ctx) {
+    int32_t ret = scePlayGoDialogTerminate();
     ctx->rax = (uint64_t)(int64_t)ret;
     SHIM_RETURN();
 }

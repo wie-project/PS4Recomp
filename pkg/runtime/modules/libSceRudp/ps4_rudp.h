@@ -7,6 +7,9 @@
 extern "C" {
 #endif
 
+int32_t sysctl(void *name, unsigned int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen);
+int __Ux86_64_setcontext(void *ucp);
+
 void shim_sceRudpInit(GuestContext *ctx);
 void shim_sceRudpTerminate(GuestContext *ctx);
 void shim_sceRudpCreateContext(GuestContext *ctx);
@@ -41,6 +44,9 @@ void shim_sceRudpPollWait(GuestContext *ctx);
 void shim_sceRudpProcessEvents(GuestContext *ctx);
 void shim_sceRudpSetMaxSegmentSize(GuestContext *ctx);
 void shim_sceRudpSetOption(GuestContext *ctx);
+
+void shim_sysctl(GuestContext *ctx);
+void shim___Ux86_64_setcontext(GuestContext *ctx);
 
 #ifdef __cplusplus
 }
