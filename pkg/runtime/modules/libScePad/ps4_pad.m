@@ -73,6 +73,8 @@ static uint8_t g_key_lx = 128;
 static uint8_t g_key_ly = 128;
 static uint8_t g_key_rx = 128;
 static uint8_t g_key_ry = 128;
+static int g_key_touch_right = 0; // the right-half touch pad key is held
+static ps4_pad_touch_tracker g_touch = {.next_id = 1};
 
 static uint64_t get_time_micros(void) {
   static mach_timebase_info_data_t timebase;
@@ -504,10 +506,14 @@ void ps4_pad_handle_key(unsigned short keyCode, int isDown) {
     }
     break;
 
-  // --- Touchpad Click ---
+  // --- Touchpad Click: T and ` on the left half, Backspace on the right half (ps4_pad_touch.h) ---
   case 17: // T
   case 50: // ` (Backtick)
     btn = ORBIS_PAD_BUTTON_TOUCH_PAD;
+    break;
+  case 51: // Backspace (Delete)
+    btn = ORBIS_PAD_BUTTON_TOUCH_PAD;
+    g_key_touch_right = isDown ? 1 : 0;
     break;
 
   default:
@@ -847,6 +853,7 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
   ps4_pad_control_file(&buttons, &lx, &ly, &rx, &ry);
 
   PadMotionSample motion = virtual_sample(script_us);
+  ps4_pad_touch_input touch_in = {{0, 0}, {0, 0}, false, false};
   @autoreleasepool {
     GCController *controller = nil;
     // Automated background runs (PS4_BACKGROUND_WINDOW) take input only from the scripts above:
@@ -922,6 +929,18 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
       rx = (uint8_t)((rstickX + 1.0f) * 127.5f);
       ry = (uint8_t)((-rstickY + 1.0f) * 127.5f);
     }
+    if (controller) {
+      // DualShock 4 / DualSense touch pad: its click and up to two fingers
+      GCPhysicalInputProfile *prof = controller.physicalInputProfile;
+      if (prof.buttons[GCInputDualShockTouchpadButton].isPressed) buttons |= ORBIS_PAD_BUTTON_TOUCH_PAD;
+      GCControllerDirectionPad *fingers[2] = {prof.dpads[GCInputDualShockTouchpadOne],
+                                              prof.dpads[GCInputDualShockTouchpadTwo]};
+      for (int i = 0; i < 2; i++) {
+        if (!fingers[i]) continue;
+        touch_in.pad_x[i] = fingers[i].xAxis.value;
+        touch_in.pad_y[i] = fingers[i].yAxis.value;
+      }
+    }
     GCMotion *gm = controller ? controller.motion : nil;
     if (gm && slot->motion.on) {
       // Turn the controller's sensors on once per controller (a controller that refuses stays
@@ -956,6 +975,9 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
   data->connected = 1;
   data->count = 1;
   data->timestamp = get_time_micros();
+  touch_in.key_right = g_key_touch_right;
+  touch_in.clicked = (buttons & ORBIS_PAD_BUTTON_TOUCH_PAD) != 0;
+  ps4_pad_touch_update(&g_touch, &touch_in, data->timestamp, &data->touch);
 
   pthread_mutex_unlock(&g_pad_mutex);
   return 0;
@@ -1146,8 +1168,9 @@ void shim_scePadSetVibration(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-// One connected local DualShock 4 per opened handle. The touch pad and dead-zone values are the
-// ones shadPS4 reports (src/core/libraries/pad/pad.cpp, GPL-2.0-or-later).
+// One connected local DualShock 4 per opened handle. The touch pad values are those of
+// ps4_pad_touch.h; the dead zones the ones shadPS4 reports (src/core/libraries/pad/pad.cpp,
+// GPL-2.0-or-later).
 int32_t scePadGetControllerInformation(int32_t handle, OrbisPadControllerInformation *info) {
   if (!info)
     return ORBIS_PAD_ERROR_INVALID_ARG;
@@ -1163,9 +1186,9 @@ int32_t scePadGetControllerInformation(int32_t handle, OrbisPadControllerInforma
   if (!found)
     return ORBIS_PAD_ERROR_INVALID_HANDLE;
   memset(info, 0, sizeof(*info));
-  info->touchPadPixelDensity = 1.0f;
-  info->touchPadResolutionX = 1920;
-  info->touchPadResolutionY = 950;
+  info->touchPadPixelDensity = PS4_PAD_TOUCH_DENSITY;
+  info->touchPadResolutionX = PS4_PAD_TOUCH_RES_X;
+  info->touchPadResolutionY = PS4_PAD_TOUCH_RES_Y;
   info->deadZoneLeft = 1;
   info->deadZoneRight = 1;
   info->connectionType = ORBIS_PAD_CONNECTION_TYPE_LOCAL;

@@ -113,7 +113,7 @@ Once built, launch the game by double-clicking `<GameName>.app` in Finder, or ru
 
 ## Controls & Input Mapping
 
-PS4Recomp provides native game controller support via Apple's GameController framework (DualShock 4, DualSense, Xbox Wireless, and Nintendo Switch controllers are detected automatically over Bluetooth or USB).
+PS4Recomp provides native game controller support via Apple's GameController framework (DualShock 4, DualSense, Xbox Wireless, and Nintendo Switch controllers are detected automatically over Bluetooth or USB). A DualShock 4 or DualSense touch pad reports its click and up to two finger positions, like the PS4 pad (1920x943, each new finger gets a new id).
 
 When playing without a physical controller, built-in keyboard emulation is active whenever the game window is focused:
 
@@ -140,7 +140,8 @@ When playing without a physical controller, built-in keyboard emulation is activ
 | **L3**                       | `F`                        | —                          | Left Stick Click / Sprint            |
 | **R3**                       | `G`                        | `B`                        | Right Stick Click / Target Lock      |
 | **Options / Start**          | `Escape`                   | `Tab`, `P`, `M`, `R`       | Pause Menu / In-game Options         |
-| **Touchpad Click**           | `T`                        | `` ` `` (Backtick)         | Gestures / Map / Inventory           |
+| **Touchpad Click (left)**    | `T`                        | `` ` `` (Backtick)         | Click with a finger on the left half |
+| **Touchpad Click (right)**   | `Backspace` (`Delete`)     | —                          | Click with a finger on the right half |
 | **Motion: Tilt Sideways**    | `H`                        | —                          | Emulate rolling controller 90° right |
 | **Motion: Shake Controller** | `N`                        | —                          | Emulate SixAxis shake (1g at 6 Hz)   |
 | **Quit Application**         | `Cmd + Q`                  | —                          | Cleanly terminate runtime            |
