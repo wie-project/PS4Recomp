@@ -1344,6 +1344,7 @@ var knownDirectShims = []string{
 	"sceNpInGameMessageInitialize",
 	"sceNpInGameMessageTerminate",
 	"sceNpInGameMessageCreateHandle",
+	"sceNpInGameMessageDeleteHandle",
 	"sceNpInGameMessageAbortHandle",
 	"sceNpInGameMessagePrepare",
 	"sceNpInGameMessageSendData",
@@ -1366,6 +1367,7 @@ var knownDirectShims = []string{
 	"sceNpSignalingTerminateConnection",
 	// libSceNpWebApi extras (libSceNp/ps4_np_extras.c)
 	"sceNpWebApiCreateHandle",
+	"sceNpWebApiDeleteHandle",
 	"sceNpWebApiReadData",
 	"sceNpWebApiCreateExtdPushEventFilter",
 	"sceNpWebApiCreateServicePushEventFilter",
@@ -1373,6 +1375,7 @@ var knownDirectShims = []string{
 	"sceNpWebApiDeleteServicePushEventFilter",
 	"sceNpWebApiRegisterExtdPushEventCallback",
 	"sceNpWebApiRegisterServicePushEventCallback",
+	"sceNpWebApiUnregisterServicePushEventCallback",
 	"sceNpWebApiUnregisterExtdPushEventCallback",
 	"sceNpWebApiUtilityParseNpId",
 	// libSceNpSns / libSceNpSnsFacebookDialog (libSceNpSns/ps4_np_sns.c)
