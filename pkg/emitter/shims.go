@@ -2204,6 +2204,11 @@ var knownDirectShims = []string{
 	"sceErrorDialogUpdateStatus",
 	"sceErrorDialogGetStatus",
 	"sceErrorDialogTerminate",
+	// libSceGameCustomDataDialog (libSceGameCustomDataDialog/ps4_game_custom_data_dialog.c)
+	"sceGameCustomDataDialogInitialize",
+	"sceGameCustomDataDialogTerminate",
+	"sceGameCustomDataDialogUpdateStatus",
+	"sceGameCustomDataDialogGetResult",
 	// libSceInvitationDialog
 	"sceInvitationDialogInitialize",
 	"sceInvitationDialogOpenA",
