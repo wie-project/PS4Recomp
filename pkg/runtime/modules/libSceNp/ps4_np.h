@@ -369,6 +369,18 @@ void shim_sceNpTusSetDataAAsync(GuestContext *ctx);
 void shim_sceNpTusAddAndGetVariableAsync(GuestContext *ctx);
 void shim_sceNpTusGetMultiSlotVariableAsync(GuestContext *ctx);
 void shim_sceNpTusGetDataAsync(GuestContext *ctx);
+void shim_sceNpTusGetData(GuestContext *ctx);
+void shim_sceNpTusGetDataVUser(GuestContext *ctx);
+void shim_sceNpTusSetData(GuestContext *ctx);
+void shim_sceNpTusSetDataVUser(GuestContext *ctx);
+void shim_sceNpTusGetMultiSlotVariable(GuestContext *ctx);
+void shim_sceNpTusGetMultiSlotVariableVUser(GuestContext *ctx);
+void shim_sceNpTusSetMultiSlotVariable(GuestContext *ctx);
+void shim_sceNpTusSetMultiSlotVariableVUser(GuestContext *ctx);
+void shim_sceNpTssGetData(GuestContext *ctx);
+void shim_sceNpScoreGetRankingByNpIdAsync(GuestContext *ctx);
+void shim_sceNpScoreGetRankingByRangeAsync(GuestContext *ctx);
+void shim_sceNpScoreGetFriendsRankingAsync(GuestContext *ctx);
 void shim_sceNpTusGetDataAAsync(GuestContext *ctx);
 
 void shim_sceNpCommerceDialogInitialize(GuestContext *ctx);

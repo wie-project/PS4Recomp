@@ -711,3 +711,30 @@ void shim_sceNpTusGetDataAAsync(GuestContext *ctx) {
 
 
 
+
+// Matching2 server requests the eboot imports beyond the ones above. Like the other room and
+// lobby requests here they fail with NOT_NP_SIGN_IN; the request and request-id pointers are
+// checked first, in shadPS4's order (np_matching2.cpp).
+// int f(SceNpMatching2ContextId ctxId, const void *request, const SceNpMatching2RequestOptParam *opt,
+//       SceNpMatching2RequestId *requestId)
+static void npx_matching2_request(GuestContext *ctx) {
+    if (!ctx->rsi || !ctx->rcx) {
+        ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
+        SHIM_RETURN();
+    }
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2SetUserInfo(GuestContext *ctx) { npx_matching2_request(ctx); }
+void shim_sceNpMatching2GetUserInfoList(GuestContext *ctx) { npx_matching2_request(ctx); }
+void shim_sceNpMatching2GetRoomDataInternal(GuestContext *ctx) { npx_matching2_request(ctx); }
+
+// int sceNpMatching2SendRoomChatMessage(SceNpMatching2ContextId ctxId, const void *request,
+//                                       const SceNpMatching2RequestOptParam *opt,
+//                                       SceNpMatching2RequestId *requestId)
+// A room chat message needs a joined room, which cannot exist signed out.
+void shim_sceNpMatching2SendRoomChatMessage(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
