@@ -1574,6 +1574,7 @@ var knownDirectShims = []string{
 	// General
 	"sceKernelUsleep",
 	"sysconf",
+	"sysctl",
 	"open",
 	"fcntl",
 	"mmap",
