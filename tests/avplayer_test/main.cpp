@@ -73,6 +73,8 @@ struct FakeFile {
     std::atomic<int> read_calls{0};
     int32_t open_result = 3;
     int32_t close_result = 0;
+    bool size_override = false;      // size returns size_result instead of the file size
+    uint64_t size_result = 0;
     int32_t read_error = 0;          // returned for reads at or past fail_at
     uint64_t fail_at = UINT64_MAX;
     uint64_t short_at = UINT64_MAX;  // reads at or past it return 0 bytes
@@ -112,7 +114,7 @@ void FakeClose(GuestContext *ctx) {
 void FakeSize(GuestContext *ctx) {
     CheckCaller(ctx);
     g_file.size_calls++;
-    GuestReturn(ctx, g_file.data.size());
+    GuestReturn(ctx, g_file.size_override ? g_file.size_result : g_file.data.size());
 }
 
 // read_offset(object, buffer, position, length): the buffer is a guest address.
@@ -169,6 +171,8 @@ void ResetFile() {
     g_file.read_calls = 0;
     g_file.open_result = 3;
     g_file.close_result = 0;
+    g_file.size_override = false;
+    g_file.size_result = 0;
     g_file.read_error = 0;
     g_file.fail_at = UINT64_MAX;
     g_file.short_at = UINT64_MAX;
@@ -560,6 +564,23 @@ void TestErrors() {
     CHECK(g_file.open_calls == 1 && g_file.size_calls == 0 && g_file.close_calls == 0);
     CHECK(g_vm_allocs == g_vm_frees);
 
+    // size fails or reports an empty file: the open fails and the guest file is closed.
+    for (const uint64_t bad_size : {(uint64_t)(int64_t)kErrIo, (uint64_t)0}) {
+        ResetFile();
+        g_file.size_override = true;
+        g_file.size_result = bad_size;
+        {
+            AvPlayerFileStreamer streamer(Callbacks());
+            CHECK(!streamer.open(&game, kPath));
+            CHECK(streamer.last_guest_error() == (bad_size ? kErrIo : 0));
+            CHECK(streamer.avio() == nullptr);
+            streamer.close(&game);
+        }
+        CHECK(g_file.open_calls == 1 && g_file.size_calls == 1 && g_file.close_calls == 1);
+        CHECK(g_file.read_calls.load() == 0);
+        CHECK(g_vm_allocs == g_vm_frees);
+    }
+
     // read_offset fails in the middle of the file: the demuxer gets EIO, not EOF.
     ResetFile();
     {
@@ -635,7 +656,7 @@ void TestErrors() {
     CHECK(AvPlayerFileStreamer::complete(fr));
     fr.size = 0;
     CHECK(!AvPlayerFileStreamer::complete(fr));
-    printf("[+] guest open/read/close errors propagate; over-long and empty reads are rejected\n");
+    printf("[+] guest open/size/read/close errors propagate; over-long and empty reads are rejected\n");
 }
 
 } // namespace

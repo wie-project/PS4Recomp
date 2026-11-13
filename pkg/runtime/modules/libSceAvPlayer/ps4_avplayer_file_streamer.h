@@ -54,7 +54,8 @@ public:
     static bool complete(const AvPlayerFileReplacement &callbacks);
 
     // Opens path_gaddr (a guest string) with the guest open callback on ctx, queries the size
-    // and creates the AVIO context. Binds ctx. On failure nothing stays open.
+    // and creates the AVIO context. Binds ctx. Fails when open returns a negative code or size
+    // returns 0 or a negative code. On failure nothing stays open.
     bool open(GuestContext *ctx, uint64_t path_gaddr);
 
     // Calls the guest close callback on ctx and releases the AVIO context and bounce buffer.

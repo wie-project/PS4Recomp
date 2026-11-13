@@ -43,7 +43,15 @@ bool AvPlayerFileStreamer::open(GuestContext *ctx, uint64_t path_gaddr) {
         return false;
     }
     m_guest_open = true;
-    m_file_size = avplayer_call_guest(ctx, m_callbacks.size, m_callbacks.object_ptr, 0, 0, 0);
+    const uint64_t size = avplayer_call_guest(ctx, m_callbacks.size, m_callbacks.object_ptr, 0, 0, 0);
+    // A set sign bit is a guest error code; an empty file has nothing to demux.
+    if (size == 0 || (int64_t)size < 0) {
+        if (size != 0) m_last_guest_error = (int32_t)size;
+        AVPLAYER_FILE_LOG("Guest file size query returned 0x%llx", (unsigned long long)size);
+        release(ctx);
+        return false;
+    }
+    m_file_size = size;
 
     GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
     const uint64_t gaddr = recomp_vm_alloc_named(proc, kChunkSize, PROT_READ | PROT_WRITE, 0,
