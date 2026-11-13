@@ -155,7 +155,7 @@ static inline void dt_make_state(DtState *st, uint8_t *scratch, unsigned test, u
     st->fcw = 0x37f;
     st->fsw = (uint16_t)(st->ftop << 11);
     if (regset[0] >> 58 & 1) { /* POPFQ: a valid RFLAGS image at the stack top (DT_MEM_TARGET + 64) */
-        uint64_t f = 0x202 | (dt_rng(&s) & 0x8D5);
+        uint64_t f = 0x202 | (dt_rng(&s) & 0xCD5); /* CF PF AF ZF SF DF OF */
         memcpy(scratch + (DT_MEM_TARGET - DT_SCRATCH_BASE) + 64, &f, 8);
     }
     if (regset[0] >> 59 & 1) { /* a valid x87 control word for FLDCW (reserved bits clear) */

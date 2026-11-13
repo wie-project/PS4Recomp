@@ -56,7 +56,7 @@ func IsOpcodeSupported(op x86asm.Op) bool {
 		x86asm.BSF, x86asm.BSR, x86asm.INC, x86asm.DEC, x86asm.NEG, x86asm.NOT,
 		x86asm.SHL, x86asm.SHR, x86asm.SAR, x86asm.XCHG, x86asm.XADD,
 		x86asm.CMPXCHG, x86asm.IMUL, x86asm.MUL, x86asm.CALL, x86asm.RET,
-		x86asm.JMP, x86asm.UD2, x86asm.INT, x86asm.FWAIT,
+		x86asm.JMP, x86asm.UD2, x86asm.INT, x86asm.FWAIT, x86asm.CLD, x86asm.STD,
 		disasm.OpEXTRQ, disasm.OpINSERTQ,
 		x86asm.MOVUPS, x86asm.MOVAPS, x86asm.MOVDQU, x86asm.MOVDQA,
 		x86asm.MOVUPD, x86asm.MOVAPD,

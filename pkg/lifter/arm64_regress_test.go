@@ -574,9 +574,14 @@ func TestRegressJumpDispatchKeepsFlags(t *testing.T) {
 	requireInOrder(t, "add; jmp 0x6000", lift("4801d8", "e9f84f0000"), "adds x19, x19, x20", "cfinv", "b _recomp_indirect_jump")
 }
 
-// STD was lifted as a NOP, so a following string instruction ran forward instead of backward.
-// DF is not modelled (0 sites in TLOU and U4): STD traps, CLD stays a NOP.
-func TestRegressStdTraps(t *testing.T) {
-	requireInOrder(t, "std", liftBlock(t, "fd")[0], "b _recomp_unsupported_instruction")
-	forbid(t, "cld", liftBlock(t, "fc")[0], "b _recomp_unsupported_instruction")
+// STD was lifted as a NOP, so a following string instruction ran forward instead of backward;
+// then it trapped. STD and CLD now set GuestContext.df, which every string instruction reads
+// (TestExecStringOpsBackward runs the backward forms against x86).
+func TestRegressStdSetsDirection(t *testing.T) {
+	requireInOrder(t, "std", liftBlock(t, "fd")[0], "mov w17, #1", "strb w17, [x16, #0x9e]")
+	requireInOrder(t, "cld", liftBlock(t, "fc")[0], "strb wzr, [x16, #0x9e]")
+	requireInOrder(t, "rep movsb", liftBlock(t, "f3a4")[0], "ldrb w7, [x7, #0x9e]", "sub x23, x23, x7", "sub x24, x24, x7")
+	for _, enc := range []string{"fd", "fc", "f3a4", "f348ab", "f3ac", "f3a6", "f2ae"} {
+		forbid(t, enc, liftBlock(t, enc)[0], "b _recomp_unsupported_instruction")
+	}
 }

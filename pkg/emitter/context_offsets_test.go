@@ -41,7 +41,7 @@ func TestContextOffsetsMatchHeader(t *testing.T) {
 	fields, tcbSlot := contextHeaderOffsets(t)
 	for name, off := range map[string]uint64{
 		"rax": 0x00, "rdx": 0x10, "rsp": 0x20, "rsi": 0x30, "r8": 0x40, "r10": 0x50, "r12": 0x60, "r14": 0x70,
-		"rip": 0x80, "fs_base": 0x88, "cf": 0x98, "zf": 0x99, "sf": 0x9a, "of": 0x9b,
+		"rip": 0x80, "fs_base": 0x88, "cf": 0x98, "zf": 0x99, "sf": 0x9a, "of": 0x9b, "df": 0x9e,
 		"xmm[0]": 0xa0, "xmm[2]": 0xc0, "xmm[4]": 0xe0, "xmm[6]": 0x100,
 		"fpu_stack": 0x2a0, "fpu_top": 0x2e0, "fpu_cw": 0x2e4, "fpu_sw": 0x2e6, "mxcsr": 0x2e8, "mem_base": 0x330,
 	} {

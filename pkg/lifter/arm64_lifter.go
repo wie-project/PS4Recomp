@@ -957,16 +957,8 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		lines = append(lines, "    nop")
 		return lines, nil
 
-	case x86asm.CLD:
-		// DF is not modelled: string instructions always run forward (DF = 0, as the System V
-		// ABI requires at calls).
-		lines = append(lines, "    nop")
-		return lines, nil
-
-	case x86asm.STD:
-		// DF = 1 (backward string operations) is not modelled; STD has no site in TLOU or U4.
-		lines = append(lines, l.emitUnsupported(inst, "std: backward string operations not lowered")...)
-		return lines, nil
+	case x86asm.CLD, x86asm.STD:
+		return l.liftDirectionFlag(op == x86asm.STD, lines), nil
 
 	case x86asm.CLC, x86asm.STC, x86asm.CMC, x86asm.LAHF, x86asm.SAHF:
 		return l.liftFlagsOp(inst, lines)

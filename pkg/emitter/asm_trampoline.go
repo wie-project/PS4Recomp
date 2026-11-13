@@ -78,8 +78,9 @@ const trampolineAsm = `// ARM64 assembly bridge between the host C runtime and r
 // points below) is in the __TEXT,__recomp_guest section: a host PC there means the pinned
 // registers are the guest registers; anywhere else the GuestContext holds what the last
 // guest -> host transition stored (recomp_pc_in_guest_code; signal handlers rely on it).
-// The rest of the guest state (x87 stack, MMX, MXCSR) lives in the GuestContext of the
-// execution context that runs, found through the TCB slot [x28 + x27 + 0x70]. The runtime
+// The rest of the guest state (x87 stack, MMX, MXCSR, the direction flag) lives in the
+// GuestContext of the execution context that runs, found through the TCB slot
+// [x28 + x27 + 0x70]. The runtime
 // keeps that slot pointing at the context that runs on the guest thread: the thread's own
 // GuestContext, or the fiber's while a fiber runs (ps4_fiber.c).
 //
