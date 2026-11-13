@@ -429,7 +429,11 @@ func (d *Disassembler) disasmFunction(entryAddr uint64) (*Function, []uint64, er
 	d.flushData()
 	var size uint64
 	if d.elf != nil {
-		if sym, ok := d.elf.SymbolByAddr[entryAddr]; ok && sym.Size > 0 {
+		// Only an STT_FUNC size bounds a function. A TLS symbol's value is an offset in
+		// the module's TLS block, not a guest address; companion modules keep those
+		// offsets unrelocated, so one can collide with the address of a function to
+		// decode (libc.prx TLS symbol 0x1d0, size 8, cut an eboot function at 0x1d8).
+		if sym, ok := d.elf.SymbolByAddr[entryAddr]; ok && sym.Type == elf.STT_FUNC && sym.Size > 0 {
 			size = sym.Size
 		}
 	}

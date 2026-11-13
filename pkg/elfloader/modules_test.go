@@ -1,6 +1,7 @@
 package elfloader
 
 import (
+	"debug/elf"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -227,3 +228,47 @@ func TestMergeImagesCanary(t *testing.T) {
 	}
 }
 
+// TestMergeImagesKeepsTLSSymbolsOutOfAddressMaps: an STT_TLS symbol's value is an offset
+// in the module's TLS block, not a guest address. Merging libc.prx's TLS symbol 0x1d0
+// into the main image's SymbolByAddr made the disassembler treat that eboot code address
+// as an 8-byte function.
+func TestMergeImagesKeepsTLSSymbolsOutOfAddressMaps(t *testing.T) {
+	dst := &LoadedELF{
+		MemoryImage:  make([]byte, 0x4000),
+		MinVAddr:     0,
+		MaxVAddr:     0x1000,
+		SymbolByAddr: map[uint64]Symbol{},
+		SymbolByName: map[string]Symbol{},
+	}
+	src := &LoadedELF{
+		MemoryImage: make([]byte, 0x4000),
+		MinVAddr:    0x2000,
+		MaxVAddr:    0x3000,
+		Symbols: []Symbol{
+			{Name: "J-oDqE1N8R4", Address: 0x100, Size: 8, Type: elf.STT_TLS},
+			{Name: "libc_fn", Address: 0x2000, Size: 0x20, Type: elf.STT_FUNC},
+		},
+		DynSymbols: []Symbol{
+			{Name: "", Address: 0},
+			{Name: "J-oDqE1N8R4", Address: 0x100, Size: 8, Type: elf.STT_TLS},
+		},
+	}
+	if err := MergeImages(dst, src); err != nil {
+		t.Fatalf("MergeImages failed: %v", err)
+	}
+	if _, ok := dst.SymbolByAddr[0x100]; ok {
+		t.Fatalf("TLS offset 0x100 entered SymbolByAddr: %+v", dst.SymbolByAddr[0x100])
+	}
+	if _, ok := dst.SymbolByName["J-oDqE1N8R4"]; ok {
+		t.Fatalf("TLS symbol name entered SymbolByName")
+	}
+	if got, ok := dst.SymbolByAddr[0x2000]; !ok || got.Name != "libc_fn" {
+		t.Fatalf("function symbol missing after merge: %+v", dst.SymbolByAddr[0x2000])
+	}
+	if len(src.Symbols) != 2 || src.Symbols[0].Address != 0x100 {
+		t.Fatalf("source symbols were modified: %+v", src.Symbols)
+	}
+	if len(src.DynSymbols) != 2 {
+		t.Fatalf("source dynsymbols were modified: %+v", src.DynSymbols)
+	}
+}

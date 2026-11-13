@@ -1,6 +1,7 @@
 package disasm
 
 import (
+	"debug/elf"
 	"encoding/binary"
 	"testing"
 
@@ -175,3 +176,82 @@ func TestBlockSplitsOnMaxBytes(t *testing.T) {
 	}
 }
 
+// TestTLSSymbolSizeDoesNotBoundFunction: a merged companion module keeps its STT_TLS
+// symbols unrelocated because their values are offsets in its TLS block, not addresses.
+// libc.prx has one at 0x1d0 (size 8); taking that size as a function bound cut the eboot
+// function at 0x1d0 after two instructions, and the lifter then dispatched to the
+// unregistered fall-through 0x1db.
+func TestTLSSymbolSizeDoesNotBoundFunction(t *testing.T) {
+	img := make([]byte, 0x200)
+	// 0x100: lea rax, [rip+0xf0]; 0x107: add rax, 0x10; the add ends at 0x10b.
+	copy(img[0x100:], []byte{0x48, 0x8d, 0x05, 0xf0, 0x00, 0x00, 0x00})
+	copy(img[0x107:], []byte{0x48, 0x83, 0xc0, 0x10})
+	for i := 0x10b; i < 0x11f; i++ {
+		img[i] = 0x90 // nop
+	}
+	img[0x11f] = 0xc3 // ret
+	loaded := imageELF(img, []elfloader.AddrRange{{Start: 0x100, End: 0x120}})
+	sym := elfloader.Symbol{Name: "J-oDqE1N8R4", Address: 0x100, Size: 8, Type: elf.STT_TLS}
+	loaded.SymbolByAddr[0x100] = sym
+	loaded.SymbolByName[sym.Name] = sym
+
+	d, err := NewDisassembler(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn, _, err := d.DisasmFunction(0x100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastEnd := uint64(0)
+	continued := false
+	for _, b := range fn.Blocks {
+		for _, inst := range b.Insts {
+			if inst.Address == 0x10b {
+				continued = true
+			}
+			if end := inst.Address + uint64(inst.Inst.Len); end > lastEnd {
+				lastEnd = end
+			}
+		}
+	}
+	if !continued {
+		t.Fatalf("decode stopped at the TLS symbol's fake end 0x108; blocks=%v", fn.Blocks)
+	}
+	if lastEnd != 0x120 {
+		t.Fatalf("function ends at 0x%x, want the ret's end 0x120", lastEnd)
+	}
+}
+
+// TestFuncSymbolSizeStillBoundsDecode: a real STT_FUNC symbol size remains the extent of
+// the function (the unwind ceiling does not override it).
+func TestFuncSymbolSizeStillBoundsDecode(t *testing.T) {
+	img := make([]byte, 0x100)
+	for i := 0x40; i < 0x50; i++ {
+		img[i] = 0x90 // nop
+	}
+	loaded := imageELF(img, []elfloader.AddrRange{{Start: 0x40, End: 0x50}})
+	loaded.SymbolByAddr[0x40] = elfloader.Symbol{Name: "tiny", Address: 0x40, Size: 4, Type: elf.STT_FUNC}
+
+	d, err := NewDisassembler(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn, _, err := d.DisasmFunction(0x40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	lastEnd := uint64(0)
+	for _, b := range fn.Blocks {
+		total += len(b.Insts)
+		for _, inst := range b.Insts {
+			if end := inst.Address + uint64(inst.Inst.Len); end > lastEnd {
+				lastEnd = end
+			}
+		}
+	}
+	if total != 4 || lastEnd != 0x44 {
+		t.Fatalf("STT_FUNC size 4: %d instructions ending at 0x%x, want 4 ending at 0x44", total, lastEnd)
+	}
+}

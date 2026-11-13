@@ -458,7 +458,6 @@ func MergeImages(dst, src *LoadedELF) error {
 	dst.DataRanges = mergeRanges(append(dst.DataRanges, src.DataRanges...))
 	dst.Relocations = append(dst.Relocations, src.Relocations...)
 
-
 	canaryTarget := dst.CanaryAddr
 	if canaryTarget == 0 {
 		canaryTarget = src.CanaryAddr
@@ -479,6 +478,13 @@ func MergeImages(dst, src *LoadedELF) error {
 
 	dst.InitArray = append(dst.InitArray, src.InitArray...)
 	for _, sym := range src.Symbols {
+		// An STT_TLS symbol's value is an offset in the module's TLS block, not a guest
+		// address (AddBias leaves it unrelocated for the same reason). It must not enter
+		// the address-keyed symbol maps of the merged image: a small TLS offset can name
+		// an address that belongs to the main image's code.
+		if sym.Type == elf.STT_TLS {
+			continue
+		}
 		addSymbol(dst, sym)
 	}
 	if len(src.DynSymbols) > 1 {
