@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <unordered_map>
 #include <utility>
@@ -72,6 +73,7 @@ constexpr uint32_t DecodeChunk = 256;             // samples per decode step: on
 constexpr uint32_t FifoFrames = 2 * DecodeChunk;  // a step only runs with fewer than 2 samples held
 constexpr uint32_t MaxParams = 64;                // params followed per sceNgs2VoiceControl call
 constexpr uint32_t MaxMixerPasses = 16;           // depth of submixer chains
+constexpr uint64_t PerfWindowUs = 5000000;        // a perf line every 5 s of renders
 
 // Prints at most `limit` lines from one call site.
 #define NGS2_WARN(limit, ...)                                                                      \
@@ -188,8 +190,22 @@ struct System {
     std::vector<Rack*> racks;
 };
 
+// Render counters: totals (ps4_ngs2_perf_totals) and the current perf line window.
+struct Perf {
+    Ps4Ngs2Perf total{};
+    uint64_t window_start_us = 0;
+    uint64_t renders = 0;
+    uint64_t render_us = 0;
+    uint64_t render_max_us = 0;
+    uint32_t playing_max = 0;
+    uint64_t voice_underruns = 0;
+    uint64_t atrac9_errors = 0;
+    uint64_t dropped_blocks = 0;
+};
+
 struct Registry {
     std::mutex mtx;
+    Perf perf;
     OrbisNgs2Handle next_handle = 0x100;
     uint32_t next_uid = 1;
     std::unordered_map<OrbisNgs2Handle, System> systems;
@@ -199,6 +215,12 @@ struct Registry {
 };
 
 static Registry g_ngs2;
+
+static uint64_t MonotonicUs() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
 
 static inline bool ValidGrain(uint32_t grain) {
     return grain >= MinGrainSamples && grain <= MaxGrainSamples && (grain % MinGrainSamples) == 0;
@@ -327,6 +349,8 @@ static void QueueBlocks(GuestContext* ctx, Voice& v, const OrbisNgs2SamplerVoice
         memcpy(&q.block, &blocks[added], sizeof(q.block));
     }
     if (added < p.numBlocks) {
+        g_ngs2.perf.total.dropped_blocks += p.numBlocks - added;
+        g_ngs2.perf.dropped_blocks += p.numBlocks - added;
         NGS2_WARN(16, "voice 0x%llx: waveform block queue full (%u); %u blocks dropped\n",
                   (unsigned long long)v.handle, MaxQueuedBlocks, p.numBlocks - added);
     }
@@ -415,6 +439,8 @@ static void DecodeAtrac9(Voice& v, const QueuedBlock& q, const uint8_t* data) {
     int used = 0;
     const int err = Atrac9DecodeF32(s.at9, data + s.byte, (int)left, g_ngs2.scratch, &used, 0);
     if (err != 0 || used <= 0 || (uint32_t)used > left) {
+        ++g_ngs2.perf.total.atrac9_errors;
+        ++g_ngs2.perf.atrac9_errors;
         NGS2_WARN(32, "voice 0x%llx: ATRAC9 decode error 0x%x at byte %u of %u; rest of the block skipped\n",
                   (unsigned long long)v.handle, (unsigned)err, s.byte, q.block.dataSize);
         s.decoded_bytes += left;
@@ -499,9 +525,10 @@ static uint32_t CollectSends(const Voice& v, Send* sends) {
     return n;
 }
 
-static void RenderSampler(GuestContext* ctx, Voice& v, uint32_t frames, uint32_t system_rate) {
+// Renders a playing sampler voice; returns whether it was playing.
+static bool RenderSampler(GuestContext* ctx, Voice& v, uint32_t frames, uint32_t system_rate) {
     Sampler& s = v.sampler;
-    if ((v.state & (StatePlaying | StatePaused)) != StatePlaying) return;
+    if ((v.state & (StatePlaying | StatePaused)) != StatePlaying) return false;
     const uint32_t channels = v.channels;
     const double step = (double)s.pitch * (double)(s.sample_rate ? s.sample_rate : system_rate) / (double)system_rate;
     Send sends[MaxPorts];
@@ -537,9 +564,15 @@ static void RenderSampler(GuestContext* ctx, Voice& v, uint32_t frames, uint32_t
     }
     s.peak = peak;
     if (s.fifo_count == 0 && s.count == 0) {
-        if (s.ended) EndVoice(v);
-        else v.state |= StateEmpty;
+        if (s.ended) {
+            EndVoice(v);
+        } else if (!(v.state & StateEmpty)) { // a stream ran dry: its next data comes late
+            v.state |= StateEmpty;
+            ++g_ngs2.perf.total.voice_underruns;
+            ++g_ngs2.perf.voice_underruns;
+        }
     }
+    return true;
 }
 
 // ---- Mixer voices ----
@@ -656,10 +689,12 @@ static void Render(GuestContext* ctx, System& sys, const OrbisNgs2RenderBufferIn
             }
         }
     }
+    uint32_t playing = 0;
     for (Rack* r : sys.racks) {
         if (r->kind != RackKind::Sampler) continue;
-        for (Voice& v : r->voices) RenderSampler(ctx, v, frames, rate);
+        for (Voice& v : r->voices) playing += RenderSampler(ctx, v, frames, rate) ? 1 : 0;
     }
+    g_ngs2.perf.playing_max = std::max(g_ngs2.perf.playing_max, playing);
     // Submixers send once everything feeding them is in.
     bool waiting = false;
     for (uint32_t pass = 0; pass < MaxMixerPasses; ++pass) {
@@ -1160,7 +1195,7 @@ void shim_sceNgs2SystemRender(GuestContext *ctx) {
     uint64_t buffers_addr = ctx->rsi;
     uint32_t num_buffers = (uint32_t)ctx->rdx;
 
-    std::lock_guard<std::mutex> lock(g_ngs2.mtx);
+    std::unique_lock<std::mutex> lock(g_ngs2.mtx);
     auto it = g_ngs2.systems.find(h);
     if (it == g_ngs2.systems.end()) {
         ctx->rax = (uint64_t)ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
@@ -1185,8 +1220,36 @@ void shim_sceNgs2SystemRender(GuestContext *ctx) {
         SHIM_RETURN();
     }
 
+    const uint64_t start = MonotonicUs();
     Render(ctx, sys, bufs, num_buffers);
+    const uint64_t end = MonotonicUs();
     sys.render_count++;
+
+    Perf& perf = g_ngs2.perf;
+    ++perf.total.renders;
+    ++perf.renders;
+    perf.render_us += end - start;
+    perf.render_max_us = std::max(perf.render_max_us, end - start);
+    if (!perf.window_start_us) perf.window_start_us = start;
+    char line[512];
+    line[0] = 0;
+    if (end - perf.window_start_us >= PerfWindowUs) {
+        const double secs = (double)(end - perf.window_start_us) / 1e6;
+        snprintf(line, sizeof(line),
+                 "[ngs2] perf: %.2f s, %llu renders (expected %.1f), render avg %.0f us max %llu us, up to %u voices "
+                 "playing, %llu voice underruns (streams ran dry), %llu ATRAC9 errors, %llu blocks dropped\n",
+                 secs, (unsigned long long)perf.renders,
+                 secs * sys.option.sampleRate / sys.option.numGrainSamples,
+                 (double)perf.render_us / (double)perf.renders, (unsigned long long)perf.render_max_us,
+                 perf.playing_max, (unsigned long long)perf.voice_underruns, (unsigned long long)perf.atrac9_errors,
+                 (unsigned long long)perf.dropped_blocks);
+        const Ps4Ngs2Perf total = perf.total;
+        perf = Perf{};
+        perf.total = total;
+        perf.window_start_us = end;
+    }
+    lock.unlock();
+    if (line[0]) fputs(line, stderr);
     ctx->rax = 0;
     SHIM_RETURN();
 }
@@ -1637,6 +1700,11 @@ void shim_sceNgs2RackGetUserData(GuestContext *ctx) {
     }
     ctx->rax = 0;
     SHIM_RETURN();
+}
+
+void ps4_ngs2_perf_totals(Ps4Ngs2Perf *out) {
+    std::lock_guard<std::mutex> lock(g_ngs2.mtx);
+    *out = g_ngs2.perf.total;
 }
 
 } // extern "C"

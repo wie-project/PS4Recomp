@@ -323,6 +323,15 @@ typedef struct OrbisNgs2SamplerVoiceState {
 #define ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE 0x804A0300
 #define ORBIS_NGS2_ERROR_INVALID_VOICE_INDEX 0x804A0302
 
+// Render counters since start (host side; a "[ngs2] perf" line reports them every 5 s).
+typedef struct Ps4Ngs2Perf {
+    uint64_t renders;         // successful sceNgs2SystemRender calls
+    uint64_t voice_underruns; // a playing sampler voice's queue ran dry before its end of data
+    uint64_t atrac9_errors;   // ATRAC9 frames libatrac9 rejected (the rest of the block skipped)
+    uint64_t dropped_blocks;  // waveform blocks that found the voice's queue full
+} Ps4Ngs2Perf;
+void ps4_ngs2_perf_totals(Ps4Ngs2Perf *out);
+
 // Shims
 void shim_sceNgs2SystemCreateWithAllocator(GuestContext *ctx);
 void shim_sceNgs2SystemDestroy(GuestContext *ctx);

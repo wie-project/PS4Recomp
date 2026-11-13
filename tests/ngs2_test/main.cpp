@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <new>
 #include <vector>
 
@@ -201,14 +202,14 @@ OrbisNgs2Handle VoiceOf(OrbisNgs2Handle rack, uint32_t index) {
     return OutHandle();
 }
 
-Graph CreateGraph() {
+Graph CreateGraph(uint32_t sampler_voices = kSamplerVoices) {
     Graph g;
     SetBufferInfo(kSysBuf, kBufSize);
     CHECK(Call(shim_sceNgs2SystemCreate, 0, kInfo, kOut) == 0);
     g.system = OutHandle();
     g.racks[0] = CreateRack(g.system, ORBIS_NGS2_RACK_ID_MASTERING, 1, 0);
     g.racks[1] = CreateRack(g.system, ORBIS_NGS2_RACK_ID_SUBMIXER, 1, 1);
-    g.racks[2] = CreateRack(g.system, ORBIS_NGS2_RACK_ID_SAMPLER, kSamplerVoices, 2);
+    g.racks[2] = CreateRack(g.system, ORBIS_NGS2_RACK_ID_SAMPLER, sampler_voices, 2);
     g.mastering = VoiceOf(g.racks[0], 0);
     g.submixer = VoiceOf(g.racks[1], 0);
     {
@@ -229,11 +230,12 @@ Graph CreateGraph() {
         Patch(p, 0, g.racks[0]); // a rack handle stands for its first voice
         CHECK(p.Send(g.submixer) == 0);
     }
-    for (uint32_t i = 0; i < kSamplerVoices; ++i) {
-        g.voices[i] = VoiceOf(g.racks[2], i);
+    for (uint32_t i = 0; i < sampler_voices; ++i) {
+        const OrbisNgs2Handle v = VoiceOf(g.racks[2], i);
+        if (i < kSamplerVoices) g.voices[i] = v;
         Params p;
-        CHECK(Patch(p, 0, g.submixer).Send(g.voices[i]) == 0);
-        CHECK(Flags(g.voices[i]) == 0); // a voice nobody played is not in use
+        CHECK(Patch(p, 0, g.submixer).Send(v) == 0);
+        CHECK(Flags(v) == 0); // a voice nobody played is not in use
     }
     return g;
 }
@@ -339,6 +341,8 @@ void TestPcm16StateAndTiming() {
     const OrbisNgs2Handle v = g.voices[0];
     constexpr uint32_t kFrames = 600;
     WritePcm16(kWave, kFrames, 1);
+    Ps4Ngs2Perf perf0, perf;
+    ps4_ngs2_perf_totals(&perf0);
     {
         Params p;
         Setup(p, ORBIS_NGS2_WAVEFORM_TYPE_PCM_I16L, 1, 48000);
@@ -371,6 +375,8 @@ void TestPcm16StateAndTiming() {
     // The queue ran dry and no end of data came: still in use and playing, flagged empty.
     CHECK(s.stateFlags == (kPlaying | kEmpty));
     CHECK(s.numDecodedSamples == kFrames && s.numDecodedBytes == kFrames * 2);
+    ps4_ngs2_perf_totals(&perf);
+    CHECK(perf.renders == perf0.renders + 3 && perf.voice_underruns == perf0.voice_underruns + 1);
     CHECK(s.waveformData == 0);
     printf("[+] PCM16 voice plays its block sample for sample and reports decoded samples / bytes\n");
 
@@ -384,6 +390,9 @@ void TestPcm16StateAndTiming() {
     for (uint32_t f = 0; f < 10; ++f) CHECK(out[f * 2] == Pcm16(f, 0));
     CHECK(out[10 * 2] == 0.0f);
     CHECK(Flags(v) == (kPlaying | kEmpty));
+    Render(g); // still dry: the same underrun
+    ps4_ngs2_perf_totals(&perf);
+    CHECK(perf.voice_underruns == perf0.voice_underruns + 2);
     // End of data (no queue flag, no blocks): the voice finishes at the next render.
     {
         Params p;
@@ -393,6 +402,8 @@ void TestPcm16StateAndTiming() {
     Render(g);
     s = State(v);
     CHECK(s.stateFlags == 0 && s.numDecodedSamples == kFrames + 10);
+    ps4_ngs2_perf_totals(&perf);
+    CHECK(perf.voice_underruns == perf0.voice_underruns + 2); // an ended voice is no underrun
     CHECK(Call(shim_sceNgs2RackGetInfo, g.racks[2], kSysInfo, sizeof(OrbisNgs2RackInfo)) == 0);
     CHECK(At<OrbisNgs2RackInfo>(kSysInfo)->activeVoiceCount == 0);
     printf("[+] an empty voice resumes with new blocks and finishes after the end of its data\n");
@@ -715,6 +726,37 @@ void TestAtrac9() {
     DestroyGraph(g);
 }
 
+// The cost of a render with Gravity Rush's 256 sampler voices, 96 of them playing looped blocks:
+// 64 PCM24 stereo, 32 ATRAC9. Printed, not checked (machine dependent).
+void TestRenderCost() {
+    std::vector<float> ref;
+    BuildAtrac9(At<uint8_t>(kWave), 2, &ref);
+    constexpr uint64_t kPcm = kWave + 2 * kAt9SuperframeBytes;
+    WritePcm24(kPcm, 4800, 2);
+    Graph g = CreateGraph(256);
+    for (uint32_t i = 0; i < 96; ++i) {
+        CHECK(Call(shim_sceNgs2RackGetVoiceHandle, g.racks[2], i, kOut) == 0);
+        const OrbisNgs2Handle v = OutHandle();
+        Params p;
+        if (i < 64) {
+            Setup(p, ORBIS_NGS2_WAVEFORM_TYPE_PCM_I24L, 2, 44100 + i * 10);
+            Blocks(p, kPcm, ORBIS_NGS2_WAVEFORM_BLOCKS_FLAG_QUEUE, {Block(0, 4800 * 6, 4800, 0, 0xFFFFFFFFu)});
+        } else {
+            Setup(p, ORBIS_NGS2_WAVEFORM_TYPE_ATRAC9, 1, 48000, kAt9Config);
+            Blocks(p, kWave, ORBIS_NGS2_WAVEFORM_BLOCKS_FLAG_QUEUE, {Block(0, 2 * kAt9SuperframeBytes, 0, 0, 0xFFFFFFFFu)});
+        }
+        CHECK(Event(p, ORBIS_NGS2_VOICE_EVENT_PLAY).Send(v) == 0);
+    }
+    constexpr int kRenders = 400;
+    timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    for (int r = 0; r < kRenders; ++r) Render(g);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    const double us = ((double)(b.tv_sec - a.tv_sec) * 1e6 + (double)(b.tv_nsec - a.tv_nsec) / 1e3) / kRenders;
+    printf("[+] render cost: %.1f us per 256-sample render (5333 us of audio), 96 voices playing\n", us);
+    DestroyGraph(g);
+}
+
 } // namespace
 
 int main() {
@@ -729,6 +771,7 @@ int main() {
     TestPauseStopKill();
     TestRenderBuffers();
     TestAtrac9();
+    TestRenderCost();
 
     printf("[ngs2-test] all passed\n");
     free(g_ctx.mem_base);
