@@ -8,6 +8,7 @@
 #include <cstring>
 #include <mutex>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -138,6 +139,100 @@ static void CallGuestFree(GuestContext* ctx, uint64_t fn_addr, uint64_t info_gue
     ctx->rsp = saved_rsp;
 }
 
+static OrbisNgs2SystemOption NormalizeSystemOption(const OrbisNgs2SystemOption* opt) {
+    OrbisNgs2SystemOption norm{};
+    if (opt) norm = *opt;
+    if (norm.maxGrainSamples == 0) norm.maxGrainSamples = 512;
+    if (norm.numGrainSamples == 0) norm.numGrainSamples = 256;
+    if (norm.sampleRate == 0) norm.sampleRate = 48000;
+    return norm;
+}
+
+static OrbisNgs2RackOption NormalizeRackOption(const OrbisNgs2RackOption* opt, const System& sys) {
+    OrbisNgs2RackOption norm{};
+    if (opt) norm = *opt;
+    if (norm.maxVoices == 0) norm.maxVoices = 64;
+    if (norm.maxGrainSamples == 0) norm.maxGrainSamples = sys.option.maxGrainSamples;
+    return norm;
+}
+
+// Context buffer of a system or rack in guest memory.
+struct ContextBuffer {
+    uint64_t addr = 0;
+    uint64_t size = 0;
+};
+
+// Asks the guest OrbisNgs2BufferAllocator for a context buffer of req_sz bytes (the
+// *WithAllocator entry points). Returns an empty buffer when the handler is null or fails.
+static ContextBuffer AllocWithGuestAllocator(GuestContext* ctx, const OrbisNgs2BufferAllocator* alloc,
+                                             size_t req_sz) {
+    if (!alloc->allocHandler) return {};
+    // Place a temporary OrbisNgs2ContextBufferInfo on the guest stack.
+    uint64_t info_guest_addr = ctx->rsp - 128;
+    auto* info = (OrbisNgs2ContextBufferInfo*)(ctx->mem_base + info_guest_addr);
+    memset(info, 0, sizeof(*info));
+    info->hostBufferSize = req_sz;
+    info->userData = alloc->userData;
+
+    int32_t alloc_res = CallGuestAlloc(ctx, alloc->allocHandler, info_guest_addr);
+    if (alloc_res != 0 || !info->hostBuffer) return {};
+    return {info->hostBuffer, req_sz};
+}
+
+// Takes the caller-supplied context buffer of sceNgs2SystemCreate and sceNgs2RackCreate.
+// Returns 0, or the ORBIS_NGS2_ERROR code for an invalid OrbisNgs2ContextBufferInfo.
+static uint32_t TakeCallerBuffer(GuestContext* ctx, uint64_t info_addr, size_t req_sz, ContextBuffer* out) {
+    if (!info_addr) return ORBIS_NGS2_ERROR_INVALID_BUFFER_INFO;
+    const auto* info = (const OrbisNgs2ContextBufferInfo*)(ctx->mem_base + info_addr);
+    if (!info->hostBuffer) return ORBIS_NGS2_ERROR_INVALID_BUFFER_ADDRESS;
+    if (info->hostBufferSize < req_sz) return ORBIS_NGS2_ERROR_INVALID_BUFFER_SIZE;
+    *out = {info->hostBuffer, info->hostBufferSize};
+    return 0;
+}
+
+// Registers a system whose context lives in buf. The caller holds g_ngs2.mtx.
+static OrbisNgs2Handle RegisterSystem(const OrbisNgs2SystemOption& norm, ContextBuffer buf) {
+    OrbisNgs2Handle h = g_ngs2.next_handle++;
+    System sys;
+    sys.handle = h;
+    sys.option = norm;
+    sys.buffer_addr = buf.addr;
+    sys.buffer_size = buf.size;
+    sys.uid = g_ngs2.next_uid++;
+    sys.render_count = 0;
+    g_ngs2.systems[h] = sys;
+    return h;
+}
+
+// Registers a rack of sys whose context lives in buf. The caller holds g_ngs2.mtx.
+static OrbisNgs2Handle RegisterRack(System& sys, uint32_t rack_id, const OrbisNgs2RackOption& norm,
+                                    ContextBuffer buf) {
+    OrbisNgs2Handle rack_h = g_ngs2.next_handle++;
+    Rack rack;
+    rack.handle = rack_h;
+    rack.system_handle = sys.handle;
+    rack.rack_id = rack_id;
+    rack.option = norm;
+    rack.buffer_addr = buf.addr;
+    rack.buffer_size = buf.size;
+
+    rack.voices.resize(norm.maxVoices);
+    for (uint32_t i = 0; i < norm.maxVoices; ++i) {
+        OrbisNgs2Handle v_h = g_ngs2.next_handle++;
+        Voice v;
+        v.handle = v_h;
+        v.rack_handle = rack_h;
+        v.voice_index = i;
+        v.state = StateFlagInUse;
+        rack.voices[i] = v;
+        g_ngs2.voices[v_h] = v;
+    }
+
+    g_ngs2.racks[rack_h] = std::move(rack);
+    sys.racks.push_back(rack_h);
+    return rack_h;
+}
+
 } // namespace
 
 extern "C" {
@@ -152,47 +247,50 @@ void shim_sceNgs2SystemCreateWithAllocator(GuestContext *ctx) {
     const auto* alloc = (const OrbisNgs2BufferAllocator*)(ctx->mem_base + ctx->rsi);
     auto* out_handle = (OrbisNgs2Handle*)(ctx->mem_base + ctx->rdx);
 
-    OrbisNgs2SystemOption norm = *opt;
-    if (norm.maxGrainSamples == 0) norm.maxGrainSamples = 512;
-    if (norm.numGrainSamples == 0) norm.numGrainSamples = 256;
-    if (norm.sampleRate == 0) norm.sampleRate = 48000;
-
+    OrbisNgs2SystemOption norm = NormalizeSystemOption(opt);
     size_t req_sz = SystemBufferSize(norm);
 
-    // Prepare buffer info
-    uint64_t allocated_guest_addr = 0;
-    if (alloc->allocHandler) {
-        // Place temporary OrbisNgs2ContextBufferInfo on guest stack
-        uint64_t info_guest_addr = ctx->rsp - 128;
-        auto* info = (OrbisNgs2ContextBufferInfo*)(ctx->mem_base + info_guest_addr);
-        memset(info, 0, sizeof(*info));
-        info->hostBufferSize = req_sz;
-        info->userData = alloc->userData;
-
-        int32_t alloc_res = CallGuestAlloc(ctx, alloc->allocHandler, info_guest_addr);
-        if (alloc_res == 0 && info->hostBuffer) {
-            allocated_guest_addr = info->hostBuffer;
-        }
-    }
-
-    if (!allocated_guest_addr) {
-        allocated_guest_addr = recomp_vm_alloc_named_aligned(ctx, req_sz, 4096, 0x3, 0, "Ngs2System");
+    ContextBuffer buf = AllocWithGuestAllocator(ctx, alloc, req_sz);
+    if (!buf.addr) {
+        buf = {recomp_vm_alloc_named_aligned(ctx, req_sz, 4096, 0x3, 0, "Ngs2System"), req_sz};
     }
 
     std::lock_guard<std::mutex> lock(g_ngs2.mtx);
-    OrbisNgs2Handle h = g_ngs2.next_handle++;
-    System sys;
-    sys.handle = h;
-    sys.option = norm;
-    sys.buffer_addr = allocated_guest_addr;
-    sys.buffer_size = req_sz;
-    sys.uid = g_ngs2.next_uid++;
-    sys.render_count = 0;
-    g_ngs2.systems[h] = sys;
-
+    OrbisNgs2Handle h = RegisterSystem(norm, buf);
     *out_handle = h;
-    fprintf(stderr, "[ngs2] SystemCreateWithAllocator: handle=0x%llx, grain=%u, rate=%u, buf=0x%llx (%zu bytes)\n",
-            (unsigned long long)h, norm.numGrainSamples, norm.sampleRate, (unsigned long long)allocated_guest_addr, req_sz);
+    fprintf(stderr, "[ngs2] SystemCreateWithAllocator: handle=0x%llx, grain=%u, rate=%u, buf=0x%llx (%llu bytes)\n",
+            (unsigned long long)h, norm.numGrainSamples, norm.sampleRate, (unsigned long long)buf.addr,
+            (unsigned long long)buf.size);
+
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+// sceNgs2SystemCreate(option, bufferInfo, outHandle): the context lives in the caller's buffer.
+void shim_sceNgs2SystemCreate(GuestContext *ctx) {
+    uint64_t opt_addr = ctx->rdi;
+    uint64_t info_addr = ctx->rsi;
+    uint64_t out_h_addr = ctx->rdx;
+
+    if (!out_h_addr) {
+        ctx->rax = (uint64_t)ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+        SHIM_RETURN();
+    }
+
+    OrbisNgs2SystemOption norm =
+        NormalizeSystemOption(opt_addr ? (const OrbisNgs2SystemOption*)(ctx->mem_base + opt_addr) : nullptr);
+    ContextBuffer buf;
+    if (uint32_t err = TakeCallerBuffer(ctx, info_addr, SystemBufferSize(norm), &buf)) {
+        ctx->rax = (uint64_t)err;
+        SHIM_RETURN();
+    }
+
+    std::lock_guard<std::mutex> lock(g_ngs2.mtx);
+    OrbisNgs2Handle h = RegisterSystem(norm, buf);
+    *(OrbisNgs2Handle*)(ctx->mem_base + out_h_addr) = h;
+    fprintf(stderr, "[ngs2] SystemCreate: handle=0x%llx, grain=%u, rate=%u, buf=0x%llx (%llu bytes)\n",
+            (unsigned long long)h, norm.numGrainSamples, norm.sampleRate, (unsigned long long)buf.addr,
+            (unsigned long long)buf.size);
 
     ctx->rax = 0;
     SHIM_RETURN();
@@ -286,60 +384,19 @@ void shim_sceNgs2RackCreateWithAllocator(GuestContext *ctx) {
         SHIM_RETURN();
     }
 
-    OrbisNgs2RackOption norm{};
-    if (opt_addr) {
-        norm = *(const OrbisNgs2RackOption*)(ctx->mem_base + opt_addr);
-    }
-    if (norm.maxVoices == 0) norm.maxVoices = 64;
-    if (norm.maxGrainSamples == 0) norm.maxGrainSamples = sys_it->second.option.maxGrainSamples;
-
+    OrbisNgs2RackOption norm = NormalizeRackOption(
+        opt_addr ? (const OrbisNgs2RackOption*)(ctx->mem_base + opt_addr) : nullptr, sys_it->second);
     size_t req_sz = RackBufferSize(norm);
 
-    uint64_t allocated_guest_addr = 0;
+    ContextBuffer buf;
     if (alloc_addr) {
-        const auto* alloc = (const OrbisNgs2BufferAllocator*)(ctx->mem_base + alloc_addr);
-        if (alloc->allocHandler) {
-            uint64_t info_guest_addr = ctx->rsp - 128;
-            auto* info = (OrbisNgs2ContextBufferInfo*)(ctx->mem_base + info_guest_addr);
-            memset(info, 0, sizeof(*info));
-            info->hostBufferSize = req_sz;
-            info->userData = alloc->userData;
-
-            int32_t alloc_res = CallGuestAlloc(ctx, alloc->allocHandler, info_guest_addr);
-            if (alloc_res == 0 && info->hostBuffer) {
-                allocated_guest_addr = info->hostBuffer;
-            }
-        }
+        buf = AllocWithGuestAllocator(ctx, (const OrbisNgs2BufferAllocator*)(ctx->mem_base + alloc_addr), req_sz);
+    }
+    if (!buf.addr) {
+        buf = {recomp_vm_alloc_named_aligned(ctx, req_sz, 4096, 0x3, 0, "Ngs2Rack"), req_sz};
     }
 
-    if (!allocated_guest_addr) {
-        allocated_guest_addr = recomp_vm_alloc_named_aligned(ctx, req_sz, 4096, 0x3, 0, "Ngs2Rack");
-    }
-
-    OrbisNgs2Handle rack_h = g_ngs2.next_handle++;
-    Rack rack;
-    rack.handle = rack_h;
-    rack.system_handle = sys_h;
-    rack.rack_id = rack_id;
-    rack.option = norm;
-    rack.buffer_addr = allocated_guest_addr;
-    rack.buffer_size = req_sz;
-
-    rack.voices.resize(norm.maxVoices);
-    for (uint32_t i = 0; i < norm.maxVoices; ++i) {
-        OrbisNgs2Handle v_h = g_ngs2.next_handle++;
-        Voice v;
-        v.handle = v_h;
-        v.rack_handle = rack_h;
-        v.voice_index = i;
-        v.state = StateFlagInUse;
-        rack.voices[i] = v;
-        g_ngs2.voices[v_h] = v;
-    }
-
-    g_ngs2.racks[rack_h] = rack;
-    sys_it->second.racks.push_back(rack_h);
-
+    OrbisNgs2Handle rack_h = RegisterRack(sys_it->second, rack_id, norm, buf);
     *(OrbisNgs2Handle*)(ctx->mem_base + out_h_addr) = rack_h;
 
     fprintf(stderr, "[ngs2] RackCreateWithAllocator: sys=0x%llx, rack_id=0x%x, handle=0x%llx, voices=%u\n",
@@ -497,12 +554,43 @@ void shim_sceNgs2CalcWaveformBlock(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-void shim_sceNgs2SystemCreate(GuestContext *ctx) {
-    shim_sceNgs2SystemCreateWithAllocator(ctx);
-}
-
+// sceNgs2RackCreate(systemHandle, rackId, option, bufferInfo, outHandle): the context lives in
+// the caller's buffer.
 void shim_sceNgs2RackCreate(GuestContext *ctx) {
-    shim_sceNgs2RackCreateWithAllocator(ctx);
+    OrbisNgs2Handle sys_h = (OrbisNgs2Handle)ctx->rdi;
+    uint32_t rack_id = (uint32_t)ctx->rsi;
+    uint64_t opt_addr = ctx->rdx;
+    uint64_t info_addr = ctx->rcx;
+    uint64_t out_h_addr = ctx->r8;
+
+    if (!out_h_addr) {
+        ctx->rax = (uint64_t)ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS;
+        SHIM_RETURN();
+    }
+
+    std::lock_guard<std::mutex> lock(g_ngs2.mtx);
+    auto sys_it = g_ngs2.systems.find(sys_h);
+    if (sys_it == g_ngs2.systems.end()) {
+        ctx->rax = (uint64_t)ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE;
+        SHIM_RETURN();
+    }
+
+    OrbisNgs2RackOption norm = NormalizeRackOption(
+        opt_addr ? (const OrbisNgs2RackOption*)(ctx->mem_base + opt_addr) : nullptr, sys_it->second);
+    ContextBuffer buf;
+    if (uint32_t err = TakeCallerBuffer(ctx, info_addr, RackBufferSize(norm), &buf)) {
+        ctx->rax = (uint64_t)err;
+        SHIM_RETURN();
+    }
+
+    OrbisNgs2Handle rack_h = RegisterRack(sys_it->second, rack_id, norm, buf);
+    *(OrbisNgs2Handle*)(ctx->mem_base + out_h_addr) = rack_h;
+    fprintf(stderr, "[ngs2] RackCreate: sys=0x%llx, rack_id=0x%x, handle=0x%llx, voices=%u, buf=0x%llx (%llu bytes)\n",
+            (unsigned long long)sys_h, rack_id, (unsigned long long)rack_h, norm.maxVoices,
+            (unsigned long long)buf.addr, (unsigned long long)buf.size);
+
+    ctx->rax = 0;
+    SHIM_RETURN();
 }
 
 void shim_sceNgs2SystemQueryBufferSize(GuestContext *ctx) {
