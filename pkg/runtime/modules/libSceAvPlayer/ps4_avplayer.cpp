@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ps4_avplayer.h"
+#include "ps4_avplayer_audio.h"
 #include "ps4_avplayer_file_streamer.h"
 #include "ps4_vfs.h"
 #include "ps4_threading.h"
@@ -13,7 +14,6 @@ extern "C" {
 #include <libavutil/mathematics.h>
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
-#include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
 
@@ -778,10 +778,7 @@ private:
             sws_freeContext(m_sws_ctx);
             m_sws_ctx = nullptr;
         }
-        if (m_swr_ctx) {
-            swr_free(&m_swr_ctx);
-            m_swr_ctx = nullptr;
-        }
+        m_audio_converter.reset();
 
         m_state.store(AvState::Stop);
         if (emit_event) {
@@ -944,66 +941,24 @@ private:
                 GuestBuffer buf;
                 if (!m_free_audio_buffers.wait_pop(m_workers_stop, buf)) break;
 
-                const AVFrame *target_frame = raw_frame;
-                AVFrame *converted_frame = nullptr;
-
-                if (raw_frame->format != AV_SAMPLE_FMT_S16) {
-                    converted_frame = av_frame_alloc();
-                    converted_frame->best_effort_timestamp = raw_frame->best_effort_timestamp;
-                    converted_frame->pts = raw_frame->pts;
-                    converted_frame->pkt_dts = raw_frame->pkt_dts < 0 ? 0 : raw_frame->pkt_dts;
-                    converted_frame->format = AV_SAMPLE_FMT_S16;
-                    av_channel_layout_copy(&converted_frame->ch_layout, &raw_frame->ch_layout);
-                    converted_frame->sample_rate = raw_frame->sample_rate;
-
-                    if (!m_swr_ctx) {
-                        SwrContext *swr = nullptr;
-                        AVChannelLayout in_layout{};
-                        AVChannelLayout out_layout{};
-                        av_channel_layout_copy(&in_layout, &raw_frame->ch_layout);
-                        av_channel_layout_copy(&out_layout, &raw_frame->ch_layout);
-                        swr_alloc_set_opts2(&swr, &out_layout, AV_SAMPLE_FMT_S16, raw_frame->sample_rate,
-                                            &in_layout, (AVSampleFormat)raw_frame->format, raw_frame->sample_rate,
-                                            0, nullptr);
-                        av_channel_layout_uninit(&in_layout);
-                        av_channel_layout_uninit(&out_layout);
-                        m_swr_ctx = swr;
-                        swr_init(m_swr_ctx);
-                    }
-
-                    int conv_res = swr_convert_frame(m_swr_ctx, converted_frame, raw_frame);
-                    if (conv_res < 0) {
-                        AVPLAYER_LOG("swr_convert_frame error %d", conv_res);
-                        av_frame_free(&converted_frame);
-                        m_free_audio_buffers.push(std::move(buf));
-                        av_frame_unref(raw_frame);
-                        continue;
-                    }
-                    target_frame = converted_frame;
+                DecodedAudioFrame frame{};
+                const int conv = m_audio_converter.convert(raw_frame, buf.host_ptr, buf.size,
+                                                           &frame.info.details.audio);
+                if (conv < 0) {
+                    AVPLAYER_LOG("Audio frame conversion failed (%d channels, %d samples): %d",
+                                 raw_frame->ch_layout.nb_channels, raw_frame->nb_samples, conv);
+                    m_free_audio_buffers.push(std::move(buf));
+                    av_frame_unref(raw_frame);
+                    continue;
                 }
-
-                uint32_t channels = (uint32_t)target_frame->ch_layout.nb_channels;
-                uint32_t bytes = channels * (uint32_t)target_frame->nb_samples * sizeof(int16_t);
-                if (bytes <= buf.size && target_frame->data[0]) {
-                    memcpy(buf.host_ptr, target_frame->data[0], bytes);
-                }
-
                 AVStream *st = m_fmt_ctx->streams[m_audio_stream_idx];
                 uint64_t ts = frame_timestamp_millis(raw_frame, st->time_base);
 
-                DecodedAudioFrame frame{};
                 frame.buffer = std::move(buf);
                 frame.info.p_data = frame.buffer.guest_addr;
                 frame.info.timestamp = ts;
-                frame.info.details.audio.channel_count = (uint16_t)channels;
-                frame.info.details.audio.sample_rate = (uint32_t)target_frame->sample_rate;
-                frame.info.details.audio.size = bytes;
 
                 m_ready_audio_frames.push(std::move(frame));
-
-                if (converted_frame) {
-                    av_frame_free(&converted_frame);
-                }
                 av_frame_unref(raw_frame);
             }
         }
@@ -1077,7 +1032,7 @@ private:
     AVCodecContext *m_video_codec_ctx = nullptr;
     AVCodecContext *m_audio_codec_ctx = nullptr;
     SwsContext *m_sws_ctx = nullptr;
-    SwrContext *m_swr_ctx = nullptr;
+    AvPlayerAudioConverter m_audio_converter;
 
     SafeQueue<AVPacket *> m_video_packets;
     SafeQueue<AVPacket *> m_audio_packets;
