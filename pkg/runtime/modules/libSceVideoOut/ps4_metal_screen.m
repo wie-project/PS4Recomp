@@ -1052,7 +1052,7 @@ static void present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, long sho
 // into a present slot and queues it (ps4_metal_screen_acquire_frame / _encode_present); this
 // thread waits for a drawable, copies the slot into it on its own command buffer, which waits
 // on the GPU for the renderer's work (shared event), and presents it.
-//   PS4_PRESENT_MODE=uncapped (default) | vsync | mailbox   (see ps4_present_queue.h)
+//   PS4_PRESENT_MODE=vsync (default) | uncapped | mailbox   (see ps4_present_queue.h)
 // ---------------------------------------------------------------------------
 #define PRESENT_SLOTS 3
 
@@ -1196,7 +1196,7 @@ static void presenter_start(void) {
     dispatch_once(&g_pr.once, ^{
         const char *m = getenv("PS4_PRESENT_MODE");
         if (!ps4_present_parse_mode(m, &g_pr.mode))
-            fprintf(stderr, "[metal-screen] unknown PS4_PRESENT_MODE=%s (uncapped, vsync, mailbox); using uncapped\n", m);
+            fprintf(stderr, "[metal-screen] unknown PS4_PRESENT_MODE=%s (vsync, uncapped, mailbox); using vsync\n", m);
         ps4_pq_init(&g_pr.q, PRESENT_SLOTS, g_pr.mode == PS4_PRESENT_MAILBOX);
         for (int i = 0; i < PRESENT_SLOTS; i++) g_pr.slot[i].shot_idx = -1;
         g_pr.queue = [g_device newCommandQueue];

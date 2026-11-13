@@ -31,8 +31,8 @@ typedef enum ps4_present_mode {
     PS4_PRESENT_MAILBOX = 2,
 } ps4_present_mode;
 
-// Parses PS4_PRESENT_MODE ("uncapped", "vsync", "mailbox"; NULL or "" = uncapped). Returns 0
-// (and *out = uncapped) for an unknown value.
+// Parses PS4_PRESENT_MODE ("uncapped", "vsync", "mailbox"; NULL or "" = vsync). Returns 0
+// (and *out = vsync) for an unknown value.
 int ps4_present_parse_mode(const char *s, ps4_present_mode *out);
 const char *ps4_present_mode_name(ps4_present_mode m);
 
