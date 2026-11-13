@@ -520,6 +520,7 @@ typedef struct {
   int32_t max_count;
   uint32_t attr;
   int num_waiters;
+  uint32_t cancel_gen;
   pthread_mutex_t mutex;
   pthread_cond_t cond;
 } RecompKernelSema;
@@ -564,6 +565,7 @@ int sceKernelCreateSema(OrbisKernelSema *sem, const char *pName, uint32_t attr, 
   s->current_count = initCount;
   s->attr = attr;
   s->num_waiters = 0;
+  s->cancel_gen = 0;
   pthread_mutex_init(&s->mutex, NULL);
   pthread_cond_init(&s->cond, NULL);
 
@@ -624,9 +626,11 @@ int sceKernelWaitSema(OrbisKernelSema sem, int32_t needCount, uint32_t *pTimeout
 
   struct timespec ts;
   int has_timeout = 0;
+  uint64_t start_us = 0;
   if (pTimeout) {
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
+    start_us = (uint64_t)now.tv_sec * 1000000ULL + (uint64_t)now.tv_nsec / 1000ULL;
     uint64_t usec = *pTimeout;
     ts.tv_sec = now.tv_sec + (time_t)(usec / 1000000ULL);
     ts.tv_nsec = now.tv_nsec + (long)((usec % 1000000ULL) * 1000ULL);
@@ -637,17 +641,15 @@ int sceKernelWaitSema(OrbisKernelSema sem, int32_t needCount, uint32_t *pTimeout
     has_timeout = 1;
   }
 
+  uint32_t my_cancel_gen = s->cancel_gen;
   s->num_waiters++;
-  while (s->magic == KSEM_MAGIC && s->current_count < needCount) {
+  int timed_out = 0;
+  while (s->magic == KSEM_MAGIC && s->cancel_gen == my_cancel_gen && s->current_count < needCount) {
     if (has_timeout) {
       int rc = pthread_cond_timedwait(&s->cond, &s->mutex, &ts);
       if (rc == ETIMEDOUT) {
-        s->num_waiters--;
-        if (pTimeout) {
-          *pTimeout = 0;
-        }
-        pthread_mutex_unlock(&s->mutex);
-        return 0x8002003c; // ORBIS_KERNEL_ERROR_ETIMEDOUT
+        timed_out = 1;
+        break;
       }
     } else {
       pthread_cond_wait(&s->cond, &s->mutex);
@@ -655,12 +657,39 @@ int sceKernelWaitSema(OrbisKernelSema sem, int32_t needCount, uint32_t *pTimeout
   }
 
   s->num_waiters--;
+
   if (s->magic != KSEM_MAGIC) {
     pthread_mutex_unlock(&s->mutex);
     return 0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
   }
 
+  if (s->cancel_gen != my_cancel_gen) {
+    pthread_mutex_unlock(&s->mutex);
+    return 0x80020040; // ORBIS_KERNEL_ERROR_ECANCELED
+  }
+
+  if (timed_out) {
+    if (pTimeout) {
+      *pTimeout = 0;
+    }
+    pthread_mutex_unlock(&s->mutex);
+    return 0x8002003c; // ORBIS_KERNEL_ERROR_ETIMEDOUT
+  }
+
   s->current_count -= needCount;
+
+  if (has_timeout && pTimeout) {
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    uint64_t end_us = (uint64_t)now.tv_sec * 1000000ULL + (uint64_t)now.tv_nsec / 1000ULL;
+    uint64_t elapsed = end_us > start_us ? end_us - start_us : 0;
+    if (elapsed >= *pTimeout) {
+      *pTimeout = 0;
+    } else {
+      *pTimeout -= (uint32_t)elapsed;
+    }
+  }
+
   pthread_mutex_unlock(&s->mutex);
   return 0;
 }
@@ -689,6 +718,7 @@ int sceKernelCancelSema(OrbisKernelSema sem, int32_t setCount, int32_t *pNumWait
     *pNumWaitThreads = s->num_waiters;
   }
   s->current_count = (setCount < 0) ? s->init_count : setCount;
+  s->cancel_gen++;
   pthread_cond_broadcast(&s->cond);
   pthread_mutex_unlock(&s->mutex);
   return 0;

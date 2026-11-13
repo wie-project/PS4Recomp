@@ -18,6 +18,9 @@ extern "C" {
 #define SCE_KERNEL_ERROR_EBUSY              0x80020010
 #define SCE_KERNEL_ERROR_ETIMEDOUT          0x8002003c
 #define SCE_KERNEL_ERROR_EINVAL             0x80020016
+#define SCE_KERNEL_ERROR_ECANCELED          0x80020040
+#define SCE_KERNEL_ERROR_ESRCH              0x80020003
+#define SCE_KERNEL_ERROR_EACCES             0x8002000d
 
 typedef int32_t OrbisKernelEventFlag;
 typedef uint32_t OrbisKernelUseconds;

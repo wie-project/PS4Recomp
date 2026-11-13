@@ -1109,6 +1109,9 @@ int32_t ps4_audioout_port_output(int32_t handle, const void *pcm) {
   }
   if (!audio_port_wait_room(port, handle)) {
     pthread_mutex_unlock(&g_audio_lock);
+    if (audio_log_enabled()) {
+      fprintf(stderr, "[AudioOut] output: port %d wait_room failed\n", handle);
+    }
     return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
   }
   if (pcm) {
@@ -1205,6 +1208,9 @@ void shim_sceAudioOutOutputs(GuestContext *ctx) {
     Ps4AudioPort *port = audio_port_get(handle);
     if (!port || !audio_port_wait_room(port, handle)) {
       pthread_mutex_unlock(&g_audio_lock);
+      if (audio_log_enabled()) {
+        fprintf(stderr, "[AudioOut] outputs: port %d invalid or wait_room failed\n", handle);
+      }
       RET_ERR(ctx, ORBIS_AUDIO_OUT_ERROR_NOT_OPENED);
       SHIM_RETURN();
     }

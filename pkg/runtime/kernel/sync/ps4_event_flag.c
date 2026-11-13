@@ -15,6 +15,8 @@ typedef struct {
     uint32_t attr;
     uint64_t pattern;
     char name[32];
+    uint32_t num_waiters;
+    uint32_t cancel_gen;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
 } RecompInternalEventFlag;
@@ -98,6 +100,8 @@ int32_t sceKernelCreateEventFlag(OrbisKernelEventFlag *idOut, const char *name, 
     } else {
         f->name[0] = '\0';
     }
+    f->num_waiters = 0;
+    f->cancel_gen = 0;
     pthread_mutex_init(&f->mutex, NULL);
     pthread_cond_init(&f->cond, NULL);
 
@@ -147,8 +151,9 @@ int32_t sceKernelClearEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern) {
 }
 
 int32_t sceKernelPollEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uint32_t waitMode, uint64_t *resultPattern) {
+    if (bitPattern == 0) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
     RecompInternalEventFlag *f = get_evf(id);
-    if (!f) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
+    if (!f) return (int32_t)SCE_KERNEL_ERROR_ESRCH;
 
     pthread_mutex_lock(&f->mutex);
     if (check_evf_condition(f->pattern, bitPattern, waitMode)) {
@@ -163,29 +168,34 @@ int32_t sceKernelPollEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uin
         pthread_mutex_unlock(&f->mutex);
         return 0;
     }
+    if (resultPattern) {
+        *resultPattern = f->pattern;
+    }
     pthread_mutex_unlock(&f->mutex);
     return (int32_t)SCE_KERNEL_ERROR_EBUSY;
 }
 
 int32_t sceKernelWaitEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uint32_t waitMode, uint64_t *resultPattern, OrbisKernelUseconds *timeout) {
+    if (bitPattern == 0) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
     RecompInternalEventFlag *f = get_evf(id);
-    if (!f) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
+    if (!f) return (int32_t)SCE_KERNEL_ERROR_ESRCH;
 
     pthread_mutex_lock(&f->mutex);
 
-    if (timeout && *timeout == 0) {
-        if (check_evf_condition(f->pattern, bitPattern, waitMode)) {
-            if (resultPattern) {
-                *resultPattern = f->pattern;
-            }
-            if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_ALL) {
-                f->pattern = 0;
-            } else if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT) {
-                f->pattern &= ~bitPattern;
-            }
-            pthread_mutex_unlock(&f->mutex);
-            return 0;
+    if (check_evf_condition(f->pattern, bitPattern, waitMode)) {
+        if (resultPattern) {
+            *resultPattern = f->pattern;
         }
+        if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_ALL) {
+            f->pattern = 0;
+        } else if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT) {
+            f->pattern &= ~bitPattern;
+        }
+        pthread_mutex_unlock(&f->mutex);
+        return 0;
+    }
+
+    if (timeout && *timeout == 0) {
         if (resultPattern) {
             *resultPattern = f->pattern;
         }
@@ -195,9 +205,11 @@ int32_t sceKernelWaitEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uin
 
     struct timespec ts;
     int has_timeout = 0;
+    uint64_t start_us = 0;
     if (timeout) {
         struct timespec now;
         clock_gettime(CLOCK_REALTIME, &now);
+        start_us = (uint64_t)now.tv_sec * 1000000ULL + (uint64_t)now.tv_nsec / 1000ULL;
         uint64_t usec = *timeout;
         ts.tv_sec = now.tv_sec + (time_t)(usec / 1000000ULL);
         ts.tv_nsec = now.tv_nsec + (long)((usec % 1000000ULL) * 1000ULL);
@@ -208,27 +220,48 @@ int32_t sceKernelWaitEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uin
         has_timeout = 1;
     }
 
-    while (f->magic == EVF_MAGIC && !check_evf_condition(f->pattern, bitPattern, waitMode)) {
+    uint32_t my_cancel_gen = f->cancel_gen;
+    f->num_waiters++;
+    int timed_out = 0;
+
+    while (f->magic == EVF_MAGIC &&
+           f->cancel_gen == my_cancel_gen &&
+           !check_evf_condition(f->pattern, bitPattern, waitMode)) {
         if (has_timeout) {
             int ret = pthread_cond_timedwait(&f->cond, &f->mutex, &ts);
             if (ret == ETIMEDOUT) {
-                if (resultPattern) {
-                    *resultPattern = f->pattern;
-                }
-                if (timeout) {
-                    *timeout = 0;
-                }
-                pthread_mutex_unlock(&f->mutex);
-                return (int32_t)SCE_KERNEL_ERROR_ETIMEDOUT;
+                timed_out = 1;
+                break;
             }
         } else {
             pthread_cond_wait(&f->cond, &f->mutex);
         }
     }
 
+    f->num_waiters--;
+
     if (f->magic != EVF_MAGIC) {
         pthread_mutex_unlock(&f->mutex);
-        return (int32_t)SCE_KERNEL_ERROR_EINVAL;
+        return (int32_t)SCE_KERNEL_ERROR_EACCES;
+    }
+
+    if (f->cancel_gen != my_cancel_gen) {
+        if (resultPattern) {
+            *resultPattern = f->pattern;
+        }
+        pthread_mutex_unlock(&f->mutex);
+        return (int32_t)SCE_KERNEL_ERROR_ECANCELED;
+    }
+
+    if (timed_out) {
+        if (resultPattern) {
+            *resultPattern = f->pattern;
+        }
+        if (timeout) {
+            *timeout = 0;
+        }
+        pthread_mutex_unlock(&f->mutex);
+        return (int32_t)SCE_KERNEL_ERROR_ETIMEDOUT;
     }
 
     if (resultPattern) {
@@ -238,6 +271,18 @@ int32_t sceKernelWaitEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uin
         f->pattern = 0;
     } else if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT) {
         f->pattern &= ~bitPattern;
+    }
+
+    if (has_timeout && timeout) {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        uint64_t end_us = (uint64_t)now.tv_sec * 1000000ULL + (uint64_t)now.tv_nsec / 1000ULL;
+        uint64_t elapsed = end_us > start_us ? end_us - start_us : 0;
+        if (elapsed >= *timeout) {
+            *timeout = 0;
+        } else {
+            *timeout -= (uint32_t)elapsed;
+        }
     }
 
     pthread_mutex_unlock(&f->mutex);
@@ -327,13 +372,14 @@ void shim_sceKernelWaitEventFlag(GuestContext *ctx) {
 
 int32_t sceKernelCancelEventFlag(OrbisKernelEventFlag id, uint64_t setPattern, int32_t *pNumWaitThreads) {
     RecompInternalEventFlag *f = get_evf(id);
-    if (!f) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
+    if (!f) return (int32_t)SCE_KERNEL_ERROR_ESRCH;
 
     pthread_mutex_lock(&f->mutex);
     if (pNumWaitThreads) {
-        *pNumWaitThreads = 0;
+        *pNumWaitThreads = (int32_t)f->num_waiters;
     }
     f->pattern = setPattern;
+    f->cancel_gen++;
     pthread_cond_broadcast(&f->cond);
     pthread_mutex_unlock(&f->mutex);
     return 0;

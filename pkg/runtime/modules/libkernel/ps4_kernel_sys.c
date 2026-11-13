@@ -9,51 +9,38 @@
 #include <errno.h>
 #include <uuid/uuid.h>
 
-void shim_clock_gettime(GuestContext *ctx);
-
 #if defined(__APPLE__)
+#include <mach/mach.h>
 #include <mach/mach_time.h>
-static mach_timebase_info_data_t g_timebase = {0};
-static uint64_t g_start_time = 0;
-
-static void init_time(void) {
-    if (g_timebase.denom == 0) {
-        mach_timebase_info(&g_timebase);
-        g_start_time = mach_absolute_time();
-    }
-}
-
-uint64_t sceKernelGetProcessTimeCounter(void) {
-    init_time();
-    uint64_t elapsed = mach_absolute_time() - g_start_time;
-    return (elapsed * g_timebase.numer) / g_timebase.denom;
-}
-#else
-#include <time.h>
-static uint64_t g_start_time_ns = 0;
-static void init_time(void) {
-    if (g_start_time_ns == 0) {
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        g_start_time_ns = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-    }
-}
-
-uint64_t sceKernelGetProcessTimeCounter(void) {
-    init_time();
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-    return now_ns - g_start_time_ns;
-}
 #endif
 
+void shim_clock_gettime(GuestContext *ctx);
+
+static uint64_t g_initial_tsc = 0;
+static int g_time_inited = 0;
+
+static void init_time(void) {
+    if (!g_time_inited) {
+        g_initial_tsc = recomp_rdtsc();
+        g_time_inited = 1;
+    }
+}
+
+uint64_t sceKernelGetProcessTimeCounter(void) {
+    init_time();
+    uint64_t now = recomp_rdtsc();
+    return now >= g_initial_tsc ? now - g_initial_tsc : 0;
+}
+
 uint64_t sceKernelGetProcessTimeCounterFrequency(void) {
-    return 1000000000ULL; // 1 GHz (1 ns per tick)
+    return RECOMP_TSC_FREQ;
 }
 
 uint64_t sceKernelGetProcessTime(void) {
-    return sceKernelGetProcessTimeCounter() / 1000ULL; // Microseconds
+    init_time();
+    uint64_t now = recomp_rdtsc();
+    uint64_t elapsed = now >= g_initial_tsc ? now - g_initial_tsc : 0;
+    return (uint64_t)(((unsigned __int128)elapsed * 1000000ULL) / RECOMP_TSC_FREQ);
 }
 
 uint64_t sceKernelGetTscFrequency(void) {

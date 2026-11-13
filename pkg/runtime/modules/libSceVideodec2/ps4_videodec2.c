@@ -203,6 +203,8 @@ typedef struct Vdec2Decoder {
     uint32_t ordinal;
     H264VtDecoder *core;
     pthread_mutex_t call_lock;
+    uint64_t trace_n;
+    uint64_t trace_warn;
 } Vdec2Decoder;
 
 static pthread_mutex_t g_vdec2_table_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -535,6 +537,9 @@ void shim_sceVideodec2DeleteDecoder(GuestContext *ctx) {
     d->magic = 0;
     pthread_mutex_unlock(&g_vdec2_table_lock);
 
+    if (getenv("PS4_VIDEODEC2_TRACE")) {
+        fprintf(stderr, "[libSceVideodec2] DeleteDecoder(handle=%p)\n", (void *)d);
+    }
     pthread_mutex_lock(&d->call_lock);
     h264vt_destroy(d->core);
     pthread_mutex_unlock(&d->call_lock);
@@ -585,10 +590,21 @@ void shim_sceVideodec2Decode(GuestContext *ctx) {
 
     pthread_mutex_lock(&d->call_lock);
     const uint8_t *au = ctx->mem_base + in->au_data;
-    h264vt_decode(d->core, au, (size_t)in->au_size, (int64_t)in->pts_data,
-                  (int64_t)in->dts_data, in->attached_data, NULL);
+    int dec_rc = h264vt_decode(d->core, au, (size_t)in->au_size, (int64_t)in->pts_data,
+                               (int64_t)in->dts_data, in->attached_data, NULL);
     int32_t rc = vdec2_emit_picture(ctx, d, fb, out);
+    int qn = h264vt_queued(d->core);
     pthread_mutex_unlock(&d->call_lock);
+    if (getenv("PS4_VIDEODEC2_TRACE")) {
+        const uint64_t idx = d->trace_n++;
+        const bool anom = (rc != 0 || dec_rc != 0 || !out->is_valid);
+        if (idx < 15 || (anom && d->trace_warn++ < 50)) {
+            fprintf(stderr, "[libSceVideodec2] Decode(dec=%u #%llu au=%llu pts=%lld dts=%lld) dec_rc=%d rc=0x%x acc=%u valid=%u q=%d\n",
+                    d->ordinal, (unsigned long long)idx, (unsigned long long)in->au_size,
+                    (long long)in->pts_data, (long long)in->dts_data,
+                    dec_rc, (unsigned)rc, (unsigned)fb->is_accepted, (unsigned)out->is_valid, qn);
+        }
+    }
 
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
@@ -620,7 +636,12 @@ void shim_sceVideodec2Flush(GuestContext *ctx) {
     pthread_mutex_lock(&d->call_lock);
     h264vt_finish(d->core);
     int32_t rc = vdec2_emit_picture(ctx, d, fb, out);
+    int qn = h264vt_queued(d->core);
     pthread_mutex_unlock(&d->call_lock);
+    if (getenv("PS4_VIDEODEC2_TRACE")) {
+        fprintf(stderr, "[libSceVideodec2] Flush(handle=%p) rc=0x%x acc=%u valid=%u q=%d\n",
+                (void *)d, (unsigned)rc, (unsigned)fb->is_accepted, (unsigned)out->is_valid, qn);
+    }
 
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
@@ -631,6 +652,9 @@ void shim_sceVideodec2Reset(GuestContext *ctx) {
     if (!d) {
         ctx->rax = (uint64_t)(int64_t)VIDEODEC2_ERROR_DECODER_INSTANCE;
         SHIM_RETURN();
+    }
+    if (getenv("PS4_VIDEODEC2_TRACE")) {
+        fprintf(stderr, "[libSceVideodec2] Reset(handle=%p)\n", (void *)d);
     }
     pthread_mutex_lock(&d->call_lock);
     h264vt_reset(d->core);
