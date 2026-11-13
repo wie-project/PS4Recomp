@@ -1,5 +1,6 @@
 #include "ps4_videoout.h"
 #include "ps4_metal_screen.h"
+#include "ps4_vblank_clock.h"
 #include "ps4_kernel_sys.h"
 
 int ps4_gnm_metal_present(GuestContext *ctx, uint64_t addr, uint32_t width, uint32_t height, uint32_t pitch,
@@ -77,14 +78,21 @@ static inline uint64_t get_fake_tsc(void) {
     return sceKernelReadTsc();
 }
 
+// Vblanks on the guest's 60 Hz timeline (ps4_vblank_clock.h), whatever the host display's
+// refresh: the same ticks the presenter flips on when the display cannot pace the guest. Each
+// tick is a deadline of the timeline, so the rate does not drift with the thread's wake-up
+// latency. A thread that oversleeps (the host was busy or asleep) counts the vblanks it missed
+// and posts one event, like a reader of the hardware counter.
 static void *vblank_thread_func(void *arg) {
     (void)arg;
-    struct timespec ts;
-    ts.tv_sec = 0;
-    ts.tv_nsec = 16666666L; // ~60 Hz (16.666 ms)
+    const uint64_t epoch = ps4_vblank_epoch_ns();
+    uint64_t tick = ps4_vblank_ticks_at(epoch, ps4_vblank_now_ns());
 
     while (g_vblank_thread_running) {
-        nanosleep(&ts, NULL);
+        ps4_vblank_wait_until_ns(ps4_vblank_tick_ns(epoch, tick + 1));
+        const uint64_t now_tick = ps4_vblank_ticks_at(epoch, ps4_vblank_now_ns());
+        const uint64_t elapsed = now_tick - tick;
+        tick = now_tick;
 
         pthread_mutex_lock(&g_video_table_mutex);
         for (int i = 0; i < MAX_VIDEO_HANDLES; i++) {
@@ -92,7 +100,7 @@ static void *vblank_thread_func(void *arg) {
             if (!vh->in_use) continue;
 
             pthread_mutex_lock(&vh->mutex);
-            vh->vblankStatus.count++;
+            vh->vblankStatus.count += elapsed;
             vh->vblankStatus.process_time = get_time_usec();
             vh->vblankStatus.tsc = get_fake_tsc();
 

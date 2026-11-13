@@ -14,6 +14,7 @@
 #include "ps4_present_queue.h"
 #include "ps4_present_stats.h"
 #include "ps4_screenshot_cadence.h"
+#include "ps4_vblank_clock.h"
 #include "recomp_runtime.h"
 
 @interface PS4ScreenDelegate : NSObject <NSWindowDelegate, NSApplicationDelegate>
@@ -1074,6 +1075,8 @@ static struct {
     _Atomic bool drain_timed_out;
     ps4_present_mode mode;
     _Atomic uint64_t display_hz; // refresh rate of the window's screen, 0 = unknown
+    _Atomic bool display_variable; // the screen has an adaptive refresh rate (ProMotion, VRR)
+    ps4_flip_pacer pacer;          // presenter thread only
     _Atomic bool hz_query_queued;
     _Atomic uint64_t presented; // frames the presenter has put on a drawable
 } g_pr;
@@ -1089,10 +1092,34 @@ void ps4_metal_screen_set_guest_flip_mode(int flip_mode) {
     atomic_store(&g_guest_flip_mode, flip_mode);
 }
 
-static uint64_t query_display_hz_main(void) {
+// Main thread: the refresh of the window's screen, into g_pr.
+static void query_display_main(void) {
     NSScreen *scr = g_window.screen ? g_window.screen : [NSScreen mainScreen];
     const NSInteger fps = scr ? scr.maximumFramesPerSecond : 0;
-    return fps > 0 ? (uint64_t)fps : 0;
+    atomic_store(&g_pr.display_hz, fps > 0 ? (uint64_t)fps : 0);
+    // a fixed-rate screen has one refresh interval; an adaptive one accepts longer ones
+    atomic_store(&g_pr.display_variable, scr && scr.maximumRefreshInterval > scr.minimumRefreshInterval * 1.01);
+}
+
+// Presenter thread: the presentation plan of the frame it is about to encode. When the guest's
+// flips are paced on its vblank timeline this waits (sleeping) for the flip's vblank.
+static double pace_frame(void) {
+    const ps4_display_info d = {(double)atomic_load(&g_pr.display_hz), atomic_load(&g_pr.display_variable)};
+    const int rate = atomic_load(&g_guest_flip_rate);
+    if (g_pr.mode == PS4_PRESENT_VSYNC) {
+        // logged when the display or the guest's flip rate changes which one paces
+        static int s_paced_by = -1;
+        const int by_display = ps4_display_paces_guest(d, rate);
+        if (by_display != s_paced_by) {
+            s_paced_by = by_display;
+            fprintf(stderr, "[metal-screen] guest flip rate %d paced by %s (display %.0f Hz%s)\n", rate,
+                    by_display ? "the display" : "the guest vblank timeline", d.hz, d.variable ? ", adaptive" : "");
+        }
+    }
+    const ps4_present_plan plan =
+        ps4_flip_pacer_plan(&g_pr.pacer, g_pr.mode, rate, atomic_load(&g_guest_flip_mode), d, ps4_vblank_now_ns());
+    if (plan.not_before_ns) ps4_vblank_wait_until_ns(plan.not_before_ns);
+    return plan.min_duration;
 }
 
 static struct {
@@ -1137,9 +1164,7 @@ static void present_slot(int s, id<CAMetalDrawable> drawable) {
     PresentSlot *ps = &g_pr.slot[s];
     id<MTLCommandBuffer> cb = [g_pr.queue commandBuffer];
     [cb encodeWaitForEvent:g_pr.ready value:ps->ready];
-    const double min_duration =
-        ps4_present_min_duration(g_pr.mode, atomic_load(&g_guest_flip_rate), atomic_load(&g_guest_flip_mode),
-                                 (double)atomic_load(&g_pr.display_hz));
+    const double min_duration = pace_frame();
     present_encode(cb, ps->tex, ps->shot_idx, min_duration, drawable);
     [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
         (void)done;
@@ -1153,7 +1178,7 @@ static void presented_one(void) {
     if ((atomic_fetch_add(&g_pr.presented, 1) + 1) % 120 == 0 && !atomic_exchange(&g_pr.hz_query_queued, true)) {
         // the window may have moved to another screen
         dispatch_async(dispatch_get_main_queue(), ^{
-            atomic_store(&g_pr.display_hz, query_display_hz_main());
+            query_display_main();
             atomic_store(&g_pr.hz_query_queued, false);
         });
     }
@@ -1203,11 +1228,12 @@ static void presenter_start(void) {
         g_pr.queue.label = @"present";
         g_pr.ready = [g_device newSharedEvent];
         held_init();
-        __block uint64_t hz = 0;
+        ps4_flip_pacer_init(&g_pr.pacer, ps4_vblank_epoch_ns());
         run_on_main(^{
-            hz = query_display_hz_main();
+            query_display_main();
         });
-        atomic_store(&g_pr.display_hz, hz);
+        const uint64_t hz = atomic_load(&g_pr.display_hz);
+        const bool variable = atomic_load(&g_pr.display_variable);
         pthread_attr_t attr;
         pthread_attr_init(&attr);
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
@@ -1221,9 +1247,9 @@ static void presenter_start(void) {
             abort();
         }
         atomic_store(&g_pr.started, true);
-        fprintf(stderr, "[metal-screen] presenter thread: mode %s, %d slots, %lu drawables, display %llu Hz\n",
+        fprintf(stderr, "[metal-screen] presenter thread: mode %s, %d slots, %lu drawables, display %llu Hz%s\n",
                 ps4_present_mode_name(g_pr.mode), PRESENT_SLOTS, (unsigned long)g_metalLayer.maximumDrawableCount,
-                (unsigned long long)hz);
+                (unsigned long long)hz, variable ? " (adaptive)" : "");
     });
 }
 
@@ -1498,9 +1524,7 @@ static void present_held(int i, id<CAMetalDrawable> drawable) {
     pthread_mutex_unlock(&g_held.mu);
     id<MTLCommandBuffer> cb = [g_pr.queue commandBuffer];
     [cb encodeWaitForEvent:g_held.ev value:ready]; // the renderer has written the frame
-    const double min_duration =
-        ps4_present_min_duration(g_pr.mode, atomic_load(&g_guest_flip_rate), atomic_load(&g_guest_flip_mode),
-                                 (double)atomic_load(&g_pr.display_hz));
+    const double min_duration = pace_frame();
     present_encode(cb, tex, shot, min_duration, drawable);
     [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
         (void)c;
