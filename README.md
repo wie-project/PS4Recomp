@@ -108,6 +108,23 @@ Once built, launch the game by double-clicking `<GameName>.app` in Finder, or ru
 | `--tso`                 | x86 Total Store Order memory model (acquire/release semantics)                | `true`        |
 | `--app-dir <dir>`       | Host directory mapping to `/app0` for game assets                             | Auto-detected |
 | `--asan`                | Compile runtime with AddressSanitizer and LeakSanitizer                       | `false`       |
+| `--patches <xml>`       | shadPS4-format patch XML applied to the executable before analysis            | —             |
+| `--patch <name>`        | Name (`Metadata Name`) of a patch set in `--patches` to apply; repeatable     | —             |
+
+### Game Patches
+
+`build` can apply game patches written in the shadPS4 patch XML format. The selected patch sets are written into the executable's ELF image before anything reads it, so patched code is discovered and lifted like any other code and patched data lands in `guest_image.bin`. Nothing is patched at run time.
+
+```bash
+./bin/ps4-recomp build path/to/CUSAxxxxx -o path/to/build \
+    --patches path/to/CUSAxxxxx.xml \
+    --patch "Skip Intro" --patch "60 FPS"
+```
+
+- Only the sets named with `--patch` are applied, in that order; the XML `isEnabled` attribute is ignored.
+- The build fails unless the file's `<TitleID>` contains the game's `TITLE_ID`, each set exists exactly once for the game's `APP_VER` (both from `sce_sys/param.sfo`), and its `AppElf` names the binary being built.
+- Addresses follow shadPS4: a line at `Address` writes guest address (`p_vaddr`) `Address - 0x400000`. Every line must fall inside the file-backed part of a loadable segment (not `.bss`, not unmapped space), must not overlap another line or a relocation target, and must use a supported type: `bytes` (hex string), `byte`, `bytes16`, `bytes32`, `bytes64` (integer, `0x` hex or decimal, little-endian), `float32`, `float64` (little-endian) or `utf8` (NUL-terminated). Pattern-scan types (`mask`, `mask_jump32`) and `utf16` are rejected.
+- The applied writes (patch address, guest address, file offset, old and new bytes) are recorded in `patch_report.txt` in the output directory, and with `--json` the `done` event lists the applied set names.
 
 ---
 

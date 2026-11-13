@@ -215,7 +215,7 @@ func TestFinishBuildDoneFollowsRun(t *testing.T) {
 	}{{"/bin/echo", true}, {"/bin/false", false}} {
 		var buf bytes.Buffer
 		cfg := &Config{Run: true, Compile: true}
-		err := finishBuild(context.Background(), events.New(&buf, "build", true), cfg, tc.bin, "")
+		err := finishBuild(context.Background(), events.New(&buf, "build", true), cfg, tc.bin, "", nil)
 		if (err == nil) != tc.wantDone {
 			t.Errorf("%s: err = %v", tc.bin, err)
 		}
