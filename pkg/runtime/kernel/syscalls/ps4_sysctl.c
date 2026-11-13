@@ -1,4 +1,5 @@
-// sysctl(2) for the read-only OIDs the game's bundled libc.prx
+// sysctl(2), and sysconf(3) / getpagesize(3), which FreeBSD's libc answers from sysctl.
+// sysctl serves the read-only OIDs the game's bundled libc.prx
 // queries: kern.arandom (arc4random seeding), hw.ncpu and hw.pagesize. Any other OID is a
 // stop, not a guessed answer.
 // Semantics follow FreeBSD 9 (the PS4 kernel base): sys/kern/kern_sysctl.c (sysctl_root,
@@ -48,7 +49,7 @@ int ps4_sysctl(const int32_t *name, uint32_t namelen, void *old, uint64_t *oldle
   }
   int32_t value;
   if (pagesize) {
-    value = PS4_SYSCTL_PAGESIZE;
+    value = PS4_PAGE_SIZE;
   } else {
     // Same CPU count as the sysconf(_SC_NPROCESSORS_ONLN) and cpuset_getaffinity shims.
     long n = sysconf(_SC_NPROCESSORS_ONLN);
@@ -98,5 +99,53 @@ void shim_sysctl(GuestContext *ctx) {
     SHIM_RETURN();
   }
   ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+// sysconf. _SC_PAGESIZE is the PS4 page size; the other names map onto the host's.
+void shim_sysconf(GuestContext *ctx) {
+  int name = (int)ctx->rdi;
+  if (name == PS4_SC_PAGESIZE) {
+    ctx->rax = PS4_PAGE_SIZE;
+    SHIM_RETURN();
+  }
+  int host_name = -1;
+  switch (name) {
+  case 57: // FreeBSD _SC_NPROCESSORS_CONF
+    host_name = _SC_NPROCESSORS_CONF;
+    break;
+  case 58: // FreeBSD _SC_NPROCESSORS_ONLN
+    host_name = _SC_NPROCESSORS_ONLN;
+    break;
+  case 1: // FreeBSD _SC_ARG_MAX
+    host_name = _SC_ARG_MAX;
+    break;
+  case 2: // FreeBSD _SC_CHILD_MAX
+    host_name = _SC_CHILD_MAX;
+    break;
+  case 3: // FreeBSD _SC_CLK_TCK
+    host_name = _SC_CLK_TCK;
+    break;
+  case 5: // FreeBSD _SC_OPEN_MAX
+    host_name = _SC_OPEN_MAX;
+    break;
+  default:
+    host_name = name;
+    break;
+  }
+  long val = sysconf(host_name);
+  if (val < 0) {
+    if (name == 57 || name == 58)
+      val = 8;
+    else
+      val = 4096;
+  }
+  ctx->rax = (uint64_t)val;
+  SHIM_RETURN();
+}
+
+// int getpagesize(void)
+void shim_getpagesize(GuestContext *ctx) {
+  ctx->rax = PS4_PAGE_SIZE;
   SHIM_RETURN();
 }

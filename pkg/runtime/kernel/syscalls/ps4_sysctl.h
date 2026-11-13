@@ -10,8 +10,11 @@
 #define PS4_HW_NCPU 3
 #define PS4_HW_PAGESIZE 7
 
-// PS4 page size: 16 KiB (shadPS4 posix_getpagesize).
-#define PS4_SYSCTL_PAGESIZE 16384
+// PS4 page size, 16 KiB: shadPS4's posix_getpagesize returns 16_KB and its sysconf answers
+// _SC_PAGESIZE with it (kernel.cpp). Every page size query (getpagesize, sysconf, hw.pagesize)
+// reports this one value.
+#define PS4_PAGE_SIZE 16384
+#define PS4_SC_PAGESIZE 47 // FreeBSD _SC_PAGESIZE (= _SC_PAGE_SIZE)
 
 // ps4_sysctl result for an OID this runtime does not model; the shim stops on it.
 #define PS4_SYSCTL_UNSUPPORTED (-1)
@@ -24,5 +27,7 @@ int ps4_sysctl(const int32_t *name, uint32_t namelen, void *old, uint64_t *oldle
                const void *newp, uint64_t newlen);
 
 void shim_sysctl(GuestContext *ctx);
+void shim_sysconf(GuestContext *ctx);
+void shim_getpagesize(GuestContext *ctx);
 
 #endif

@@ -1,4 +1,5 @@
-// Host test for the sysctl shim (kern.arandom, hw.ncpu, hw.pagesize). Build and run (from the
+// Host test for the sysctl shim (kern.arandom, hw.ncpu, hw.pagesize) and the page size that
+// sysctl, sysconf(_SC_PAGESIZE) and getpagesize report. Build and run (from the
 // repository root):
 //   clang -std=c11 -I pkg/runtime/core -I pkg/runtime/kernel/syscalls tests/sysctl_test/main.c \
 //     pkg/runtime/kernel/syscalls/ps4_sysctl.c -o /tmp/sysctl_test && /tmp/sysctl_test
@@ -61,7 +62,7 @@ int main(void) {
     set_mib(&ctx, PS4_CTL_HW, PS4_HW_PAGESIZE);
     *len = 4;
     assert(call(&ctx, 2, kOld, kLen, 0, 0) == 0);
-    assert(*len == 4 && *(int32_t *)old == 16384);
+    assert(*len == 4 && *(int32_t *)old == PS4_PAGE_SIZE);
 
     // A NULL old buffer reports the size only.
     *len = 0;
@@ -127,6 +128,19 @@ int main(void) {
     assert(ps4_sysctl(osrel, 2, &hv, &hlen, NULL, 0) == PS4_SYSCTL_UNSUPPORTED);
     const int32_t deep[3] = {PS4_CTL_HW, PS4_HW_NCPU, 0};
     assert(ps4_sysctl(deep, 3, &hv, &hlen, NULL, 0) == PS4_SYSCTL_UNSUPPORTED);
+
+    // One page size on every path: the PS4 16 KiB page, whatever the host's is.
+    assert(PS4_PAGE_SIZE == 16384);
+    ctx.rsp = kStack - 8;
+    shim_getpagesize(&ctx);
+    assert(ctx.rsp == kStack && ctx.rax == PS4_PAGE_SIZE);
+    ctx.rsp = kStack - 8;
+    ctx.rdi = PS4_SC_PAGESIZE;
+    shim_sysconf(&ctx);
+    assert(ctx.rsp == kStack && ctx.rax == PS4_PAGE_SIZE);
+    set_mib(&ctx, PS4_CTL_HW, PS4_HW_PAGESIZE);
+    *len = 4;
+    assert(call(&ctx, 2, kOld, kLen, 0, 0) == 0 && *(int32_t *)old == PS4_PAGE_SIZE);
 
     free(ctx.mem_base);
     printf("[sysctl-test] PASSED\n");
