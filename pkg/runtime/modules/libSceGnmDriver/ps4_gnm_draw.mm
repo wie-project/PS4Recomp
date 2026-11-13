@@ -1164,6 +1164,15 @@ struct CompileStats {
 };
 CompileStats g_compile;
 
+// A Metal library compiled synchronously on the encoder thread (a frame waits for it): counted,
+// and logged with its site when it took over 8 ms.
+void NoteSyncLibrary(const char* site, uint64_t code_addr, double ms) {
+    g_compile.lib_sync.Add(ms);
+    if (ms > 8.0)
+        RLog("sync-library", "%s shader 0x%llx: Metal library compiled on the encoder thread in %.1f ms", site,
+             (unsigned long long)code_addr, ms);
+}
+
 void PrintCompileStats() {
     auto c = [](const CompileCounter& k, char* out, size_t n) {
         snprintf(out, n, "%llu (%.0f ms, max %.1f ms, %llu over 8 ms)", (unsigned long long)k.n.load(),
@@ -3454,7 +3463,7 @@ bool CompileFallbackFn(const Shader* s) {
     NSError* e = nil;
     const double t0 = CFAbsoluteTimeGetCurrent();
     id<MTLLibrary> lib = [S.dev newLibraryWithSource:@(msl.c_str()) options:CompileOptions() error:&e];
-    g_compile.lib_sync.Add((CFAbsoluteTimeGetCurrent() - t0) * 1000.0);
+    NoteSyncLibrary("pipeline fallback", s->code_addr, (CFAbsoluteTimeGetCurrent() - t0) * 1000.0);
     id<MTLFunction> fn = [lib newFunctionWithName:@"main0"];
     S.fallback_fns[s->msl_hash] = fn; // nil too: the shader is not retried again
     g_compile.store_fallbacks++;
@@ -3664,7 +3673,7 @@ Shader* FinishShader(gcn_shader* sh, gcn_hw_stage hw, uint64_t code_addr, uint64
         const double mtl_t0 = CFAbsoluteTimeGetCurrent();
         lib = [S.dev newLibraryWithSource:[NSString stringWithUTF8String:msl] options:CompileOptions() error:&e];
         g_hitch.mtl_ms += (CFAbsoluteTimeGetCurrent() - mtl_t0) * 1000.0;
-        g_compile.lib_sync.Add((CFAbsoluteTimeGetCurrent() - mtl_t0) * 1000.0);
+        NoteSyncLibrary(hw == GCN_HW_CS ? "compute" : "draw", code_addr, (CFAbsoluteTimeGetCurrent() - mtl_t0) * 1000.0);
         if (!lib) {
             RLog("msl-fail", "Metal rejected MSL of shader 0x%llx (hw %u): %s",
                  (unsigned long long)code_addr, hw, e.localizedDescription.UTF8String);
@@ -7545,7 +7554,7 @@ id<MTLFunction> CompileStageFn(const char* raw_msl, bool invariant_pos, const ch
                                   options:CompileOptions()
                                     error:&e];
         g_hitch.mtl_ms += (CFAbsoluteTimeGetCurrent() - t0) * 1000.0;
-        g_compile.lib_sync.Add((CFAbsoluteTimeGetCurrent() - t0) * 1000.0);
+        NoteSyncLibrary(tag, code_addr, (CFAbsoluteTimeGetCurrent() - t0) * 1000.0);
         if (!lib) {
             RLog("msl-fail", "Metal rejected %s MSL of shader 0x%llx: %s", tag,
                  (unsigned long long)code_addr, e ? e.localizedDescription.UTF8String : "unknown");
