@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 #include "common/div_ceil.h"
@@ -336,11 +337,16 @@ void LowerWaveOpsPass(IR::Program& program, const RuntimeInfo& runtime_info,
     const u32 num_subgroups = Common::AlignUp(num_threads, 64) / profile.subgroup_size;
     // the subgroups the workgroup has (its last wave may have no upper half)
     const u32 num_running_subgroups = Common::DivCeil(num_threads, profile.subgroup_size);
-    const u32 scratch_base = Common::AlignUp(runtime_info.hw.cs.shared_memory_size, sizeof(u64));
+    // SharedMemoryToStoragePass spills the shader's own LDS to a storage buffer when it cannot
+    // share threadgroup memory with this scratch; the threadgroup then holds only the scratch.
+    const bool lds_in_storage =
+        std::any_of(program.info.buffers.begin(), program.info.buffers.end(),
+                    [](const BufferResource& b) { return b.buffer_type == BufferType::SharedMemory; });
+    const u32 shared_size = lds_in_storage ? 0u : runtime_info.hw.cs.shared_memory_size;
+    const u32 scratch_base = Common::AlignUp(shared_size, sizeof(u64));
     const u32 values_base = scratch_base + num_subgroups * u32(sizeof(u32));
     const u32 scratch_size = (needs_values ? 2 : 1) * num_subgroups * u32(sizeof(u32));
-    program.info.shared_memory_scratch_size =
-        scratch_base + scratch_size - runtime_info.hw.cs.shared_memory_size;
+    program.info.shared_memory_scratch_size = scratch_base + scratch_size - shared_size;
 
     std::unordered_set<const IR::Inst*> merged_wave_any;
     for (IR::Inst* inst : worklist) {

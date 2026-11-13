@@ -13,6 +13,7 @@
 #include <fmt/format.h>
 #include <spirv/unified1/spirv.hpp11>
 
+#include <algorithm>
 #include <numbers>
 #include <string_view>
 
@@ -1115,8 +1116,14 @@ void EmitContext::DefineSharedMemory() {
         return;
     }
     ASSERT(info.hw_stage == HwStage::Compute);
+    // A storage buffer replaces the shader's own LDS when it cannot share threadgroup memory
+    // with the wave64 scratch (SharedMemoryToStoragePass); only the scratch is left here.
+    const bool lds_in_storage = std::any_of(
+        info.buffers.begin(), info.buffers.end(),
+        [](const BufferResource& b) { return b.buffer_type == BufferType::SharedMemory; });
     const u32 shared_memory_size =
-        runtime_info.hw.cs.shared_memory_size + info.shared_memory_scratch_size;
+        (lds_in_storage ? 0u : runtime_info.hw.cs.shared_memory_size) +
+        info.shared_memory_scratch_size;
 
     const auto make_type = [&](IR::Type type, Id element_type, u32 element_size,
                                std::string_view name) {
