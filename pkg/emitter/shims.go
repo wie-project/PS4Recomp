@@ -1384,7 +1384,7 @@ var knownDirectShims = []string{
 	"sceNpSnsFacebookDialogOpen",
 	"sceNpSnsFacebookDialogUpdateStatus",
 	"sceNpSnsFacebookDialogGetResult",
-	// libSceNpUtility / NpLookup (libSceNpUtility/ps4_np_utility.c)
+	// libSceNpUtility: NpLookup, NpWordFilter, NpBandwidthTest (libSceNpUtility/ps4_np_utility.c)
 	"sceNpLookupCreateTitleCtx",
 	"sceNpLookupDeleteTitleCtx",
 	"sceNpLookupCreateRequest",
@@ -1393,6 +1393,18 @@ var knownDirectShims = []string{
 	"sceNpLookupCreateAsyncRequest",
 	"sceNpLookupPollAsync",
 	"sceNpLookupAbortRequest",
+	"sceNpWordFilterCreateTitleCtx",
+	"sceNpWordFilterDeleteTitleCtx",
+	"sceNpWordFilterCreateRequest",
+	"sceNpWordFilterCreateAsyncRequest",
+	"sceNpWordFilterDeleteRequest",
+	"sceNpWordFilterAbortRequest",
+	"sceNpWordFilterCensorComment",
+	"sceNpWordFilterSanitizeComment",
+	"sceNpWordFilterPollAsync",
+	"sceNpBandwidthTestInitStart",
+	"sceNpBandwidthTestGetStatus",
+	"sceNpBandwidthTestShutdown",
 	// libSceNpManager extras
 	"sceNpSetNpTitleId",
 	"sceNpRegisterPlusEventCallback",
