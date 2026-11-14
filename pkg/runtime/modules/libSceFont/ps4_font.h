@@ -12,22 +12,24 @@
 extern "C" {
 #endif
 
-// Error codes
+// Error codes (libSceFont, facility 0x8046)
 #define ORBIS_FONT_OK                         0
-#define ORBIS_FONT_ERROR_INVALID_PARAMETER    ((int32_t)0x80540001)
-#define ORBIS_FONT_ERROR_INVALID_MEMORY       ((int32_t)0x80540002)
-#define ORBIS_FONT_ERROR_ALLOCATION_FAILED    ((int32_t)0x80540003)
-#define ORBIS_FONT_ERROR_INVALID_LIBRARY      ((int32_t)0x80540004)
-#define ORBIS_FONT_ERROR_INVALID_FONT_HANDLE  ((int32_t)0x80540005)
-#define ORBIS_FONT_ERROR_INVALID_RENDERER     ((int32_t)0x80540006)
-#define ORBIS_FONT_ERROR_NO_SUPPORT_FUNCTION  ((int32_t)0x80540007)
-#define ORBIS_FONT_ERROR_NO_SUPPORT_FONTSET   ((int32_t)0x80540008)
-#define ORBIS_FONT_ERROR_FONT_OPEN_FAILED     ((int32_t)0x80540009)
-#define ORBIS_FONT_ERROR_INVALID_TEXT_SOURCE  ((int32_t)0x8054000a)
-#define ORBIS_FONT_ERROR_INVALID_STRING       ((int32_t)0x8054000b)
-#define ORBIS_FONT_ERROR_ALREADY_SPECIFIED    ((int32_t)0x8054000c)
-#define ORBIS_FONT_ERROR_NO_SUPPORT_CODE      ((int32_t)0x80540010)
+#define ORBIS_FONT_ERROR_FATAL                ((int32_t)0x80460001)
+#define ORBIS_FONT_ERROR_INVALID_PARAMETER    ((int32_t)0x80460002)
+#define ORBIS_FONT_ERROR_INVALID_MEMORY       ((int32_t)0x80460003)
+#define ORBIS_FONT_ERROR_INVALID_LIBRARY      ((int32_t)0x80460004)
+#define ORBIS_FONT_ERROR_INVALID_FONT_HANDLE  ((int32_t)0x80460005)
+#define ORBIS_FONT_ERROR_INVALID_RENDERER     ((int32_t)0x80460007)
+#define ORBIS_FONT_ERROR_INVALID_TEXT_SOURCE  ((int32_t)0x80460008)
+#define ORBIS_FONT_ERROR_INVALID_STRING       ((int32_t)0x80460009)
+#define ORBIS_FONT_ERROR_ALLOCATION_FAILED    ((int32_t)0x80460010)
 #define ORBIS_FONT_ERROR_FS_OPEN_FAILED       ((int32_t)0x80460011)
+#define ORBIS_FONT_ERROR_NO_SUPPORT_FUNCTION  ((int32_t)0x80460020)
+#define ORBIS_FONT_ERROR_ALREADY_SPECIFIED    ((int32_t)0x80460021)
+#define ORBIS_FONT_ERROR_NO_SUPPORT_FONTSET   ((int32_t)0x80460031)
+#define ORBIS_FONT_ERROR_FONT_OPEN_FAILED     ((int32_t)0x80460036)
+#define ORBIS_FONT_ERROR_NO_SUPPORT_CODE      ((int32_t)0x80460041)
+#define ORBIS_FONT_ERROR_NO_SUPPORT_GLYPH     ((int32_t)0x80460042)
 #define ORBIS_FONT_ERROR_NOT_BOUND_RENDERER   ((int32_t)0x80460061)
 
 typedef void *OrbisFontLib;
@@ -84,6 +86,16 @@ typedef struct OrbisFontGlyphMetrics {
         float advance;
     } Vertical;
 } OrbisFontGlyphMetrics;
+_Static_assert(sizeof(OrbisFontGlyphMetrics) == 0x20, "OrbisFontGlyphMetrics ABI size");
+
+// Kerning of a character pair, in pixels at the font's scale.
+typedef struct OrbisFontKerning {
+    float offsetX;
+    float offsetY;
+    float positionX;
+    float positionY;
+} OrbisFontKerning;
+_Static_assert(sizeof(OrbisFontKerning) == 0x10, "OrbisFontKerning ABI size");
 
 typedef struct OrbisFontSurfaceImage {
     void *address;
@@ -350,6 +362,8 @@ void shim_sceFontSetEffectSlant(GuestContext *ctx);
 void shim_sceFontSetupRenderEffectWeight(GuestContext *ctx);
 void shim_sceFontSetupRenderEffectSlant(GuestContext *ctx);
 void shim_sceFontGetHorizontalLayout(GuestContext *ctx);
+void shim_sceFontGetCharGlyphMetrics(GuestContext *ctx);
+void shim_sceFontGetKerning(GuestContext *ctx);
 void shim_sceFontRenderSurfaceSetScissor(GuestContext *ctx);
 
 #ifdef __cplusplus

@@ -1141,6 +1141,8 @@ var shimAliases = map[string]string{
 	"sw65+7wXCKE": "shim_sceFontSetScalePoint",
 	"v0phZwa4R5o": "shim_sceFontSetEffectWeight",
 	"vRxf4d0ulPs": "shim_sceFontRenderSurfaceSetScissor",
+	"L97d+3OgMlE": "shim_sceFontGetCharGlyphMetrics",
+	"sDuhHGNhHvE": "shim_sceFontGetKerning",
 	// libSceVideodec2
 	"RnDibcGCPKw": "shim_sceVideodec2QueryComputeMemoryInfo",
 	"eD+X2SmxUt4": "shim_sceVideodec2AllocateComputeQueue",
@@ -2001,6 +2003,7 @@ var knownDirectShims = []string{
 	"sceAudio3dPortGetQueueLevel",
 	"sceAudio3dPortAdvance",
 	"sceAudio3dPortPush",
+	"sceAudio3dPortFlush",
 	"sceAudio3dObjectReserve",
 	"sceAudio3dObjectUnreserve",
 	"sceAudio3dObjectSetAttributes",
@@ -2953,6 +2956,8 @@ var knownDirectShims = []string{
 	"sceFontSetupRenderEffectSlant",
 	"sceFontGetHorizontalLayout",
 	"sceFontRenderSurfaceSetScissor",
+	"sceFontGetCharGlyphMetrics",
+	"sceFontGetKerning",
 	// libSceVideodec2
 	"sceVideodec2QueryComputeMemoryInfo",
 	"sceVideodec2AllocateComputeQueue",

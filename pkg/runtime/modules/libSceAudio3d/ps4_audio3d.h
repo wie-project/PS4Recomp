@@ -117,6 +117,7 @@ int32_t ps4_audio3d_port_get_attributes_supported(uint32_t port_id, uint32_t *ca
 int32_t ps4_audio3d_port_get_queue_level(uint32_t port_id, uint32_t *level, uint32_t *available);
 int32_t ps4_audio3d_port_advance(uint32_t port_id);
 int32_t ps4_audio3d_port_push(uint32_t port_id, uint32_t blocking);
+int32_t ps4_audio3d_port_flush(uint32_t port_id);
 int32_t ps4_audio3d_object_reserve(uint32_t port_id, uint32_t *object_id);
 int32_t ps4_audio3d_object_unreserve(uint32_t port_id, uint32_t object_id);
 int32_t ps4_audio3d_object_set_attributes(uint32_t port_id, uint32_t object_id, uint64_t num,
@@ -141,6 +142,7 @@ void shim_sceAudio3dPortGetAttributesSupported(GuestContext *ctx);
 void shim_sceAudio3dPortGetQueueLevel(GuestContext *ctx);
 void shim_sceAudio3dPortAdvance(GuestContext *ctx);
 void shim_sceAudio3dPortPush(GuestContext *ctx);
+void shim_sceAudio3dPortFlush(GuestContext *ctx);
 void shim_sceAudio3dObjectReserve(GuestContext *ctx);
 void shim_sceAudio3dObjectUnreserve(GuestContext *ctx);
 void shim_sceAudio3dObjectSetAttributes(GuestContext *ctx);
