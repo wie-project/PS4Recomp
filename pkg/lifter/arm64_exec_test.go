@@ -26,7 +26,9 @@ import (
 // Both sides map the window at the same fixed address, so guest addresses are host addresses
 // (the lifted side runs with x28, the memory base, at 0). The lifted side's FS base (x27)
 // points at a TCB whose +0x70 slot holds a fresh GuestContext (x87 stack empty, FCW 0x37f,
-// MXCSR 0x1f80), the native side starts after FNINIT with MXCSR 0x1f80.
+// MXCSR 0x1f80), the native side starts after FNINIT with MXCSR 0x1f80. The direction flag is
+// an input (bit 10 of the initial RFLAGS: POPFQ on the native side, GuestContext.df on the lifted
+// side) and an output compared on every case; the native side clears it before returning to C.
 
 const (
 	execMemBase = 0x7000000000 // window: [execMemBase, execMemBase+execMemSize)
@@ -42,6 +44,7 @@ const (
 	fCF = 1 << 0
 	fZF = 1 << 6
 	fSF = 1 << 7
+	fDF = 1 << 10
 	fOF = 1 << 11
 )
 
@@ -71,6 +74,7 @@ const (
 	stTcb    = 136 // u64 FS base (lifted)
 	stNzcv   = 144 // u64 initial NZCV (lifted)
 	stOut    = 152 // u8 OF, CF, ZF, SF read back by SETcc (lifted)
+	stDF     = 156 // u8 DF after the sequence (lifted: GuestContext.df)
 	stSize   = 160
 	readOps  = "0f90c0 0f92c0 0f94c0 0f98c0" // seto al, setb al, sete al, sets al
 	readMask = fOF | fCF | fZF | fSF
@@ -185,6 +189,7 @@ func runExec(t *testing.T, cases []execCase, want []map[int][]byte) {
 		for k, r := range execRegs {
 			fmt.Fprintf(&host, "    str %s, [x16, #%d]\n", arm64RegMap[r].X, stRegs+8*k)
 		}
+		fmt.Fprintf(&host, "    add x17, x27, #0x70\n    ldr x17, [x28, x17]\n    ldrb w17, [x17, #0x9e]\n    strb w17, [x16, #%d]\n", stDF)
 		rpc := pc + 0x800
 		for k, h := range strings.Fields(readOps) {
 			b, _ := hex.DecodeString(h)
@@ -229,7 +234,7 @@ func runExec(t *testing.T, cases []execCase, want []map[int][]byte) {
 			}
 		}
 		native.WriteString("    mov rcx, [rip+_g_tmp]\n    mov [rax], rcx\n    mov rsp, [rip+_g_rsp]\n" +
-			"    pushfq\n    pop rcx\n    mov [rax+128], rcx\n    fninit\n" +
+			"    pushfq\n    pop rcx\n    mov [rax+128], rcx\n    cld\n    fninit\n" +
 			"    pop r15\n    pop r14\n    pop r13\n    pop r12\n    pop rbp\n    pop rbx\n    ret\n")
 
 		// Initial memory.
@@ -284,7 +289,8 @@ int main(int argc, char **argv) {
         uint16_t cw = 0x37f; memcpy(ctx + 0x2e4, &cw, 2);
         uint32_t mx = 0x1f80; memcpy(ctx + 0x2e8, &mx, 4);
         uint64_t fs = (uint64_t)tcb; memcpy(st + %d, &fs, 8);
-`, execCtx-execMemBase, execTcb-execMemBase, stTcb)
+        uint64_t fl; memcpy(&fl, st + %d, 8); ctx[0x9e] = (uint8_t)(fl >> 10 & 1);
+`, execCtx-execMemBase, execTcb-execMemBase, stTcb, stFlags)
 		}
 		d.WriteString(`        fns[i](st);
         fwrite(st, sizeof st, 1, out);
@@ -388,6 +394,9 @@ int main(int argc, char **argv) {
 			if gv != wv {
 				t.Errorf("%s: %v = %#x, x86 %#x", c.name, r, gv, wv)
 			}
+		}
+		if gd, wd := g[stDF] != 0, binary.LittleEndian.Uint64(w[stFlags:])&fDF != 0; gd != wd {
+			t.Errorf("%s: DF = %v, x86 %v", c.name, gd, wd)
 		}
 		if !c.noFlags {
 			mask := c.cmpFlags

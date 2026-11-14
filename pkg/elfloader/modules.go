@@ -616,6 +616,8 @@ func ResolveModuleRelocations(main *LoadedELF, companionExports []Symbol) error 
 			if ok && targetAddr != 0 {
 				finalAddr := targetAddr + uint64(rel.Addend)
 				binary.LittleEndian.PutUint64(main.MemoryImage[rel.Offset:rel.Offset+8], finalAddr)
+			} else if rel.ResolvesToNull() {
+				binary.LittleEndian.PutUint64(main.MemoryImage[rel.Offset:rel.Offset+8], 0)
 			} else {
 				// For host shims or unresolved symbols: point the GOT slot to rel.Offset (or rel.PltAddr)
 				// so indirect call recomp_dispatch(ctx, MEM_U64(rel.Offset)) dispatches to the registered shim/stub!

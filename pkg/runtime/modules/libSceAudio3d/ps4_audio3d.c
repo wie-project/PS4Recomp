@@ -747,6 +747,51 @@ int32_t ps4_audio3d_port_push(uint32_t port_id, uint32_t blocking) {
   return r;
 }
 
+// sceAudio3dPortFlush, after shadPS4's audio3d.cpp: outputs everything the port holds,
+// whatever its buffer mode. When nothing has been advanced but objects or the bed hold PCM,
+// one grain is mixed first. Queued grains (associated AudioOut ports first, then the mix) go
+// out with blocking submissions; then every associated AudioOut port gets a NULL output,
+// which blocks until that port takes another grain.
+int32_t ps4_audio3d_port_flush(uint32_t port_id) {
+  pthread_mutex_lock(&g_lock);
+  A3dPort *p = port_get(port_id);
+  if (!p) {
+    pthread_mutex_unlock(&g_lock);
+    return PS4_AUDIO3D_ERROR_INVALID_PORT;
+  }
+  if (p->mix_count == 0) {
+    bool pending = p->bed_count > 0;
+    for (uint32_t s = 0; s < p->max_objects && !pending; s++) {
+      pending = p->objects[s].id && p->objects[s].pcm_count;
+    }
+    if (pending) port_mix_grain(p);
+  }
+  const uint32_t gen = p->gen;
+  int32_t r = port_submit_locked(p, PS4_AUDIO3D_BLOCKING_SYNC);
+  int32_t handles[A3D_MAX_ASSOC];
+  uint32_t n = 0;
+  if (r == 0) {
+    for (uint32_t i = 0; i < A3D_MAX_ASSOC; i++) {
+      if (p->assoc[i].handle > 0) handles[n++] = p->assoc[i].handle;
+    }
+  }
+  if (n) p->pushing++;
+  pthread_mutex_unlock(&g_lock);
+  for (uint32_t i = 0; i < n && r == 0; i++) {
+    int32_t o = ps4_audioout_port_output(handles[i], NULL);
+    if (o < 0) r = o;
+  }
+  if (n) {
+    pthread_mutex_lock(&g_lock);
+    // As in port_submit_locked: a port closed meanwhile reports INVALID_PORT.
+    if (!p->open || p->gen != gen) r = PS4_AUDIO3D_ERROR_INVALID_PORT;
+    p->pushing--;
+    pthread_cond_broadcast(&g_cond);
+    pthread_mutex_unlock(&g_lock);
+  }
+  return r;
+}
+
 // ---------------------------------------------------------------- objects
 
 int32_t ps4_audio3d_object_reserve(uint32_t port_id, uint32_t *object_id) {
@@ -1258,6 +1303,14 @@ void shim_sceAudio3dPortPush(GuestContext *ctx) {
   static uint32_t budget = 8;
   int32_t r = ps4_audio3d_port_push((uint32_t)ctx->rdi, (uint32_t)ctx->rsi);
   trace_result("PortPush", (uint32_t)ctx->rdi, (uint32_t)ctx->rsi, r, &budget);
+  A3D_RET(ctx, r);
+  SHIM_RETURN();
+}
+
+void shim_sceAudio3dPortFlush(GuestContext *ctx) {
+  static uint32_t budget = 8;
+  int32_t r = ps4_audio3d_port_flush((uint32_t)ctx->rdi);
+  trace_result("PortFlush", (uint32_t)ctx->rdi, 0, r, &budget);
   A3D_RET(ctx, r);
   SHIM_RETURN();
 }

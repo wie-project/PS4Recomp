@@ -26,12 +26,17 @@
 #define NPX_SIGNALING_ERROR_INVALID_ARGUMENT       ((int32_t)0x80552715)
 #define NPX_SIGNALING_CONN_STATUS_INACTIVE         0
 
-// NpWebApi error codes (0x805529xx).
+// NpWebApi error codes (0x805529xx, shadPS4 np_error.h).
+#define NPX_WEBAPI_ERROR_OUT_OF_MEMORY             ((int32_t)0x80552901)
 #define NPX_WEBAPI_ERROR_INVALID_ARGUMENT          ((int32_t)0x80552902)
+#define NPX_WEBAPI_ERROR_HANDLE_NOT_FOUND          ((int32_t)0x8055290D)
+#define NPX_WEBAPI_ERROR_SERVICE_PUSH_EVENT_CALLBACK_NOT_FOUND ((int32_t)0x8055290F)
+
+// NpInGameMessage error codes (0x80552Bxx, shadPS4 np_error.h).
+#define NPX_IGM_ERROR_OUT_OF_MEMORY                ((int32_t)0x80552B01)
+#define NPX_IGM_ERROR_HANDLE_NOT_FOUND             ((int32_t)0x80552B05)
 
 static pthread_mutex_t g_npx_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int32_t g_npx_igm_handle = 1;
-static int32_t g_npx_webapi_handle = 1;
 static int32_t g_npx_webapi_filter = 1;
 static int32_t g_npx_webapi_callback = 1;
 
@@ -41,6 +46,67 @@ static int32_t npx_next(int32_t *counter) {
     if (*counter <= 0 || *counter > 0x7fff) *counter = 1;
     pthread_mutex_unlock(&g_npx_mutex);
     return v;
+}
+
+// Live objects of one kind, each owned by the context id it was created under (handles by
+// their library context, push-event callbacks by their user context), so deleting checks
+// both, as shadPS4's per-context maps do (np_web_api_internal.cpp). Fixed capacity: a full
+// table is the library's OUT_OF_MEMORY.
+#define NPX_MAX_OBJECTS 256
+typedef struct {
+    int32_t owner;
+    int32_t id; // 0 = free slot
+} NpxObject;
+
+typedef struct {
+    NpxObject slot[NPX_MAX_OBJECTS];
+    int32_t next; // next id candidate, 1..0x7fff
+} NpxObjectTable;
+
+static NpxObjectTable g_npx_igm_handles = {.next = 1};
+static NpxObjectTable g_npx_webapi_handles = {.next = 1};
+static NpxObjectTable g_npx_webapi_service_callbacks = {.next = 1};
+
+// Lock held.
+static bool npx_id_live(const NpxObjectTable *t, int32_t id) {
+    for (int i = 0; i < NPX_MAX_OBJECTS; i++) {
+        if (t->slot[i].id == id) return true;
+    }
+    return false;
+}
+
+// Registers a new object under owner; returns its id, or 0 when the table is full.
+static int32_t npx_object_add(NpxObjectTable *t, int32_t owner) {
+    pthread_mutex_lock(&g_npx_mutex);
+    int32_t id = 0;
+    for (int i = 0; i < NPX_MAX_OBJECTS; i++) {
+        if (t->slot[i].id != 0) continue;
+        do { // ids are positive and unique among live objects
+            id = t->next++;
+            if (t->next > 0x7fff) t->next = 1;
+        } while (npx_id_live(t, id));
+        t->slot[i].owner = owner;
+        t->slot[i].id = id;
+        break;
+    }
+    pthread_mutex_unlock(&g_npx_mutex);
+    return id;
+}
+
+// Removes the object id owned by owner; false when there is none.
+static bool npx_object_remove(NpxObjectTable *t, int32_t owner, int32_t id) {
+    if (id <= 0) return false;
+    bool found = false;
+    pthread_mutex_lock(&g_npx_mutex);
+    for (int i = 0; i < NPX_MAX_OBJECTS; i++) {
+        if (t->slot[i].id == id && t->slot[i].owner == owner) {
+            t->slot[i].id = 0;
+            found = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_npx_mutex);
+    return found;
 }
 
 //=============================================================================
@@ -70,7 +136,15 @@ void shim_sceNpInGameMessageTerminate(GuestContext *ctx) {
 
 // int sceNpInGameMessageCreateHandle(int libCtxId) -> handleId
 void shim_sceNpInGameMessageCreateHandle(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)npx_next(&g_npx_igm_handle);
+    int32_t id = npx_object_add(&g_npx_igm_handles, (int32_t)ctx->rdi);
+    ctx->rax = (uint64_t)(int64_t)(id ? id : NPX_IGM_ERROR_OUT_OF_MEMORY);
+    SHIM_RETURN();
+}
+
+// int sceNpInGameMessageDeleteHandle(int libCtxId, int handleId)
+void shim_sceNpInGameMessageDeleteHandle(GuestContext *ctx) {
+    bool ok = npx_object_remove(&g_npx_igm_handles, (int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    ctx->rax = ok ? 0 : (uint64_t)(int64_t)NPX_IGM_ERROR_HANDLE_NOT_FOUND;
     SHIM_RETURN();
 }
 
@@ -158,7 +232,15 @@ void shim_sceNpSignalingTerminateConnection(GuestContext *ctx) {
 
 // int sceNpWebApiCreateHandle(int libCtxId) -> handleId
 void shim_sceNpWebApiCreateHandle(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)npx_next(&g_npx_webapi_handle);
+    int32_t id = npx_object_add(&g_npx_webapi_handles, (int32_t)ctx->rdi);
+    ctx->rax = (uint64_t)(int64_t)(id ? id : NPX_WEBAPI_ERROR_OUT_OF_MEMORY);
+    SHIM_RETURN();
+}
+
+// int sceNpWebApiDeleteHandle(int libCtxId, int handleId)
+void shim_sceNpWebApiDeleteHandle(GuestContext *ctx) {
+    bool ok = npx_object_remove(&g_npx_webapi_handles, (int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    ctx->rax = ok ? 0 : (uint64_t)(int64_t)NPX_WEBAPI_ERROR_HANDLE_NOT_FOUND;
     SHIM_RETURN();
 }
 
@@ -203,8 +285,21 @@ void shim_sceNpWebApiRegisterExtdPushEventCallback(GuestContext *ctx) {
 }
 
 // int sceNpWebApiRegisterServicePushEventCallback(int titleUserCtxId, int filterId, cb, void *arg) -> callbackId
+// A NULL callback is INVALID_ARGUMENT (shadPS4 np_web_api.cpp).
 void shim_sceNpWebApiRegisterServicePushEventCallback(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)npx_next(&g_npx_webapi_callback);
+    if (!ctx->rdx) {
+        ctx->rax = (uint64_t)(int64_t)NPX_WEBAPI_ERROR_INVALID_ARGUMENT;
+        SHIM_RETURN();
+    }
+    int32_t id = npx_object_add(&g_npx_webapi_service_callbacks, (int32_t)ctx->rdi);
+    ctx->rax = (uint64_t)(int64_t)(id ? id : NPX_WEBAPI_ERROR_OUT_OF_MEMORY);
+    SHIM_RETURN();
+}
+
+// int sceNpWebApiUnregisterServicePushEventCallback(int titleUserCtxId, int callbackId)
+void shim_sceNpWebApiUnregisterServicePushEventCallback(GuestContext *ctx) {
+    bool ok = npx_object_remove(&g_npx_webapi_service_callbacks, (int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    ctx->rax = ok ? 0 : (uint64_t)(int64_t)NPX_WEBAPI_ERROR_SERVICE_PUSH_EVENT_CALLBACK_NOT_FOUND;
     SHIM_RETURN();
 }
 
@@ -711,3 +806,30 @@ void shim_sceNpTusGetDataAAsync(GuestContext *ctx) {
 
 
 
+
+// Matching2 server requests the eboot imports beyond the ones above. Like the other room and
+// lobby requests here they fail with NOT_NP_SIGN_IN; the request and request-id pointers are
+// checked first, in shadPS4's order (np_matching2.cpp).
+// int f(SceNpMatching2ContextId ctxId, const void *request, const SceNpMatching2RequestOptParam *opt,
+//       SceNpMatching2RequestId *requestId)
+static void npx_matching2_request(GuestContext *ctx) {
+    if (!ctx->rsi || !ctx->rcx) {
+        ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_INVALID_ARGUMENT;
+        SHIM_RETURN();
+    }
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}
+
+void shim_sceNpMatching2SetUserInfo(GuestContext *ctx) { npx_matching2_request(ctx); }
+void shim_sceNpMatching2GetUserInfoList(GuestContext *ctx) { npx_matching2_request(ctx); }
+void shim_sceNpMatching2GetRoomDataInternal(GuestContext *ctx) { npx_matching2_request(ctx); }
+
+// int sceNpMatching2SendRoomChatMessage(SceNpMatching2ContextId ctxId, const void *request,
+//                                       const SceNpMatching2RequestOptParam *opt,
+//                                       SceNpMatching2RequestId *requestId)
+// A room chat message needs a joined room, which cannot exist signed out.
+void shim_sceNpMatching2SendRoomChatMessage(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_MATCHING2_ERROR_NOT_NP_SIGN_IN;
+    SHIM_RETURN();
+}

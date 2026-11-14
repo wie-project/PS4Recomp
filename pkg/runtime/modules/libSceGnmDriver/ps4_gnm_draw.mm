@@ -764,6 +764,7 @@ struct State {
     std::shared_ptr<WorkLog> cmd_log;
     std::vector<ps4_metal_screen_present_op> present_ops; // present signals in the open command buffer
     std::vector<uint32_t> flat_scratch[7]; // per-stage flattened user data (VS, PS, CS, GS, ES, HS, LS)
+    std::vector<std::array<uint64_t, 2>> flat_reads[7];
     // flat_scratch[i] already holds this draw's flattened user data, built by GetShader with
     // the SRT program of the shader recorded here (all permutations of a program share it)
     const Shader* flat_from[7] = {};
@@ -802,7 +803,7 @@ struct State {
     std::deque<std::pair<uint64_t, std::vector<GpuWrite>>> inflight_written;
     // gpu_written and inflight_written by range, latest write only: what OverlapsPendingWrite asks
     GnmPendingWrites pending_writes;
-    // The same, kept for the T# table hazard check (ResolveTableHazards) until no draw or dispatch
+    // The same, kept for the T# table hazard check (ResolveFlatHazards) until no draw or dispatch
     // whose tables the CP copied before they completed is left to encode (PruneTableWrites).
     std::deque<std::pair<uint64_t, std::shared_ptr<const std::vector<GpuWrite>>>> table_written;
     // completed_seq when the CP copied the tables of the draw or dispatch encoded last
@@ -2180,7 +2181,8 @@ bool GuestBuffer(uint64_t addr, uint64_t size, GuestAccess access, __strong id<M
 }
 
 bool ShouldTrace();
-void BuildFlat(const struct Shader* s, const uint32_t ud[16], std::vector<uint32_t>* flat);
+void BuildFlat(const struct Shader* s, const uint32_t ud[16], std::vector<uint32_t>* flat,
+               std::vector<std::array<uint64_t, 2>>* reads);
 id<MTLTexture> DepthCompanion(id<MTLTexture> dt, bool encode);
 bool HasStencil(MTLPixelFormat f);
 id<MTLTexture> DepthFromMemory(const ImageDesc& img, bool encode);
@@ -2292,7 +2294,7 @@ void PruneCompletedWrites() {
 
 // ---- What GPU work was pending when the CP copied a draw's or dispatch's T# tables ----
 // The CP copies the tables (the flattened user data) when it prepares the draw; the hazard check
-// (ResolveTableHazards) runs when the encoder encodes it, which can be much later: with the
+// (ResolveFlatHazards) runs when the encoder encodes it, which can be much later: with the
 // encoder thread the CP runs ahead, and in a captured frame every pass starts its encoding with
 // the GPU drained. So the check judges a write by whether it had completed when the CP read the
 // tables: a draw or dispatch takes completed_seq first (TableReadBegin), and every write of a
@@ -2345,6 +2347,7 @@ bool OverlapsWriteAfter(uint64_t addr, uint64_t size, uint64_t snap, GpuWrite* h
         }
     };
     for (auto& r : S.gpu_written) check(r, UINT64_MAX);
+    for (auto& r : S.async.gpu_written) check(r, UINT64_MAX);
     for (auto& [seq, w] : S.table_written)
         if (seq > snap)
             for (auto& r : *w) check(r, seq);
@@ -3754,7 +3757,7 @@ Shader* GetShader(gcn_hw_stage hw, gcn_sw_stage sw, const gcn_runtime_info& rt, 
         if (fi >= 0) {
             // walk the pointer chains once: the flattened user data serves the check here and
             // the binding of the draw
-            BuildFlat(vec[base], ud, &S.flat_scratch[fi]);
+            BuildFlat(vec[base], ud, &S.flat_scratch[fi], &S.flat_reads[fi]);
             S.flat_from[fi] = vec[base];
             hit = GmCpGuarded([&](gcn_read_guest_fn read) {
                 return gcn_shader_find_compatible_flat(list, n, ud, S.flat_scratch[fi].data(),
@@ -4260,7 +4263,8 @@ struct BindCtx {
 // Flattened user data of a shader stage for the current draw/dispatch (user SGPRs plus the
 // values its SRT program fetches from guest memory). Built once per stage and shared by the
 // hazard check, depth companions and binding.
-void BuildFlat(const Shader* s, const uint32_t ud[16], std::vector<uint32_t>* flat);
+void BuildFlat(const Shader* s, const uint32_t ud[16], std::vector<uint32_t>* flat,
+               std::vector<std::array<uint64_t, 2>>* reads);
 
 // BuildFlat for the shader chosen by GetShader, unless GetShader already built it.
 void StageFlat(int fi, const Shader* s, const uint32_t ud[16]) {
@@ -4271,15 +4275,31 @@ void StageFlat(int fi, const Shader* s, const uint32_t ud[16]) {
     if (from && gcn_shader_same_srt(from->sh, s->sh) &&
         S.flat_scratch[fi].size() == std::max<uint32_t>(s->info.flatbuf_size_dw, 16) && !ShouldTrace())
         return;
-    BuildFlat(s, ud, &S.flat_scratch[fi]);
+    BuildFlat(s, ud, &S.flat_scratch[fi], &S.flat_reads[fi]);
 }
 
-void BuildFlat(const Shader* s, const uint32_t ud[16], std::vector<uint32_t>* flat) {
+void NoteFlatRead(void* ctx, uint64_t addr, uint64_t size) {
+    auto& reads = *static_cast<std::vector<std::array<uint64_t, 2>>*>(ctx);
+    if (!reads.empty()) {
+        auto& last = reads.back();
+        if (addr <= last[0] + last[1] && last[0] <= addr + size) {
+            const uint64_t end = std::max(last[0] + last[1], addr + size);
+            last[0] = std::min(last[0], addr);
+            last[1] = end - last[0];
+            return;
+        }
+    }
+    reads.push_back({addr, size});
+}
+
+void BuildFlat(const Shader* s, const uint32_t ud[16], std::vector<uint32_t>* flat,
+               std::vector<std::array<uint64_t, 2>>* reads) {
     static const bool dumpflat = getenv("PS4_GNM_TRACE_BUFS") != nullptr;
     g_trace_reads = dumpflat && ShouldTrace();
     GmCpGuarded([&](gcn_read_guest_fn read) {
+        reads->clear();
         flat->assign(std::max<uint32_t>(s->info.flatbuf_size_dw, 16), 0);
-        gcn_shader_build_flatbuf(s->sh, ud, read, S.ctx, flat->data(), flat->size());
+        gcn_shader_build_flatbuf_tracked(s->sh, ud, read, S.ctx, flat->data(), flat->size(), NoteFlatRead, reads);
         return true;
     });
     g_trace_reads = false;
@@ -5515,87 +5535,71 @@ void LogTableEntries(const Shader* s, const TableEntryCounts& c) {
     }
 }
 
-// The SRT walker copied the tables' entries from guest memory when the CP prepared the draw or
-// dispatch. If GPU work that had not completed by then writes that memory, the copy is stale
-// (the same limitation the flattened user data has elsewhere; Uncharted 4's tables are written
-// by the CPU). Whether a write had completed is judged at the CP's copy (`snap`, TableReadBegin),
-// not here: by the time the encoder runs this the write may have completed (the CP ran ahead of
-// the encoder, a captured pass drained the GPU when it started encoding, or an earlier check
-// drained it). One check per draw or dispatch, over the table reads of all its stages: on a hit
-// the GPU is drained if the write may still be pending, and every stage with tables copies its
-// tables again. Each stage's permutation was chosen from the stale tables (entry-count bucket,
-// entry image types), so each is checked against the tables read again: false when one no longer
-// fits, and the caller skips the draw (counted, logged once per shader). Encoder thread, before
-// the stages' images are used.
-// cap::SetSkipped reason of a pass ResolveTableHazards refuses. Reachable in a captured frame
-// too: the drain at the start of a captured pass's encoding does not make the CP's copy current.
-const char* const kCapTableHazardSkip = "T# tables written by pending GPU work no longer fit the permutation";
+// Read ranges belong to the original CP snapshot, including every intermediate pointer.
+// Rediscovering them here could follow a pointer the GPU already replaced and miss the hazard.
+// A completed-since-snapshot write still invalidates the copy; draining only currently pending
+// writes is insufficient. Rebuild every stage after a hit so no stage keeps pre-drain data.
+const char* const kCapFlatHazardSkip = "GPU-written flattened shader data no longer fits the permutation";
 
-struct TableStage {
+struct FlatStage {
     const Shader* s = nullptr; // nullptr: no such stage
     const uint32_t* ud = nullptr;
     const gcn_runtime_info* rt = nullptr;
     std::vector<uint32_t>* flat = nullptr;
     StageImages* img = nullptr;
+    std::vector<std::array<uint64_t, 2>>* reads = nullptr;
 };
 
-bool ResolveTableHazards(const TableStage* st, uint32_t n, uint64_t snap) {
-    bool tables = false;
-    for (uint32_t k = 0; k < n; ++k) tables |= st[k].s && !st[k].s->tables.empty();
-    if (!tables) return true;
+bool ResolveFlatHazards(const FlatStage* st, uint32_t n, uint64_t snap, bool* refreshed = nullptr) {
+    if (refreshed) *refreshed = false;
     PruneTableWrites();
-    if (S.gpu_written.empty() && S.table_written.empty()) return true;
-    static thread_local std::vector<std::array<uint64_t, 2>> reads;
+    if (S.gpu_written.empty() && S.async.gpu_written.empty() && S.table_written.empty()) return true;
     const Shader* hit_s = nullptr;
     GpuWrite hit{};
     uint64_t hit_read[2] = {}, pending_seq = 0;
     for (uint32_t k = 0; k < n && !hit_s; ++k) {
-        const Shader* s = st[k].s;
-        if (!s || s->tables.empty()) continue;
-        std::vector<uint32_t>& flat = *st[k].flat;
-        uint32_t nr = gcn_shader_image_table_reads(s->sh, flat.data(), reinterpret_cast<uint64_t(*)[2]>(reads.data()),
-                                                   (uint32_t)reads.size());
-        if (nr > reads.size()) {
-            reads.resize(nr);
-            nr = gcn_shader_image_table_reads(s->sh, flat.data(), reinterpret_cast<uint64_t(*)[2]>(reads.data()), nr);
-        }
-        for (uint32_t i = 0; i < nr; ++i) {
-            if (!OverlapsWriteAfter(reads[i][0], reads[i][1], snap, &hit, &pending_seq)) continue;
-            hit_s = s;
-            hit_read[0] = reads[i][0];
-            hit_read[1] = reads[i][1];
+        if (!st[k].s || !st[k].reads) continue;
+        for (const auto& read : *st[k].reads) {
+            if (!OverlapsWriteAfter(read[0], read[1], snap, &hit, &pending_seq)) continue;
+            hit_s = st[k].s;
+            hit_read[0] = read[0];
+            hit_read[1] = read[1];
             break;
         }
     }
     if (!hit_s) return true;
     g_table_stats.hazard_drains.fetch_add(1, std::memory_order_relaxed);
     char key[64];
-    snprintf(key, sizeof(key), "table-hazard-%llx", (unsigned long long)hit_s->code_addr);
-    RLog(key, "shader 0x%llx: T# table read 0x%llx+0x%llx written by GPU work pending when the CP read it "
-              "(0x%llx+0x%llx): draining, tables read again",
+    snprintf(key, sizeof(key), "flat-hazard-%llx", (unsigned long long)hit_s->code_addr);
+    RLog(key, "shader 0x%llx: flattened read 0x%llx+0x%llx written by GPU work pending when the CP read it "
+              "(0x%llx+0x%llx): draining, shader data read again",
          (unsigned long long)hit_s->code_addr, (unsigned long long)hit_read[0], (unsigned long long)hit_read[1],
          (unsigned long long)hit.addr, (unsigned long long)hit.size);
-    if (pending_seq > CompletedSeq()) {
-        Commit();
-        WaitAll();
-    }
+    // Other stages or ranges may depend on later writes than the first hit, on either queue.
+    Commit();
+    WaitAll();
+    if (S.hung) return false;
     for (uint32_t k = 0; k < n; ++k) {
         const Shader* s = st[k].s;
-        if (!s || s->tables.empty()) continue;
-        BuildFlat(s, st[k].ud, st[k].flat);
+        if (!s) continue;
+        BuildFlat(s, st[k].ud, st[k].flat, st[k].reads);
         if (st[k].img) DecodeStageImages(s, *st[k].flat, st[k].img);
     }
     for (uint32_t k = 0; k < n; ++k) {
         const Shader* s = st[k].s;
-        if (!s || s->tables.empty() || gcn_shader_is_compatible(s->sh, st[k].ud, st[k].rt, ReadGuest, S.ctx)) continue;
+        if (!s) continue;
+        const gcn_shader* shaders[] = {s->sh};
+        if (gcn_shader_find_compatible_flat(shaders, 1, st[k].ud, st[k].flat->data(),
+                                            st[k].flat->size(), st[k].rt, ReadGuest, S.ctx) == 0) continue;
         g_table_stats.hazard_skips.fetch_add(1, std::memory_order_relaxed);
         char why[256];
         gcn_shader_explain_mismatch(s->sh, st[k].ud, st[k].rt, ReadGuest, S.ctx, why, sizeof(why));
-        snprintf(key, sizeof(key), "table-hazard-skip-%llx", (unsigned long long)s->code_addr);
-        RLog(key, "shader 0x%llx: the T# tables written by the GPU no longer fit its permutation (%s): skipped",
+        snprintf(key, sizeof(key), "flat-hazard-skip-%llx", (unsigned long long)s->code_addr);
+        RLog(key, "shader 0x%llx: GPU-written shader data no longer fits its permutation (%s): skipped",
              (unsigned long long)s->code_addr, why);
         return false;
     }
+    if (refreshed) *refreshed = true;
     return true;
 }
 
@@ -10304,11 +10308,12 @@ struct DrawRec {
     uint64_t ls_es_addr = 0, hs_gs_addr = 0;
     uint32_t vs_ud[16] = {}, ps_ud[16] = {};
     uint32_t ls_es_ud[16] = {}, hs_gs_ud[16] = {};
-    gcn_runtime_info vs_rt{}, ps_rt{};       // the stages' runtime state (ResolveTableHazards)
+    gcn_runtime_info vs_rt{}, ps_rt{};       // the stages' runtime state (ResolveFlatHazards)
     gcn_runtime_info ls_es_rt{}, hs_gs_rt{}; // LS/ES and HS/GS runtime state when stage_mode != 0
     uint64_t table_snap = 0;                 // TableReadBegin when the CP read guest memory for it
     std::vector<uint32_t> vs_flat, ps_flat;
     std::vector<uint32_t> ls_es_flat, hs_gs_flat;
+    std::vector<std::array<uint64_t, 2>> vs_reads, ps_reads, ls_es_reads, hs_gs_reads;
     std::vector<VtxIn> vtx;
     StageImages vs_img, ps_img;
     StageImages ls_es_img, hs_gs_img;
@@ -10323,6 +10328,10 @@ struct DrawRec {
         memset(ps_ud, 0, sizeof(ps_ud));
         vs_flat.clear();
         ps_flat.clear();
+        vs_reads.clear();
+        ps_reads.clear();
+        ls_es_reads.clear();
+        hs_gs_reads.clear();
         vtx.clear();
         vs_img.Clear();
         ps_img.Clear();
@@ -10340,6 +10349,26 @@ struct DrawRec {
     }
 };
 void DrawEncode(DrawRec& r);
+
+bool RefreshVertexInputs(DrawRec& r, const Shader* s, const uint32_t ud[16]) {
+    r.vtx.resize(s->attrs.size());
+    for (uint32_t i = 0; i < s->attrs.size(); ++i) {
+        uint32_t sharp[4] = {};
+        gcn_shader_fetch_vertex_attrib_sharp(s->sh, i, ud, ReadGuest, S.ctx, sharp);
+        VtxIn& vi = r.vtx[i];
+        DecodeBuffer(sharp, &vi.bd);
+        vi.vf = GetVertexFormat(vi.bd.raw_dfmt, vi.bd.raw_nfmt);
+        if (s->info.msl_first_free_buffer + i > 30 || !vi.vf.mtl_vertex_format) {
+            NoteSkip(SkipReason::VertexFormat);
+            return false;
+        }
+        if ((vi.bd.stride & 3) || (vi.bd.address & 3)) {
+            NoteSkip(SkipReason::VertexAlign);
+            return false;
+        }
+    }
+    return true;
+}
 
 // Draw and dispatch records are reused, so preparing and retiring one does not allocate. Taken
 // by the CP thread, returned by the encoder.
@@ -10491,13 +10520,17 @@ bool PrepareTessDraw(const uint32_t* regs, const DrawArgs& args,
     // 6. Build flattened user data and decode stage images for LS, HS, DS, PS.
     StageFlat(6, ls, r.ls_es_ud);
     r.ls_es_flat = S.flat_scratch[6];
+    r.ls_es_reads = S.flat_reads[6];
     StageFlat(5, hs, r.hs_gs_ud);
     r.hs_gs_flat = S.flat_scratch[5];
+    r.hs_gs_reads = S.flat_reads[5];
     StageFlat(0, vs, r.vs_ud);
     r.vs_flat = S.flat_scratch[0];
+    r.vs_reads = S.flat_reads[0];
     if (ps) {
         StageFlat(1, ps, r.ps_ud);
         r.ps_flat = S.flat_scratch[1];
+        r.ps_reads = S.flat_reads[1];
     }
     DecodeStageImages(ls, r.ls_es_flat, &r.ls_es_img);
     DecodeStageImages(hs, r.hs_gs_flat, &r.hs_gs_img);
@@ -10624,11 +10657,14 @@ bool PrepareGsDraw(const uint32_t* regs, const DrawArgs& args,
     // 5. Build flattened user data and decode stage images for ES, GS, PS.
     StageFlat(4, es, r.ls_es_ud);
     r.ls_es_flat = S.flat_scratch[4];
+    r.ls_es_reads = S.flat_reads[4];
     StageFlat(3, gs, r.hs_gs_ud);
     r.hs_gs_flat = S.flat_scratch[3];
+    r.hs_gs_reads = S.flat_reads[3];
     if (ps) {
         StageFlat(1, ps, r.ps_ud);
         r.ps_flat = S.flat_scratch[1];
+        r.ps_reads = S.flat_reads[1];
     }
     DecodeStageImages(es, r.ls_es_flat, &r.ls_es_img);
     DecodeStageImages(gs, r.hs_gs_flat, &r.hs_gs_img);
@@ -10880,9 +10916,11 @@ bool Draw(GuestContext* ctx, const uint32_t* regs, const DrawArgs& args) {
         // ---- resource tables (flattened user data)
         StageFlat(0, vs, vs_ud);
         r.vs_flat = S.flat_scratch[0];
+        r.vs_reads = S.flat_reads[0];
         if (ps) {
             StageFlat(1, ps, ps_ud);
             r.ps_flat = S.flat_scratch[1];
+            r.ps_reads = S.flat_reads[1];
         }
         DecodeStageImages(vs, r.vs_flat, &r.vs_img);
         if (ps) DecodeStageImages(ps, r.ps_flat, &r.ps_img);
@@ -11159,6 +11197,19 @@ void EncodeTessDraw(DrawRec& r) {
     }
 
     StageImagesScope images(&r.ls_es_img, &r.hs_gs_img, &r.vs_img, &r.ps_img);
+    const FlatStage table_stages[4] = {
+        {ls, r.ls_es_ud, &r.ls_es_rt, &r.ls_es_flat, &r.ls_es_img, &r.ls_es_reads},
+        {hs, r.hs_gs_ud, &r.hs_gs_rt, &r.hs_gs_flat, &r.hs_gs_img, &r.hs_gs_reads},
+        {vs, r.vs_ud, &r.vs_rt, &r.vs_flat, &r.vs_img, &r.vs_reads},
+        {ps, r.ps_ud, &r.ps_rt, &r.ps_flat, &r.ps_img, &r.ps_reads},
+    };
+    bool refreshed = false;
+    if (!ResolveFlatHazards(table_stages, 4, r.table_snap, &refreshed)) {
+        cap::SetSkipped(kCapFlatHazardSkip);
+        NoteSkip(SkipReason::TableHazard);
+        return;
+    }
+    if (refreshed && !RefreshVertexInputs(r, ls, r.ls_es_ud)) return;
 
     PassKey key;
     id<MTLTexture> hold[9] = {};
@@ -11430,17 +11481,6 @@ void EncodeTessDraw(DrawRec& r) {
         if (key.color[i]) RefreshGuestNewer(rs.color[i].address, key.color[i], true);
     if (cap::g_pass) cap::NoteTargets(key, rs, clr.depth, clr.stencil);
 
-    const TableStage table_stages[4] = {
-        {ls, r.ls_es_ud, &r.ls_es_rt, &r.ls_es_flat, &r.ls_es_img},
-        {hs, r.hs_gs_ud, &r.hs_gs_rt, &r.hs_gs_flat, &r.hs_gs_img},
-        {vs, r.vs_ud, &r.vs_rt, &r.vs_flat, &r.vs_img},
-        {ps, r.ps_ud, &r.ps_rt, &r.ps_flat, &r.ps_img},
-    };
-    if (!ResolveTableHazards(table_stages, 4, r.table_snap)) {
-        cap::SetSkipped(kCapTableHazardSkip);
-        NoteSkip(SkipReason::TableHazard);
-        return;
-    }
     if (!g_pending_tess.empty() && (g_pending_tess.back().key != key || clr.any())) {
         FlushPendingTess();
     }
@@ -11658,6 +11698,18 @@ void EncodeGsDraw(DrawRec& r) {
     if (!es || !gs) return;
 
     StageImagesScope images(&r.ls_es_img, &r.hs_gs_img, &r.ps_img, nullptr);
+    const FlatStage table_stages[3] = {
+        {es, r.ls_es_ud, &r.ls_es_rt, &r.ls_es_flat, &r.ls_es_img, &r.ls_es_reads},
+        {gs, r.hs_gs_ud, &r.hs_gs_rt, &r.hs_gs_flat, &r.hs_gs_img, &r.hs_gs_reads},
+        {ps, r.ps_ud, &r.ps_rt, &r.ps_flat, &r.ps_img, &r.ps_reads},
+    };
+    bool refreshed = false;
+    if (!ResolveFlatHazards(table_stages, 3, r.table_snap, &refreshed)) {
+        cap::SetSkipped(kCapFlatHazardSkip);
+        NoteSkip(SkipReason::TableHazard);
+        return;
+    }
+    if (refreshed && !RefreshVertexInputs(r, es, r.ls_es_ud)) return;
 
     PassKey key;
     id<MTLTexture> hold[9] = {};
@@ -12039,16 +12091,6 @@ void EncodeGsDraw(DrawRec& r) {
         if (key.color[i]) RefreshGuestNewer(rs.color[i].address, key.color[i], true);
     if (cap::g_pass) cap::NoteTargets(key, rs, clr.depth, clr.stencil);
 
-    const TableStage table_stages[3] = {
-        {es, r.ls_es_ud, &r.ls_es_rt, &r.ls_es_flat, &r.ls_es_img},
-        {gs, r.hs_gs_ud, &r.hs_gs_rt, &r.hs_gs_flat, &r.hs_gs_img},
-        {ps, r.ps_ud, &r.ps_rt, &r.ps_flat, &r.ps_img},
-    };
-    if (!ResolveTableHazards(table_stages, 3, r.table_snap)) {
-        cap::SetSkipped(kCapTableHazardSkip);
-        NoteSkip(SkipReason::TableHazard);
-        return;
-    }
     if (!g_only_clears) {
         for (int si = 0; si < 3; ++si) {
             if (!table_stages[si].s) continue;
@@ -12521,6 +12563,16 @@ void DrawEncode(DrawRec& r) {
     const bool indirect = args.indirect_addr != 0;
     char desc[512];
     StageImagesScope images(&r.vs_img, &r.ps_img, nullptr);
+    FlushDeferredHleCopies();
+    const FlatStage table_stages[2] = {{vs, vs_ud, &r.vs_rt, &r.vs_flat, &r.vs_img, &r.vs_reads},
+                                      {ps, ps_ud, &r.ps_rt, &r.ps_flat, &r.ps_img, &r.ps_reads}};
+    bool refreshed = false;
+    if (!ResolveFlatHazards(table_stages, 2, r.table_snap, &refreshed)) {
+        cap::SetSkipped(kCapFlatHazardSkip);
+        NoteSkip(SkipReason::TableHazard);
+        return;
+    }
+    if (refreshed && !RefreshVertexInputs(r, vs, vs_ud)) return;
     {
 
         PassKey key;
@@ -13007,13 +13059,6 @@ void DrawEncode(DrawRec& r) {
                 RefreshGuestNewer(key.color_addr[i], key.color[i], written_by_r);
             }
         if (cap::g_pass) cap::NoteTargets(key, rs, clr.depth, clr.stencil);
-        const TableStage table_stages[2] = {{vs, vs_ud, &r.vs_rt, &vs_flat, &r.vs_img},
-                                            {ps, ps_ud, &r.ps_rt, &ps_flat, &r.ps_img}};
-        if (!ResolveTableHazards(table_stages, 2, r.table_snap)) {
-            cap::SetSkipped(kCapTableHazardSkip);
-            NoteSkip(SkipReason::TableHazard);
-            return;
-        }
         // the textures the draw samples. PS4_GNM_MTL4_ONLY_CLEARS skips them: the draw is skipped, and
         // the depth companions are renderer textures the Metal 4 backend does not keep resident yet.
         // Their shared bookkeeping (GmApplyInvalidations, RefreshGuestNewer of sampled surfaces) is
@@ -13275,6 +13320,7 @@ struct DispatchRec {
     int queue_kind = kQueueGfx; // the GNM queue: kQueueGfx, or kQueueCompute (a compute ring)
     int ring = -1;              // the compute ring (CP slot), -1: graphics
     std::vector<uint32_t> flat;
+    std::vector<std::array<uint64_t, 2>> reads;
     StageImages img;
     // guest memory fast path (GmPlan): the ticket and the shader's predicted written pages
     uint64_t gm_ticket = 0;
@@ -13286,6 +13332,7 @@ struct DispatchRec {
         indirect_addr = 0;
         queue = "";
         flat.clear();
+        reads.clear();
         img.Clear();
         gm_ticket = 0;
         gm_pred.reset();
@@ -14049,6 +14096,7 @@ void Dispatch(GuestContext* ctx, const uint32_t* regs, uint32_t dim_x, uint32_t 
         StageFlat(2, cs, ud);
         if (cap::g_pass) cap::NoteStage("cs", cs, ud);
         r.flat = S.flat_scratch[2];
+        r.reads = S.flat_reads[2];
         DecodeStageImages(cs, r.flat, &r.img);
         r.cs = cs;
         r.dim_x = dim_x;
@@ -14132,6 +14180,14 @@ void DispatchEncode(DispatchRec*& rp) {
     const uint64_t indirect_addr = r.indirect_addr;
     const char* const queue = r.queue;
     StageImagesScope images(nullptr, nullptr, &r.img);
+    FlushPendingTess();
+    FlushDeferredHleCopies();
+    const FlatStage table_stage = {cs, r.ud, &r.rt, &r.flat, &r.img, &r.reads};
+    if (!ResolveFlatHazards(&table_stage, 1, r.table_snap)) {
+        cap::SetSkipped(kCapFlatHazardSkip);
+        NoteSkip(SkipReason::CsTableHazard);
+        return;
+    }
     // asynchronous compute: a compute-ring job, and what Main and Upload held before its preparation
     const bool async_route = g_async_compute && r.queue_kind == kQueueCompute;
     const MainMark mark = async_route ? MainMark::Now() : MainMark{};
@@ -14456,12 +14512,6 @@ void DispatchEncode(DispatchRec*& rp) {
 
         FlushPendingTess();
         FlushDeferredHleCopies();
-        const TableStage table_stage = {cs, r.ud, &r.rt, &flat, &r.img};
-        if (!ResolveTableHazards(&table_stage, 1, r.table_snap)) {
-            cap::SetSkipped(kCapTableHazardSkip);
-            NoteSkip(SkipReason::CsTableHazard);
-            return;
-        }
         ResolveTextureHazards(cs, flat);
         PrepareDepthCompanions(cs, flat);
         const MTLSize tg = MTLSizeMake(wx, wy, wz);

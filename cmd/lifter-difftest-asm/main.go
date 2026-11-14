@@ -139,8 +139,8 @@ const (
 	regsetShiftCL = 1 << 60
 	// regsetFcw: the memory operand holds a valid x87 control word (for FLDCW).
 	regsetFcw = 1 << 59
-	// regsetPopf: [stackTop] holds a valid RFLAGS image for POPFQ (arithmetic flags random,
-	// IF and bit 1 set, TF/DF/AC clear).
+	// regsetPopf: [stackTop] holds a valid RFLAGS image for POPFQ (arithmetic flags and DF
+	// random, IF and bit 1 set, TF/AC clear).
 	regsetPopf = 1 << 58
 	// regsetX87Full: the instruction names ST(7); all eight x87 registers hold values (by
 	// default ST(7) is empty so that a push does not overflow).
@@ -923,7 +923,9 @@ func writeNative(path string, tests []*test) {
 		if t.stackOp { // back to the host stack before anything else uses it (MOV keeps the flags)
 			b.WriteString("  mov [rip+_g_test_rsp], rsp\n  mov rsp, [rip+_g_saved_rsp]\n")
 		}
-		b.WriteString("  mov [rip+_g_tmp], rax\n  pushfq\n  pop rax\n")
+		// CLD after the flags are read: the test may have set DF (STD, POPFQ), and the C driver
+		// runs with DF = 0 (System V).
+		b.WriteString("  mov [rip+_g_tmp], rax\n  pushfq\n  pop rax\n  cld\n")
 		b.WriteString("  push rcx\n  mov rcx, [rip+_g_state]\n")
 		fmt.Fprintf(&b, "  mov [rcx+%d], rax\n", offFlags)
 		b.WriteString("  pop rax\n") // rax = original rcx

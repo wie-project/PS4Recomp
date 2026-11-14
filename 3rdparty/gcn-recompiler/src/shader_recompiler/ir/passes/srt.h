@@ -134,8 +134,10 @@ void ForEachSrtTableRead(std::span<const u32> program, const u32* flat,
 
 // Runs the walker. flat_dst must hold flattened_bufsize_dw dwords with the user data
 // already copied to the first NUM_USER_DATA_REGS dwords. Returns false if any read failed.
+using SrtObserveReadFn = void (*)(void* ctx, u64 addr, u64 size);
 bool RunSrtProgram(std::span<const u32> program, const u32* user_data, u32* flat_dst,
-                   SrtReadFn read, void* read_ctx);
+                   SrtReadFn read, void* read_ctx, SrtObserveReadFn observe = nullptr,
+                   void* observe_ctx = nullptr);
 
 struct PersistentSrtInfo {
     // Special case when fetch shader uses step rates.

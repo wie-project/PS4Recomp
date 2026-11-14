@@ -19,6 +19,7 @@ _Static_assert(offsetof(GuestContext, fpu_cw) == 0x2e4, "fpu_cw offset used by t
 _Static_assert(offsetof(GuestContext, fpu_sw) == 0x2e6, "fpu_sw offset used by the lifter");
 _Static_assert(offsetof(GuestContext, zf) == 0x99, "zf offset used by the lifter");
 _Static_assert(offsetof(GuestContext, sf) == 0x9a, "sf offset used by the lifter");
+_Static_assert(offsetof(GuestContext, df) == 0x9e, "df offset used by the lifter");
 
 extern const uint64_t lt_count;
 extern void (*const lt_table[])(DtState *, uint64_t fs_base);
@@ -58,6 +59,7 @@ int main(int argc, char **argv) {
             memset(&ctx, 0, sizeof(ctx));
             ctx.mxcsr = res.st.mxcsr;
             ctx.fpu_cw = res.st.fcw;
+            ctx.df = (uint8_t)(res.st.flags >> 10 & 1); /* DF lives in the GuestContext, not NZCV */
             ctx.fpu_top = (int)res.st.ftop;
             for (int i = 0; i < 8; i++) ctx.fpu_stack[(res.st.ftop + i) & 7] = res.st.st[i];
             GuestContext *cp = &ctx;
@@ -68,6 +70,7 @@ int main(int argc, char **argv) {
                 lt_table[t]((DtState *)&st, DT_FAKE_TCB);
                 memcpy(&res.st, (void *)&st, sizeof(st));
                 res.st.mxcsr = ctx.mxcsr;
+                res.st.flags = (res.st.flags & ~0x400ULL) | (uint64_t)(ctx.df & 1) << 10;
                 /* x87: the lifter keeps TOP and the eight registers in the GuestContext and
                    inserts TOP into the status word only when it is stored (FNSTSW). */
                 unsigned top = (unsigned)ctx.fpu_top & 7;

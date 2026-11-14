@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"strings"
 )
 
 const (
@@ -63,6 +64,18 @@ type Relocation struct {
 	SymName string
 	Addend  int64
 	PltAddr uint64
+	// WeakUndef reports that the referenced symbol is STB_WEAK and undefined (SHN_UNDEF) in
+	// the module that carries the relocation.
+	WeakUndef bool
+}
+
+// ResolvesToNull reports whether the relocation binds 0 when no module defines its symbol: a
+// weak undefined symbol resolves to 0 (ELF gABI). Only plaintext names qualify: they carry no
+// library/module id, so no import library can provide them (PRX modules reference their
+// optional module_start/module_stop this way). A weak NID import is still bound to a host
+// shim or reported as unresolved: a missing shim does not mean the library lacks the symbol.
+func (r *Relocation) ResolvesToNull() bool {
+	return r.WeakUndef && !strings.Contains(r.SymName, "#")
 }
 
 // Symbol represents an exported or local symbol.
@@ -71,6 +84,7 @@ type Symbol struct {
 	Address uint64
 	Size    uint64
 	Type    elf.SymType
+	Bind    elf.SymBind
 	Section elf.SectionIndex
 }
 
@@ -164,6 +178,15 @@ func (l *LoadedELF) FunctionHasLSDA(fnStart, fnEnd uint64) bool {
 
 // LoadELF reads and parses a 64-bit ELF binary. PS4 SELF/FSELF containers are unwrapped first.
 func LoadELF(path string) (*LoadedELF, error) {
+	data, err := ReadELFImage(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadELFImage(path, data)
+}
+
+// ReadELFImage reads the ELF image at path, unwrapping a SELF/FSELF container.
+func ReadELFImage(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read '%s': %w", path, err)
@@ -174,6 +197,11 @@ func LoadELF(path string) (*LoadedELF, error) {
 			return nil, fmt.Errorf("failed to extract ELF from SELF '%s': %w", path, err)
 		}
 	}
+	return data, nil
+}
+
+// LoadELFImage parses data, the ELF image read from path (ReadELFImage).
+func LoadELFImage(path string, data []byte) (*LoadedELF, error) {
 	loaded, err := LoadELFBytes(data)
 	if err != nil {
 		return nil, err
@@ -295,6 +323,7 @@ func LoadELFBytes(data []byte) (*LoadedELF, error) {
 				Address: s.Value,
 				Size:    s.Size,
 				Type:    elf.ST_TYPE(s.Info),
+				Bind:    elf.ST_BIND(s.Info),
 				Section: s.Section,
 			})
 		}
@@ -308,6 +337,7 @@ func LoadELFBytes(data []byte) (*LoadedELF, error) {
 				Address: s.Value,
 				Size:    s.Size,
 				Type:    elf.ST_TYPE(s.Info),
+				Bind:    elf.ST_BIND(s.Info),
 				Section: s.Section,
 			}
 			loaded.DynSymbols = append(loaded.DynSymbols, sym)
@@ -440,16 +470,20 @@ func applyRelaTable(loaded *LoadedELF, relData []byte, isPlt bool) {
 		symIdx := uint32(info >> 32)
 
 		var symName string
+		weakUndef := false
 		if int(symIdx) < len(loaded.DynSymbols) {
-			symName = loaded.DynSymbols[symIdx].Name
+			sym := &loaded.DynSymbols[symIdx]
+			symName = sym.Name
+			weakUndef = symIdx != 0 && sym.Bind == elf.STB_WEAK && sym.Section == elf.SHN_UNDEF
 		}
 
 		rel := Relocation{
-			Offset:  offset,
-			Type:    relType,
-			SymIdx:  symIdx,
-			SymName: symName,
-			Addend:  addend,
+			Offset:    offset,
+			Type:      relType,
+			SymIdx:    symIdx,
+			SymName:   symName,
+			Addend:    addend,
+			WeakUndef: weakUndef,
 		}
 
 		if relType == R_X86_64_JUMP_SLOT && isPlt {
@@ -724,6 +758,7 @@ func parseSCEDynamic(loaded *LoadedELF, data []byte, file *elf.File) {
 				Address: value,
 				Size:    size,
 				Type:    elf.ST_TYPE(info),
+				Bind:    elf.ST_BIND(info),
 				Section: elf.SectionIndex(shndx),
 			}
 			loaded.DynSymbols = append(loaded.DynSymbols, sym)

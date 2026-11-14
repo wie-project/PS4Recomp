@@ -26,6 +26,7 @@ import (
 	"ps4-recomp/pkg/analyzer"
 	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
+	"ps4-recomp/pkg/elfpatch"
 	"ps4-recomp/pkg/emitter"
 	"ps4-recomp/pkg/events"
 	"ps4-recomp/pkg/lifter"
@@ -53,6 +54,20 @@ type Config struct {
 	TSO bool
 	// JSON emits progress as JSON lines on stdout; the human log goes to stderr.
 	JSON bool
+	// PatchFile is a shadPS4-format patch XML; Patches are the names of its sets to apply to
+	// the executable before analysis.
+	PatchFile string
+	Patches   []string
+}
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ", ") }
+
+func (l *stringList) Set(v string) error {
+	*l = append(*l, v)
+	return nil
 }
 
 const banner = `
@@ -84,6 +99,8 @@ Options:
       -asan               Compile with AddressSanitizer and LeakSanitizer (default: false)
       -json               Emit progress as JSON lines on stdout (the log goes to stderr)
       -tso                x86 memory ordering: acquire/release for non-stack guest memory (default: true)
+      -patches <xml>      shadPS4-format patch XML to apply to the executable before analysis
+      -patch <name>       Name of a patch set in -patches to apply (repeatable)
   -h, -help               Show this help message
 `
 
@@ -98,6 +115,8 @@ func normalizeArgs(args []string) ([]string, []string) {
 		"-O": true, "-opt": true, "--opt": true,
 		"-k": true, "-chunk-size": true, "--chunk-size": true,
 		"-app-dir": true, "--app-dir": true,
+		"-patches": true, "--patches": true,
+		"-patch": true, "--patch": true,
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -160,6 +179,8 @@ func ParseArgs(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.Asan, "asan", false, "Compile with AddressSanitizer and LeakSanitizer")
 	fs.BoolVar(&cfg.TSO, "tso", cfg.TSO, "x86 memory ordering: acquire/release for non-stack guest memory")
 	fs.BoolVar(&cfg.JSON, "json", false, "Emit progress as JSON lines on stdout")
+	fs.StringVar(&cfg.PatchFile, "patches", "", "shadPS4-format patch XML applied before analysis")
+	fs.Var((*stringList)(&cfg.Patches), "patch", "Name of a patch set to apply (repeatable)")
 	fs.BoolVar(&cfg.Verbose, "verbose", cfg.Verbose, "Verbose logging")
 	fs.BoolVar(&cfg.Verbose, "v", cfg.Verbose, "Verbose logging (short)")
 	fs.BoolVar(&help, "help", false, "Show help message")
@@ -251,6 +272,12 @@ func ParseArgs(args []string) (*Config, error) {
 	if cfg.Jobs < 1 {
 		cfg.Jobs = 1
 	}
+	if cfg.PatchFile == "" && len(cfg.Patches) > 0 {
+		return nil, errors.New("-patch needs -patches <xml>")
+	}
+	if cfg.PatchFile != "" && len(cfg.Patches) == 0 {
+		return nil, errors.New("-patches needs at least one -patch <name>")
+	}
 
 	return cfg, nil
 }
@@ -333,9 +360,14 @@ func Execute(args []string) (err error) {
 	stepStart := time.Now()
 	ev.Progress("load", 1, 4, "stages", "loading the ELF")
 	fmt.Fprintf(logw, "[ps4-recomp] [1/4] Loading ELF: %s\n", cfg.ElfPath)
-	loaded, err := elfloader.LoadELF(cfg.ElfPath)
+	loaded, patches, err := loadPatchedELF(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to load ELF '%s': %w", cfg.ElfPath, err)
+	}
+	if patches != nil {
+		for _, s := range patches.Sets {
+			fmt.Fprintf(logw, "             Patch applied: %s (%d lines, %d bytes)\n", s.Name, len(s.Writes), s.Bytes())
+		}
 	}
 	fmt.Fprintf(logw, "             Entry point: 0x%x | Segments: %d | Relocations: %d | Unwind functions: %d | Time: %v\n",
 		loaded.EntryPoint, len(loaded.Segments), len(loaded.Relocations), len(loaded.FuncBounds), time.Since(stepStart).Round(time.Millisecond))
@@ -537,6 +569,13 @@ func Execute(args []string) (err error) {
 		fmt.Fprintf(logw, "             Warning: %s\n", w)
 	}
 	fmt.Fprintf(logw, "             Wrote %s\n", hlePath)
+	if patches != nil {
+		patchPath := filepath.Join(cfg.OutDir, "patch_report.txt")
+		if err := os.WriteFile(patchPath, []byte(patches.Report()), 0o644); err != nil {
+			return fmt.Errorf("failed to write patch report: %w", err)
+		}
+		fmt.Fprintf(logw, "             Wrote %s\n", patchPath)
+	}
 
 	if cfg.AppDir != "" {
 		srcAssets := filepath.Join(cfg.AppDir, "assets")
@@ -608,12 +647,12 @@ func Execute(args []string) (err error) {
 	if ctx.Err() != nil {
 		return errBuildCancelled
 	}
-	return finishBuild(ctx, ev, cfg, targetBin, appBundle)
+	return finishBuild(ctx, ev, cfg, targetBin, appBundle, patches.Names())
 }
 
 // finishBuild runs the optional run step and then reports the build as done, so that with
 // --json the last event of the stream is "done" only if the whole command succeeded.
-func finishBuild(ctx context.Context, ev *events.Writer, cfg *Config, targetBin, appBundle string) error {
+func finishBuild(ctx context.Context, ev *events.Writer, cfg *Config, targetBin, appBundle string, patches []string) error {
 	if cfg.Run && cfg.Compile {
 		fmt.Fprintln(logw, "===================================================================")
 		if err := runBinary(ctx, targetBin, cfg.TimeoutSec, cfg.AppDir); err != nil {
@@ -621,9 +660,9 @@ func finishBuild(ctx context.Context, ev *events.Writer, cfg *Config, targetBin,
 		}
 	}
 	if appBundle != "" {
-		ev.Done(buildResult{App: appBundle, TitleID: titleIDOf(cfg.AppDir), BuiltWith: Version})
+		ev.Done(buildResult{App: appBundle, TitleID: titleIDOf(cfg.AppDir), BuiltWith: Version, Patches: patches})
 	} else {
-		ev.Done(buildResult{BuiltWith: Version})
+		ev.Done(buildResult{BuiltWith: Version, Patches: patches})
 	}
 	return nil
 }
@@ -779,6 +818,8 @@ type buildResult struct {
 	App       string `json:"app,omitempty"`
 	TitleID   string `json:"title_id,omitempty"`
 	BuiltWith string `json:"built_with"`
+	// Patches are the names of the patch sets applied to the executable.
+	Patches []string `json:"patches,omitempty"`
 }
 
 // ninjaStatus matches the "[done/total]" prefix of a ninja status line.
@@ -1434,6 +1475,53 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 
 // bundleMeta is the identity a game bundle presents to macOS.
 type bundleMeta struct{ BundleID, DisplayName, Version string }
+
+// loadPatchedELF loads the executable with the requested patch sets written into its image, so
+// that every later stage (relocation, unwind parsing, CFG discovery, lifting and the guest
+// image) reads the patched bytes. It returns a nil result when no patches were requested.
+func loadPatchedELF(cfg *Config) (*elfloader.LoadedELF, *elfpatch.Result, error) {
+	data, err := elfloader.ReadELFImage(cfg.ElfPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	var res *elfpatch.Result
+	if cfg.PatchFile != "" {
+		f, err := elfpatch.Load(cfg.PatchFile)
+		if err != nil {
+			return nil, nil, err
+		}
+		sf := readSFO(cfg.AppDir)
+		if sf == nil {
+			return nil, nil, fmt.Errorf("patches are checked against sce_sys/param.sfo, which was not found in the app dir %q", cfg.AppDir)
+		}
+		t := elfpatch.Target{ElfName: filepath.Base(cfg.ElfPath)}
+		var ok bool
+		if t.TitleID, ok = sf.String("TITLE_ID"); !ok {
+			return nil, nil, errors.New("param.sfo has no TITLE_ID to check the patches against")
+		}
+		if t.AppVer, ok = sf.String("APP_VER"); !ok {
+			return nil, nil, errors.New("param.sfo has no APP_VER to check the patches against")
+		}
+		sets, err := f.Select(cfg.Patches, t)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := elfpatch.Apply(data, sets); err != nil {
+			return nil, nil, err
+		}
+		res = &elfpatch.Result{Path: cfg.PatchFile, Target: t, Sets: sets}
+	}
+	loaded, err := elfloader.LoadELFImage(cfg.ElfPath, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	if res != nil {
+		if err := elfpatch.CheckRelocations(res.Sets, loaded.Relocations); err != nil {
+			return nil, nil, err
+		}
+	}
+	return loaded, res, nil
+}
 
 // readSFO loads <appDir>/sce_sys/param.sfo, or returns nil when there is none.
 func readSFO(appDir string) *sfo.File {

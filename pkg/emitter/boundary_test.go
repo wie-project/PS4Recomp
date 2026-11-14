@@ -58,6 +58,7 @@ func boundaryStubAddr(i int) uint64 { return 0x7f0000000 + uint64(i)*0x10 }
 // the flags of the game build (pkg/cli: -O2 -ffp-contract=off).
 var boundaryRuntimeSources = []string{
 	"core/recomp_runtime.c",
+	"core/recomp_x87.c",
 	"kernel/threading/ps4_threading.c",
 	"kernel/threading/ps4_stall_profile.c",
 	"modules/libSceFiber/ps4_fiber.c",
@@ -73,10 +74,12 @@ var boundaryRuntimeSources = []string{
 var liftedHelperFns = []struct {
 	sym  string
 	code []byte
+	addr uint64 // guest address (harness.c ADDR_LIFTED_*)
 	res  uint64
 }{
-	{"_guest_lifted_vpcmpistri", []byte{0xc4, 0xe3, 0x79, 0x63, 0xd3, 0x38}, 0x1003000},       // vpcmpistri xmm2, xmm3, 0x38
-	{"_guest_lifted_vaeskeygenassist", []byte{0xc4, 0xe3, 0x79, 0xdf, 0xe5, 0x01}, 0x1003400}, // vaeskeygenassist xmm4, xmm5, 1
+	{"_guest_lifted_vpcmpistri", []byte{0xc4, 0xe3, 0x79, 0x63, 0xd3, 0x38}, 0x500000, 0x1003000},       // vpcmpistri xmm2, xmm3, 0x38
+	{"_guest_lifted_vaeskeygenassist", []byte{0xc4, 0xe3, 0x79, 0xdf, 0xe5, 0x01}, 0x500100, 0x1003400}, // vaeskeygenassist xmm4, xmm5, 1
+	{"_guest_lifted_fcos", []byte{0xd9, 0xff}, 0x500400, 0x1003800},                                     // fcos
 }
 
 func writeLiftedHelperFns(t *testing.T, path string) {
@@ -86,12 +89,12 @@ func writeLiftedHelperFns(t *testing.T, path string) {
 	li := func(reg string, v uint64) {
 		fmt.Fprintf(&b, "    movz %s, #0x%x\n    movk %s, #0x%x, lsl #16\n", reg, v&0xffff, reg, v>>16)
 	}
-	for i, f := range liftedHelperFns {
+	for _, f := range liftedHelperFns {
 		inst, err := x86asm.Decode(f.code, 64)
 		if err != nil {
 			t.Fatal(err)
 		}
-		addr := uint64(0x500000 + i*0x100)
+		addr := f.addr
 		fn := &disasm.Function{EntryAddr: addr, UsesYmm: true}
 		lines, err := lifter.NewArm64Lifter(nil).LiftInstructionToBuf(disasm.Instruction{Address: addr, Inst: inst},
 			addr+uint64(inst.Len), fn, nil)

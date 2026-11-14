@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "ps4_avplayer.h"
+#include "ps4_avplayer_audio.h"
+#include "ps4_avplayer_file_streamer.h"
 #include "ps4_vfs.h"
 #include "ps4_threading.h"
 #include "recomp_runtime.h"
@@ -12,7 +14,6 @@ extern "C" {
 #include <libavutil/mathematics.h>
 #include <libavutil/error.h>
 #include <libavutil/mem.h>
-#include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
 
@@ -60,37 +61,12 @@ static inline uint64_t recomp_host_to_guest(const GuestContext *ctx, const void 
 
 static uint64_t call_guest_allocate(GuestContext *ctx, uint64_t fn_addr, uint64_t obj_ptr, uint32_t align, uint32_t size) {
     if (!fn_addr) return 0;
-    uint64_t saved_rdi = ctx->rdi;
-    uint64_t saved_rsi = ctx->rsi;
-    uint64_t saved_rdx = ctx->rdx;
-    uint64_t saved_rax = ctx->rax;
-
-    ctx->rdi = obj_ptr;
-    ctx->rsi = align;
-    ctx->rdx = size;
-    recomp_call_guest(ctx, fn_addr);
-    uint64_t res = ctx->rax;
-
-    ctx->rdi = saved_rdi;
-    ctx->rsi = saved_rsi;
-    ctx->rdx = saved_rdx;
-    ctx->rax = saved_rax;
-    return res;
+    return avplayer_call_guest(ctx, fn_addr, obj_ptr, align, size, 0);
 }
 
 static void call_guest_deallocate(GuestContext *ctx, uint64_t fn_addr, uint64_t obj_ptr, uint64_t mem) {
     if (!fn_addr || !mem) return;
-    uint64_t saved_rdi = ctx->rdi;
-    uint64_t saved_rsi = ctx->rsi;
-    uint64_t saved_rax = ctx->rax;
-
-    ctx->rdi = obj_ptr;
-    ctx->rsi = mem;
-    recomp_call_guest(ctx, fn_addr);
-
-    ctx->rdi = saved_rdi;
-    ctx->rsi = saved_rsi;
-    ctx->rax = saved_rax;
+    avplayer_call_guest(ctx, fn_addr, obj_ptr, mem, 0, 0);
 }
 
 static void copy_nv12_data(uint8_t *dst, uint64_t max_size, const AVFrame *src) {
@@ -302,10 +278,12 @@ enum class AvState {
 class AvPlayer {
 public:
     AvPlayer(GuestContext *ctx, const AvPlayerInitData &data)
-        : m_init_data(data), m_main_ctx(ctx) {
+        : m_init_data(data) {
         if (ctx) {
             m_proc_ctx = ctx->process_ctx ? ctx->process_ctx : ctx;
             m_controller_ctx = recomp_create_thread_context(m_proc_ctx, 1024 * 1024);
+            // The demuxer runs the game's file_replacement callbacks.
+            m_demuxer_ctx = recomp_create_thread_context(m_proc_ctx, 1024 * 1024);
         }
         if (m_init_data.default_language && ctx) {
             const char *lang = (const char *)recomp_guest_to_host(ctx, m_init_data.default_language);
@@ -320,16 +298,26 @@ public:
         });
     }
 
-    ~AvPlayer() {
-        stop_playback_internal(m_main_ctx, false);
+    // Stops the controller and playback and closes the source. ctx is the caller of
+    // sceAvPlayerClose: guest deallocate and file close callbacks run on it.
+    void shutdown(GuestContext *ctx) {
         m_controller_stop.store(true);
         m_event_queue.notify_all();
         if (m_controller_thread.joinable()) {
             m_controller_thread.join();
         }
+        stop_playback_internal(ctx, false);
+        close_source(ctx);
+    }
+
+    ~AvPlayer() {
         if (m_controller_ctx) {
             recomp_free_thread_context(m_controller_ctx);
             m_controller_ctx = nullptr;
+        }
+        if (m_demuxer_ctx) {
+            recomp_free_thread_context(m_demuxer_ctx);
+            m_demuxer_ctx = nullptr;
         }
     }
 
@@ -337,15 +325,19 @@ public:
         m_post_init_data = data;
     }
 
-    int32_t add_source(const char *path) {
+    // path_gaddr is the guest address of the source path. With the game's file_replacement
+    // callbacks the source is read through them on ctx; otherwise the path is a guest file
+    // system path. A source that is already open is stopped and closed first.
+    int32_t add_source(GuestContext *ctx, uint64_t path_gaddr) {
+        const char *path = (const char *)recomp_guest_to_host(ctx, path_gaddr);
         if (!path || path[0] == '\0') return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
-        m_state.store(AvState::AddingSource);
 
-        char host_path[1024] = {0};
-        const char *open_path = path;
-        if (ps4_vfs_resolve(path, host_path, sizeof(host_path)) == 0) {
-            open_path = host_path;
+        if (m_fmt_ctx) {
+            std::unique_lock<std::mutex> lock(m_state_mutex);
+            stop_playback_internal(ctx, false);
+            close_source(ctx);
         }
+        m_state.store(AvState::AddingSource);
 
         AVFormatContext *context = avformat_alloc_context();
         if (!context) {
@@ -354,21 +346,44 @@ public:
             return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;
         }
 
-        if (avformat_open_input(&context, open_path, nullptr, nullptr) < 0) {
-            AVPLAYER_LOG("Failed to open video file %s (open_path: %s)", path, open_path);
-            avformat_free_context(context);
+        int open_res = 0;
+        if (m_init_data.file_replacement.open) {
+            auto streamer = std::make_unique<AvPlayerFileStreamer>(m_init_data.file_replacement);
+            if (!streamer->open(ctx, path_gaddr)) {
+                AVPLAYER_LOG("Failed to open video file %s through the game's file callbacks", path);
+                avformat_free_context(context);
+                m_state.store(AvState::Error);
+                return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;
+            }
+            context->pb = streamer->avio();
+            context->flags |= AVFMT_FLAG_CUSTOM_IO;
+            m_file_streamer = std::move(streamer);
+            // The path names the stream for format probing; the bytes come from pb.
+            open_res = avformat_open_input(&context, path, nullptr, nullptr);
+        } else {
+            char host_path[1024] = {0};
+            const char *open_path = path;
+            if (ps4_vfs_resolve(path, host_path, sizeof(host_path)) == 0) {
+                open_path = host_path;
+            }
+            open_res = avformat_open_input(&context, open_path, nullptr, nullptr);
+        }
+        // avformat_open_input frees context on failure.
+        if (open_res < 0) {
+            AVPLAYER_LOG("Failed to open video file %s: %d", path, open_res);
+            close_source(ctx);
             m_state.store(AvState::Error);
             return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;
         }
-
-        if (avformat_find_stream_info(context, nullptr) < 0) {
-            AVPLAYER_LOG("Failed to find stream info for %s", path);
-            avformat_close_input(&context);
-            m_state.store(AvState::Error);
-            return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;
-        }
-
         m_fmt_ctx = context;
+
+        if (avformat_find_stream_info(m_fmt_ctx, nullptr) < 0) {
+            AVPLAYER_LOG("Failed to find stream info for %s", path);
+            close_source(ctx);
+            m_state.store(AvState::Error);
+            return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;
+        }
+
         m_streams.clear();
         for (uint32_t i = 0; i < m_fmt_ctx->nb_streams; ++i) {
             AVStream *stream = m_fmt_ctx->streams[i];
@@ -439,6 +454,10 @@ public:
         std::unique_lock<std::mutex> lock(m_state_mutex);
         if (m_video_stream_idx < 0 && m_audio_stream_idx < 0) {
             AVPLAYER_LOG("Cannot start playback: no streams enabled");
+            return false;
+        }
+        if (!m_demuxer_ctx) {
+            AVPLAYER_LOG("Cannot start playback: no guest context for the demuxer thread");
             return false;
         }
 
@@ -688,6 +707,20 @@ private:
         buf.host_ptr = nullptr;
     }
 
+    // Closes the demuxer input and the game's file. Playback must be stopped.
+    void close_source(GuestContext *ctx) {
+        if (m_fmt_ctx) {
+            avformat_close_input(&m_fmt_ctx);
+        }
+        if (m_file_streamer) {
+            m_file_streamer->close(ctx);
+            m_file_streamer.reset();
+        }
+        m_streams.clear();
+        m_video_stream_idx = -1;
+        m_audio_stream_idx = -1;
+    }
+
     bool stop_playback_internal(GuestContext *ctx, bool emit_event = true) {
         m_workers_stop.store(true);
 
@@ -745,10 +778,7 @@ private:
             sws_freeContext(m_sws_ctx);
             m_sws_ctx = nullptr;
         }
-        if (m_swr_ctx) {
-            swr_free(&m_swr_ctx);
-            m_swr_ctx = nullptr;
-        }
+        m_audio_converter.reset();
 
         m_state.store(AvState::Stop);
         if (emit_event) {
@@ -759,6 +789,13 @@ private:
 
     void demuxer_worker() {
         AVPLAYER_LOG("Demuxer worker started");
+        RecompThread *sys_thr = nullptr;
+        if (m_demuxer_ctx) {
+            sys_thr = recomp_init_system_thread(m_demuxer_ctx, "AvDemuxer");
+        }
+        if (m_file_streamer) {
+            m_file_streamer->bind(m_demuxer_ctx);
+        }
         while (!m_workers_stop.load()) {
             if (m_video_packets.size() > 30 || m_audio_packets.size() > 60) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -792,6 +829,9 @@ private:
             } else {
                 av_packet_free(&pkt);
             }
+        }
+        if (sys_thr) {
+            recomp_cleanup_system_thread(sys_thr);
         }
         AVPLAYER_LOG("Demuxer worker ended");
     }
@@ -901,66 +941,24 @@ private:
                 GuestBuffer buf;
                 if (!m_free_audio_buffers.wait_pop(m_workers_stop, buf)) break;
 
-                const AVFrame *target_frame = raw_frame;
-                AVFrame *converted_frame = nullptr;
-
-                if (raw_frame->format != AV_SAMPLE_FMT_S16) {
-                    converted_frame = av_frame_alloc();
-                    converted_frame->best_effort_timestamp = raw_frame->best_effort_timestamp;
-                    converted_frame->pts = raw_frame->pts;
-                    converted_frame->pkt_dts = raw_frame->pkt_dts < 0 ? 0 : raw_frame->pkt_dts;
-                    converted_frame->format = AV_SAMPLE_FMT_S16;
-                    av_channel_layout_copy(&converted_frame->ch_layout, &raw_frame->ch_layout);
-                    converted_frame->sample_rate = raw_frame->sample_rate;
-
-                    if (!m_swr_ctx) {
-                        SwrContext *swr = nullptr;
-                        AVChannelLayout in_layout{};
-                        AVChannelLayout out_layout{};
-                        av_channel_layout_copy(&in_layout, &raw_frame->ch_layout);
-                        av_channel_layout_copy(&out_layout, &raw_frame->ch_layout);
-                        swr_alloc_set_opts2(&swr, &out_layout, AV_SAMPLE_FMT_S16, raw_frame->sample_rate,
-                                            &in_layout, (AVSampleFormat)raw_frame->format, raw_frame->sample_rate,
-                                            0, nullptr);
-                        av_channel_layout_uninit(&in_layout);
-                        av_channel_layout_uninit(&out_layout);
-                        m_swr_ctx = swr;
-                        swr_init(m_swr_ctx);
-                    }
-
-                    int conv_res = swr_convert_frame(m_swr_ctx, converted_frame, raw_frame);
-                    if (conv_res < 0) {
-                        AVPLAYER_LOG("swr_convert_frame error %d", conv_res);
-                        av_frame_free(&converted_frame);
-                        m_free_audio_buffers.push(std::move(buf));
-                        av_frame_unref(raw_frame);
-                        continue;
-                    }
-                    target_frame = converted_frame;
+                DecodedAudioFrame frame{};
+                const int conv = m_audio_converter.convert(raw_frame, buf.host_ptr, buf.size,
+                                                           &frame.info.details.audio);
+                if (conv < 0) {
+                    AVPLAYER_LOG("Audio frame conversion failed (%d channels, %d samples): %d",
+                                 raw_frame->ch_layout.nb_channels, raw_frame->nb_samples, conv);
+                    m_free_audio_buffers.push(std::move(buf));
+                    av_frame_unref(raw_frame);
+                    continue;
                 }
-
-                uint32_t channels = (uint32_t)target_frame->ch_layout.nb_channels;
-                uint32_t bytes = channels * (uint32_t)target_frame->nb_samples * sizeof(int16_t);
-                if (bytes <= buf.size && target_frame->data[0]) {
-                    memcpy(buf.host_ptr, target_frame->data[0], bytes);
-                }
-
                 AVStream *st = m_fmt_ctx->streams[m_audio_stream_idx];
                 uint64_t ts = frame_timestamp_millis(raw_frame, st->time_base);
 
-                DecodedAudioFrame frame{};
                 frame.buffer = std::move(buf);
                 frame.info.p_data = frame.buffer.guest_addr;
                 frame.info.timestamp = ts;
-                frame.info.details.audio.channel_count = (uint16_t)channels;
-                frame.info.details.audio.sample_rate = (uint32_t)target_frame->sample_rate;
-                frame.info.details.audio.size = bytes;
 
                 m_ready_audio_frames.push(std::move(frame));
-
-                if (converted_frame) {
-                    av_frame_free(&converted_frame);
-                }
                 av_frame_unref(raw_frame);
             }
         }
@@ -992,7 +990,8 @@ private:
                     }
                     if (v_idx >= 0) enable_stream((uint32_t)v_idx);
                     if (a_idx >= 0) enable_stream((uint32_t)a_idx);
-                    start_playback(m_main_ctx);
+                    // Guest allocator callbacks run on this thread's own context.
+                    start_playback(m_controller_ctx);
                 }
                 if (m_init_data.event_replacement.event_callback && m_controller_ctx) {
                     m_controller_ctx->rdi = m_init_data.event_replacement.object_ptr;
@@ -1019,12 +1018,13 @@ private:
 
     AvPlayerInitData m_init_data{};
     AvPlayerPostInitData m_post_init_data{};
-    GuestContext *m_main_ctx = nullptr;
     GuestContext *m_proc_ctx = nullptr;
     GuestContext *m_controller_ctx = nullptr;
+    GuestContext *m_demuxer_ctx = nullptr;
     char m_default_language[8] = {0};
 
     AVFormatContext *m_fmt_ctx = nullptr;
+    std::unique_ptr<AvPlayerFileStreamer> m_file_streamer;
     std::vector<StreamDesc> m_streams;
     int m_video_stream_idx = -1;
     int m_audio_stream_idx = -1;
@@ -1032,7 +1032,7 @@ private:
     AVCodecContext *m_video_codec_ctx = nullptr;
     AVCodecContext *m_audio_codec_ctx = nullptr;
     SwsContext *m_sws_ctx = nullptr;
-    SwrContext *m_swr_ctx = nullptr;
+    AvPlayerAudioConverter m_audio_converter;
 
     SafeQueue<AVPacket *> m_video_packets;
     SafeQueue<AVPacket *> m_audio_packets;
@@ -1072,6 +1072,18 @@ private:
 // Host Shims
 // ==========================================
 
+// file_replacement is all four callbacks or none.
+static bool has_partial_file_replacement(const AvPlayerFileReplacement &fr) {
+    const bool any = fr.open || fr.close || fr.read_offset || fr.size;
+    if (any && !AvPlayerFileStreamer::complete(fr)) {
+        AVPLAYER_LOG("Incomplete file_replacement (open=0x%llx close=0x%llx read_offset=0x%llx size=0x%llx)",
+                     (unsigned long long)fr.open, (unsigned long long)fr.close,
+                     (unsigned long long)fr.read_offset, (unsigned long long)fr.size);
+        return true;
+    }
+    return false;
+}
+
 void shim_sceAvPlayerInit(GuestContext *ctx) {
     if (!ctx->rdi) {
         ctx->rax = 0;
@@ -1087,6 +1099,11 @@ void shim_sceAvPlayerInit(GuestContext *ctx) {
                  data->auto_start, data->num_output_video_framebuffers,
                  (unsigned long long)data->event_replacement.event_callback);
 
+    if (has_partial_file_replacement(data->file_replacement)) {
+        ctx->rax = 0;
+        SHIM_RETURN();
+    }
+
     AvPlayer *player = new AvPlayer(ctx, *data);
     ctx->rax = (uint64_t)player;
     SHIM_RETURN();
@@ -1100,6 +1117,11 @@ void shim_sceAvPlayerInitEx(GuestContext *ctx) {
     const AvPlayerInitDataEx *p_data = (const AvPlayerInitDataEx *)recomp_guest_to_host(ctx, ctx->rdi);
     uint64_t *out_handle = (uint64_t *)recomp_guest_to_host(ctx, ctx->rsi);
     if (!p_data || !out_handle) {
+        ctx->rax = (uint64_t)(int64_t)ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
+        SHIM_RETURN();
+    }
+
+    if (has_partial_file_replacement(p_data->file_replacement)) {
         ctx->rax = (uint64_t)(int64_t)ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
         SHIM_RETURN();
     }
@@ -1133,13 +1155,14 @@ void shim_sceAvPlayerPostInit(GuestContext *ctx) {
 
 void shim_sceAvPlayerAddSource(GuestContext *ctx) {
     AvPlayer *player = (AvPlayer *)ctx->rdi;
-    const char *path = (const char *)recomp_guest_to_host(ctx, ctx->rsi);
+    const uint64_t path_gaddr = ctx->rsi;
+    const char *path = (const char *)recomp_guest_to_host(ctx, path_gaddr);
     if (!player || !path) {
         ctx->rax = (uint64_t)(int64_t)ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
         SHIM_RETURN();
     }
     AVPLAYER_LOG("sceAvPlayerAddSource: %s", path);
-    ctx->rax = (uint64_t)(int64_t)player->add_source(path);
+    ctx->rax = (uint64_t)(int64_t)player->add_source(ctx, path_gaddr);
     SHIM_RETURN();
 }
 
@@ -1151,12 +1174,11 @@ void shim_sceAvPlayerAddSourceEx(GuestContext *ctx) {
         ctx->rax = (uint64_t)(int64_t)ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
         SHIM_RETURN();
     }
-    const char *path = (const char *)recomp_guest_to_host(ctx, details->uri.name);
-    if (!path) {
+    if (!recomp_guest_to_host(ctx, details->uri.name)) {
         ctx->rax = (uint64_t)(int64_t)ORBIS_AVPLAYER_ERROR_INVALID_PARAMS;
         SHIM_RETURN();
     }
-    ctx->rax = (uint64_t)(int64_t)player->add_source(path);
+    ctx->rax = (uint64_t)(int64_t)player->add_source(ctx, details->uri.name);
     SHIM_RETURN();
 }
 
@@ -1330,6 +1352,7 @@ void shim_sceAvPlayerClose(GuestContext *ctx) {
         SHIM_RETURN();
     }
     AVPLAYER_LOG("sceAvPlayerClose called");
+    player->shutdown(ctx);
     delete player;
     ctx->rax = 0;
     SHIM_RETURN();

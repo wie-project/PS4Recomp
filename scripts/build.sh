@@ -66,6 +66,8 @@ cp 3rdparty/spirv-cross/spirv_*.hpp "$STAGING_DIR/spirv-cross/"
 cp 3rdparty/spirv-cross/GLSL.std.450.h "$STAGING_DIR/spirv-cross/"
 cp 3rdparty/libatrac9/libatrac9.a "$STAGING_DIR/libatrac9/"
 cp 3rdparty/libatrac9/C/src/libatrac9.h "$STAGING_DIR/libatrac9/C/src/"
+# libSceNgs2 resets a decoder in place: it needs the Atrac9Handle layout.
+cp 3rdparty/libatrac9/C/src/structures.h "$STAGING_DIR/libatrac9/C/src/"
 cp 3rdparty/minimp3/minimp3.h "$STAGING_DIR/minimp3/"
 
 echo "=== [ps4-recomp] 4/5: Compiling standalone binary ==="

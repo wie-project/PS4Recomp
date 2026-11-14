@@ -148,49 +148,6 @@ void shim_error(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-// sysconf
-void shim_sysconf(GuestContext *ctx) {
-  int name = (int)ctx->rdi;
-  int host_name = -1;
-  switch (name) {
-  case 47: // FreeBSD _SC_PAGESIZE
-    host_name = _SC_PAGESIZE;
-    break;
-  case 57: // FreeBSD _SC_NPROCESSORS_CONF
-    host_name = _SC_NPROCESSORS_CONF;
-    break;
-  case 58: // FreeBSD _SC_NPROCESSORS_ONLN
-    host_name = _SC_NPROCESSORS_ONLN;
-    break;
-  case 1: // FreeBSD _SC_ARG_MAX
-    host_name = _SC_ARG_MAX;
-    break;
-  case 2: // FreeBSD _SC_CHILD_MAX
-    host_name = _SC_CHILD_MAX;
-    break;
-  case 3: // FreeBSD _SC_CLK_TCK
-    host_name = _SC_CLK_TCK;
-    break;
-  case 5: // FreeBSD _SC_OPEN_MAX
-    host_name = _SC_OPEN_MAX;
-    break;
-  default:
-    host_name = name;
-    break;
-  }
-  long val = sysconf(host_name);
-  if (val < 0) {
-    if (name == 47)
-      val = 4096;
-    else if (name == 57 || name == 58)
-      val = 8;
-    else
-      val = 4096;
-  }
-  ctx->rax = (uint64_t)val;
-  SHIM_RETURN();
-}
-
 // nanosleep
 void shim_nanosleep(GuestContext *ctx) {
   uint64_t req_addr = ctx->rdi;

@@ -400,16 +400,32 @@ static void fiber_entry_returned(FiberHost *h) {
   abort();
 }
 
-// Start fiber h's guest entry function on the current host stack.
+// A fiber without a context runs on the stack of the guest thread that waits in Run, this far
+// below the Run call.
+#define FIBER_CONTEXTLESS_STACK_GAP 8192u
+
+// Start fiber h's guest entry function on the current host stack. A fiber with a context runs
+// on it; one without starts over each time it is run (see fiber_restarts).
 static void fiber_call_entry(FiberHost *h, uint64_t arg_on_run) {
   GuestContext *ctx = h->fctx;
   OrbisFiberObject *f = fiber_obj(ctx, h->guest_addr);
-  ctx->rsp = (f->addr_context + f->size_context) & ~0xFULL;
+  if (f->addr_context) {
+    ctx->rsp = (f->addr_context + f->size_context) & ~0xFULL;
+  } else {
+    ctx->rsp = (h->worker->ctx->rsp - FIBER_CONTEXTLESS_STACK_GAP) & ~0xFULL;
+    ctx->unwind_frame = NULL;
+  }
   ctx->rbp = 0;
   ctx->rdi = f->arg_on_initialize;
   ctx->rsi = arg_on_run;
   recomp_call_guest(ctx, f->entry);
   fiber_entry_returned(h);
+}
+
+// On Orbis a fiber without a context keeps no state when it leaves (Switch or ReturnToThread):
+// the next Run or Switch starts it over from its entry.
+static bool fiber_restarts(GuestContext *ctx, const FiberHost *h) {
+  return fiber_obj(ctx, h->guest_addr)->addr_context == 0;
 }
 
 // ---- Thread mode: one host thread per fiber, handed over with batons ----
@@ -544,18 +560,25 @@ static void fiber_co_main(FiberHost *h) {
   fiber_call_entry(h, h->in_arg);
 }
 
+// Point h->sp at a frame on top of h's host stack that starts the entry. A fiber that restarts
+// does this while it still runs on that stack, before it switches away: the frames it overwrites
+// belong to the entry call it abandons.
+static void co_reset_frame(FiberHost *h) {
+  uint64_t *frame = (uint64_t *)((uint8_t *)h->stack + FIBER_HOST_STACK_SIZE) - 20; // 160-byte switch frame
+  memset(frame, 0, 160);
+  frame[0] = (uint64_t)(uintptr_t)h;            // x19
+  frame[1] = (uint64_t)(uintptr_t)fiber_co_main; // x20
+  frame[11] = (uint64_t)(uintptr_t)ps4_fiber_co_trampoline; // x30; x29 = 0 ends the frame chain
+  h->sp = frame;
+}
+
 static bool co_alloc_stack(FiberHost *h) {
   if (h->stack) return true;
   void *p = mmap(NULL, FIBER_HOST_STACK_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
   if (p == MAP_FAILED) return false;
   mprotect(p, (size_t)getpagesize(), PROT_NONE); // guard page
   h->stack = p;
-  uint64_t *frame = (uint64_t *)((uint8_t *)p + FIBER_HOST_STACK_SIZE) - 20; // 160-byte switch frame
-  memset(frame, 0, 160);
-  frame[0] = (uint64_t)(uintptr_t)h;            // x19
-  frame[1] = (uint64_t)(uintptr_t)fiber_co_main; // x20
-  frame[11] = (uint64_t)(uintptr_t)ps4_fiber_co_trampoline; // x30; x29 = 0 ends the frame chain
-  h->sp = frame;
+  co_reset_frame(h);
   atomic_fetch_add_explicit(&g_fstat_creates, 1, memory_order_relaxed);
   return true;
 }
@@ -574,6 +597,8 @@ static void co_enter(FiberHost *h, FiberWorker *w, uint64_t arg, _Atomic uint32_
 }
 
 // ---- Guest API ----
+
+static void fiber_log_failure(GuestContext *ctx, const char *op, uint64_t addr, int32_t ret);
 
 static int32_t fiber_initialize(GuestContext *ctx, uint64_t fiber_addr, uint64_t name_addr,
                                 uint64_t entry, uint64_t arg_on_init, uint64_t addr_context,
@@ -673,6 +698,7 @@ void shim_sceFiberFinalize(GuestContext *ctx) {
       f->magic_end = 0;
     }
   }
+  fiber_log_failure(ctx, "sceFiberFinalize", addr, ret);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
 }
@@ -704,11 +730,7 @@ static int32_t fiber_run(GuestContext *ctx, uint64_t addr, uint64_t addr_context
   OrbisFiberObject *f = NULL;
   int32_t ret = fiber_claim(ctx, addr, &f);
   if (ret != 0) return ret;
-  if (attach) {
-    ret = fiber_attach_context(f, addr_context, size_context);
-  } else if (!f->addr_context) {
-    ret = (int32_t)ORBIS_FIBER_ERROR_INVALID;
-  }
+  if (attach) ret = fiber_attach_context(f, addr_context, size_context);
   FiberWorker *w = ret == 0 ? get_worker(ctx) : NULL;
   if (ret == 0 && !w) ret = (int32_t)ORBIS_FIBER_ERROR_INVALID;
   FiberHost *h = (FiberHost *)(uintptr_t)f->host;
@@ -745,11 +767,7 @@ static int32_t fiber_switch(GuestContext *ctx, uint64_t addr, uint64_t addr_cont
   OrbisFiberObject *f = NULL;
   int32_t ret = fiber_claim(ctx, addr, &f);
   if (ret != 0) return ret;
-  if (attach) {
-    ret = fiber_attach_context(f, addr_context, size_context);
-  } else if (!f->addr_context) {
-    ret = (int32_t)ORBIS_FIBER_ERROR_INVALID;
-  }
+  if (attach) ret = fiber_attach_context(f, addr_context, size_context);
   FiberHost *h = (FiberHost *)(uintptr_t)f->host;
   if (ret == 0 && !g_fiber_threads && !co_alloc_stack(h)) ret = (int32_t)ORBIS_FIBER_ERROR_INVALID;
   if (ret != 0) {
@@ -762,9 +780,12 @@ static int32_t fiber_switch(GuestContext *ctx, uint64_t addr, uint64_t addr_cont
   fiber_release_thread(self->fctx, w->ctx);
   if (!g_fiber_threads) {
     fstat_count(FSTAT_SWITCH);
+    const bool restarts = fiber_restarts(ctx, self);
     atomic_store(&self_obj->state, FIBER_STATE_SUSPENDING);
     co_enter(h, w, arg_on_run_to, &self_obj->state);
-    ps4_fiber_ctx_switch(&self->sp, h->sp);
+    void *discard_sp;
+    if (restarts) co_reset_frame(self);
+    ps4_fiber_ctx_switch(restarts ? &discard_sp : &self->sp, h->sp);
     // Resumed, possibly on another worker's host thread: locals only.
     co_finish_switch(&self->release);
     write_u64(ctx, arg_on_run_addr, self->in_arg);
@@ -776,24 +797,56 @@ static int32_t fiber_switch(GuestContext *ctx, uint64_t addr, uint64_t addr_cont
   // us just posts our baton, which fiber_suspend consumes right away. The
   // target is the worker's current fiber first: an IDLE fiber may be finalized.
   w->current = h;
+  const bool restarts = fiber_restarts(ctx, self);
+  // A restarting fiber ends this host thread; whoever claims it next starts a new one.
+  if (restarts) atomic_store(&self->host_started, false);
   atomic_store(&self_obj->state, FIBER_STATE_IDLE);
   int err = fiber_resume(h, w, arg_on_run_to, FSTAT_SWITCH);
   if (err != 0) {
     uint32_t idle = FIBER_STATE_IDLE;
     // Unless another thread has claimed us meanwhile (then we may be finalized), we run on.
-    w->current = atomic_compare_exchange_strong(&self_obj->state, &idle, FIBER_STATE_RUNNING) ? self : NULL;
+    const bool kept = atomic_compare_exchange_strong(&self_obj->state, &idle, FIBER_STATE_RUNNING);
+    if (kept && restarts) atomic_store(&self->host_started, true);
+    w->current = kept ? self : NULL;
     atomic_store(&f->state, FIBER_STATE_IDLE);
     return (int32_t)ORBIS_FIBER_ERROR_INVALID;
   }
   // From here another thread may claim this fiber; only touch locals.
+  if (restarts) pthread_exit(NULL);
   uint64_t arg = fiber_suspend(self);
   write_u64(ctx, arg_on_run_addr, arg);
   return 0;
 }
 
+// Games often ignore these results, so a failed transfer is logged where it happens.
+static void fiber_log_failure(GuestContext *ctx, const char *op, uint64_t addr, int32_t ret) {
+  if (ret == 0) return;
+  const char *name = "?";
+  unsigned state = 0;
+  uint32_t magic_start = 0, magic_end = 0;
+  uint64_t host = 0, context = 0;
+  if (addr && !(addr & 7) && addr + sizeof(OrbisFiberObject) <= ctx->mem_size) {
+    OrbisFiberObject *f = fiber_obj(ctx, addr);
+    name = f->name;
+    state = atomic_load(&f->state);
+    magic_start = f->magic_start;
+    magic_end = f->magic_end;
+    host = f->host;
+    context = f->addr_context;
+  }
+  FiberHost *self = tl_fiber_self;
+  const char *from = self ? fiber_obj(ctx, self->guest_addr)->name : "(thread)";
+  fprintf(stderr,
+          "[ps4-fiber] %s(0x%llx '%.32s', state %u, magic %08x/%08x, host 0x%llx, context 0x%llx) from '%.32s' "
+          "on guest thread %u -> 0x%08x\n",
+          op, (unsigned long long)addr, name, state, magic_start, magic_end, (unsigned long long)host,
+          (unsigned long long)context, from, (unsigned)ctx->thread_id, (uint32_t)ret);
+}
+
 // sceFiberRun(fiber, argOnRunTo, argOnReturn*)
 void shim_sceFiberRun(GuestContext *ctx) {
   int32_t ret = fiber_run(ctx, ctx->rdi, 0, 0, false, ctx->rsi, ctx->rdx);
+  fiber_log_failure(ctx, "sceFiberRun", ctx->rdi, ret);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
 }
@@ -801,6 +854,7 @@ void shim_sceFiberRun(GuestContext *ctx) {
 // sceFiberSwitch(fiber, argOnRunTo, argOnRun*)
 void shim_sceFiberSwitch(GuestContext *ctx) {
   int32_t ret = fiber_switch(ctx, ctx->rdi, 0, 0, false, ctx->rsi, ctx->rdx);
+  fiber_log_failure(ctx, "sceFiberSwitch", ctx->rdi, ret);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
 }
@@ -808,6 +862,7 @@ void shim_sceFiberSwitch(GuestContext *ctx) {
 // _sceFiberAttachContextAndRun(fiber, addrContext, sizeContext, argOnRunTo, argOnReturn*)
 void shim_sceFiberAttachContextAndRun(GuestContext *ctx) {
   int32_t ret = fiber_run(ctx, ctx->rdi, ctx->rsi, ctx->rdx, true, ctx->rcx, ctx->r8);
+  fiber_log_failure(ctx, "sceFiberAttachContextAndRun", ctx->rdi, ret);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
 }
@@ -815,6 +870,7 @@ void shim_sceFiberAttachContextAndRun(GuestContext *ctx) {
 // _sceFiberAttachContextAndSwitch(fiber, addrContext, sizeContext, argOnRunTo, argOnRun*)
 void shim_sceFiberAttachContextAndSwitch(GuestContext *ctx) {
   int32_t ret = fiber_switch(ctx, ctx->rdi, ctx->rsi, ctx->rdx, true, ctx->rcx, ctx->r8);
+  fiber_log_failure(ctx, "sceFiberAttachContextAndSwitch", ctx->rdi, ret);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
 }
@@ -834,19 +890,25 @@ void shim_sceFiberReturnToThread(GuestContext *ctx) {
   w->current = NULL;
   tcb_set_running(w->ctx, w->ctx);
   uint64_t arg;
+  const bool restarts = fiber_restarts(ctx, self);
   if (!g_fiber_threads) {
     fstat_count(FSTAT_RETURN);
     atomic_store(&self_obj->state, FIBER_STATE_SUSPENDING);
     w->release = &self_obj->state;
     tl_fiber_self = NULL;
     g_current_ctx = w->ctx;
-    ps4_fiber_ctx_switch(&self->sp, w->sp);
+    void *discard_sp;
+    if (restarts) co_reset_frame(self);
+    ps4_fiber_ctx_switch(restarts ? &discard_sp : &self->sp, w->sp);
     // Resumed, possibly on another worker's host thread: locals only.
     co_finish_switch(&self->release);
     arg = self->in_arg;
   } else {
+    // A restarting fiber ends this host thread; whoever claims it next starts a new one.
+    if (restarts) atomic_store(&self->host_started, false);
     atomic_store(&self_obj->state, FIBER_STATE_IDLE);
     baton_post(&w->baton, FSTAT_RETURN);
+    if (restarts) pthread_exit(NULL);
     arg = fiber_suspend(self);
   }
   write_u64(ctx, arg_on_run_addr, arg);

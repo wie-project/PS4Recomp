@@ -40,6 +40,9 @@ const (
 	ImportHostShim ImportClass = iota
 	ImportGuestExport
 	ImportDefined
+	// ImportWeakNull is a weak undefined plaintext symbol no module defines: the loader binds 0
+	// (elfloader.Relocation.ResolvesToNull).
+	ImportWeakNull
 	ImportUnresolved
 )
 
@@ -51,6 +54,8 @@ func (c ImportClass) String() string {
 		return "guest-export"
 	case ImportDefined:
 		return "defined"
+	case ImportWeakNull:
+		return "weak-null"
 	default:
 		return "unresolved"
 	}
@@ -83,6 +88,7 @@ type HLEReport struct {
 	HostShimCount    int
 	GuestExportCount int
 	DefinedCount     int
+	WeakNullCount    int
 	UnresolvedCount  int
 	UnresolvedRelocs int
 
@@ -157,6 +163,8 @@ func NewHLEReport(loaded *elfloader.LoadedELF, modules []GuestModule) *HLEReport
 					}
 					if rel.SymName == "__stack_chk_guard" || canon == "__stack_chk_guard" {
 						ent.Class = ImportDefined
+					} else if rel.ResolvesToNull() {
+						ent.Class = ImportWeakNull
 					}
 				}
 			}
@@ -175,6 +183,8 @@ func NewHLEReport(loaded *elfloader.LoadedELF, modules []GuestModule) *HLEReport
 			r.GuestExportCount++
 		case ImportDefined:
 			r.DefinedCount++
+		case ImportWeakNull:
+			r.WeakNullCount++
 		default:
 			r.UnresolvedCount++
 			r.UnresolvedRelocs += ent.Relocs
@@ -388,8 +398,8 @@ func (r *HLEReport) ImportSummary() string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "             HLE imports: %d unique (%d host shims, %d linked PRX, %d defined, %d unresolved)\n",
-		len(r.Imports), r.HostShimCount, r.GuestExportCount, r.DefinedCount, r.UnresolvedCount)
+	fmt.Fprintf(&b, "             HLE imports: %d unique (%d host shims, %d linked PRX, %d defined, %d weak null, %d unresolved)\n",
+		len(r.Imports), r.HostShimCount, r.GuestExportCount, r.DefinedCount, r.WeakNullCount, r.UnresolvedCount)
 	if r.UnresolvedCount == 0 {
 		return b.String()
 	}
@@ -511,6 +521,7 @@ func (r *HLEReport) FullString() string {
 	fmt.Fprintf(&b, "  host shim:     %d\n", r.HostShimCount)
 	fmt.Fprintf(&b, "  linked PRX:    %d\n", r.GuestExportCount)
 	fmt.Fprintf(&b, "  defined:       %d\n", r.DefinedCount)
+	fmt.Fprintf(&b, "  weak null:     %d\n", r.WeakNullCount)
 	fmt.Fprintf(&b, "  unresolved:    %d (%d relocs)\n\n", r.UnresolvedCount, r.UnresolvedRelocs)
 
 	type libGroup struct {

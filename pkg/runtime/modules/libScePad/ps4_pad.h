@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "recomp_runtime.h"
+#include "ps4_pad_touch.h"
 
 #define ORBIS_PAD_BUTTON_L3        0x0002
 #define ORBIS_PAD_BUTTON_R3        0x0004
@@ -22,7 +23,6 @@
 #define ORBIS_PAD_BUTTON_SQUARE    0x8000
 #define ORBIS_PAD_BUTTON_TOUCH_PAD 0x100000
 
-#define ORBIS_PAD_MAX_TOUCH_NUM 2
 
 typedef struct vec_float3 {
     float x;
@@ -46,19 +46,6 @@ typedef struct analog {
     uint8_t l2;
     uint8_t r2;
 } analog;
-
-typedef struct OrbisPadTouch {
-    uint16_t x, y;
-    uint8_t finger;
-    uint8_t pad[3];
-} OrbisPadTouch;
-
-typedef struct OrbisPadTouchData {
-    uint8_t fingers;
-    uint8_t pad1[3];
-    uint32_t pad2;
-    OrbisPadTouch touch[ORBIS_PAD_MAX_TOUCH_NUM];
-} OrbisPadTouchData;
 
 typedef struct OrbisPadData {
     uint32_t buttons;
@@ -117,6 +104,8 @@ typedef struct OrbisPadControllerInformation {
 
 _Static_assert(sizeof(OrbisPadControllerInformation) == 28, "ScePadControllerInformation is 28 bytes");
 _Static_assert(sizeof(OrbisPadData) == 120, "ScePadData is 120 bytes");
+_Static_assert(offsetof(OrbisPadData, touch) == 0x34 && offsetof(OrbisPadData, touch.touch) == 0x3C,
+               "ScePadData.touchData at 0x34, its touch points at 0x3C");
 
 int32_t scePadInit(void);
 int32_t scePadOpen(int32_t userID, int32_t type, int32_t index, void *param);

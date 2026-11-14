@@ -99,6 +99,17 @@ if (GCN_BUILD_TOOLS)
     target_include_directories(gcn_dis PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${EXT}/fmt/include
                                ${EXT}/magic_enum/include ${EXT}/boost)
     target_compile_definitions(gcn_dis PRIVATE FMT_USE_NONTYPE_TEMPLATE_ARGS=0)
+    # Exercise the real internal SRT bytecode interpreter, including attempted-read observation.
+    add_executable(gcn_srt_reads tests/srt_reads.cpp)
+    target_link_libraries(gcn_srt_reads PRIVATE gcn_recompiler)
+    target_include_directories(gcn_srt_reads PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${EXT}/fmt/include
+                               ${EXT}/magic_enum/include ${EXT}/boost)
+    target_compile_definitions(gcn_srt_reads PRIVATE FMT_USE_NONTYPE_TEMPLATE_ARGS=0)
+    if (GCN_BUILD_MSL)
+        target_link_libraries(gcn_srt_reads PRIVATE ${GCN_SPIRV_CROSS_DIR}/libspirv-cross.a)
+    endif()
+    enable_testing()
+    add_test(NAME gcn_srt_reads COMMAND gcn_srt_reads)
     # C-only smoke test proving the API is callable from C.
     add_executable(gcn_c_smoke tools/c_smoke.c)
     target_link_libraries(gcn_c_smoke PRIVATE gcn_recompiler)

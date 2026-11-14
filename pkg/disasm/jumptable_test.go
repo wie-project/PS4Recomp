@@ -595,6 +595,9 @@ func TestSwitchTableCountBounds(t *testing.T) {
 		{"cmp ecx, 7; jb", dec([]byte{0x83, 0xf9, 0x07}, []byte{0x72, 0x00}), x86asm.RCX, 7},
 		{"cmp ecx, 7; ja", dec([]byte{0x83, 0xf9, 0x07}, []byte{0x77, 0x00}), x86asm.RCX, 8},
 		{"mov ebx, edx; inc edx; cmp edx, 0xe; ja", dec(movEbxEdx, []byte{0xff, 0xc2}, []byte{0x83, 0xfa, 0x0e}, []byte{0x77, 0x00}), x86asm.RBX, 0},
+		// libc.prx 0x29771df: a vector load between the check and its jump keeps the flags.
+		{"cmp eax, 4; vmovsd xmm7, [rbp-0x30]; ja", dec([]byte{0x83, 0xf8, 0x04}, []byte{0xc5, 0xfb, 0x10, 0x7d, 0xd0}, []byte{0x77, 0x00}), x86asm.RAX, 5},
+		{"cmp eax, 4; add edx, 1; ja", dec([]byte{0x83, 0xf8, 0x04}, []byte{0x83, 0xc2, 0x01}, []byte{0x77, 0x00}), x86asm.RAX, 0},
 	} {
 		if got := switchTableCount(tc.window, tc.idx); got != tc.want {
 			t.Errorf("%s: count %d, want %d", tc.name, got, tc.want)

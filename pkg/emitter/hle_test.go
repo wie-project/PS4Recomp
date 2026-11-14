@@ -223,3 +223,30 @@ func TestHLEReportWrite(t *testing.T) {
 		t.Fatal("report missing header")
 	}
 }
+
+// A weak undefined plaintext symbol no module defines is bound to 0 by the loader; the report
+// counts it apart from the unresolved imports, which a weak NID import without a shim stays.
+func TestHLEReportWeakNull(t *testing.T) {
+	loaded := &elfloader.LoadedELF{
+		MemoryImage: make([]byte, 0x100),
+		Relocations: []elfloader.Relocation{
+			{Offset: 0x10, Type: elfloader.R_X86_64_JUMP_SLOT, SymName: "module_start", WeakUndef: true},
+			{Offset: 0x18, Type: elfloader.R_X86_64_JUMP_SLOT, SymName: "module_start", WeakUndef: true},
+			{Offset: 0x20, Type: elfloader.R_X86_64_JUMP_SLOT, SymName: "zzzzzzzzzzz#A#B", WeakUndef: true},
+			{Offset: 0x28, Type: elfloader.R_X86_64_JUMP_SLOT, SymName: "module_stop"},
+		},
+	}
+	r := NewHLEReport(loaded, nil)
+	if r.WeakNullCount != 1 || r.UnresolvedCount != 2 || r.UnresolvedRelocs != 2 {
+		t.Fatalf("weak null %d, unresolved %d (%d relocs); want 1, 2 (2)", r.WeakNullCount, r.UnresolvedCount, r.UnresolvedRelocs)
+	}
+	for _, imp := range r.Imports {
+		want := ImportUnresolved
+		if imp.Name == "module_start" {
+			want = ImportWeakNull
+		}
+		if imp.Class != want {
+			t.Fatalf("%s: class %v, want %v", imp.Name, imp.Class, want)
+		}
+	}
+}

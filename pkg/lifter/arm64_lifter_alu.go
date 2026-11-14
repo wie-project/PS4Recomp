@@ -12,6 +12,9 @@ import (
 func (l *Arm64Lifter) liftMov(inst disasm.Instruction, nextPC uint64, lines []string) ([]string, error) {
 	dst := inst.Inst.Args[0]
 	src := inst.Inst.Args[1]
+	if op := inst.Inst.Opcode >> 24; op >= 0xa0 && op <= 0xa3 {
+		return liftMovMoffs(inst.Inst, lines), nil
+	}
 
 	// Reg <- Reg
 	if dstReg, ok := dst.(x86asm.Reg); ok {
@@ -142,6 +145,33 @@ func (l *Arm64Lifter) liftMov(inst disasm.Instruction, nextPC uint64, lines []st
 
 	lines = append(lines, "    brk #0 // unsupported mov")
 	return lines, nil
+}
+
+// liftMovMoffs handles MOV AL/AX/EAX/RAX, moffs (A0, A1) and MOV moffs, AL/AX/EAX/RAX (A2, A3):
+// the operand's 64-bit absolute address is Mem.Disp (x86asm reports it without base, index or
+// scale, as it does a VEX RIP-relative operand, so computeEffAddr cannot tell them apart), plus
+// the FS base with an FS override. A 32-bit address (ADDR32) and GS do not get here
+// (unsupportedAddressing).
+func liftMovMoffs(inst x86asm.Inst, lines []string) []string {
+	load := inst.Opcode>>24 <= 0xa1
+	mem, reg := inst.Args[1], inst.Args[0]
+	if !load {
+		mem, reg = inst.Args[0], inst.Args[1]
+	}
+	m := mem.(x86asm.Mem)
+	desc := arm64RegMap[reg.(x86asm.Reg)]
+	lines = append(lines, loadImm64("x16", uint64(m.Disp))...)
+	if m.Segment == x86asm.FS {
+		lines = append(lines, "    add x16, x16, x27")
+	}
+	switch {
+	case !load:
+		return append(lines, storeGuest(desc.Size, desc.X, desc.W, "x16"))
+	case desc.Size >= 4: // a 32-bit load zero-extends into RAX, as the x86 32-bit write does
+		return append(lines, loadGuest(desc.Size, desc.X, desc.W, "x16"))
+	}
+	lines = append(lines, loadGuest(desc.Size, "x17", "w17", "x16"))
+	return append(lines, fmt.Sprintf("    bfi %s, x17, #0, #%d", desc.X, 8*desc.Size))
 }
 
 // liftMovzx handles MOVZX.
@@ -2068,7 +2098,8 @@ func (l *Arm64Lifter) liftLeave(lines []string) []string {
 
 // liftShldShrd handles SHLD and SHRD (16/32/64-bit) with x86 flags: CF = last bit shifted out of
 // the destination, OF (count 1) = sign change, SF/ZF from the result. A masked count of 0
-// changes nothing. 16/32-bit operands are shifted as one 2*size-bit value in a 64-bit register.
+// changes nothing but still zero-extends a 32-bit register. 16/32-bit operands are shifted as
+// one 2*size-bit value in a 64-bit register.
 func (l *Arm64Lifter) liftShldShrd(inst disasm.Instruction, nextPC uint64, lines []string) ([]string, error) {
 	op := inst.Inst.Op
 	srcReg, okSrcReg := inst.Inst.Args[1].(x86asm.Reg)
@@ -2160,6 +2191,7 @@ func (l *Arm64Lifter) liftShldShrd(inst disasm.Instruction, nextPC uint64, lines
 	lines = append(lines, store(res)...)
 	if skip != "" {
 		lines = append(lines, skip+":")
+		lines = append(lines, zeroCountZext(inst)...)
 	}
 	return lines, nil
 }

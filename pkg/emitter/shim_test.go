@@ -16,6 +16,7 @@ func TestLookupShimByNID(t *testing.T) {
 		{"pthread_sigmask", "JZKw5+Wrnaw", "shim_pthread_sigmask"},
 		{"cpuset_getaffinity", "Pdgml4rbxYk", "shim_cpuset_getaffinity"},
 		{"getrlimit", "Wh7HbV7JFqc", "shim_getrlimit"},
+		{"sysctl", "DFmMT80xcNI", "shim_sysctl"},
 		{"raise", "0t0-MxQNwK4", "shim_raise"},
 		{"memcpy", "Q3VBxCXhUHs", "shim_memcpy"},
 		{"memset", "8zTFvBIAIN8", "shim_memset"},
@@ -541,7 +542,7 @@ func TestCatherineFullBodyShimsByNID(t *testing.T) {
 		{"sceZlibWaitForDone", "uB8VlDD4e0s"},
 		{"sceZlibGetResult", "2eDcGHC0YaM"},
 		{"sceZlibFinalize", "6na+Sa-B83w"},
-		// libSceFont (13)
+		// libSceFont (15)
 		{"sceFontRenderCharGlyphImage", "3G4zhgKuxE8"},
 		{"sceFontGetScalePixel", "CkVmLoCNN-8"},
 		{"sceFontSetResolutionDpi", "I1acwR7Qp8E"},
@@ -555,6 +556,8 @@ func TestCatherineFullBodyShimsByNID(t *testing.T) {
 		{"sceFontSetScalePoint", "sw65+7wXCKE"},
 		{"sceFontSetEffectWeight", "v0phZwa4R5o"},
 		{"sceFontRenderSurfaceSetScissor", "vRxf4d0ulPs"},
+		{"sceFontGetCharGlyphMetrics", "L97d+3OgMlE"},
+		{"sceFontGetKerning", "sDuhHGNhHvE"},
 		// libSceVideodec2 (9 from Catherine + extra)
 		{"sceVideodec2Decode", "852F5+q6+iM"},
 		{"sceVideodec2CreateDecoder", "CNNRoRYd8XI"},
