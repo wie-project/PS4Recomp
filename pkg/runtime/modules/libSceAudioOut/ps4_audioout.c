@@ -136,6 +136,16 @@ typedef struct {
   uint64_t first_sound_us;
   uint64_t first_sound_play_us;
   uint64_t first_sound_outputs;
+  // Producer timing and queue level (see Ps4AudioPortStats), and the perf line window.
+  uint64_t last_return_us;   // an output call returned; 0 = none yet
+  uint64_t max_work_us;
+  uint32_t min_queued;       // UINT32_MAX: no device period since the first output
+  uint64_t perf_outputs;
+  uint64_t perf_late;
+  uint64_t perf_underrun_frames;
+  uint32_t perf_min_queued;  // UINT32_MAX: none in the window
+  uint64_t perf_max_work_us;
+  uint64_t perf_max_block_us;
   // stats (guest input after volume, before mixing)
   double stat_sq;
   float stat_peak;
@@ -166,6 +176,17 @@ static double g_mix_sq = 0.0;
 static float g_mix_peak = 0.0f;
 static uint64_t g_mix_frames = 0;
 static uint64_t g_last_stat_us = 0;
+// Device periods: totals and the perf line window (always on, every PERF_WINDOW_US).
+#define PERF_WINDOW_US 5000000ULL
+static uint64_t g_periods = 0;
+static uint64_t g_starved_periods = 0; // a port that had output found its ring short
+static uint64_t g_perf_start_us = 0;
+static uint64_t g_perf_periods = 0;
+static uint64_t g_perf_starved = 0;
+static uint32_t g_perf_min_frames = 0;
+static uint32_t g_perf_max_frames = 0;
+static uint64_t g_perf_last_period_us = 0;
+static uint64_t g_perf_max_interval_us = 0;
 
 // WAV dump. The device (the headless clock thread or the CoreAudio render callback) copies each
 // mixed period into a ring; a writer thread moves the ring to the file. No file I/O runs under
@@ -590,21 +611,106 @@ static void audio_stats_maybe_log(AudioLogBuf *b) {
   g_mix_frames = 0;
 }
 
+// Called with g_audio_lock held; the caller prints `b` after the unlock. Always on: every
+// PERF_WINDOW_US while the device runs, a line on the device periods (starved: a port that had
+// output found its ring short, so the device played silence for it) and one per port that had
+// output in the window: grains against the port rate, late grains (the ring was already empty),
+// underrun frames, the lowest level queued ahead of the device, the longest time the guest took
+// between two output calls (its own work: when it passes the queued level, the ring runs dry) and
+// the longest time an output call blocked waiting for room.
+static void audio_perf_maybe_log(AudioLogBuf *b) {
+  if (!g_host_running) {
+    return;
+  }
+  uint64_t now = get_time_micros();
+  if (g_perf_start_us == 0) {
+    g_perf_start_us = now;
+    return;
+  }
+  if (now - g_perf_start_us < PERF_WINDOW_US) {
+    return;
+  }
+  double secs = (double)(now - g_perf_start_us) / 1e6;
+  logbuf_add(b,
+             "[AudioOut] perf: %.2f s, device %llu periods (%u..%u frames, max interval %.1f ms), "
+             "%llu starved\n",
+             secs, (unsigned long long)g_perf_periods, g_perf_min_frames, g_perf_max_frames,
+             (double)g_perf_max_interval_us / 1000.0, (unsigned long long)g_perf_starved);
+  for (int i = 1; i < MAX_AUDIO_PORTS; i++) {
+    Ps4AudioPort *p = &g_ports[i];
+    if (!p->in_use || p->perf_outputs == 0) {
+      continue;
+    }
+    char queued[32];
+    if (p->perf_min_queued == UINT32_MAX) {
+      snprintf(queued, sizeof(queued), "none");
+    } else {
+      snprintf(queued, sizeof(queued), "%u frames", p->perf_min_queued);
+    }
+    logbuf_add(b,
+               "[AudioOut] perf: port %d (type %d, %u frames): %llu outputs (expected %.1f), %llu "
+               "late, %llu underrun frames, min queued %s of %u, guest work max %.1f ms, blocked "
+               "max %.1f ms\n",
+               i, p->type, p->length, (unsigned long long)p->perf_outputs,
+               secs * (double)p->freq / (double)p->length, (unsigned long long)p->perf_late,
+               (unsigned long long)p->perf_underrun_frames, queued, p->ring_limit,
+               (double)p->perf_max_work_us / 1000.0, (double)p->perf_max_block_us / 1000.0);
+  }
+  for (int i = 1; i < MAX_AUDIO_PORTS; i++) {
+    Ps4AudioPort *p = &g_ports[i];
+    p->perf_outputs = 0;
+    p->perf_late = 0;
+    p->perf_underrun_frames = 0;
+    p->perf_min_queued = UINT32_MAX;
+    p->perf_max_work_us = 0;
+    p->perf_max_block_us = 0;
+  }
+  g_perf_start_us = now;
+  g_perf_periods = 0;
+  g_perf_starved = 0;
+  g_perf_min_frames = 0;
+  g_perf_max_frames = 0;
+  g_perf_max_interval_us = 0;
+}
+
+// Lock held: an output call for the port returned at `now` after blocking `blocked` us for room.
+static void audio_port_returned(Ps4AudioPort *p, uint64_t now, uint64_t blocked) {
+  p->last_return_us = now;
+  if (blocked > p->perf_max_block_us) p->perf_max_block_us = blocked;
+}
+
 // ---------------------------------------------------------------- mixing
 
 // Mix `frames` stereo frames from all port rings into out (interleaved).
 // Called with g_audio_lock held.
 static void audio_mix(float *out, uint32_t frames) {
   memset(out, 0, (size_t)frames * 2 * sizeof(float));
+  uint64_t now = get_time_micros();
+  if (g_perf_last_period_us && now - g_perf_last_period_us > g_perf_max_interval_us) {
+    g_perf_max_interval_us = now - g_perf_last_period_us;
+  }
+  g_perf_last_period_us = now;
+  if (g_perf_periods == 0 || frames < g_perf_min_frames) g_perf_min_frames = frames;
+  if (frames > g_perf_max_frames) g_perf_max_frames = frames;
+  g_periods++;
+  g_perf_periods++;
+  bool starved = false;
   for (int i = 1; i < MAX_AUDIO_PORTS; i++) {
     Ps4AudioPort *p = &g_ports[i];
     if (!p->in_use || !p->ring) {
       continue;
     }
+    if (p->outputs > 0) {
+      // The level the producer kept ahead of the device, seen as this period starts.
+      if (p->ring_fill < p->min_queued) p->min_queued = p->ring_fill;
+      if (p->ring_fill < p->perf_min_queued) p->perf_min_queued = p->ring_fill;
+    }
     uint32_t n = p->ring_fill < frames ? p->ring_fill : frames;
     if (n < frames && p->outputs > 0) {
       p->underruns++;
       p->underrun_frames += frames - n;
+      p->perf_underrun_frames += frames - n;
+      starved = true;
     }
     uint32_t r = p->ring_read;
     for (uint32_t f = 0; f < n; f++) {
@@ -614,6 +720,10 @@ static void audio_mix(float *out, uint32_t frames) {
     }
     p->ring_read = r;
     p->ring_fill -= n;
+  }
+  if (starved) {
+    g_starved_periods++;
+    g_perf_starved++;
   }
   for (uint32_t f = 0; f < frames * 2; f++) {
     float v = out[f];
@@ -799,7 +909,15 @@ static void audio_host_start(AudioLogBuf *b) {
   }
   g_host_running = true;
   g_last_render_us = get_time_micros();
-  logbuf_add(b, "[AudioOut] host output started (default device, float32 stereo 48 kHz)\n");
+  // The device's period: what each render callback takes from the rings at most.
+  UInt32 period = 0, size = sizeof(period);
+  if (AudioUnitGetProperty(g_unit, kAudioDevicePropertyBufferFrameSize, kAudioUnitScope_Global, 0,
+                           &period, &size) != noErr) {
+    period = 0;
+  }
+  logbuf_add(b, "[AudioOut] host output started (default device, float32 stereo 48 kHz, %u-frame "
+                "device period)\n",
+             (unsigned)period);
 #endif
 }
 
@@ -952,8 +1070,15 @@ static void audio_port_arrive(Ps4AudioPort *p, uint64_t now, uint64_t locked) {
     }
   }
   p->last_output_us = now;
+  if (p->last_return_us != 0 && now > p->last_return_us) {
+    uint64_t work = now - p->last_return_us;
+    if (work > p->max_work_us) p->max_work_us = work;
+    if (work > p->perf_max_work_us) p->perf_max_work_us = work;
+  }
+  p->perf_outputs++;
   if (p->outputs > 0 && g_host_running && p->ring_fill == 0) {
     p->late_outputs++;
+    p->perf_late++;
   }
 }
 
@@ -1068,6 +1193,8 @@ int32_t ps4_audioout_port_open(int32_t user, int32_t type, int32_t index, uint32
   port->ring_cap = port->ring_limit + len;
   port->ring = (float *)calloc((size_t)port->ring_cap * 2, sizeof(float));
   port->win_start_us = get_time_micros();
+  port->min_queued = UINT32_MAX;
+  port->perf_min_queued = UINT32_MAX;
 
   logbuf_add(&log,
              "[AudioOut] open: user=%d type=%d index=%d len=%u freq=%u param=0x%x (fmt=%u %s %uch) "
@@ -1116,10 +1243,13 @@ int32_t ps4_audioout_port_output(int32_t handle, const void *pcm) {
   }
   if (pcm) {
     audio_port_push(port, pcm, &log);
+    uint64_t done = get_time_micros();
+    audio_port_returned(port, done, done - locked);
   }
   bool host = g_host_running;
   dump_log_pending(&log);
   audio_stats_maybe_log(&log);
+  audio_perf_maybe_log(&log);
   uint64_t next = port->next_sync_time_us;
   pthread_mutex_unlock(&g_audio_lock);
   logbuf_flush(&log);
@@ -1223,9 +1353,19 @@ void shim_sceAudioOutOutputs(GuestContext *ctx) {
       audio_port_push(port, ctx->mem_base + pcm, &log);
     }
   }
+  uint64_t done = get_time_micros();
+  for (uint32_t i = 0; i < num; i++) {
+    int32_t handle = *(int32_t *)(ctx->mem_base + param_addr + i * 16ULL);
+    uint64_t pcm = *(uint64_t *)(ctx->mem_base + param_addr + i * 16ULL + 8);
+    Ps4AudioPort *port = audio_port_get(handle);
+    if (port && pcm) {
+      audio_port_returned(port, done, done - locked);
+    }
+  }
   bool host = g_host_running;
   dump_log_pending(&log);
   audio_stats_maybe_log(&log);
+  audio_perf_maybe_log(&log);
   int32_t h0 = *(int32_t *)(ctx->mem_base + param_addr);
   Ps4AudioPort *first = audio_port_get(h0);
   uint64_t next = first ? first->next_sync_time_us : 0;
@@ -1261,8 +1401,18 @@ int32_t ps4_audioout_port_stats(int32_t handle, Ps4AudioPortStats *out) {
   out->first_sound_play_us = mono_micros_of(p->first_sound_play_us);
   out->first_sound_outputs = p->first_sound_outputs;
   out->ring_frames = p->ring_cap;
+  out->min_queued = p->min_queued;
+  out->max_work_us = p->max_work_us;
   pthread_mutex_unlock(&g_audio_lock);
   return 0;
+}
+
+void ps4_audioout_device_stats(Ps4AudioDeviceStats *out) {
+  pthread_mutex_lock(&g_audio_lock);
+  out->running = g_host_running;
+  out->periods = g_periods;
+  out->starved_periods = g_starved_periods;
+  pthread_mutex_unlock(&g_audio_lock);
 }
 
 int32_t ps4_audioout_port_close(int32_t handle) {
