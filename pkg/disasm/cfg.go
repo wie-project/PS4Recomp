@@ -275,33 +275,46 @@ func pendingRangeHas(rs []elfloader.AddrRange, addr uint64) bool {
 	return false
 }
 
-// noteData records [start, end) as bytes the decoder must not enter.
-// Extents that overlap an unwind function are left alone: those bytes are code.
+// noteData records [start, end) as bytes the decoder must not enter: the extent of a
+// jump table whose length is proven. Compilers place such tables inside the function
+// (between its code and the end of its symbol and unwind extent), so an extent inside an
+// unwind function is still data. The ranges hold only while the current function is decoded
+// (pendingData), and that decode never leaves the function's own bounds.
 func (d *Disassembler) noteData(start, end uint64) {
-	if d == nil || end <= start || d.overlapsFunc(start, end) {
+	if d == nil || end <= start {
 		return
+	}
+	for _, r := range d.pendingData {
+		if start >= r.Start && end <= r.End {
+			return
+		}
 	}
 	d.pendingData = append(d.pendingData, elfloader.AddrRange{Start: start, End: end})
 }
 
-func (d *Disassembler) overlapsFunc(start, end uint64) bool {
-	if d.elf == nil || len(d.elf.FuncBounds) == 0 {
-		return false
-	}
-	b := d.elf.FuncBounds
-	i, ok := slices.BinarySearchFunc(b, start, func(r elfloader.AddrRange, addr uint64) int {
-		if addr >= r.End {
-			return -1
+// pendingDataEnd returns the end of the noted data range containing addr.
+func (d *Disassembler) pendingDataEnd(addr uint64) (uint64, bool) {
+	end, found := uint64(0), false
+	for _, r := range d.pendingData {
+		if addr >= r.Start && addr < r.End && r.End > end {
+			end, found = r.End, true
 		}
-		if addr < r.Start {
-			return 1
-		}
-		return 0
-	})
-	if ok {
-		return true
 	}
-	return i < len(b) && b[i].Start < end
+	return end, found
+}
+
+// crossesPendingData reports whether [start, end) overlaps a noted data range.
+func (d *Disassembler) crossesPendingData(start, end uint64) bool {
+	return rangesOverlap(d.pendingData, start, end)
+}
+
+func rangesOverlap(rs []elfloader.AddrRange, start, end uint64) bool {
+	for _, r := range rs {
+		if start < r.End && r.Start < end {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Disassembler) flushData() {
@@ -425,8 +438,45 @@ func (d *Disassembler) DisasmFunction(entryAddr uint64) (*Function, []uint64, er
 }
 
 // disasmFunction disassembles a single function starting at entryAddr.
+//
+// The jump tables found while decoding are data (noteData). A table found after the decoder
+// has already run over its bytes (the linear sweep of a sized symbol always does; a
+// fall-through into the table can) makes the function decode again with the table known, so
+// no instruction is decoded from table bytes. Each retry adds a range that overlapped decoded
+// instructions and is skipped from then on, so the loop ends.
 func (d *Disassembler) disasmFunction(entryAddr uint64) (*Function, []uint64, error) {
 	d.flushData()
+	capHits, capDetails, privStops := d.CapHits, len(d.CapHitDetails), d.PrivilegedStops
+	for {
+		known := len(d.pendingData)
+		fn, calls, err := d.disasmFunctionOnce(entryAddr)
+		if err != nil || !decodedOverlaps(fn, d.pendingData[known:]) {
+			return fn, calls, err
+		}
+		// The diagnostics of a discarded decode are not counted.
+		d.CapHits, d.CapHitDetails, d.PrivilegedStops = capHits, d.CapHitDetails[:capDetails], privStops
+	}
+}
+
+// decodedOverlaps reports whether an instruction of fn overlaps one of rs.
+func decodedOverlaps(fn *Function, rs []elfloader.AddrRange) bool {
+	if len(rs) == 0 {
+		return false
+	}
+	for _, b := range fn.Blocks {
+		if !rangesOverlap(rs, b.StartAddr, b.EndAddr) {
+			continue
+		}
+		for _, in := range b.Insts {
+			if rangesOverlap(rs, in.Address, in.Address+uint64(in.Inst.Len)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (d *Disassembler) disasmFunctionOnce(entryAddr uint64) (*Function, []uint64, error) {
 	var size uint64
 	if d.elf != nil {
 		// Only an STT_FUNC size bounds a function. A TLS symbol's value is an offset in
@@ -470,12 +520,17 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 
 	pc := entryAddr
 	for pc < fnEnd {
+		// A known jump table inside the function is skipped; decoding goes on after it.
+		if end, ok := d.pendingDataEnd(pc); ok {
+			pc = end
+			continue
+		}
 		if !d.inCode(pc) {
 			break
 		}
 
 		inst, err := Decode(d.elf.MemoryImage[pc:])
-		if err != nil || inst.Len == 0 {
+		if err != nil || inst.Len == 0 || d.crossesPendingData(pc, pc+uint64(inst.Len)) {
 			// Do not truncate the rest of the function on an unexpected byte or decode failure.
 			// Insert a 1-byte UD2 placeholder so execution traps if reached, and continue
 			// decoding subsequent instructions so that leaders, subsequent blocks, and
@@ -529,11 +584,67 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 		return nil, nil, fmt.Errorf("no instructions decoded for function at 0x%x", entryAddr)
 	}
 
-	// Identify basic block leaders
-	leaders := make(map[uint64]bool)
+	// Relocation targets inside the function are leaders.
+	var relocLeaders []uint64
+	for _, rel := range d.elf.Relocations {
+		if rel.Addend > 0 {
+			target := uint64(rel.Addend)
+			if target >= entryAddr && target < fnEnd {
+				relocLeaders = append(relocLeaders, target)
+			}
+		}
+	}
+
+	// A switch whose bounds check is in another block is proven through the block graph
+	// (proveLinearTables). A newly proven table can change the leaders, and so the graph, so
+	// the blocks are built again until no further table is proven.
+	// The targets of a table whose length is not proven come from a scan that can overrun the
+	// table; as in the branch-following decoder they are left out until the proofs are done.
+	var proven map[uint64]ResolvedJumpTable
+	leaders := make(map[uint64]bool, len(insts)/4+1)
+	for {
+		calls, withheld := d.linearBlocks(fn, insts, relocLeaders, leaders, &proven, false)
+		if !d.proveLinearTables(fn, &proven) {
+			if withheld {
+				calls, _ = d.linearBlocks(fn, insts, relocLeaders, leaders, &proven, true)
+			}
+			discoveredCalls = append(discoveredCalls, calls...)
+			break
+		}
+	}
+
+	fn.UsesYmm = usesYmm(fn)
+	d.analyzeBlockFlagLiveness(fn)
+	if !d.SkipFlagLiveness {
+		analyzeCarryOverflowLiveness(fn, d.isTailCallTarget)
+	}
+	return fn, discoveredCalls, nil
+}
+
+// linearBlocks partitions the linear decode of fn into basic blocks: it fills fn.Blocks,
+// fn.BlockOrder and fn.JumpTables, and returns the transfers out of the function. A jmp in
+// proven uses that table; any other indirect jmp is resolved from its own straight-line run,
+// and a table proven there is added to proven (allocated on first use). The targets of a table
+// that is not proven are used only with unproven set; withheld reports that some were left out.
+// leaders is scratch space.
+func (d *Disassembler) linearBlocks(fn *Function, insts []Instruction, relocLeaders []uint64, leaders map[uint64]bool,
+	proven *map[uint64]ResolvedJumpTable, unproven bool) (calls []uint64, withheld bool) {
+	entryAddr, fnEnd := fn.EntryAddr, fn.EndAddr
+	clear(fn.Blocks)
+	clear(fn.JumpTables)
+	fn.BlockOrder = fn.BlockOrder[:0]
+
+	clear(leaders)
 	leaders[entryAddr] = true
+	for _, t := range relocLeaders {
+		leaders[t] = true
+	}
 	for i, inst := range insts {
 		nextPC := inst.Address + uint64(inst.Inst.Len)
+		// The instruction after skipped data starts a block: no block runs across the gap.
+		if i+1 < len(insts) && insts[i+1].Address != nextPC {
+			leaders[insts[i+1].Address] = true
+		}
 
 		switch {
 		case inst.Inst.Op == x86asm.JMP:
@@ -543,19 +654,33 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 					leaders[target] = true
 				} else {
 					// Tail call to another function
-					discoveredCalls = append(discoveredCalls, target)
+					calls = append(calls, target)
 				}
-			} else if sw, ok := d.ResolveJumpTable(insts[:i+1], func(reg x86asm.Reg) (uint64, bool) {
-				addr, found, _ := traceLEA(insts, i, reg)
-				return addr, found
-			}, nil, entryAddr, fnEnd); ok && len(sw.Targets) > 0 {
-				// An indirect jmp through a jump table.
-				fn.JumpTables[inst.Address] = sw.Targets
-				for _, target := range sw.Targets {
-					if target >= entryAddr && target < fnEnd {
-						leaders[target] = true
-					} else {
-						discoveredCalls = append(discoveredCalls, target)
+			} else {
+				sw, ok := (*proven)[inst.Address]
+				if !ok {
+					sw, ok = d.ResolveJumpTable(insts[:i+1], func(reg x86asm.Reg) (uint64, bool) {
+						addr, found, _ := traceLEA(insts, i, reg)
+						return addr, found
+					}, nil, entryAddr, fnEnd)
+					if ok && sw.Count > 0 {
+						if *proven == nil {
+							*proven = make(map[uint64]ResolvedJumpTable)
+						}
+						(*proven)[inst.Address] = sw
+					}
+				}
+				if ok && len(sw.Targets) > 0 && sw.Count <= 0 && !unproven {
+					withheld = true
+				} else if ok && len(sw.Targets) > 0 {
+					// An indirect jmp through a jump table.
+					fn.JumpTables[inst.Address] = sw.Targets
+					for _, target := range sw.Targets {
+						if target >= entryAddr && target < fnEnd {
+							leaders[target] = true
+						} else {
+							calls = append(calls, target)
+						}
 					}
 				}
 			}
@@ -569,7 +694,7 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 				if target >= entryAddr && target < fnEnd {
 					leaders[target] = true
 				} else if d.inCode(target) {
-					discoveredCalls = append(discoveredCalls, target)
+					calls = append(calls, target)
 				}
 			}
 			if nextPC < fnEnd {
@@ -577,14 +702,7 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			}
 
 		case inst.Inst.Op == x86asm.CALL:
-			target := uint64(0)
-			if rel, ok := inst.Inst.Args[0].(x86asm.Rel); ok {
-				target = uint64(int64(nextPC) + int64(rel))
-			} else if mem, ok := inst.Inst.Args[0].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
-				disp := int64(int32(mem.Disp))
-				target = uint64(int64(nextPC) + disp)
-			}
-			if target != 0 && d.isNoReturn(target) && nextPC < fnEnd {
+			if d.isNoReturn(callTarget(inst)) && nextPC < fnEnd {
 				leaders[nextPC] = true
 			}
 
@@ -592,54 +710,102 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 			if nextPC < fnEnd {
 				leaders[nextPC] = true
 			}
-
 		}
 	}
 
-	// Also check if any known relocation target is inside this function
-	for _, rel := range d.elf.Relocations {
-		if rel.Addend > 0 {
-			target := uint64(rel.Addend)
-			if target >= entryAddr && target < fnEnd {
-				leaders[target] = true
-			}
+	// Build basic blocks. A block ends where its last instruction ends.
+	var cur *BasicBlock
+	flush := func() {
+		if cur != nil && len(cur.Insts) > 0 {
+			last := cur.Insts[len(cur.Insts)-1]
+			cur.EndAddr = last.Address + uint64(last.Inst.Len)
+			fn.Blocks[cur.StartAddr] = cur
 		}
 	}
-
-	// Build basic blocks
-	var currentBlock *BasicBlock
 	for _, inst := range insts {
-		if leaders[inst.Address] || currentBlock == nil {
-			if currentBlock != nil && len(currentBlock.Insts) > 0 {
-				currentBlock.EndAddr = inst.Address
-				fn.Blocks[currentBlock.StartAddr] = currentBlock
-			}
-			currentBlock = &BasicBlock{
+		if leaders[inst.Address] || cur == nil {
+			flush()
+			cur = &BasicBlock{
 				StartAddr: inst.Address,
 				Insts:     make([]Instruction, 0, 8),
 			}
-			currentBlock.Insts = append(currentBlock.Insts, inst)
-		} else {
-			currentBlock.Insts = append(currentBlock.Insts, inst)
 		}
+		cur.Insts = append(cur.Insts, inst)
 	}
-	if currentBlock != nil && len(currentBlock.Insts) > 0 {
-		lastInst := currentBlock.Insts[len(currentBlock.Insts)-1]
-		currentBlock.EndAddr = lastInst.Address + uint64(lastInst.Inst.Len)
-		fn.Blocks[currentBlock.StartAddr] = currentBlock
-	}
+	flush()
 
 	for addr := range fn.Blocks {
 		fn.BlockOrder = append(fn.BlockOrder, addr)
 	}
 	slices.Sort(fn.BlockOrder)
+	return calls, withheld
+}
 
-	fn.UsesYmm = usesYmm(fn)
-	d.analyzeBlockFlagLiveness(fn)
-	if !d.SkipFlagLiveness {
-		analyzeCarryOverflowLiveness(fn, d.isTailCallTarget)
+// callTarget is the direct or RIP-relative indirect target of a call, 0 for any other.
+func callTarget(inst Instruction) uint64 {
+	next := inst.Address + uint64(inst.Inst.Len)
+	if rel, ok := inst.Inst.Args[0].(x86asm.Rel); ok {
+		return uint64(int64(next) + int64(rel))
 	}
-	return fn, discoveredCalls, nil
+	if mem, ok := inst.Inst.Args[0].(x86asm.Mem); ok && mem.Base == x86asm.RIP {
+		return uint64(int64(next) + int64(int32(mem.Disp)))
+	}
+	return 0
+}
+
+// proveLinearTables resolves each indirect jmp of the linear decode of fn whose table is not
+// in proven again, with the searches for the table address, the bounds check and the index
+// source in its predecessor blocks (blockGraph), as the branch-following decoder does. It
+// reports whether a table was proven (added to proven).
+func (d *Disassembler) proveLinearTables(fn *Function, proven *map[uint64]ResolvedJumpTable) bool {
+	var g *blockGraph
+	changed := false
+	for _, start := range fn.BlockOrder {
+		b := fn.Blocks[start]
+		last := b.Insts[len(b.Insts)-1]
+		if last.Inst.Op != x86asm.JMP {
+			continue
+		}
+		if _, ok := last.Inst.Args[0].(x86asm.Rel); ok {
+			continue
+		}
+		if _, ok := (*proven)[last.Address]; ok {
+			continue
+		}
+		if g == nil {
+			g = linearGraph(fn)
+		}
+		sw, ok := d.resolveJumpTableCapped(b.Insts,
+			func(reg x86asm.Reg) (uint64, bool) { return g.tableAddr(start, reg) },
+			func(idxReg x86asm.Reg) (int, bool) { return g.count(start, idxReg) },
+			func(idxReg x86asm.Reg) int { return g.indexCap(start, idxReg) },
+			0, fn.EntryAddr, fn.EndAddr)
+		if ok && sw.Count > 0 {
+			if *proven == nil {
+				*proven = make(map[uint64]ResolvedJumpTable)
+			}
+			(*proven)[last.Address] = sw
+			changed = true
+		}
+	}
+	return changed
+}
+
+// linearGraph is the predecessor graph of the blocks of fn (blockSuccessors).
+func linearGraph(fn *Function) *blockGraph {
+	g := &blockGraph{
+		preds: make(map[uint64][]uint64, len(fn.Blocks)),
+		insts: make(map[uint64][]Instruction, len(fn.Blocks)),
+	}
+	for _, start := range fn.BlockOrder {
+		b := fn.Blocks[start]
+		g.insts[start] = b.Insts
+		succs, _ := blockSuccessors(fn, b, nil)
+		for _, t := range succs {
+			g.preds[t] = append(g.preds[t], start)
+		}
+	}
+	return g
 }
 
 // findJumpTableTargets reads a 32-bit PIC jump table at tableAddr. Entries are
@@ -753,7 +919,7 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 				}
 
 				inst, err := Decode(d.elf.MemoryImage[pc:])
-				if err != nil || inst.Len == 0 {
+				if err != nil || inst.Len == 0 || d.crossesPendingData(pc, pc+uint64(inst.Len)) {
 					break
 				}
 				if inst.Op == 0 {
@@ -783,171 +949,11 @@ func (d *Disassembler) disasmBranchFollowing(entryAddr uint64) (*Function, []uin
 					if rel, ok := inst.Args[0].(x86asm.Rel); ok {
 						edge(uint64(int64(nextPC) + int64(rel)))
 					} else {
-						findTableAddr := func(reg x86asm.Reg) (uint64, bool) {
-							type item struct {
-								block uint64
-								reg   x86asm.Reg
-							}
-							visited := make(map[item]bool)
-							var queue []item
-							for _, p := range blockPreds[blockStart] {
-								it := item{p, reg}
-								if !visited[it] {
-									visited[it] = true
-									queue = append(queue, it)
-								}
-							}
-							depth := 0
-							for len(queue) > 0 && depth < 256 {
-								depth++
-								var nextQueue []item
-								for _, it := range queue {
-									insts := blockInsts[it.block]
-									cur := it.reg
-									killed := false
-									for i := len(insts) - 1; i >= 0; i-- {
-										dst, target, isLEA := leaRIPTarget(insts[i])
-										if isLEA && sameGPR(dst, cur) {
-											return target, true
-										}
-										if insts[i].Inst.Op == x86asm.MOV {
-											d, ok0 := insts[i].Inst.Args[0].(x86asm.Reg)
-											s, ok1 := insts[i].Inst.Args[1].(x86asm.Reg)
-											if ok0 && ok1 && sameGPR(d, cur) && d >= x86asm.RAX && d <= x86asm.R15 {
-												cur = s
-												continue
-											}
-										}
-										if modifiesReg(insts[i].Inst, cur) {
-											killed = true
-											break
-										}
-									}
-									if !killed {
-										for _, p := range blockPreds[it.block] {
-											nit := item{p, cur}
-											if !visited[nit] {
-												visited[nit] = true
-												nextQueue = append(nextQueue, nit)
-											}
-										}
-									}
-								}
-								queue = nextQueue
-							}
-							return 0, false
-						}
-
-						// findCount looks for the bounds check of the index (idxReg: the register
-						// it is in at this block's start) in the predecessor blocks. It must bound
-						// the index on every path to this jmp: the count is the largest one found,
-						// and a path that reaches the function entry, a write of the index or the
-						// search depth without a check gives none. "Every path" means every
-						// predecessor decoded so far: a predecessor found after the table is
-						// resolved is not checked again. Register copies (`mov idx, src`) are
-						// followed into the predecessors with the register they came from. A
-						// check that ends a block bounds the index only on one of its edges (ja:
-						// the fall-through, jb: the taken edge); on the other edge the index is
-						// out of that range and may still reach this jmp (a second switch on the
-						// same index), so the search goes on past it there.
-						findCount := func(idxReg x86asm.Reg) (int, bool) {
-							type edgeTo struct {
-								pred, child uint64
-								reg         x86asm.Reg
-							}
-							visited := make(map[edgeTo]bool)
-							var queue []edgeTo
-							for _, p := range blockPreds[blockStart] {
-								e := edgeTo{p, blockStart, idxReg}
-								if !visited[e] {
-									visited[e] = true
-									queue = append(queue, e)
-								}
-							}
-							if len(queue) == 0 {
-								return 0, false
-							}
-							found := 0
-							for depth := 0; len(queue) > 0 && depth < 256; depth++ {
-								var nextQueue []edgeTo
-								for _, e := range queue {
-									insts := blockInsts[e.pred]
-									if n := len(insts); n > 0 && !boundHoldsOnEdge(insts[n-1], e.child) {
-										insts = insts[:n-1]
-									}
-									c, killed, from := switchTableCountKill(insts, e.reg)
-									if c > 0 {
-										found = max(found, c)
-										continue
-									}
-									if killed {
-										return 0, false
-									}
-									preds := blockPreds[e.pred]
-									if len(preds) == 0 {
-										return 0, false
-									}
-									for _, p := range preds {
-										ne := edgeTo{p, e.pred, from}
-										if !visited[ne] {
-											visited[ne] = true
-											nextQueue = append(nextQueue, ne)
-										}
-									}
-								}
-								queue = nextQueue
-							}
-							if len(queue) > 0 || found == 0 {
-								return 0, false
-							}
-							return found, true
-						}
-
-						// findCap follows the index register back through the predecessors to its
-						// source; a cap needs every path to end in a byte load (byteIndexCap).
-						findCap := func(idxReg x86asm.Reg) int {
-							type item struct {
-								block uint64
-								reg   x86asm.Reg
-							}
-							visited := make(map[uint64]bool)
-							var queue []item
-							for _, p := range blockPreds[blockStart] {
-								if !visited[p] {
-									visited[p] = true
-									queue = append(queue, item{p, idxReg})
-								}
-							}
-							found := 0
-							for depth := 0; len(queue) > 0 && depth < 256; depth++ {
-								var next []item
-								for _, it := range queue {
-									c, from, killed := byteIndexCapKill(blockInsts[it.block], it.reg)
-									if killed {
-										return 0
-									}
-									if c > 0 {
-										found = c
-										continue
-									}
-									preds := blockPreds[it.block]
-									if len(preds) == 0 {
-										return 0
-									}
-									for _, p := range preds {
-										if !visited[p] {
-											visited[p] = true
-											next = append(next, item{p, from})
-										}
-									}
-								}
-								queue = next
-							}
-							if len(queue) > 0 {
-								return 0
-							}
-							return found
-						}
+						g := blockGraph{preds: blockPreds, insts: blockInsts}
+						jmpBlock := blockStart
+						findTableAddr := func(reg x86asm.Reg) (uint64, bool) { return g.tableAddr(jmpBlock, reg) }
+						findCount := func(idxReg x86asm.Reg) (int, bool) { return g.count(jmpBlock, idxReg) }
+						findCap := func(idxReg x86asm.Reg) int { return g.indexCap(jmpBlock, idxReg) }
 
 						// curBlock is the decode run that ends at the jmp: straight-line code, so
 						// a real execution path to it (another path may join inside it), and

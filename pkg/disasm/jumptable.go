@@ -617,7 +617,8 @@ func switchTableCountKill(window []Instruction, idxReg x86asm.Reg) (int, bool, x
 		}
 
 		// 4. Conditional jump bounds checks (CMP/SUB + JA/JAE/JB/JBE)
-		// The instructions between the check and the jump may copy the checked register into the
+		// The instructions between the check and the jump leave the flags alone (flagNeutral:
+		// `cmp eax, 4; vmovsd xmm7, [rbp-0x30]; ja`) and may copy the checked register into the
 		// index (`cmp ebx, 7; mov eax, ebx; ja`): cand follows those copies back to the register
 		// the check must test. Any other write of cand ends the search.
 		if inst.Op == x86asm.JA || inst.Op == x86asm.JAE || inst.Op == x86asm.JB || inst.Op == x86asm.JBE {
@@ -625,8 +626,7 @@ func switchTableCountKill(window []Instruction, idxReg x86asm.Reg) (int, bool, x
 			cand := idxReg
 			for j := i - 1; j >= 0; j-- {
 				prev := window[j].Inst
-				if prev.Op == x86asm.MOV || prev.Op == x86asm.LEA || prev.Op == x86asm.NOP ||
-					prev.Op == x86asm.MOVZX || prev.Op == x86asm.MOVSX || prev.Op == x86asm.MOVSXD {
+				if flagNeutral(prev) {
 					writes, src := copyInto(prev, cand)
 					if writes {
 						if src == 0 {
