@@ -8,5 +8,5 @@ import "testing"
 // correction and the GameController axis mapping of ScePadData's motion fields.
 func TestPadMotion(t *testing.T) {
 	bin := buildHostC(t, "pad_motion", "../runtime/modules/libScePad/ps4_pad_motion.c")
-	runHostCases(t, bin, []string{"rest", "integrate", "deadband", "off", "tilt", "gap", "reset", "gc-mapping", "gc-consistent"})
+	runHostCases(t, bin, []string{"rest", "integrate", "deadband", "off", "tilt", "gap", "reset", "gc-mapping", "gc-consistent", "gc-poses"})
 }

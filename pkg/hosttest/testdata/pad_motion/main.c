@@ -163,9 +163,35 @@ static void case_gc_mapping(void) {
     CHECK(vec_near(s.rate, 0, 1, 0), "yaw: %f %f %f", s.rate.x, s.rate.y, s.rate.z);
     s = pad_motion_from_gc((PadVec){1, 0, 0}, (PadVec){0, 0, -1});
     CHECK(vec_near(s.rate, 1, 0, 0), "pitch: %f %f %f", s.rate.x, s.rate.y, s.rate.z);
-    // Rolling right (GameController -y, the right side goes down) is the pad's +z.
-    s = pad_motion_from_gc((PadVec){0, -1, 0}, (PadVec){0, 0, -1});
-    CHECK(vec_near(s.rate, 0, 0, 1), "roll: %f %f %f", s.rate.x, s.rate.y, s.rate.z);
+    // Rolling right onto the right grip (GameController +y, measured +94 deg) lowers the right
+    // side: the pad's -z (its +z raises the right side).
+    s = pad_motion_from_gc((PadVec){0, 1, 0}, (PadVec){0, 0, -1});
+    CHECK(vec_near(s.rate, 0, 0, -1), "roll: %f %f %f", s.rate.x, s.rate.y, s.rate.z);
+}
+
+// Poses measured on macOS (an openpuck DualSense, guided probe): the acceleration held still
+// after each move and the rotation integrated during it, in GameController's axes. Mapped to the
+// pad's axes, the flat pose's up turned by each move's rotation must be the acceleration measured
+// after it (within 6 deg: the moves were made by hand).
+static void case_gc_poses(void) {
+    static const struct {
+        const char *name;
+        PadVec rot_deg, accel;
+    } moves[] = {
+        {"stand up (triggers up)", {86.2, 1.7, 2.9}, {0.006, -0.961, -0.260}},
+        {"on its right grip", {-4.2, 93.9, 22.1}, {0.987, 0.040, 0.082}},
+        {"turn left", {-0.9, -16.3, 94.1}, {-0.009, 0.169, -0.989}},
+    };
+    const PadVec flat = pad_motion_from_gc((PadVec){0, 0, 0}, (PadVec){0.004, 0.164, -0.990}).accel;
+    for (size_t i = 0; i < sizeof(moves) / sizeof(moves[0]); i++) {
+        PadMotionSample s = pad_motion_from_gc(pad_vec_scale(moves[i].rot_deg, M_PI / 180), moves[i].accel);
+        PadVec want = pad_quat_rotate_inv(pad_quat_exp(s.rate), flat);
+        double c = (want.x * s.accel.x + want.y * s.accel.y + want.z * s.accel.z) /
+                   (pad_vec_len(want) * pad_vec_len(s.accel));
+        double err = acos(c > 1 ? 1 : c) * 180 / M_PI;
+        CHECK(err < 6, "%s: predicted up %f %f %f, measured %f %f %f (%f deg)", moves[i].name, want.x, want.y,
+              want.z, s.accel.x, s.accel.y, s.accel.z, err);
+    }
 }
 
 // The gyro and the accelerometer, mapped, agree: standing the pad up (90 deg about its x in 1 s)
@@ -199,6 +225,7 @@ int main(int argc, char **argv) {
         {"rest", case_rest},   {"integrate", case_integrate}, {"deadband", case_deadband}, {"off", case_off},
         {"tilt", case_tilt},   {"gap", case_gap},             {"reset", case_reset},
         {"gc-mapping", case_gc_mapping}, {"gc-consistent", case_gc_consistent},
+        {"gc-poses", case_gc_poses},
     };
     if (argc != 2) return 2;
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
