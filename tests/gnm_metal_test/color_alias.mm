@@ -106,7 +106,10 @@ static void Run(id<MTLDevice> device, id<MTLCommandQueue> queue, bool srgb_first
 int main() {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        Check(device != nil, "Metal device unavailable");
+        if (!device) {
+            fprintf(stderr, "Metal device unavailable\n");
+            return 77;
+        }
         id<MTLCommandQueue> queue = [device newCommandQueue];
         Run(device, queue, true);
         Run(device, queue, false);

@@ -6,8 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"testing"
 )
 
@@ -16,15 +14,15 @@ import (
 // insufficient.
 func metalTestSource(t *testing.T, name string) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Skip("the test's own source path is unknown")
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
 	}
-	for dir := filepath.Dir(file); ; dir = filepath.Dir(dir) {
+	for ; ; dir = filepath.Dir(dir) {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
 			source := filepath.Join(dir, "tests", "gnm_metal_test", name)
 			if _, err := os.Stat(source); err != nil {
-				t.Skipf("native Metal regression source is not present: %v", err)
+				t.Fatalf("native Metal regression source is not present: %v", err)
 			}
 			return source
 		}
@@ -40,7 +38,7 @@ func runMetalTestBinary(t *testing.T, path string) {
 	if err == nil {
 		return
 	}
-	if strings.Contains(string(out), "Metal device unavailable") {
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 77 {
 		t.Skipf("Metal device is unavailable: %s", out)
 	}
 	t.Fatalf("native Metal regression: %v\n%s", err, out)

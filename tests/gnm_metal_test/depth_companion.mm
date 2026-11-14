@@ -105,7 +105,10 @@ fragment float4 fs(V v [[stage_in]], constant float2& p [[buffer(0)]],
 int main() {
     @autoreleasepool {
         id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
-        Check(dev != nil, "Metal device unavailable");
+        if (!dev) {
+            fprintf(stderr, "Metal device unavailable\n");
+            return 77;
+        }
         MTLTextureDescriptor* desc =
             [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Float
                                                             width:16 height:16 mipmapped:NO];
