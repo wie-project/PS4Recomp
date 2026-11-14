@@ -2,6 +2,7 @@
 #include "ps4_kernel_sys.h"
 #include "ps4_sysmodule.h"
 #include "ps4_fiber.h"
+#include "ps4_syscalls.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -185,12 +186,6 @@ int32_t sceKernelSetPrtAperture(int32_t id,uint64_t address, size_t size) {
     PrtApertures[id].size = size;
     
     return 0;
-}
-
-
-int32_t sceKernelFutimes(const char *path, const struct timeval tv[2]) {
-    (void)path; (void)tv;
-    return 0; // SCE_OK
 }
 
 int32_t sceKernelAddTimerEvent(void) { return 0; }
@@ -566,11 +561,7 @@ void shim_sceKernelGetPrtAperture(GuestContext *ctx) {
 }
 
 void shim_sceKernelFutimes(GuestContext *ctx) {
-    uint64_t pathGuest = ctx->rdi;
-    uint64_t tvGuest = ctx->rsi;
-    const char *path = pathGuest ? (const char *)(ctx->mem_base + pathGuest) : NULL;
-    const struct timeval *tv = tvGuest ? (const struct timeval *)(ctx->mem_base + tvGuest) : NULL;
-    ctx->rax = (uint64_t)(int64_t)sceKernelFutimes(path, tv);
+    shim_futimes(ctx);
     SHIM_RETURN();
 }
 
