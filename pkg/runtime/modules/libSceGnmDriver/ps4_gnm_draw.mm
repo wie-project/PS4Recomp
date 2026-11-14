@@ -60,7 +60,6 @@
 #include "ps4_gnm_draw.h"
 #include "ps4_gnm_guest_window.h"
 #include "ps4_gnm_membudget.h"
-#include "ps4_gnm_pass_writes.h"
 #include "ps4_gnm_pending_writes.h"
 #include "ps4_gnm_rectlist.h"
 #include "ps4_gnm_push_data.h"
@@ -609,12 +608,7 @@ struct PassKey {
     uint32_t width = 0, height = 0;
     uint32_t samples = 1;
     uint32_t sample_locs = 0; // PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0 of multisampled passes
-    // The draw of this key (ps4_gnm_pass_writes.h bits): `hazard`, the attachments of the open pass
-    // (S.pass) it samples; `writes`, the attachments of this key it writes (all unless the caller
-    // knows). `written` (S.pass only): what the open pass's draws and load actions wrote so far.
-    uint32_t hazard = 0;
-    uint32_t writes = kPassAllAttachments;
-    uint32_t written = 0;
+    bool has_hazard = false;
     bool operator==(const PassKey& o) const {
         for (int i = 0; i < 8; ++i)
             if (color[i] != o.color[i] || color_slice[i] != o.color_slice[i]) return false;
@@ -623,7 +617,7 @@ struct PassKey {
     }
     bool operator!=(const PassKey& o) const { return !(*this == o); }
     bool CanSubsume(const PassKey& child, bool allow_depth_omit = false) const {
-        if (child.hazard & written) return false; // it samples what this pass wrote
+        if (child.has_hazard) return false;
         if (sample_locs != child.sample_locs || samples != child.samples) return false;
         bool parent_has_rt = (depth != nil);
         bool child_has_rt = (child.depth != nil);
@@ -1163,15 +1157,6 @@ struct CompileStats {
     std::atomic<uint64_t> lib_async{0}, lib_prewarmed{0}, pso_async{0}, store_fallbacks{0};
 };
 CompileStats g_compile;
-
-// A Metal library compiled synchronously on the encoder thread (a frame waits for it): counted,
-// and logged with its site when it took over 8 ms.
-void NoteSyncLibrary(const char* site, uint64_t code_addr, double ms) {
-    g_compile.lib_sync.Add(ms);
-    if (ms > 8.0)
-        RLog("sync-library", "%s shader 0x%llx: Metal library compiled on the encoder thread in %.1f ms", site,
-             (unsigned long long)code_addr, ms);
-}
 
 void PrintCompileStats() {
     auto c = [](const CompileCounter& k, char* out, size_t n) {
@@ -3463,7 +3448,7 @@ bool CompileFallbackFn(const Shader* s) {
     NSError* e = nil;
     const double t0 = CFAbsoluteTimeGetCurrent();
     id<MTLLibrary> lib = [S.dev newLibraryWithSource:@(msl.c_str()) options:CompileOptions() error:&e];
-    NoteSyncLibrary("pipeline fallback", s->code_addr, (CFAbsoluteTimeGetCurrent() - t0) * 1000.0);
+    g_compile.lib_sync.Add((CFAbsoluteTimeGetCurrent() - t0) * 1000.0);
     id<MTLFunction> fn = [lib newFunctionWithName:@"main0"];
     S.fallback_fns[s->msl_hash] = fn; // nil too: the shader is not retried again
     g_compile.store_fallbacks++;
@@ -3673,7 +3658,7 @@ Shader* FinishShader(gcn_shader* sh, gcn_hw_stage hw, uint64_t code_addr, uint64
         const double mtl_t0 = CFAbsoluteTimeGetCurrent();
         lib = [S.dev newLibraryWithSource:[NSString stringWithUTF8String:msl] options:CompileOptions() error:&e];
         g_hitch.mtl_ms += (CFAbsoluteTimeGetCurrent() - mtl_t0) * 1000.0;
-        NoteSyncLibrary(hw == GCN_HW_CS ? "compute" : "draw", code_addr, (CFAbsoluteTimeGetCurrent() - mtl_t0) * 1000.0);
+        g_compile.lib_sync.Add((CFAbsoluteTimeGetCurrent() - mtl_t0) * 1000.0);
         if (!lib) {
             RLog("msl-fail", "Metal rejected MSL of shader 0x%llx (hw %u): %s",
                  (unsigned long long)code_addr, hw, e.localizedDescription.UTF8String);
@@ -6843,14 +6828,9 @@ gcn_push_data MakePushData(const Regs& regs) {
     return p;
 }
 
-// The attachments of `pass` (ps4_gnm_pass_writes.h bits) that the stage's images (storage_only:
-// its storage images) overlap or are.
-uint32_t StageAttachmentHazard(const PassKey& pass, const Shader* s, const std::vector<uint32_t>& flat,
-                               bool storage_only) {
-    uint32_t m = 0;
-    if (!s || s->imgs.empty()) return 0;
+bool StageHasAttachmentHazard(const PassKey& pass, const Shader* s, const std::vector<uint32_t>& flat) {
+    if (!s || s->imgs.empty()) return false;
     for (uint32_t i = 0; i < s->imgs.size(); ++i) {
-        if (storage_only && !s->imgs[i].is_storage) continue;
         ImageDesc img;
         uint64_t approx = 0;
         if (!StageImage(s, flat, i, &img, &approx) || !img.valid || !img.address) continue;
@@ -6861,26 +6841,26 @@ uint32_t StageAttachmentHazard(const PassKey& pass, const Shader* s, const std::
             if (pass.depth_addr) {
                 const uint64_t d_start = pass.depth_addr;
                 const uint64_t d_end = pass.depth_addr + std::max<uint64_t>(pass.depth_size, 1);
-                if (img_start < d_end && img_end > d_start) m |= kPassDepth;
+                if (img_start < d_end && img_end > d_start) return true;
             }
-            if (pass.stencil_size) {
+            if (pass.stencil_addr) {
                 const uint64_t s_start = pass.stencil_addr;
                 const uint64_t s_end = pass.stencil_addr + std::max<uint64_t>(pass.stencil_size, 1);
-                if (img_start < s_end && img_end > s_start) m |= kPassDepth;
+                if (img_start < s_end && img_end > s_start) return true;
             }
         }
         for (int c = 0; c < 8; ++c) {
             if (!pass.color[c] || !pass.color_addr[c]) continue;
             const uint64_t c_start = pass.color_addr[c];
             const uint64_t c_end = pass.color_addr[c] + std::max<uint64_t>(pass.color_size[c], 1);
-            if (img_start < c_end && img_end > c_start) m |= kPassColor0 << c;
+            if (img_start < c_end && img_end > c_start) return true;
         }
         if (S.tex) {
             if (pass.depth) {
                 if (id<MTLTexture> dt = S.tex->FindDepthTarget(img.address)) {
                     if (dt == pass.depth || (dt.parentTexture && dt.parentTexture == pass.depth) ||
                         (pass.depth.parentTexture && dt == pass.depth.parentTexture))
-                        m |= kPassDepth;
+                        return true;
                 }
             }
             for (int c = 0; c < 8; ++c) {
@@ -6888,158 +6868,22 @@ uint32_t StageAttachmentHazard(const PassKey& pass, const Shader* s, const std::
                 if (id<MTLTexture> ct = S.tex->FindColorTarget(img.address)) {
                     if (ct == pass.color[c] || (ct.parentTexture && ct.parentTexture == pass.color[c]) ||
                         (pass.color[c].parentTexture && ct == pass.color[c].parentTexture))
-                        m |= kPassColor0 << c;
+                        return true;
                 }
             }
         }
     }
-    return m;
+    return false;
 }
 
-// The attachments a draw encoded with `key` binds (ps4_gnm_pass_writes.h bits).
-uint32_t PassBound(const PassKey& key) {
-    uint32_t b = key.depth ? kPassDepth : 0;
-    for (int i = 0; i < 8; ++i)
-        if (key.color[i]) b |= kPassColor0 << i;
-    return b;
-}
-
-// The attachments of `pass` that a draw with these stages reads or writes through its images
-// (storage_only: writes through its storage images); 0: none.
-uint32_t PassAttachmentHazard(const PassKey& pass, const Shader* vs, const std::vector<uint32_t>& vs_flat,
-                              const Shader* ps, const std::vector<uint32_t>& ps_flat, bool storage_only = false) {
+bool HasPassAttachmentHazard(const PassKey& pass, const Shader* vs, const std::vector<uint32_t>& vs_flat,
+                             const Shader* ps, const std::vector<uint32_t>& ps_flat) {
     if (!pass.depth && !pass.color[0] && !pass.color[1] && !pass.color[2] && !pass.color[3] &&
         !pass.color[4] && !pass.color[5] && !pass.color[6] && !pass.color[7])
-        return 0;
-    return StageAttachmentHazard(pass, vs, vs_flat, storage_only) | StageAttachmentHazard(pass, ps, ps_flat, storage_only);
-}
-
-// The attachments of `key` a draw writes: DrawPassWrites, and those its storage images overlap.
-uint32_t KeyWrites(const PassKey& key, const uint32_t write_mask[8], const RenderState& rs, const Shader* vs,
-                   const std::vector<uint32_t>& vs_flat, const Shader* ps, const std::vector<uint32_t>& ps_flat) {
-    return DrawPassWrites(PassBound(key), write_mask, rs) | PassAttachmentHazard(key, vs, vs_flat, ps, ps_flat, true);
-}
-
-// What the draws that end their pass for a hazard (BeginPass: they sample an attachment the
-// pass wrote) sample, and how. Per draw: the attachment kind, whether the draw writes what it
-// samples, its depth state. Per sampled image that overlaps a written attachment: how the image
-// binds and how it was matched to the attachment. Only with PS4_GNM_STATS set (the runtime's
-// switch for extra statistics); otherwise these draws are not looked at.
-const bool g_pass_hazard_stats = getenv("PS4_GNM_STATS") != nullptr;
-struct PassHazardStats {
-    uint64_t draws = 0;
-    uint64_t depth = 0, color = 0;            // the draw samples the depth / a color attachment
-    uint64_t self = 0;                        // the draw writes an attachment it samples
-    uint64_t depth_test = 0, depth_write = 0; // of the draws sampling the depth attachment
-    uint64_t stencil_test = 0;
-    uint64_t imgs = 0;
-    uint64_t as_depth = 0, as_r32f = 0, as_stencil = 0, as_color = 0, as_storage = 0;
-    uint64_t same_base = 0;  // image base address == attachment base address
-    uint64_t same_tex = 0;   // other base, but the target lookup of the image is the attachment
-    uint64_t range_only = 0; // only the address ranges overlap
-    uint64_t vs_imgs = 0;    // of the images: bound to the vertex shader
-};
-static PassHazardStats g_pass_hazards;
-
-// The attachment of `pass` image `img` overlaps (ps4_gnm_pass_writes.h bit, 0: none) and how it
-// matched: 1 same base address, 2 target lookup, 3 address ranges only.
-uint32_t ImageAttachment(const PassKey& pass, const ImageDesc& img, uint64_t approx, int* how) {
-    const uint64_t a = img.address, e = img.address + std::max<uint64_t>(approx, 1);
-    const auto ranged = [&](uint64_t base, uint64_t size) {
-        return base && a < base + std::max<uint64_t>(size, 1) && e > base;
-    };
-    const auto same = [](id<MTLTexture> x, id<MTLTexture> y) {
-        return x && y && (x == y || x.parentTexture == y || y.parentTexture == x);
-    };
-    if (pass.depth) {
-        const bool lookup = S.tex && same(S.tex->FindDepthTarget(a), pass.depth);
-        if (a == pass.depth_addr || (pass.stencil_size && a == pass.stencil_addr)) *how = 1;
-        else if (lookup) *how = 2;
-        else if (ranged(pass.depth_addr, pass.depth_size) || ranged(pass.stencil_addr, pass.stencil_size)) *how = 3;
-        else *how = 0;
-        if (*how) return kPassDepth;
-    }
-    for (int c = 0; c < 8; ++c) {
-        if (!pass.color[c]) continue;
-        const bool lookup = S.tex && same(S.tex->FindColorTarget(a), pass.color[c]);
-        if (pass.color_addr[c] && a == pass.color_addr[c]) *how = 1;
-        else if (lookup) *how = 2;
-        else if (ranged(pass.color_addr[c], pass.color_size[c])) *how = 3;
-        else *how = 0;
-        if (*how) return kPassColor0 << c;
-    }
-    *how = 0;
-    return 0;
-}
-
-// Counts (g_pass_hazards) and logs (rate limited per shader and image) a draw that BeginPass will
-// split off the open pass for a hazard. clearing: the draw's pass clears (BeginPass counts that
-// split as a clear). Called right before BeginPass with the draw's key.hazard and key.writes,
-// only when g_pass_hazard_stats.
-void NotePassHazardSplit(const PassKey& key, bool clearing, const RenderState& rs, const Shader* vs,
-                         const std::vector<uint32_t>& vs_flat, const Shader* ps, const std::vector<uint32_t>& ps_flat,
-                         const char* name) {
-    const uint32_t hit = key.hazard & S.pass.written;
-    if (S.be->OpenEncoder() != GnmEncoder::Render || clearing || !hit) return;
-    PassHazardStats& st = g_pass_hazards;
-    st.draws++;
-    if (hit & kPassDepth) {
-        st.depth++;
-        st.depth_test += rs.ds.depth_test;
-        st.depth_write += rs.ds.depth_write;
-        st.stencil_test += rs.ds.stencil_test;
-    }
-    if (hit & ~kPassDepth) st.color++;
-    if (key.writes & hit) st.self++;
-    const Shader* stages[2] = {vs, ps};
-    const std::vector<uint32_t>* flats[2] = {&vs_flat, &ps_flat};
-    for (int si = 0; si < 2; ++si) {
-        const Shader* s = stages[si];
-        if (!s) continue;
-        for (uint32_t i = 0; i < s->imgs.size(); ++i) {
-            ImageDesc img;
-            uint64_t approx = 0;
-            if (!StageImage(s, *flats[si], i, &img, &approx) || !img.valid || !img.address) continue;
-            int how = 0;
-            const uint32_t att = ImageAttachment(S.pass, img, approx, &how) & hit;
-            if (!att) continue;
-            st.imgs++;
-            st.vs_imgs += si == 0;
-            const gcn_image_binding& ib = s->imgs[i];
-            const char* as = "color";
-            if (ib.is_storage) st.as_storage++, as = "storage";
-            else if (ib.is_depth) st.as_depth++, as = "depth";
-            else if (att == kPassDepth && StencilPlaneDepth(img)) st.as_stencil++, as = "stencil plane";
-            else if (att == kPassDepth) st.as_r32f++, as = "depth as R32F";
-            else st.as_color++;
-            if (how == 1) st.same_base++;
-            else if (how == 2) st.same_tex++;
-            else st.range_only++;
-            char lk[64];
-            snprintf(lk, sizeof(lk), "pass-hazard-%llx-%u", (unsigned long long)s->code_addr, i);
-            const bool depth_att = att == kPassDepth;
-            int c = 0;
-            while (!depth_att && c < 7 && !(att & (kPassColor0 << c))) ++c;
-            id<MTLTexture> at = depth_att ? S.pass.depth : S.pass.color[c];
-            const uint64_t at_addr = depth_att ? S.pass.depth_addr : S.pass.color_addr[c];
-            const uint64_t at_size = depth_att ? S.pass.depth_size : S.pass.color_size[c];
-            RLog(lk,
-                 "pass hazard: %s %s 0x%llx image %u (%s, %s) 0x%llx+0x%llx fmt %u/%u %ux%u pitch %u levels %u-%u "
-                 "layers %u tile %u type %u samples %u; attachment %s%d 0x%llx+0x%llx %lux%lu mtlfmt %lu stencil 0x%llx; "
-                 "match %s; draw writes 0x%x, pass wrote 0x%x; depth test %d write %d func %u, stencil test %d; "
-                 "color0 %s mask 0x%x blend %d",
-                 name, si == 0 ? "vs" : "ps", (unsigned long long)s->code_addr, i, as,
-                 ib.table == UINT32_MAX ? "direct" : "table", (unsigned long long)img.address,
-                 (unsigned long long)approx, img.raw_dfmt, img.raw_nfmt, img.width, img.height, img.pitch,
-                 img.base_level, img.last_level, img.num_layers, (uint32_t)img.tile_mode, (uint32_t)img.type,
-                 img.num_samples, depth_att ? "depth" : "color", depth_att ? 0 : c, (unsigned long long)at_addr,
-                 (unsigned long long)at_size, (unsigned long)at.width, (unsigned long)at.height,
-                 (unsigned long)at.pixelFormat, (unsigned long long)S.pass.stencil_addr,
-                 how == 1 ? "same base" : how == 2 ? "target lookup" : "address ranges", key.writes, S.pass.written,
-                 rs.ds.depth_test, rs.ds.depth_write, rs.ds.depth_compare, rs.ds.stencil_test,
-                 key.color[0] ? "bound" : "none", rs.color[0].mtl_write_mask, rs.blend[0].enable);
-        }
-    }
+        return false;
+    if (StageHasAttachmentHazard(pass, vs, vs_flat)) return true;
+    if (StageHasAttachmentHazard(pass, ps, ps_flat)) return true;
+    return false;
 }
 
 // =====================================================================================
@@ -7187,8 +7031,7 @@ struct PassSplitStats {
     uint64_t color_subset = 0;
     uint64_t color_diff = 0;
     uint64_t dim_diff = 0;
-    uint64_t hazard = 0;      // the draw samples an attachment the open pass wrote
-    uint64_t hazard_kept = 0; // the draw samples an attachment of the open pass and continues it
+    uint64_t hazard = 0;
     uint64_t la_calls = 0;
     uint64_t la_no_next = 0;
     uint64_t la_added = 0;
@@ -7213,8 +7056,6 @@ bool BeginPass(const PassKey& key, const ClearReq& clr, id<MTLTexture> const* ho
     }
     if (open == GnmEncoder::Render && S.pass.CanSubsume(key, allow_depth_omit) && !clr.any() &&
         !HasDeferredHleCopies()) {
-        if (key.hazard) g_pass_splits.hazard_kept++;
-        S.pass.written |= key.writes;
         if (hold) {
             for (int i = 0; i < 9; ++i) {
                 if (hold[i] && !S.pass_hold[i]) S.pass_hold[i] = hold[i];
@@ -7225,7 +7066,7 @@ bool BeginPass(const PassKey& key, const ClearReq& clr, id<MTLTexture> const* ho
     if (open == GnmEncoder::Render) {
         if (clr.any()) {
             g_pass_splits.clr_any++;
-        } else if (key.hazard & S.pass.written) {
+        } else if (key.has_hazard) {
             g_pass_splits.hazard++;
         } else if (key.depth != S.pass.depth || key.depth_slice != S.pass.depth_slice) {
             g_pass_splits.depth_diff++;
@@ -7331,11 +7172,6 @@ bool BeginPass(const PassKey& key, const ClearReq& clr, id<MTLTexture> const* ho
     S.passes_total++;
     if (key.depth && !clr.depth) S.n_depth_loads++;
     S.pass = key;
-    S.pass.hazard = 0;
-    S.pass.written = key.writes;
-    for (int i = 0; i < 8; ++i)
-        if (key.color[i] && clr.color[i]) S.pass.written |= kPassColor0 << i;
-    if (key.depth && (clr.depth || clr.stencil)) S.pass.written |= kPassDepth;
     for (int i = 0; i < 9; ++i) S.pass_hold[i] = hold ? hold[i] : nil;
     return true;
 }
@@ -7676,7 +7512,7 @@ id<MTLFunction> CompileStageFn(const char* raw_msl, bool invariant_pos, const ch
                                   options:CompileOptions()
                                     error:&e];
         g_hitch.mtl_ms += (CFAbsoluteTimeGetCurrent() - t0) * 1000.0;
-        NoteSyncLibrary(tag, code_addr, (CFAbsoluteTimeGetCurrent() - t0) * 1000.0);
+        g_compile.lib_sync.Add((CFAbsoluteTimeGetCurrent() - t0) * 1000.0);
         if (!lib) {
             RLog("msl-fail", "Metal rejected %s MSL of shader 0x%llx: %s", tag,
                  (unsigned long long)code_addr, e ? e.localizedDescription.UTF8String : "unknown");
@@ -9859,7 +9695,6 @@ void AfterGpu(std::function<void()> fn) { AfterGpu(std::move(fn), kQueueGfx); }
 bool LabelTraced(uint64_t addr) { return g_label_trace_addr && (addr & ~7ull) == g_label_trace_addr; }
 
 void AfterGpuLabel(uint64_t addr, uint64_t value, const char* packet, int queue, std::function<void()> fn) {
-    NoteGpuFence(); // the guest waits for GPU completion through this label (OnSubmit, PresentImpl)
     if (!LabelTraced(addr)) {
         AfterGpu(std::move(fn), queue);
         return;
@@ -11227,8 +11062,7 @@ void FlushPendingTess() {
         p.ps_img.flat = p.ps_flat.data();
         StageImagesScope images(&p.vs_img, &p.ps_img, nullptr);
         if (S.be->OpenEncoder() == GnmEncoder::Render) {
-            p.key.hazard = PassAttachmentHazard(S.pass, p.vs, p.vs_flat, p.ps, p.ps_flat);
-            if (g_pass_hazard_stats) NotePassHazardSplit(p.key, p.clr.any(), p.rs, p.vs, p.vs_flat, p.ps, p.ps_flat, p.name);
+            p.key.has_hazard = HasPassAttachmentHazard(S.pass, p.vs, p.vs_flat, p.ps, p.ps_flat);
         }
         if (!BeginPass(p.key, p.clr, p.hold, true)) {
             NoteSkip(SkipReason::PassBegin);
@@ -11461,9 +11295,10 @@ void EncodeTessDraw(DrawRec& r) {
                                   ? std::min<uint32_t>(db.base_slice, (uint32_t)t.arrayLength - 1)
                                   : 0;
             key.depth_addr = db.z_read_address;
-            key.depth_size = db.DepthBytes();
+            key.depth_size = db.slice_bytes ? (uint64_t)db.slice_bytes * std::max(1u, db.num_slices)
+                                            : (uint64_t)db.pitch * db.height * 4;
             key.stencil_addr = db.stencil_read_address;
-            key.stencil_size = db.StencilBytes();
+            key.stencil_size = key.depth_size;
             hold[8] = t;
             depth_fmt = (uint32_t)t.pixelFormat;
             rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
@@ -11472,7 +11307,8 @@ void EncodeTessDraw(DrawRec& r) {
             if (db.stencil_read_address) S.stencil_to_z[db.stencil_read_address] = db.z_read_address;
             const uint32_t dc = regs[0xA200];
             const bool depth_enable = (dc >> 1) & 1, depth_write = (dc >> 2) & 1;
-            if (WritesDepthStencil(rs)) BumpDepthVersion(t);
+            if (depth_write || rs.ds.stencil_test || db.depth_clear_enable || db.stencil_clear_enable)
+                BumpDepthVersion(t);
             uint64_t htile_seq = 0;
             const uint32_t htile_slice = std::min<uint32_t>(db.base_slice, 63);
             const bool htile_clear =
@@ -11812,7 +11648,6 @@ void EncodeTessDraw(DrawRec& r) {
     meta_undo.Keep();
     PendingTessDraw p{};
     p.sig = sig;
-    key.writes = KeyWrites(key, write_mask, rs, vs, r.vs_flat, ps, r.ps_flat);
     p.key = key;
     for (int i = 0; i < 9; ++i) p.hold[i] = hold[i];
     p.clr = clr;
@@ -11960,9 +11795,10 @@ void EncodeGsDraw(DrawRec& r) {
                                   ? std::min<uint32_t>(db.base_slice, (uint32_t)t.arrayLength - 1)
                                   : 0;
             key.depth_addr = db.z_read_address;
-            key.depth_size = db.DepthBytes();
+            key.depth_size = db.slice_bytes ? (uint64_t)db.slice_bytes * std::max(1u, db.num_slices)
+                                            : (uint64_t)db.pitch * db.height * 4;
             key.stencil_addr = db.stencil_read_address;
-            key.stencil_size = db.StencilBytes();
+            key.stencil_size = key.depth_size;
             hold[8] = t;
             depth_fmt = (uint32_t)t.pixelFormat;
             rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
@@ -11971,7 +11807,8 @@ void EncodeGsDraw(DrawRec& r) {
             if (db.stencil_read_address) S.stencil_to_z[db.stencil_read_address] = db.z_read_address;
             const uint32_t dc = regs[0xA200];
             const bool depth_enable = (dc >> 1) & 1, depth_write = (dc >> 2) & 1;
-            if (WritesDepthStencil(rs)) BumpDepthVersion(t);
+            if (depth_write || rs.ds.stencil_test || db.depth_clear_enable || db.stencil_clear_enable)
+                BumpDepthVersion(t);
             uint64_t htile_seq = 0;
             const uint32_t htile_slice = std::min<uint32_t>(db.base_slice, 63);
             const bool htile_clear =
@@ -12392,10 +12229,8 @@ void EncodeGsDraw(DrawRec& r) {
 
     // ---- Step 2: Render Pass (Pass-Through VS + PS)
     if (S.be->OpenEncoder() == GnmEncoder::Render) {
-        key.hazard = PassAttachmentHazard(S.pass, es, r.ls_es_flat, ps, r.ps_flat);
+        key.has_hazard = HasPassAttachmentHazard(S.pass, es, r.ls_es_flat, ps, r.ps_flat);
     }
-    key.writes = KeyWrites(key, write_mask, rs, es, r.ls_es_flat, ps, r.ps_flat);
-    if (g_pass_hazard_stats) NotePassHazardSplit(key, clr.any(), rs, es, r.ls_es_flat, ps, r.ps_flat, args.name);
     if (!BeginPass(key, clr, hold, true)) {
         NoteSkip(SkipReason::PassBegin);
         return;
@@ -12532,7 +12367,7 @@ void ApplyPassLookahead(const DrawRec& cur, PassKey& key, __strong id<MTLTexture
         uint64_t cand_caddr[8] = {}, cand_csize[8] = {};
         id<MTLTexture> cand_depth = nil;
         uint32_t cand_dslice = 0;
-        uint64_t cand_daddr = 0, cand_saddr = 0, cand_dsize = 0, cand_ssize = 0;
+        uint64_t cand_daddr = 0, cand_saddr = 0, cand_dsize = 0;
         bool nx_any_rt = false;
         bool stop = false;
 
@@ -12633,14 +12468,14 @@ void ApplyPassLookahead(const DrawRec& cur, PassKey& key, __strong id<MTLTexture
                 cand_dslice = dsl;
                 cand_daddr = ndb.z_read_address;
                 cand_saddr = ndb.stencil_read_address;
-                cand_dsize = ndb.DepthBytes();
-                cand_ssize = ndb.StencilBytes();
+                cand_dsize = ndb.slice_bytes ? (uint64_t)ndb.slice_bytes * std::max(1u, ndb.num_slices)
+                                             : (uint64_t)ndb.pitch * ndb.height * 4;
                 cand.depth = dt;
                 cand.depth_slice = dsl;
                 cand.depth_addr = cand_daddr;
                 cand.depth_size = cand_dsize;
                 cand.stencil_addr = cand_saddr;
-                cand.stencil_size = cand_ssize;
+                cand.stencil_size = cand_dsize;
             }
         }
         if (!nx_any_rt) {
@@ -12650,7 +12485,7 @@ void ApplyPassLookahead(const DrawRec& cur, PassKey& key, __strong id<MTLTexture
 
         {
             StageImagesScope nx_images(&nx->vs_img, &nx->ps_img, nullptr);
-            if (PassAttachmentHazard(key, nx->vs, nx->vs_flat, nx->ps, nx->ps_flat)) {
+            if (HasPassAttachmentHazard(key, nx->vs, nx->vs_flat, nx->ps, nx->ps_flat)) {
                 g_pass_splits.la_stop_haz++;
                 break;
             }
@@ -12664,7 +12499,7 @@ void ApplyPassLookahead(const DrawRec& cur, PassKey& key, __strong id<MTLTexture
                 const DrawRec* dj = (j == encq::t_batch_idx) ? &cur : (*encq::t_batch)[j].draw;
                 if (!dj) continue;
                 StageImagesScope dj_images(&dj->vs_img, &dj->ps_img, nullptr);
-                if (PassAttachmentHazard(cand, dj->vs, dj->vs_flat, dj->ps, dj->ps_flat)) {
+                if (HasPassAttachmentHazard(cand, dj->vs, dj->vs_flat, dj->ps, dj->ps_flat)) {
                     conflict = true;
                     break;
                 }
@@ -12689,7 +12524,7 @@ void ApplyPassLookahead(const DrawRec& cur, PassKey& key, __strong id<MTLTexture
                 key.depth_addr = cand_daddr;
                 key.depth_size = cand_dsize;
                 key.stencil_addr = cand_saddr;
-                key.stencil_size = cand_ssize;
+                key.stencil_size = cand_dsize;
                 hold[8] = cand_depth;
                 depth_fmt = (uint32_t)cand_depth.pixelFormat;
                 g_pass_splits.la_added++;
@@ -12849,9 +12684,10 @@ void DrawEncode(DrawRec& r) {
                                       ? std::min<uint32_t>(db.base_slice, (uint32_t)t.arrayLength - 1)
                                       : 0;
                 key.depth_addr = db.z_read_address;
-                key.depth_size = db.DepthBytes();
+                key.depth_size = db.slice_bytes ? (uint64_t)db.slice_bytes * std::max(1u, db.num_slices)
+                                                : (uint64_t)db.pitch * db.height * 4;
                 key.stencil_addr = db.stencil_read_address;
-                key.stencil_size = db.StencilBytes();
+                key.stencil_size = key.depth_size;
                 hold[8] = t;
                 depth_fmt = (uint32_t)t.pixelFormat;
                 rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
@@ -12860,7 +12696,8 @@ void DrawEncode(DrawRec& r) {
                 if (db.stencil_read_address) S.stencil_to_z[db.stencil_read_address] = db.z_read_address;
                 const uint32_t dc = regs[0xA200];
                 const bool depth_enable = (dc >> 1) & 1, depth_write = (dc >> 2) & 1;
-                if (WritesDepthStencil(rs)) BumpDepthVersion(t);
+                if (depth_write || rs.ds.stencil_test || db.depth_clear_enable || db.stencil_clear_enable)
+                    BumpDepthVersion(t);
                 uint64_t htile_seq = 0;
                 const uint32_t htile_slice = std::min<uint32_t>(db.base_slice, 63);
                 const bool htile_clear =
@@ -12977,7 +12814,7 @@ void DrawEncode(DrawRec& r) {
         const bool can_subsume_open =
             allow_depth_omit && S.be->OpenEncoder() == GnmEncoder::Render && S.pass.CanSubsume(key, true) &&
             !clr.any() && !HasDeferredHleCopies() &&
-            !(PassAttachmentHazard(S.pass, vs, r.vs_flat, ps, r.ps_flat) & S.pass.written);
+            !HasPassAttachmentHazard(S.pass, vs, r.vs_flat, ps, r.ps_flat);
         if (can_subsume_open) {
             for (int i = 0; i < 8; ++i) {
                 if (!color_fmt[i] && S.pass.color[i]) color_fmt[i] = (uint32_t)S.pass.color[i].pixelFormat;
@@ -13233,10 +13070,8 @@ void DrawEncode(DrawRec& r) {
             if (ps) PrepareDepthCompanions(ps, ps_flat);
         }
         if (S.be->OpenEncoder() == GnmEncoder::Render) {
-            key.hazard = PassAttachmentHazard(S.pass, vs, vs_flat, ps, ps_flat);
+            key.has_hazard = HasPassAttachmentHazard(S.pass, vs, vs_flat, ps, ps_flat);
         }
-        key.writes = KeyWrites(key, write_mask, rs, vs, vs_flat, ps, ps_flat);
-        if (g_pass_hazard_stats) NotePassHazardSplit(key, clr.any(), rs, vs, vs_flat, ps, ps_flat, args.name);
         if (!BeginPass(key, clr, hold, true, allow_depth_omit)) {
             NoteSkip(SkipReason::PassBegin);
             return;
@@ -14920,28 +14755,15 @@ template <class Describe> void PresentStats(Describe&& describe) {
                     (held - held0) / 300.0, (by_time - time0) / 300.0, (by_backlog - backlog0) / 300.0);
             held0 = held, time0 = by_time, backlog0 = by_backlog;
         }
-        fprintf(stderr, "[gnm-draw] pass splits per frame: clr=%.1f, depth=%.1f, color_subset=%.1f, color_diff=%.1f, dim=%.1f, hazard=%.1f; "
-                        "draws sampling an unwritten attachment of their pass %.1f\n",
+        fprintf(stderr, "[gnm-draw] pass splits per frame: clr=%.1f, depth=%.1f, color_subset=%.1f, color_diff=%.1f, dim=%.1f, hazard=%.1f\n",
                 g_pass_splits.clr_any / 300.0, g_pass_splits.depth_diff / 300.0,
                 g_pass_splits.color_subset / 300.0, g_pass_splits.color_diff / 300.0,
-                g_pass_splits.dim_diff / 300.0, g_pass_splits.hazard / 300.0, g_pass_splits.hazard_kept / 300.0);
+                g_pass_splits.dim_diff / 300.0, g_pass_splits.hazard / 300.0);
         fprintf(stderr, "[gnm-draw] lookahead per frame: calls=%.1f no_next=%.1f added=%.1f stop(nondraw=%.1f clr=%.1f pend=%.1f diff=%.1f sc=%.1f haz=%.1f)\n",
                 g_pass_splits.la_calls / 300.0, g_pass_splits.la_no_next / 300.0, g_pass_splits.la_added / 300.0,
                 g_pass_splits.la_stop_nondraw / 300.0, g_pass_splits.la_stop_clr / 300.0,
                 g_pass_splits.la_stop_pend / 300.0, g_pass_splits.la_stop_diff / 300.0,
                 g_pass_splits.la_stop_sc / 300.0, g_pass_splits.la_stop_haz / 300.0);
-        if (g_pass_hazard_stats) {
-            const PassHazardStats& h = g_pass_hazards;
-            fprintf(stderr, "[gnm-draw] hazard splits per frame: %.1f draws (sampling depth %.1f: depth test %.1f, depth write %.1f, "
-                            "stencil test %.1f; sampling color %.1f; writing what they sample %.1f); %.1f images (vs %.1f) bound as "
-                            "depth %.1f, depth as R32F %.1f, stencil plane %.1f, color %.1f, storage %.1f; matched by same base %.1f, "
-                            "target lookup %.1f, address ranges only %.1f\n",
-                    h.draws / 300.0, h.depth / 300.0, h.depth_test / 300.0, h.depth_write / 300.0, h.stencil_test / 300.0,
-                    h.color / 300.0, h.self / 300.0, h.imgs / 300.0, h.vs_imgs / 300.0, h.as_depth / 300.0, h.as_r32f / 300.0,
-                    h.as_stencil / 300.0, h.as_color / 300.0, h.as_storage / 300.0, h.same_base / 300.0, h.same_tex / 300.0,
-                    h.range_only / 300.0);
-            g_pass_hazards = {};
-        }
         g_pass_splits = {};
         S.n_passes = S.n_depth_loads = S.n_cencs = S.n_cbarriers = S.n_cdisp = S.n_occl_splits = 0;
         S.n_occl_events = S.n_occl_draws = S.n_occl_missed = 0;
