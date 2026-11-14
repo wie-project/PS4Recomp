@@ -502,23 +502,27 @@ func TestRegressCallRspOperand(t *testing.T) {
 
 // x87 instructions with no site in TLOU or U4 (CUSA00557, CUSA04529) are not lowered: they trap
 // with a report instead of running a guessed lowering. FCOS had one that called libm's cos and
-// clobbered XMM0-XMM7, the YMM upper halves and the flags.
+// clobbered XMM0-XMM7, the YMM upper halves and the flags; it now calls _recomp_x87_fcos, which
+// keeps them (pkg/emitter TestGuestStateBoundary/helper-calls-keep-registers), and FDECSTP is
+// lowered (TestExecX87Fdecstp).
 func TestRegressX87UnusedTrap(t *testing.T) {
 	for _, tc := range []struct{ name, hex string }{
-		{"fcos", "d9ff"}, {"fsin", "d9fe"}, {"fsincos", "d9fb"}, {"fptan", "d9f2"}, {"fpatan", "d9f3"},
+		{"fsin", "d9fe"}, {"fsincos", "d9fb"}, {"fptan", "d9f2"}, {"fpatan", "d9f3"},
 		{"f2xm1", "d9f0"}, {"fyl2x", "d9f1"}, {"fyl2xp1", "d9f9"},
 		{"fbld tbyte [rax]", "df20"}, {"fbstp tbyte [rax]", "df30"},
 		{"fnsave [rax]", "dd30"}, {"frstor [rax]", "dd20"},
 		{"fxam", "d9e5"}, {"ftst", "d9e4"}, {"fucom st1", "dde1"}, {"fucomp st1", "dde9"}, {"fucompp", "dae9"},
-		{"fincstp", "d9f7"}, {"fdecstp", "d9f6"},
+		{"fincstp", "d9f7"},
 	} {
 		requireInOrder(t, tc.name, liftBlock(t, tc.hex)[0], "b _recomp_unsupported_instruction")
 	}
+	requireInOrder(t, "fcos", liftBlock(t, "d9ff")[0], "stp x29, x30, [sp, #-16]!", "bl _recomp_x87_fcos",
+		"ldp x29, x30, [sp], #16")
 }
 
 // FS:[base+index*scale+disp] ignored base and index (0 sites); the address is now computed as
 // usual and the FS base (x27) added. Forms computeEffAddr cannot express trap (0 sites each):
-// addr32, MOV moffs64 (A0-A3), GS.
+// addr32, GS. MOV moffs64 (A0-A3) is lowered apart from it (TestRegressMovMoffs).
 func TestRegressAddressingForms(t *testing.T) {
 	requireInOrder(t, "mov rax, fs:[rax+8]", liftBlock(t, "64488b4008")[0],
 		"mov x16, x19", "add x16, x16, #8", "add x16, x16, x27", "ldr x19, [x28, x16]")
@@ -526,8 +530,6 @@ func TestRegressAddressingForms(t *testing.T) {
 		"mov x16, x19", "add x16, x16, x21, lsl #3", "add x16, x16, x27", "ldr x19, [x28, x16]")
 	requireInOrder(t, "mov rax, fs:[0x28]", liftBlock(t, "64488b042528000000")[0], "add x16, x27, #40", "ldr x19, [x28, x16]")
 	for _, tc := range []struct{ name, hex string }{
-		{"mov eax, [moffs64]", "a10000001000000000"},
-		{"mov [moffs64], rax", "48a30000001000000000"},
 		{"mov rax, gs:[0]", "65488b042500000000"},
 		{"mov eax, [edi]", "678b07"},
 		{"lea rax, [edi+eax]", "67488d0407"},
@@ -574,9 +576,28 @@ func TestRegressJumpDispatchKeepsFlags(t *testing.T) {
 	requireInOrder(t, "add; jmp 0x6000", lift("4801d8", "e9f84f0000"), "adds x19, x19, x20", "cfinv", "b _recomp_indirect_jump")
 }
 
-// STD was lifted as a NOP, so a following string instruction ran forward instead of backward.
-// DF is not modelled (0 sites in TLOU and U4): STD traps, CLD stays a NOP.
-func TestRegressStdTraps(t *testing.T) {
-	requireInOrder(t, "std", liftBlock(t, "fd")[0], "b _recomp_unsupported_instruction")
-	forbid(t, "cld", liftBlock(t, "fc")[0], "b _recomp_unsupported_instruction")
+// STD was lifted as a NOP, so a following string instruction ran forward instead of backward;
+// then it trapped. STD and CLD now set GuestContext.df, which every string instruction reads
+// (TestExecStringOpsBackward runs the backward forms against x86).
+func TestRegressStdSetsDirection(t *testing.T) {
+	requireInOrder(t, "std", liftBlock(t, "fd")[0], "mov w17, #1", "strb w17, [x16, #0x9e]")
+	requireInOrder(t, "cld", liftBlock(t, "fc")[0], "strb wzr, [x16, #0x9e]")
+	requireInOrder(t, "rep movsb", liftBlock(t, "f3a4")[0], "ldrb w7, [x7, #0x9e]", "sub x23, x23, x7", "sub x24, x24, x7")
+	for _, enc := range []string{"fd", "fc", "f3a4", "f348ab", "f3ac", "f3a6", "f2ae"} {
+		forbid(t, enc, liftBlock(t, enc)[0], "b _recomp_unsupported_instruction")
+	}
+}
+
+// MOV with a 64-bit absolute address (moffs) trapped as unsupported. It loads the 64-bit
+// address (plus the FS base with an FS override); ADDR32 and GS forms still trap
+// (TestExecMovMoffs runs the flat forms against x86).
+func TestRegressMovMoffs(t *testing.T) {
+	requireInOrder(t, "mov rax, [moffs]", liftBlock(t, "48a1efcdab8967452301")[0],
+		"movz x16, #0xcdef, lsl #0", "movk x16, #0x89ab, lsl #16", "movk x16, #0x4567, lsl #32", "movk x16, #0x123, lsl #48",
+		"ldapr x19, [x7]")
+	requireInOrder(t, "mov rax, fs:[moffs]", liftBlock(t, "6448a10800000000000000")[0], "add x16, x16, x27", "ldapr x19, [x7]")
+	requireInOrder(t, "mov [moffs], al", liftBlock(t, "a2efcdab8967452301")[0], "stlrb w19, [x7]")
+	for _, enc := range []string{"67a044332211", "6548a10800000000000000"} {
+		requireInOrder(t, enc, liftBlock(t, enc)[0], "b _recomp_unsupported_instruction")
+	}
 }

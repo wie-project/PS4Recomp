@@ -249,6 +249,10 @@ def main():
                 diffs.append("mem bytes %d..%d differ: native %s lifted %s" % (
                     ix[0] - 32, ix[-1] - 32, mem1[ix[0]:ix[-1] + 1].hex(), mem2[ix[0]:ix[-1] + 1].hex()))
                 kinds.add("mem")
+            # DF is never undefined: compared for every test (the lifter keeps it in GuestContext.df).
+            if (f1 >> 10 & 1) != (f2 >> 10 & 1):
+                diffs.append("flag DF native %d lifted %d" % (f1 >> 10 & 1, f2 >> 10 & 1))
+                kinds.add("flag-DF")
             for name in fl:
                 bit = FLAGBIT[name]
                 if (f1 >> bit & 1) != (f2 >> bit & 1):

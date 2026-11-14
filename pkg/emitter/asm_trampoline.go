@@ -78,8 +78,9 @@ const trampolineAsm = `// ARM64 assembly bridge between the host C runtime and r
 // points below) is in the __TEXT,__recomp_guest section: a host PC there means the pinned
 // registers are the guest registers; anywhere else the GuestContext holds what the last
 // guest -> host transition stored (recomp_pc_in_guest_code; signal handlers rely on it).
-// The rest of the guest state (x87 stack, MMX, MXCSR) lives in the GuestContext of the
-// execution context that runs, found through the TCB slot [x28 + x27 + 0x70]. The runtime
+// The rest of the guest state (x87 stack, MMX, MXCSR, the direction flag) lives in the
+// GuestContext of the execution context that runs, found through the TCB slot
+// [x28 + x27 + 0x70]. The runtime
 // keeps that slot pointing at the context that runs on the guest thread: the thread's own
 // GuestContext, or the fiber's while a fiber runs (ps4_fiber.c).
 //
@@ -114,7 +115,7 @@ const trampolineAsm = `// ARM64 assembly bridge between the host C runtime and r
 // but each guest RET returns through its own host frame; libc's longjmp and __cxa_throw
 // are shims that report and abort (shim_guest_nonlocal_jump, shim_guest_cxa_throw).
 // Helpers the lifter calls inside one instruction (recomp_vpcmpistri, recomp_vpcmpe_stri,
-// recomp_vaeskeygenassist below) keep every vector register.
+// recomp_vaeskeygenassist, recomp_x87_fcos below) keep every vector register.
 // --------------------------------------------------------------------------------------
 
 // void recomp_enter_guest(GuestContext *ctx, uint64_t target_fn)
@@ -359,6 +360,36 @@ Lvaeskeygenassist_host:
     LOAD_Q0_31
     fmov d0, x0
     mov  v0.d[1], x1
+    HELPER_LOAD_R8_R15
+    ldr  x16, [sp, #16]
+    msr  nzcv, x16
+    ldp  x29, x30, [sp], #32
+    ret
+
+// FCOS: recomp_x87_fcos_impl(ctx) works on the x87 stack in ctx. FCOS changes no EFLAGS, so
+// NZCV is kept. x87 arithmetic does not follow MXCSR: the C code runs with FPCR = 0 (round to
+// nearest, no flush to zero), and the guest FPCR is restored afterwards.
+GUEST_SECTION
+.globl _recomp_x87_fcos
+_recomp_x87_fcos:
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    mrs  x17, nzcv
+    str  x17, [sp, #16]
+    HELPER_SAVE_GPRS
+    b    Lx87_fcos_host
+
+HOST_SECTION
+Lx87_fcos_host:
+    SAVE_Q0_31
+    mrs  x17, fpcr
+    str  x17, [sp, #512 + 24]
+    msr  fpcr, xzr
+    mov  x0, x16
+    bl   _recomp_x87_fcos_impl
+    ldr  x17, [sp, #512 + 24]
+    msr  fpcr, x17
+    LOAD_Q0_31
     HELPER_LOAD_R8_R15
     ldr  x16, [sp, #16]
     msr  nzcv, x16

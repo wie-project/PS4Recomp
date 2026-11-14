@@ -609,9 +609,10 @@ func (l *Arm64Lifter) liftAes(inst disasm.Instruction, nextPC uint64, lines []st
 	return lines, nil
 }
 
-// liftPushfq handles PUSHFQ: SF, ZF, CF (in the tracked carry sense) and OF from NZCV, IF and
-// bit 1 set; AF and PF are not modeled.
+// liftPushfq handles PUSHFQ: SF, ZF, CF (in the tracked carry sense) and OF from NZCV, DF from
+// GuestContext.df, IF and bit 1 set; AF and PF are not modeled.
 func (l *Arm64Lifter) liftPushfq(inst disasm.Instruction, lines []string) ([]string, error) {
+	lines = append(lines, l.emitLoadCtxPtr("x4")...)
 	lines = append(lines,
 		"    cset w0, mi",
 		"    cset w1, eq",
@@ -620,6 +621,8 @@ func (l *Arm64Lifter) liftPushfq(inst disasm.Instruction, lines []string) ([]str
 		"    orr w0, w2, w0, lsl #7",
 		"    orr w0, w0, w1, lsl #6",
 		"    orr w0, w0, w3, lsl #11",
+		"    ldrb w1, [x4, #0x9e]", // df
+		"    orr w0, w0, w1, lsl #10",
 		"    mov w1, #0x202",
 		"    orr w0, w0, w1",
 		"    sub x26, x26, #8",
@@ -628,13 +631,16 @@ func (l *Arm64Lifter) liftPushfq(inst disasm.Instruction, lines []string) ([]str
 	return lines, nil
 }
 
-// liftPopfq handles POPFQ: N = SF, Z = ZF, C = CF (carryAdd), V = OF.
+// liftPopfq handles POPFQ: N = SF, Z = ZF, C = CF (carryAdd), V = OF, GuestContext.df = DF.
 func (l *Arm64Lifter) liftPopfq(inst disasm.Instruction, lines []string) ([]string, error) {
+	lines = append(lines, l.emitLoadCtxPtr("x4")...)
 	lines = append(lines,
 		"    ldr x0, [x28, x26]",
 		"    add x26, x26, #8",
-		"    rmif x0, #4, #12", // N = bit 7, Z = bit 6
-		"    rmif x0, #63, #2", // C = bit 0
+		"    ubfx w1, w0, #10, #1",
+		"    strb w1, [x4, #0x9e]", // df
+		"    rmif x0, #4, #12",     // N = bit 7, Z = bit 6
+		"    rmif x0, #63, #2",     // C = bit 0
 		"    ubfx w1, w0, #11, #1",
 		"    rmif x1, #0, #1", // V = bit 11
 	)

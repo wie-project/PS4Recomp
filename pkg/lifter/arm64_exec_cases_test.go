@@ -2,6 +2,7 @@ package lifter
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"testing"
@@ -254,6 +255,250 @@ func TestExecStringOps(t *testing.T) {
 				}
 			}
 		}
+	}
+	runExecCases(t, cases)
+}
+
+// String instructions with DF = 1: every element moves to a decreasing address, one at a time,
+// so a backward copy into an overlapping higher destination is exact (memmove) and one into a
+// lower destination replicates the trailing elements. DF comes from STD (and CLD clears it
+// again, inside the case), from the incoming RFLAGS (the state a previous block left), or from
+// POPFQ; PUSHFQ stores it in bit 10. DF itself is compared after every case.
+func TestExecStringOpsBackward(t *testing.T) {
+	pattern := make([]byte, 0x100)
+	for i := range pattern {
+		pattern[i] = byte(i*37 + 0x81)
+	}
+	const std, cld = "fd", "fc"
+	// Element 0 of each operand is at +0x180 of the window, the copies run below it.
+	src, dst := uint64(execMemBase+0x180), uint64(execMemBase+0x480)
+	type sop struct {
+		name string
+		enc  string
+		elem int
+	}
+	var cases []execCase
+	// dfSeqs: how DF = 1 reaches the instruction and whether the case clears it afterwards.
+	dfSeqs := []struct {
+		name      string
+		pre, post []string
+		flags     uint64
+	}{{"std;", []string{std}, []string{cld}, 0}, {"df=1 in;", nil, nil, fDF}, {"std; (left set)", []string{std}, nil, 0}}
+	seq := func(pre []string, op string, post []string) []string {
+		return append(append(append([]string{}, pre...), op), post...)
+	}
+	movs := []sop{{"rep movsb", "f3a4", 1}, {"rep movsw", "66f3a5", 2}, {"rep movsd", "f3a5", 4}, {"rep movsq", "f348a5", 8}}
+	for _, d := range dfSeqs {
+		for _, m := range movs {
+			for _, n := range []uint64{0, 1, 7, 33} {
+				// overlap > 0: destination above the source (backward memmove);
+				// overlap < 0: destination below it (the copy overwrites its own unread source).
+				for _, overlap := range []int{0, 1, m.elem, 3 * m.elem, -1, -m.elem, -3 * m.elem} {
+					s, dd := src, dst
+					if overlap != 0 {
+						dd = uint64(int64(src) + int64(overlap))
+					}
+					cases = append(cases, execCase{
+						name:  fmt.Sprintf("%s %s rcx=%d overlap=%d", d.name, m.name, n, overlap),
+						code:  seq(d.pre, m.enc, d.post),
+						regs:  map[x86asm.Reg]uint64{x86asm.RSI: s, x86asm.RDI: dd, x86asm.RCX: n},
+						flags: d.flags | fCF | fZF,
+						mem:   map[int][]byte{0x100: pattern},
+					})
+				}
+			}
+		}
+		for _, m := range []sop{{"movsb", "a4", 1}, {"movsw", "66a5", 2}, {"movsd", "a5", 4}, {"movsq", "48a5", 8}} {
+			cases = append(cases, execCase{
+				name:  fmt.Sprintf("%s %s", d.name, m.name),
+				code:  seq(d.pre, m.enc, d.post),
+				regs:  map[x86asm.Reg]uint64{x86asm.RSI: src, x86asm.RDI: dst, x86asm.RCX: 5},
+				flags: d.flags,
+				mem:   map[int][]byte{0x100: pattern},
+			})
+		}
+		for _, m := range []sop{{"rep stosb", "f3aa", 1}, {"rep stosw", "66f3ab", 2}, {"rep stosd", "f3ab", 4},
+			{"rep stosq", "f348ab", 8}, {"stosb", "aa", 1}, {"stosq", "48ab", 8}} {
+			for _, n := range []uint64{0, 1, 5} {
+				cases = append(cases, execCase{
+					name:  fmt.Sprintf("%s %s rcx=%d", d.name, m.name, n),
+					code:  seq(d.pre, m.enc, d.post),
+					regs:  map[x86asm.Reg]uint64{x86asm.RDI: dst, x86asm.RCX: n, x86asm.RAX: 0x1122334455667788},
+					flags: d.flags | fSF | fOF,
+					mem:   map[int][]byte{0x400: pattern},
+				})
+			}
+		}
+		for _, m := range []sop{{"lodsb", "ac", 1}, {"lodsw", "66ad", 2}, {"lodsd", "ad", 4}, {"lodsq", "48ad", 8},
+			{"rep lodsb", "f3ac", 1}, {"rep lodsq", "f348ad", 8}} {
+			for _, n := range []uint64{0, 1, 3} {
+				cases = append(cases, execCase{
+					name:  fmt.Sprintf("%s %s rcx=%d", d.name, m.name, n),
+					code:  seq(d.pre, m.enc, d.post),
+					regs:  map[x86asm.Reg]uint64{x86asm.RSI: src, x86asm.RCX: n, x86asm.RAX: 0x8877665544332211},
+					flags: d.flags,
+					mem:   map[int][]byte{0x100: pattern},
+				})
+			}
+		}
+		// CMPS/SCAS backward: the operands end at +0x180 / +0x480 and are compared from there
+		// down. Equal for the last 5 elements, then 0x80 vs 0x01 (byte compare: SF/OF).
+		a := make([]byte, 0x90)
+		b := make([]byte, 0x90)
+		for i := range a {
+			a[i] = byte(i + 1)
+			b[i] = byte(i + 1)
+		}
+		a[0x80-5], b[0x80-5] = 0x80, 0x01
+		for _, c := range []sop{{"repe cmpsb", "f3a6", 1}, {"repne cmpsb", "f2a6", 1}, {"repe cmpsw", "66f3a7", 2},
+			{"repe cmpsd", "f3a7", 4}, {"repe cmpsq", "f348a7", 8}, {"cmpsb", "a6", 1}} {
+			for _, n := range []uint64{0, 1, 3, 6, 16} {
+				for _, swap := range []bool{false, true} {
+					x, y := a, b
+					if swap {
+						x, y = b, a
+					}
+					cases = append(cases, execCase{
+						name:  fmt.Sprintf("%s %s rcx=%d swap=%v", d.name, c.name, n, swap),
+						code:  seq(d.pre, c.enc, d.post),
+						regs:  map[x86asm.Reg]uint64{x86asm.RSI: src, x86asm.RDI: dst, x86asm.RCX: n},
+						flags: d.flags,
+						mem:   map[int][]byte{0x100: x, 0x400: y},
+					})
+				}
+			}
+		}
+		for _, c := range []sop{{"repne scasb", "f2ae", 1}, {"repe scasb", "f3ae", 1}, {"repne scasq", "f248af", 8},
+			{"repe scasw", "66f3af", 2}, {"scasb", "ae", 1}} {
+			for _, n := range []uint64{0, 1, 6, 16} {
+				for _, al := range []uint64{0x7a7a7a7a7a7a7a7b, 0xffffff80, 0x79} {
+					cases = append(cases, execCase{
+						name:  fmt.Sprintf("%s %s rcx=%d rax=%#x", d.name, c.name, n, al),
+						code:  seq(d.pre, c.enc, d.post),
+						regs:  map[x86asm.Reg]uint64{x86asm.RDI: dst, x86asm.RCX: n, x86asm.RAX: al},
+						flags: d.flags,
+						mem:   map[int][]byte{0x400: a},
+					})
+				}
+			}
+		}
+	}
+	// The eboot's backward memmove tail (dst > src, overlapping): RDI/RSI advanced past the end,
+	// the RCX & 7 trailing bytes copied by REP MOVSB, then RDX >> 3 qwords by REP MOVSQ, all
+	// with DF = 1 between STD and CLD.
+	memmoveBack := []string{"4801cf", "4801ce", std, "4883e107", "48ffcf", "48ffce", "f3a4", "4889d1",
+		"48c1e903", "4883ee07", "4883ef07", "f348a5", cld}
+	for _, n := range []uint64{0, 1, 7, 8, 9, 40, 77} {
+		for _, gap := range []uint64{1, 3, 8, 13, 0x100} {
+			cases = append(cases, execCase{
+				name: fmt.Sprintf("memmove backward n=%d dst=src+%d", n, gap),
+				code: memmoveBack,
+				regs: map[x86asm.Reg]uint64{x86asm.RSI: execMemBase + 0x100, x86asm.RDI: execMemBase + 0x100 + gap,
+					x86asm.RCX: n, x86asm.RDX: n},
+				noFlags: true, // ADD/AND/DEC/SHR/SUB flags of the bookkeeping: not the point here
+				mem:     map[int][]byte{0x100: pattern},
+			})
+		}
+	}
+	// PUSHFQ stores DF in bit 10; POPFQ loads it, and the next string instruction follows it.
+	for _, fl := range []uint64{0, fDF} {
+		cases = append(cases, execCase{
+			name: fmt.Sprintf("pushfq df=%d", fl>>10), code: []string{"9c"}, flags: fl | fCF, cmpFlags: readMask,
+		})
+		cases = append(cases, execCase{
+			name: fmt.Sprintf("std; pushfq; cld df=%d", fl>>10), code: []string{std, "9c", cld}, flags: fl,
+		})
+		for _, img := range []uint64{0x202, 0x202 | fDF, 0x202 | fDF | fCF | fZF} {
+			cases = append(cases, execCase{
+				name:  fmt.Sprintf("popfq %#x; rep stosb df=%d", img, fl>>10),
+				code:  []string{"9d", "f3aa"},
+				regs:  map[x86asm.Reg]uint64{x86asm.RDI: dst, x86asm.RCX: 4, x86asm.RAX: 0x5a},
+				flags: fl,
+				mem:   map[int][]byte{int(execRSP - execMemBase): le64(img)},
+			})
+		}
+	}
+	runExecCases(t, cases)
+}
+
+// FDECSTP: TOP = (TOP - 1) & 7, wrapping from 0 to 7, the registers keep their values (ST(i)
+// becomes ST(i+1)), and C1 is cleared. The values are read back through FLD ST(i) of registers
+// that hold one (reading an empty register is a stack fault on x86; the lifter has no tags).
+func TestExecX87Fdecstp(t *testing.T) {
+	const (
+		fldA      = "dd06"   // fld qword [rsi]
+		fldB      = "dd4608" // fld qword [rsi+8]
+		fdecstp   = "d9f6"
+		fnstswAX  = "dfe0"
+		fnstswM16 = "dd7f10" // fnstsw [rdi+16]
+		fstpM0    = "dd1f"   // fstp qword [rdi]
+		fstpM8    = "dd5f08" // fstp qword [rdi+8]
+		fldenv    = "d966"   // fldenv [rsi+disp8]
+	)
+	src, dst := uint64(execMemBase+0x100), uint64(execMemBase+0x400)
+	regs := map[x86asm.Reg]uint64{x86asm.RSI: src, x86asm.RDI: dst}
+	vals := append(le64(math.Float64bits(1.25)), le64(math.Float64bits(-3.5))...)
+	rep := func(n int, enc string) []string {
+		var c []string
+		for range n {
+			c = append(c, enc)
+		}
+		return c
+	}
+	cases := []execCase{
+		{name: "fdecstp from TOP 0 wraps to 7", code: []string{fdecstp, fnstswAX}, regs: regs},
+		{name: "fdecstp x9 from TOP 0", code: append(rep(9, fdecstp), fnstswAX), regs: regs},
+		{name: "fdecstp x8 is the identity", code: append(rep(8, fdecstp), fnstswAX), regs: regs},
+		{
+			// TOP 6 after two loads; FDECSTP: TOP 5, b = ST(1), a = ST(2).
+			name: "fld a; fld b; fdecstp; fld st(1); fstp; fld st(2); fstp",
+			code: []string{fldA, fldB, fdecstp, fnstswM16, "d9c1", fstpM0, "d9c2", fstpM8, fnstswAX},
+			regs: regs, mem: map[int][]byte{0x100: vals},
+		},
+		{
+			// FDECSTP from TOP 6 down past 0 to 7: ST(0) = a (register 7), ST(7) = b (register 6).
+			// FST and FXCH read them without a push (register 6 is full).
+			name: "fld a; fld b; fdecstp x7 (TOP 7); fst; fxch st(7); fst",
+			code: append(append([]string{fldA, fldB}, rep(7, fdecstp)...), fnstswM16, "dd17", "d9cf", "dd5708", fnstswAX),
+			regs: regs, mem: map[int][]byte{0x100: vals},
+		},
+	}
+	// FLDENV with C1 (and C3/C2/C0) set and TOP = 2, all tags empty: FDECSTP clears C1 and keeps
+	// the other condition codes, TOP = 1.
+	for _, sw := range []uint16{0x1200, 0x5700, 0x1000} {
+		env := make([]byte, 28)
+		binary.LittleEndian.PutUint16(env[0:], 0x37f)
+		binary.LittleEndian.PutUint16(env[4:], sw)
+		binary.LittleEndian.PutUint16(env[8:], 0xffff)
+		cases = append(cases, execCase{
+			name: fmt.Sprintf("fldenv fsw=%#x; fdecstp", sw),
+			code: []string{fldenv + "20", fdecstp, fnstswAX},
+			regs: regs, mem: map[int][]byte{0x120: env},
+		})
+	}
+	runExecCases(t, cases)
+}
+
+// MOV with a 64-bit absolute address (moffs, A0-A3): loads into AL/AX (the rest of RAX kept),
+// EAX (zero-extended) and RAX, stores from each, at an unaligned address.
+func TestExecMovMoffs(t *testing.T) {
+	pattern := make([]byte, 0x40)
+	for i := range pattern {
+		pattern[i] = byte(i*29 + 0x93)
+	}
+	addr := hex.EncodeToString(le64(execMemBase + 0x203))
+	var cases []execCase
+	for _, f := range []struct{ name, op string }{
+		{"mov al, [moffs]", "a0"}, {"mov ax, [moffs]", "66a1"}, {"mov eax, [moffs]", "a1"}, {"mov rax, [moffs]", "48a1"},
+		{"mov [moffs], al", "a2"}, {"mov [moffs], ax", "66a3"}, {"mov [moffs], eax", "a3"}, {"mov [moffs], rax", "48a3"},
+	} {
+		cases = append(cases, execCase{
+			name:  f.name,
+			code:  []string{f.op + addr},
+			regs:  map[x86asm.Reg]uint64{x86asm.RAX: 0x1122334455667788},
+			flags: fCF | fSF,
+			mem:   map[int][]byte{0x200: pattern},
+		})
 	}
 	runExecCases(t, cases)
 }
