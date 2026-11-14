@@ -14,7 +14,6 @@ void shim_write(GuestContext *ctx);
 void shim_writev(GuestContext *ctx);
 void shim_exit(GuestContext *ctx);
 void shim_error(GuestContext *ctx);
-void shim_sysconf(GuestContext *ctx);
 void shim_nanosleep(GuestContext *ctx);
 void shim_sched_yield(GuestContext *ctx);
 void shim_mmap(GuestContext *ctx);

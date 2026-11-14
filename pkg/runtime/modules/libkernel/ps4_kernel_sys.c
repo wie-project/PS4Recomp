@@ -990,11 +990,6 @@ void shim___progname(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-void shim_getpagesize(GuestContext *ctx) {
-    ctx->rax = 4096;
-    SHIM_RETURN();
-}
-
 static uint64_t g_guest_heap_trace_info_buf = 0;
 
 void shim_sceLibcHeapGetTraceInfo(GuestContext *ctx) {

@@ -16,6 +16,7 @@ func TestLookupShimByNID(t *testing.T) {
 		{"pthread_sigmask", "JZKw5+Wrnaw", "shim_pthread_sigmask"},
 		{"cpuset_getaffinity", "Pdgml4rbxYk", "shim_cpuset_getaffinity"},
 		{"getrlimit", "Wh7HbV7JFqc", "shim_getrlimit"},
+		{"sysctl", "DFmMT80xcNI", "shim_sysctl"},
 		{"raise", "0t0-MxQNwK4", "shim_raise"},
 		{"memcpy", "Q3VBxCXhUHs", "shim_memcpy"},
 		{"memset", "8zTFvBIAIN8", "shim_memset"},
