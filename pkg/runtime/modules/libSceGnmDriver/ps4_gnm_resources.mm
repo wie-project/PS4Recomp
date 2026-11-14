@@ -2873,6 +2873,9 @@ struct TextureCache::Entry {
     NumberFormat nfmt = NumberFormat::Unorm;
     CompMapping cb_swizzle;     // color targets: CB component swap (for readback)
     id<MTLTexture> tex = nil;
+    // Linear/sRGB attachments are two views of the same guest bytes, not independent surfaces.
+    // Kept separately from sampled aliases so sampling cannot replace the cached attachment view.
+    id<MTLTexture> color_twin = nil;
     bool dirty = true;
     uint64_t cpu_digest = 0;       // sampled: digest of guest bytes at last CPU/GPU-refresh upload
     uint64_t cpu_check_epoch = 0;  // sampled: last cpu_submit_epoch_ verified against cpu_digest
@@ -3128,6 +3131,7 @@ id<MTLTexture> TextureCache::AliasCopy(const Entry* e) {
 }
 
 void TextureCache::DropEntryLocked(Entry* e) {
+    RetireLocked(e->color_twin);
     ReleaseTextureLocked(e->tex);
     ReleaseTextureLocked(AliasCopy(e));
     delete e;
@@ -3590,6 +3594,8 @@ bool TextureCache::UpgradeEntryUsageLocked(Entry* e, MTLTextureUsage needed) {
     ReleaseTextureLocked(AliasCopy(e));
     e->alias = nil;
     e->alias_key = 0;
+    RetireLocked(e->color_twin);
+    e->color_twin = nil;
     ReleaseTextureLocked(e->tex);
     RetireLocked(e->tex);
     TrackLocked(e, -1);
@@ -3963,10 +3969,16 @@ id<MTLTexture> TextureCache::GetColorTarget(const ColorTarget& cb, bool load_fro
     const uint32_t w = (cb.extent_width && cb.extent_width <= cb.pitch) ? cb.extent_width : cb.pitch;
     const uint32_t h = (cb.extent_height && cb.extent_height <= cb.height + 64) ? cb.extent_height : cb.height;
     const uint32_t layers = cb.num_slices;
+    const SurfaceDesc surface = cb.ToSurfaceDesc();
     auto range = entries_.equal_range(cb.address);
     for (auto it = range.first; it != range.second; ++it) {
         Entry* e = it->second;
-        if (e->kind == Entry::Color && e->mtl_format == cb.mtl_format && e->width == w &&
+        const bool twin = e->kind == Entry::Color &&
+                          SrgbTwinFormat((MTLPixelFormat)e->mtl_format) == cb.mtl_format &&
+                          e->dfmt == cb.dfmt && e->cb_swizzle == cb.swizzle &&
+                          e->surf.tile_mode == surface.tile_mode && e->surf.pitch == surface.pitch &&
+                          e->surf.alt_tile == surface.alt_tile;
+        if (e->kind == Entry::Color && (e->mtl_format == cb.mtl_format || twin) && e->width == w &&
             e->height == h && e->samples == cb.num_samples) {
             if (e->layers < layers && cb.num_samples == 1) {
                 MTLTextureDescriptor* td = [MTLTextureDescriptor new];
@@ -3979,11 +3991,13 @@ id<MTLTexture> TextureCache::GetColorTarget(const ColorTarget& cb, bool load_fro
                 td.usage = e->tex.usage;
                 td.storageMode = e->tex.storageMode;
                 id<MTLTexture> t = NewTextureLocked(td);
-                if (!t) return e->tex;
+                if (!t) return twin ? e->color_twin : e->tex;
                 if (grown_from) *grown_from = e->tex;
                 ReleaseTextureLocked(AliasCopy(e));
                 e->alias = nil;
                 e->alias_key = 0;
+                RetireLocked(e->color_twin);
+                e->color_twin = nil;
                 ReleaseTextureLocked(e->tex);
                 RetireLocked(e->tex); // the renderer forgets state keyed by the old texture
                 TrackLocked(e, -1);
@@ -4003,11 +4017,18 @@ id<MTLTexture> TextureCache::GetColorTarget(const ColorTarget& cb, bool load_fro
                     UploadLocked(e);
                 }
             }
+            id<MTLTexture> attachment = e->tex;
+            if (twin) {
+                if (!e->color_twin)
+                    e->color_twin = [e->tex newTextureViewWithPixelFormat:(MTLPixelFormat)cb.mtl_format];
+                if (!e->color_twin) return nil;
+                attachment = e->color_twin;
+            }
             e->generation++;
             stats.hits++;
             GpuWroteLocked(e); // drawn into: earlier buffer writes no longer describe it
             if (written) StampWriteLocked(e);
-            return TouchLocked(e), e->tex;
+            return TouchLocked(e), attachment;
         }
     }
     Entry* e = new Entry();
@@ -4284,6 +4305,7 @@ bool TextureCache::CloneGpuTexture(uint64_t src_addr, uint64_t dst_addr, uint64_
         d = new Entry(*s);
         d->address = dst_addr;
         d->alias = nil;
+        d->color_twin = nil;
         d->alias_generation = ~0ull;
         d->alias_key = 0;
         d->last_write_seq = d->write_lo = d->write_hi = 0; // not the source's writes
@@ -4446,7 +4468,7 @@ bool TextureCache::DescribeGpuTexture(id<MTLTexture> tex, ps4gnm_capture::GpuTex
     TimedLock lk(mutex_);
     for (const auto& kv : entries_) {
         const Entry* e = kv.second;
-        if (e->kind != Entry::Sampled && e->tex == tex) {
+        if (e->kind != Entry::Sampled && (e->tex == tex || e->color_twin == tex)) {
             EntryId(*e, out);
             return true;
         }
