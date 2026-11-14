@@ -903,7 +903,8 @@ static bool ProcessGfxPackets(GuestContext *ctx, GfxStream &st) {
             }
             const uint32_t *payload = &dcb_words[pc + 1];
 
-            // PS4_GNM_STATS=1: histogram of type-3 opcodes, printed every 600 submits.
+            // PS4_GNM_STATS=1: histogram of type-3 opcodes, printed every 600 submits (the renderer also
+            // explains its render pass hazard splits then, ps4_gnm_draw.mm).
             if (g_gnm_stats) g_gnm_hist[opcode]++;
 
             switch (opcode) {
