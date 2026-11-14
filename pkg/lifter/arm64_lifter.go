@@ -2,13 +2,19 @@ package lifter
 
 import (
 	"fmt"
-	"regexp"
+	"strconv"
 	"strings"
 
 	"ps4-recomp/pkg/disasm"
 
 	"golang.org/x/arch/x86/x86asm"
 )
+
+// The lifter formats several assembly lines per x86 instruction, so the hot paths keep fmt's
+// reflection out of the loop: these helpers produce the same text as %d / %x.
+func itoa(v int64) string    { return strconv.FormatInt(v, 10) }
+func uitoa(v uint64) string  { return strconv.FormatUint(v, 10) }
+func hexStr(v uint64) string { return strconv.FormatUint(v, 16) }
 
 // RegDesc holds the ARM64 register mapping details for an x86 register.
 type Arm64RegDesc struct {
@@ -191,6 +197,23 @@ type Arm64Lifter struct {
 	cpol carryPol
 	// noTSO turns off acquire/release for non-stack guest memory (see arm64_lifter_tso.go).
 	noTSO bool
+	// textCache memoizes the x86 text of instructions for the assembly comments. The same
+	// encoding repeats throughout a module and x86asm's formatting is expensive. x86asm's
+	// argument types (Reg, Mem, Rel, Imm) are all comparable, so Inst is a valid map key.
+	textCache map[x86asm.Inst]string
+}
+
+// instText returns the x86 text of inst for the assembly comment, cached per encoding.
+func (l *Arm64Lifter) instText(inst x86asm.Inst) string {
+	if s, ok := l.textCache[inst]; ok {
+		return s
+	}
+	s := disasm.InstString(inst)
+	if l.textCache == nil {
+		l.textCache = make(map[x86asm.Inst]string, 1024)
+	}
+	l.textCache[inst] = s
+	return s
 }
 
 // x86 flags live in NZCV: N = SF, Z = ZF, V = OF (PF after an FP compare, the only place PF
@@ -239,7 +262,7 @@ func localLabel(fn *disasm.Function, target uint64) string {
 	if fn == nil || fn.Blocks[target] == nil {
 		return ""
 	}
-	return fmt.Sprintf("L_fn_0x%x_loc_0x%x", fn.EntryAddr, target)
+	return "L_fn_0x" + hexStr(fn.EntryAddr) + "_loc_0x" + hexStr(target)
 }
 
 // branchTo returns the unconditional transfer to the direct branch target target: a branch to
@@ -251,7 +274,7 @@ func (l *Arm64Lifter) branchTo(fn *disasm.Function, target uint64) []string {
 		return []string{"    b " + lbl}
 	}
 	if l.IsKnownFunc(target) {
-		return []string{"    ldr x30, [sp], #16", fmt.Sprintf("    b _fn_0x%x", target)}
+		return []string{"    ldr x30, [sp], #16", "    b _fn_0x" + hexStr(target)}
 	}
 	lines := loadImm64("x0", target)
 	return append(lines, "    ldr x30, [sp], #16", "    b _recomp_indirect_jump")
@@ -392,6 +415,19 @@ func NewArm64Lifter(knownFuncs map[uint64]bool) *Arm64Lifter {
 	}
 }
 
+// Clone returns an independent lifter over the same immutable known-function set, with fresh
+// per-block state. The emitter lifts one assembly chunk per clone so chunks can run in
+// parallel; labels are unique within a function, so separate clones do not collide.
+func (l *Arm64Lifter) Clone() *Arm64Lifter {
+	if l == nil {
+		return nil
+	}
+	return &Arm64Lifter{
+		knownFuncs: l.knownFuncs,
+		noTSO:      l.noTSO,
+	}
+}
+
 // emitUnsupported generates a diagnostic stub that calls recomp_unsupported_instruction.
 func (l *Arm64Lifter) emitUnsupported(inst disasm.Instruction, reason string) []string {
 	var fnEntry uint64
@@ -403,20 +439,20 @@ func (l *Arm64Lifter) emitUnsupported(inst disasm.Instruction, reason string) []
 		msg = disasm.InstString(inst.Inst)
 	}
 	l.unsuppCounter++
-	strLabel := fmt.Sprintf("L_unsupp_str_0x%x_%d", inst.Address, l.unsuppCounter)
-	skipLabel := fmt.Sprintf("L_unsupp_skip_0x%x_%d", inst.Address, l.unsuppCounter)
+	strLabel := "L_unsupp_str_0x" + hexStr(inst.Address) + "_" + uitoa(l.unsuppCounter)
+	skipLabel := "L_unsupp_skip_0x" + hexStr(inst.Address) + "_" + uitoa(l.unsuppCounter)
 
 	var lines []string
-	lines = append(lines, fmt.Sprintf("    // UNSUPPORTED: %s", msg))
+	lines = append(lines, "    // UNSUPPORTED: "+msg)
 	lines = append(lines, loadImm64("x0", inst.Address)...)
 	lines = append(lines, loadImm64("x1", fnEntry)...)
-	lines = append(lines, fmt.Sprintf("    b %s", skipLabel))
-	lines = append(lines, fmt.Sprintf("%s:", strLabel))
+	lines = append(lines, "    b "+skipLabel)
+	lines = append(lines, strLabel+":")
 	escaped := strings.ReplaceAll(msg, "\"", "\\\"")
-	lines = append(lines, fmt.Sprintf("    .asciz \"%s\"", escaped))
+	lines = append(lines, "    .asciz \""+escaped+"\"")
 	lines = append(lines, "    .balign 4")
-	lines = append(lines, fmt.Sprintf("%s:", skipLabel))
-	lines = append(lines, fmt.Sprintf("    adr x2, %s", strLabel))
+	lines = append(lines, skipLabel+":")
+	lines = append(lines, "    adr x2, "+strLabel)
 	lines = append(lines, "    b _recomp_unsupported_instruction")
 	return lines
 }
@@ -432,13 +468,13 @@ func loadImm32(reg string, val uint32) []string {
 		return nil
 	}
 	if val <= 0xffff {
-		return []string{fmt.Sprintf("    mov %s, #0x%x", reg, val)}
+		return []string{"    mov " + reg + ", #0x" + hexStr(uint64(val))}
 	}
 	low := val & 0xffff
 	hi := (val >> 16) & 0xffff
-	res := []string{fmt.Sprintf("    movz %s, #0x%x", reg, low)}
+	res := []string{"    movz " + reg + ", #0x" + hexStr(uint64(low))}
 	if hi != 0 {
-		res = append(res, fmt.Sprintf("    movk %s, #0x%x, lsl #16", reg, hi))
+		res = append(res, "    movk "+reg+", #0x"+hexStr(uint64(hi))+", lsl #16")
 	}
 	return res
 }
@@ -449,10 +485,10 @@ func loadImm64(reg string, val uint64) []string {
 		return nil
 	}
 	if val == 0 {
-		return []string{fmt.Sprintf("    mov %s, #0", reg)}
+		return []string{"    mov " + reg + ", #0"}
 	}
 	if val <= 0xffff {
-		return []string{fmt.Sprintf("    movz %s, #0x%x", reg, val)}
+		return []string{"    movz " + reg + ", #0x" + hexStr(val)}
 	}
 	var lines []string
 	first := true
@@ -460,15 +496,15 @@ func loadImm64(reg string, val uint64) []string {
 		chunk := (val >> shift) & 0xffff
 		if chunk != 0 {
 			if first {
-				lines = append(lines, fmt.Sprintf("    movz %s, #0x%x, lsl #%d", reg, chunk, shift))
+				lines = append(lines, "    movz "+reg+", #0x"+hexStr(chunk)+", lsl #"+itoa(int64(shift)))
 				first = false
 			} else {
-				lines = append(lines, fmt.Sprintf("    movk %s, #0x%x, lsl #%d", reg, chunk, shift))
+				lines = append(lines, "    movk "+reg+", #0x"+hexStr(chunk)+", lsl #"+itoa(int64(shift)))
 			}
 		}
 	}
 	if len(lines) == 0 {
-		lines = append(lines, fmt.Sprintf("    mov %s, #0", reg))
+		lines = append(lines, "    mov "+reg+", #0")
 	}
 	return lines
 }
@@ -540,20 +576,20 @@ func computeEffAddr(mem x86asm.Mem, nextPC uint64, targetReg string) []string {
 		} else {
 			lines = append(lines, computeEffAddr(plain, nextPC, targetReg)...)
 		}
-		return append(lines, fmt.Sprintf("    add %s, %s, x27", targetReg, targetReg))
+		return append(lines, "    add "+targetReg+", "+targetReg+", x27")
 	}
 	if mem.Segment == x86asm.FS {
 		if disp != 0 {
 			if disp >= 0 && disp <= 4095 {
-				lines = append(lines, fmt.Sprintf("    add %s, x27, #%d", targetReg, disp))
+				lines = append(lines, "    add "+targetReg+", x27, #"+itoa(disp))
 			} else if disp < 0 && -disp <= 4095 {
-				lines = append(lines, fmt.Sprintf("    sub %s, x27, #%d", targetReg, -disp))
+				lines = append(lines, "    sub "+targetReg+", x27, #"+itoa(-disp))
 			} else {
 				lines = append(lines, loadImm64(targetReg, uint64(disp))...)
-				lines = append(lines, fmt.Sprintf("    add %s, x27, %s", targetReg, targetReg))
+				lines = append(lines, "    add "+targetReg+", x27, "+targetReg)
 			}
 		} else {
-			lines = append(lines, fmt.Sprintf("    mov %s, x27", targetReg))
+			lines = append(lines, "    mov "+targetReg+", x27")
 		}
 		return lines
 	}
@@ -562,7 +598,7 @@ func computeEffAddr(mem x86asm.Mem, nextPC uint64, targetReg string) []string {
 	hasBase := false
 	if mem.Base != 0 {
 		if armReg, ok := arm64RegMap[mem.Base]; ok {
-			lines = append(lines, fmt.Sprintf("    mov %s, %s", targetReg, armReg.X))
+			lines = append(lines, "    mov "+targetReg+", "+armReg.X)
 			hasBase = true
 		}
 	}
@@ -581,15 +617,15 @@ func computeEffAddr(mem x86asm.Mem, nextPC uint64, targetReg string) []string {
 			}
 			if hasBase {
 				if shift > 0 {
-					lines = append(lines, fmt.Sprintf("    add %s, %s, %s, lsl #%d", targetReg, targetReg, armIdx.X, shift))
+					lines = append(lines, "    add "+targetReg+", "+targetReg+", "+armIdx.X+", lsl #"+itoa(int64(shift)))
 				} else {
-					lines = append(lines, fmt.Sprintf("    add %s, %s, %s", targetReg, targetReg, armIdx.X))
+					lines = append(lines, "    add "+targetReg+", "+targetReg+", "+armIdx.X)
 				}
 			} else {
 				if shift > 0 {
-					lines = append(lines, fmt.Sprintf("    lsl %s, %s, #%d", targetReg, armIdx.X, shift))
+					lines = append(lines, "    lsl "+targetReg+", "+armIdx.X+", #"+itoa(int64(shift)))
 				} else {
-					lines = append(lines, fmt.Sprintf("    mov %s, %s", targetReg, armIdx.X))
+					lines = append(lines, "    mov "+targetReg+", "+armIdx.X)
 				}
 				hasBase = true
 			}
@@ -597,22 +633,22 @@ func computeEffAddr(mem x86asm.Mem, nextPC uint64, targetReg string) []string {
 	}
 
 	if !hasBase {
-		lines = append(lines, fmt.Sprintf("    mov %s, #0", targetReg))
+		lines = append(lines, "    mov "+targetReg+", #0")
 	}
 
 	// 5. Displacement
 	if disp != 0 {
 		if disp > 0 && disp <= 4095 {
-			lines = append(lines, fmt.Sprintf("    add %s, %s, #%d", targetReg, targetReg, disp))
+			lines = append(lines, "    add "+targetReg+", "+targetReg+", #"+itoa(disp))
 		} else if disp < 0 && -disp <= 4095 {
-			lines = append(lines, fmt.Sprintf("    sub %s, %s, #%d", targetReg, targetReg, -disp))
+			lines = append(lines, "    sub "+targetReg+", "+targetReg+", #"+itoa(-disp))
 		} else {
 			scratch := "x7"
 			if targetReg == "x7" {
 				scratch = "x6"
 			}
 			lines = append(lines, loadImm64(scratch, uint64(disp))...)
-			lines = append(lines, fmt.Sprintf("    add %s, %s, %s", targetReg, targetReg, scratch))
+			lines = append(lines, "    add "+targetReg+", "+targetReg+", "+scratch)
 		}
 	}
 
@@ -627,15 +663,15 @@ func readRegTo(reg x86asm.Reg, targetX string, targetW string) ([]string, bool) 
 	}
 	var lines []string
 	if desc.IsHigh8 {
-		lines = append(lines, fmt.Sprintf("    ubfx %s, %s, #8, #8", targetW, desc.W))
+		lines = append(lines, "    ubfx "+targetW+", "+desc.W+", #8, #8")
 	} else if desc.Size == 1 {
-		lines = append(lines, fmt.Sprintf("    and %s, %s, #0xff", targetW, desc.W))
+		lines = append(lines, "    and "+targetW+", "+desc.W+", #0xff")
 	} else if desc.Size == 2 {
-		lines = append(lines, fmt.Sprintf("    and %s, %s, #0xffff", targetW, desc.W))
+		lines = append(lines, "    and "+targetW+", "+desc.W+", #0xffff")
 	} else if desc.Size == 4 {
-		lines = append(lines, fmt.Sprintf("    mov %s, %s", targetW, desc.W))
+		lines = append(lines, "    mov "+targetW+", "+desc.W)
 	} else {
-		lines = append(lines, fmt.Sprintf("    mov %s, %s", targetX, desc.X))
+		lines = append(lines, "    mov "+targetX+", "+desc.X)
 	}
 	return lines, true
 }
@@ -648,15 +684,15 @@ func writeRegFrom(reg x86asm.Reg, srcX string, srcW string) ([]string, bool) {
 	}
 	var lines []string
 	if desc.IsHigh8 {
-		lines = append(lines, fmt.Sprintf("    bfi %s, %s, #8, #8", desc.X, srcX))
+		lines = append(lines, "    bfi "+desc.X+", "+srcX+", #8, #8")
 	} else if desc.Size == 1 {
-		lines = append(lines, fmt.Sprintf("    bfi %s, %s, #0, #8", desc.X, srcX))
+		lines = append(lines, "    bfi "+desc.X+", "+srcX+", #0, #8")
 	} else if desc.Size == 2 {
-		lines = append(lines, fmt.Sprintf("    bfi %s, %s, #0, #16", desc.X, srcX))
+		lines = append(lines, "    bfi "+desc.X+", "+srcX+", #0, #16")
 	} else if desc.Size == 4 {
-		lines = append(lines, fmt.Sprintf("    mov %s, %s", desc.W, srcW)) // zeroes upper 32 bits
+		lines = append(lines, "    mov "+desc.W+", "+srcW) // zeroes upper 32 bits
 	} else {
-		lines = append(lines, fmt.Sprintf("    mov %s, %s", desc.X, srcX))
+		lines = append(lines, "    mov "+desc.X+", "+srcX)
 	}
 	return lines, true
 }
@@ -669,14 +705,14 @@ func loadImmToReg(reg x86asm.Reg, val uint64) ([]string, bool) {
 	}
 	var lines []string
 	if desc.IsHigh8 {
-		lines = append(lines, fmt.Sprintf("    mov w16, #0x%x", val&0xff))
-		lines = append(lines, fmt.Sprintf("    bfi %s, x16, #8, #8", desc.X))
+		lines = append(lines, "    mov w16, #0x"+hexStr(val&0xff))
+		lines = append(lines, "    bfi "+desc.X+", x16, #8, #8")
 	} else if desc.Size == 1 {
-		lines = append(lines, fmt.Sprintf("    mov w16, #0x%x", val&0xff))
-		lines = append(lines, fmt.Sprintf("    bfi %s, x16, #0, #8", desc.X))
+		lines = append(lines, "    mov w16, #0x"+hexStr(val&0xff))
+		lines = append(lines, "    bfi "+desc.X+", x16, #0, #8")
 	} else if desc.Size == 2 {
-		lines = append(lines, fmt.Sprintf("    mov w16, #0x%x", val&0xffff))
-		lines = append(lines, fmt.Sprintf("    bfi %s, x16, #0, #16", desc.X))
+		lines = append(lines, "    mov w16, #0x"+hexStr(val&0xffff))
+		lines = append(lines, "    bfi "+desc.X+", x16, #0, #16")
 	} else if desc.Size == 4 {
 		lines = append(lines, loadImm32(desc.W, uint32(val))...)
 	} else {
@@ -695,26 +731,26 @@ func readMemTo(mem x86asm.Mem, nextPC uint64, size int, targetX string, targetW 
 func loadGuest(size int, targetX, targetW, addrReg string) string {
 	switch size {
 	case 1:
-		return fmt.Sprintf("    ldrb %s, [x28, %s]", targetW, addrReg)
+		return "    ldrb " + targetW + ", [x28, " + addrReg + "]"
 	case 2:
-		return fmt.Sprintf("    ldrh %s, [x28, %s]", targetW, addrReg)
+		return "    ldrh " + targetW + ", [x28, " + addrReg + "]"
 	case 4:
-		return fmt.Sprintf("    ldr %s, [x28, %s]", targetW, addrReg)
+		return "    ldr " + targetW + ", [x28, " + addrReg + "]"
 	}
-	return fmt.Sprintf("    ldr %s, [x28, %s]", targetX, addrReg)
+	return "    ldr " + targetX + ", [x28, " + addrReg + "]"
 }
 
 // storeGuest stores the low size bytes of the source register to the guest address in addrReg.
 func storeGuest(size int, srcX, srcW, addrReg string) string {
 	switch size {
 	case 1:
-		return fmt.Sprintf("    strb %s, [x28, %s]", srcW, addrReg)
+		return "    strb " + srcW + ", [x28, " + addrReg + "]"
 	case 2:
-		return fmt.Sprintf("    strh %s, [x28, %s]", srcW, addrReg)
+		return "    strh " + srcW + ", [x28, " + addrReg + "]"
 	case 4:
-		return fmt.Sprintf("    str %s, [x28, %s]", srcW, addrReg)
+		return "    str " + srcW + ", [x28, " + addrReg + "]"
 	}
-	return fmt.Sprintf("    str %s, [x28, %s]", srcX, addrReg)
+	return "    str " + srcX + ", [x28, " + addrReg + "]"
 }
 
 // writeMemFrom generates instructions to write from ARM register to guest memory.
@@ -780,10 +816,109 @@ func (l *Arm64Lifter) LiftInstructionToBuf(inst disasm.Instruction, nextPC uint6
 	return lines, err
 }
 
-var (
-	highVecRe  = regexp.MustCompile(`\b[bhsdqv](1[6-9]|2[0-9]|3[01])\b`)
-	upperTokRe = regexp.MustCompile(`\b([bhsdqv])U(1[6-9]|2[0-9]|3[01])\b`)
-)
+// isVecRegLetter reports whether c starts a vector register name the upper-half
+// logic tracks: b/h/s/d/q/v, the element forms of v16-v31.
+func isVecRegLetter(c byte) bool {
+	switch c {
+	case 'b', 'h', 's', 'd', 'q', 'v':
+		return true
+	}
+	return false
+}
+
+// isAsmWordByte is the word-byte class of Go's regexp \b (ASCII [0-9A-Za-z_]).
+func isAsmWordByte(c byte) bool {
+	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// scanVecRegs reports every plain upper-half register name in s, that is
+// \b[bhsdqv](1[6-9]|2[0-9]|3[01])\b. A hand-written scanner avoids the regexp engine on
+// every lowered instruction, which is the hottest path of the lifter.
+func scanVecRegs(s string, fn func(start, end, idx int)) {
+	for i := 0; i+2 < len(s); i++ {
+		if !isVecRegLetter(s[i]) || (i > 0 && isAsmWordByte(s[i-1])) {
+			continue
+		}
+		d0, d1 := s[i+1], s[i+2]
+		if d0 < '0' || d0 > '9' || d1 < '0' || d1 > '9' {
+			continue
+		}
+		n := int(d0-'0')*10 + int(d1-'0')
+		if n < 16 || n > 31 || (i+3 < len(s) && isAsmWordByte(s[i+3])) {
+			continue
+		}
+		fn(i, i+3, n)
+	}
+}
+
+// scanUpperTokens reports every upper-half placeholder in s, that is
+// \b([bhsdqv])U(1[6-9]|2[0-9]|3[01])\b.
+func scanUpperTokens(s string, fn func(start, end, idx int, letter byte)) {
+	for i := 0; i+3 < len(s); i++ {
+		if !isVecRegLetter(s[i]) || (i > 0 && isAsmWordByte(s[i-1])) || s[i+1] != 'U' {
+			continue
+		}
+		d0, d1 := s[i+2], s[i+3]
+		if d0 < '0' || d0 > '9' || d1 < '0' || d1 > '9' {
+			continue
+		}
+		n := int(d0-'0')*10 + int(d1-'0')
+		if n < 16 || n > 31 || (i+4 < len(s) && isAsmWordByte(s[i+4])) {
+			continue
+		}
+		fn(i, i+4, n, s[i])
+	}
+}
+
+// renameVecRegs rewrites the plain upper-half register names in s through rename. It
+// returns s itself when no name is renamed, so the common instruction allocates nothing.
+func renameVecRegs(s string, rename map[int]int) string {
+	var b strings.Builder
+	last := 0
+	changed := false
+	scanVecRegs(s, func(start, end, idx int) {
+		m, ok := rename[idx]
+		if !ok {
+			return
+		}
+		if !changed {
+			b.Grow(len(s) + 1)
+			changed = true
+		}
+		b.WriteString(s[last:start])
+		b.WriteByte(s[start])
+		b.WriteString(strconv.Itoa(m))
+		last = end
+	})
+	if !changed {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// stripUpperMarks resolves the upper-half placeholders in s by dropping the U of "vU17".
+// It returns s itself when there is no placeholder.
+func stripUpperMarks(s string) string {
+	var b strings.Builder
+	last := 0
+	changed := false
+	scanUpperTokens(s, func(start, end, _ int, letter byte) {
+		if !changed {
+			b.Grow(len(s) - 1)
+			changed = true
+		}
+		b.WriteString(s[last:start])
+		b.WriteByte(letter)
+		b.WriteString(s[start+2 : end])
+		last = end
+	})
+	if !changed {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
 
 // vecArg0IsSource reports VEX instructions whose first operand is a source, not a destination.
 func vecArg0IsSource(op x86asm.Op) bool {
@@ -813,19 +948,15 @@ func fixUpperHalves(inst x86asm.Inst, lines []string, start int, ymmFn bool) []s
 		if t == "" || t[0] == '.' || strings.HasPrefix(t, "//") {
 			continue
 		}
-		for _, m := range upperTokRe.FindAllStringSubmatch(t, -1) {
-			n := 0
-			fmt.Sscanf(m[2], "%d", &n)
+		scanUpperTokens(t, func(_, _, n int, _ byte) {
 			opnd |= 1 << uint(n)
-		}
+		})
 		if i := strings.Index(t, "//"); i >= 0 {
 			t = t[:i]
 		}
-		for _, m := range highVecRe.FindAllStringSubmatch(t, -1) {
-			n := 0
-			fmt.Sscanf(m[1], "%d", &n)
+		scanVecRegs(t, func(_, _, n int) {
 			scratch |= 1 << uint(n)
-		}
+		})
 	}
 	if opnd == 0 && (scratch == 0 || !ymmFn) {
 		return lines
@@ -873,16 +1004,9 @@ func fixUpperHalves(inst x86asm.Inst, lines []string, start int, ymmFn bool) []s
 			continue
 		}
 		if len(rename) > 0 {
-			ln = highVecRe.ReplaceAllStringFunc(ln, func(r string) string {
-				n := 0
-				fmt.Sscanf(r[1:], "%d", &n)
-				if m, ok := rename[n]; ok {
-					return fmt.Sprintf("%c%d", r[0], m)
-				}
-				return r
-			})
+			ln = renameVecRegs(ln, rename)
 		}
-		lines[i] = upperTokRe.ReplaceAllString(ln, "$1$2")
+		lines[i] = stripUpperMarks(ln)
 	}
 	if !ymmFn || inst.Op == x86asm.VZEROUPPER || inst.Op == x86asm.VZEROALL {
 		return lines
@@ -908,14 +1032,15 @@ func fixUpperHalves(inst x86asm.Inst, lines []string, start int, ymmFn bool) []s
 			regs = append(regs, n)
 		}
 	}
-	var save, restore []string
-	for i := 0; i < len(regs); i += 2 {
+	save := make([]string, 0, (len(regs)+1)/2)
+	restore := make([]string, (len(regs)+1)/2)
+	for i, n := 0, 0; i < len(regs); i, n = i+2, n+1 {
 		if i+1 < len(regs) {
-			save = append(save, fmt.Sprintf("    stp q%d, q%d, [sp, #-32]!", regs[i], regs[i+1]))
-			restore = append([]string{fmt.Sprintf("    ldp q%d, q%d, [sp], #32", regs[i], regs[i+1])}, restore...)
+			save = append(save, "    stp q"+strconv.Itoa(regs[i])+", q"+strconv.Itoa(regs[i+1])+", [sp, #-32]!")
+			restore[len(restore)-1-n] = "    ldp q" + strconv.Itoa(regs[i]) + ", q" + strconv.Itoa(regs[i+1]) + ", [sp], #32"
 		} else {
-			save = append(save, fmt.Sprintf("    str q%d, [sp, #-16]!", regs[i]))
-			restore = append([]string{fmt.Sprintf("    ldr q%d, [sp], #16", regs[i])}, restore...)
+			save = append(save, "    str q"+strconv.Itoa(regs[i])+", [sp, #-16]!")
+			restore[len(restore)-1-n] = "    ldr q" + strconv.Itoa(regs[i]) + ", [sp], #16"
 		}
 	}
 	// Keep the "// 0x...: inst" comment first.
@@ -940,8 +1065,7 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 	args := inst.Inst.Args
 	lines := dst
 
-	comment := fmt.Sprintf("    // 0x%x: %s", inst.Address, disasm.InstString(inst.Inst))
-	lines = append(lines, comment)
+	lines = append(lines, "    // 0x"+hexStr(inst.Address)+": "+l.instText(inst.Inst))
 
 	if reason := unsupportedAddressing(inst.Inst); reason != "" {
 		lines = append(lines, l.emitUnsupported(inst, reason)...)

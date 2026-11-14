@@ -86,7 +86,7 @@ Options:
   -o, -out <dir>          Output directory for generated code and binaries (default: "build")
   -e, -elf <file>         Path to input PS4 ELF or game directory
   -c, -compile            Compile generated code to native ARM64 binary with clang (default: true)
-  -j, -jobs <num>         Number of parallel clang workers (default: NumCPU)
+  -j, -jobs <num>         Number of parallel workers for emission and clang (default: NumCPU)
   -O, -opt <level>        Clang optimization level (0, 1, 2, 3, s, z) (default: "2")
   -r, -run                Run the compiled binary after successful recompilation (default: false)
   -t, -timeout <sec>      Watchdog timeout in seconds when running binary (0 = no timeout) (default: 0)
@@ -163,8 +163,8 @@ func ParseArgs(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.Run, "r", cfg.Run, "Run binary (short)")
 	fs.IntVar(&cfg.TimeoutSec, "timeout", cfg.TimeoutSec, "Execution timeout in seconds")
 	fs.IntVar(&cfg.TimeoutSec, "t", cfg.TimeoutSec, "Execution timeout in seconds (short)")
-	fs.IntVar(&cfg.Jobs, "jobs", cfg.Jobs, "Parallel compiler jobs")
-	fs.IntVar(&cfg.Jobs, "j", cfg.Jobs, "Parallel compiler jobs (short)")
+	fs.IntVar(&cfg.Jobs, "jobs", cfg.Jobs, "Parallel workers for emission and clang")
+	fs.IntVar(&cfg.Jobs, "j", cfg.Jobs, "Parallel workers for emission and clang (short)")
 	fs.StringVar(&cfg.OptLevel, "opt", cfg.OptLevel, "Clang optimization level")
 	fs.StringVar(&cfg.OptLevel, "O", cfg.OptLevel, "Clang optimization level (short)")
 	fs.BoolVar(&cfg.AllSymbols, "all-symbols", cfg.AllSymbols, "Recompile all symbols in symbol table")
@@ -549,6 +549,7 @@ func Execute(args []string) (err error) {
 	em.AppDir = cfg.AppDir
 	em.Modules = moduleInfos
 	em.ChunkSize = cfg.ChunkSize
+	em.Workers = cfg.Jobs
 	em.Funcs = funcs
 	em.HLE = hle
 	cFiles, err := em.EmitAll(cfg.OutDir)
@@ -1921,7 +1922,6 @@ func bundleDylibDependencies(contentsDir, bundleBin string) error {
 	}
 	return nil
 }
-
 
 var (
 	custom3rdPartyMu   sync.Mutex
