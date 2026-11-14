@@ -26,6 +26,7 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 | Title                                    | Title ID    | Engine / Type       | Status                 | Notes                                                                       |
 | ---------------------------------------- | ----------- | ------------------- | ---------------------- | --------------------------------------------------------------------------- |
 | **Yakuza 0**                             | `CUSA05070` | Kiwami Engine       | **Playble**            | Starts, settings works, cutscenes and gameplay works in first mission       |
+| **Gravity Rush Remastered**              | `CUSA01113` | SIE Japan Studio    | **Playable**           | Boots, menus, cutscenes, gravity shift via DualSense gyro                   |
 | **Catherine: Full Body**                 | `CUSA14836` | Atlus Engine        | **In-Game**            | Starts. Has a graphic artifacts                                             |
 | **Bloodborne: Game of the Year Edition** | `CUSA03173` | FromSoftware Engine | **In-Game**            | Starts, settings, cutscenes and character editor works. The gameplay starts |
 | **The Last of Us Remastered**            | `CUSA00557` | Naughty Dog Engine  | **Bootable / In-Game** | Boots, renders 3D graphics and audio                                        |
