@@ -150,6 +150,7 @@ int32_t sigreturn(void *context) {
     return 0;
 }
 
+// stubbed on non-devkit consoles
 int32_t sceKernelGetGPI(void) {
     return 0; // SCE_OK
 }
@@ -495,6 +496,7 @@ void shim_sceKernelIsAddressSanitizerEnabled(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+// stubbed on non-devkit consoles
 void shim_sceKernelGetGPI(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceKernelGetGPI();
     SHIM_RETURN();
