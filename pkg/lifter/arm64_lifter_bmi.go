@@ -200,10 +200,14 @@ func (l *Arm64Lifter) liftBmi(inst disasm.Instruction, nextPC uint64, lines []st
 		}
 
 		if sz == 8 {
-			// RDX is x22
+			// Compute both halves before writing either destination: the low destination
+			// may be RDX (x22), which is also the implicit multiplier. Write high last
+			// so it wins when both destinations name the same register.
 			lines = append(lines,
-				fmt.Sprintf("    mul %s, x22, x16", descLo.X),
-				fmt.Sprintf("    umulh %s, x22, x16", descHi.X),
+				"    mul x17, x22, x16",
+				"    umulh x16, x22, x16",
+				fmt.Sprintf("    mov %s, x17", descLo.X),
+				fmt.Sprintf("    mov %s, x16", descHi.X),
 			)
 		} else {
 			lines = append(lines,
