@@ -188,7 +188,6 @@ static bool WriteFenceData(GuestContext *ctx, uint64_t addr, uint32_t data_sel,
 static std::atomic<uint64_t> g_sync_counts[8];
 static const char *const kSyncNames[8] = {"eop", "release_mem", "eos", "write_data", "dma", "ce_dump", "cond_exec", "other"};
 static void SyncGpu(int reason = 7) {
-    if ((reason & 7) <= 3) ps4draw::NoteGpuFence();
     if (ps4draw::HasPendingWork()) {
         g_sync_counts[reason & 7]++;
         ps4draw::Flush(true);
@@ -904,7 +903,8 @@ static bool ProcessGfxPackets(GuestContext *ctx, GfxStream &st) {
             }
             const uint32_t *payload = &dcb_words[pc + 1];
 
-            // PS4_GNM_STATS=1: histogram of type-3 opcodes, printed every 600 submits.
+            // PS4_GNM_STATS=1: histogram of type-3 opcodes, printed every 600 submits (the renderer also
+            // explains its render pass hazard splits then, ps4_gnm_draw.mm).
             if (g_gnm_stats) g_gnm_hist[opcode]++;
 
             switch (opcode) {

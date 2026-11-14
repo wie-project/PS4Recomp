@@ -616,6 +616,14 @@ struct DepthTarget {
     bool StencilValid() const {
         return stencil_read_address != 0 && stencil_format != StencilFormat::Invalid;
     }
+    // Bytes of the depth plane and of the stencil plane over the view's slices. The planes share
+    // DB_DEPTH_SLICE's tile count: slice_bytes is that many 8x8 tiles at bpp bits per sample, the
+    // stencil plane the same tiles at 8 bits per sample (0: no stencil plane).
+    uint64_t DepthBytes() const { return (uint64_t)slice_bytes * num_slices; }
+    uint64_t StencilBytes() const {
+        if (!StencilValid() || bpp < 8) return 0;
+        return (uint64_t)slice_bytes / (bpp / 8) * num_slices;
+    }
     SurfaceDesc ToSurfaceDesc() const;
     void GetLayout(SurfaceLayout* out) const;
 };
