@@ -184,6 +184,16 @@ static bool WriteFenceData(GuestContext *ctx, uint64_t addr, uint32_t data_sel,
     }
 }
 
+// Fixed-value guest labels can be polled as completion fences. GPU clock and perf-counter writes
+// are not predictable labels, so they do not establish this contract.
+static void NoteGpuFenceData(GuestContext *ctx, uint64_t addr, uint32_t data_sel) {
+    if (data_sel == kDataSel32) {
+        if (GuestMemPtr(ctx, addr & ~3ULL, 4)) ps4draw::NoteGpuCompletionLabel();
+    } else if (data_sel == kDataSel64) {
+        if (GuestMemPtr(ctx, addr & ~7ULL, 8)) ps4draw::NoteGpuCompletionLabel();
+    }
+}
+
 // Make all encoded GPU work complete before the CPU can observe a fence.
 static std::atomic<uint64_t> g_sync_counts[8];
 static const char *const kSyncNames[8] = {"eop", "release_mem", "eos", "write_data", "dma", "ce_dump", "cond_exec", "other"};
@@ -289,6 +299,7 @@ static void HandleEventWriteEop(GuestContext *ctx, const uint32_t *p, uint32_t p
 
     // End of pipe: performed when all GPU work submitted before it has completed.
     const int queue = CpQueue();
+    NoteGpuFenceData(ctx, addr, data_sel);
     PendingLabel(addr, data_sel, data_lo, data_hi, true, queue, t_cp_ring);
     ps4draw::AfterGpuLabel(addr, (uint64_t)data_lo | ((uint64_t)data_hi << 32), queue ? "compute EOP" : "EOP", queue, [=]() {
         bool wrote = WriteFenceData(ctx, addr, data_sel, data_lo, data_hi);
@@ -319,6 +330,7 @@ static void HandleReleaseMem(GuestContext *ctx, const uint32_t *p, uint32_t payl
     const uint32_t data_hi = payload_dw >= 6 ? p[5] : 0;
 
     const int queue = CpQueue();
+    NoteGpuFenceData(ctx, addr, data_sel);
     PendingLabel(addr, data_sel, data_lo, data_hi, true, queue, t_cp_ring);
     ps4draw::AfterGpuLabel(addr, (uint64_t)data_lo | ((uint64_t)data_hi << 32), queue ? "compute RELEASE_MEM" : "RELEASE_MEM", queue, [=]() {
         bool wrote = WriteFenceData(ctx, addr, data_sel, data_lo, data_hi);
@@ -347,6 +359,7 @@ static void HandleEventWriteEos(GuestContext *ctx, const uint32_t *p, uint32_t p
         const uint32_t hi = payload_dw >= 5 ? p[4] : 0;
         const uint32_t sel = payload_dw >= 5 ? kDataSel64 : kDataSel32;
         const int queue = CpQueue();
+        NoteGpuFenceData(ctx, addr, sel);
         PendingLabel(addr, sel, lo, hi, true, queue, t_cp_ring);
         ps4draw::AfterGpuLabel(addr, (uint64_t)lo | ((uint64_t)hi << 32), queue ? "compute EOS" : "EOS", queue, [=]() {
             WriteFenceData(ctx, addr, sel, lo, hi);

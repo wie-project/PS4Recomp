@@ -10074,8 +10074,16 @@ void SetExtentHints(const uint32_t cb[8], uint32_t db) {
     S.db_extent = db;
 }
 
+// The submit-side bit controls the encoder drain that prevents the CPU from overwriting guest
+// inputs while the background encoder still reads them. A completion label only permits omitting
+// the per-present GPU drain; it does not remove that submit-side protection.
 static std::atomic<bool> g_has_gpu_fence{false};
-void NoteGpuFence() { g_has_gpu_fence.store(true, std::memory_order_relaxed); }
+static std::atomic<bool> g_has_gpu_completion_label{false};
+void NoteGpuFence() {
+    g_has_gpu_fence.store(true, std::memory_order_relaxed);
+    g_has_gpu_completion_label.store(true, std::memory_order_relaxed);
+}
+void NoteGpuCompletionLabel() { g_has_gpu_completion_label.store(true, std::memory_order_relaxed); }
 
 void OnSubmit() {
     S.submit_idx++;
@@ -15022,7 +15030,9 @@ bool PresentImpl(GuestContext* ctx, uint64_t addr, uint32_t width, uint32_t heig
         static const bool wait_on_present = getenv("PS4_GNM_WAIT_ON_PRESENT") != nullptr;
         static const bool async_no_fence = getenv("PS4_GNM_ASYNC_NO_FENCE") != nullptr;
         static const bool writeback_all = getenv("PS4_GNM_WRITEBACK_ALL") != nullptr;
-        const bool no_fence_wait = !async_no_fence && !g_has_gpu_fence.load(std::memory_order_relaxed);
+        const bool no_fence_wait = !async_no_fence &&
+                                   !g_has_gpu_fence.load(std::memory_order_relaxed) &&
+                                   !g_has_gpu_completion_label.load(std::memory_order_relaxed);
         if ((wait_on_present || no_fence_wait) && !writeback_all) WaitAll();
         if (writeback_all) { // experiment: make every GPU surface CPU-visible
             WaitAll();
