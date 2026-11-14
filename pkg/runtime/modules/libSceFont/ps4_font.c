@@ -1409,9 +1409,6 @@ static void font_render_glyph_common(GuestContext *ctx, int add_baseline) {
     SHIM_RETURN();
 }
 
-
-void shim_sceFontGetCharGlyphMetrics(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
-void shim_sceFontGetKerning(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 // 48. sceFontRenderCharGlyphImageHorizontal
 void shim_sceFontRenderCharGlyphImageHorizontal(GuestContext *ctx) {
     font_render_glyph_common(ctx, 0);

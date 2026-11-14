@@ -3161,8 +3161,6 @@ var knownDirectShims = []string{
 	"sceFontSetupRenderEffectSlant",
 	"sceFontGetHorizontalLayout",
 	"sceFontRenderSurfaceSetScissor",
-	"sceFontGetCharGlyphMetrics",
-	"sceFontGetKerning",
 	// libSceVideodec2
 	"sceVideodec2QueryComputeMemoryInfo",
 	"sceVideodec2AllocateComputeQueue",
