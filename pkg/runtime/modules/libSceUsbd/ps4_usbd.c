@@ -37,7 +37,6 @@ int32_t sceUsbdInterruptTransfer(int32_t handle, uint8_t endpoint, void *data, i
 //To do: find a place for those functions, they are not part of the libSceUsbd module but are used by it
 // Declarations & Stubs
 int32_t sceGameLiveStreamingPostSocialMessage(void) { return 0; }
-int32_t sceNpInGameMessageDeleteHandle(void) { return 0; }
 int32_t sceNpPartyGetState(void) { return 0; }
 int32_t sceNpSignalingGetLocalNetInfo(void) { return 0; }
 int32_t sceNpSnsFacebookDialogClose(void) { return 0; }
@@ -77,7 +76,6 @@ void shim_sceUsbdInterruptTransfer(GuestContext *ctx) { ctx->rax = 0; SHIM_RETUR
 
 // Corresponding GuestContext Shims (returning 0)
 void shim_sceGameLiveStreamingPostSocialMessage(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
-void shim_sceNpInGameMessageDeleteHandle(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 void shim_sceNpPartyGetState(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 void shim_sceNpSignalingGetLocalNetInfo(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 void shim_sceNpSnsFacebookDialogClose(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }

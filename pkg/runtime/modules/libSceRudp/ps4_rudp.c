@@ -206,6 +206,4 @@ void shim_sceRudpSetOption(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-
-void shim_sysctl(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 void shim___Ux86_64_setcontext(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }

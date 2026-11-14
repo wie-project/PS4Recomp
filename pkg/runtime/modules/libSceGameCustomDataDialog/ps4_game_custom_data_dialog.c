@@ -49,31 +49,3 @@ int32_t ps4_game_custom_data_dialog_get_result(const uint8_t *result) {
   // FINISHED needs a dialog that ran, which Open (not provided) would start.
   return st == GCDD_STATUS_NONE ? GCDD_ERROR_NOT_INITIALIZED : GCDD_ERROR_NOT_FINISHED;
 }
-
-// int sceGameCustomDataDialogInitialize(void)
-void shim_sceGameCustomDataDialogInitialize(GuestContext *ctx) {
-  ctx->rax = (uint64_t)(int64_t)ps4_game_custom_data_dialog_initialize();
-  SHIM_RETURN();
-}
-
-// int sceGameCustomDataDialogTerminate(void)
-void shim_sceGameCustomDataDialogTerminate(GuestContext *ctx) {
-  ctx->rax = (uint64_t)(int64_t)ps4_game_custom_data_dialog_terminate();
-  SHIM_RETURN();
-}
-
-// SceCommonDialogStatus sceGameCustomDataDialogUpdateStatus(void)
-void shim_sceGameCustomDataDialogUpdateStatus(GuestContext *ctx) {
-  ctx->rax = (uint64_t)(int64_t)ps4_game_custom_data_dialog_update_status();
-  SHIM_RETURN();
-}
-
-// int sceGameCustomDataDialogGetResult(SceGameCustomDataDialogResult *result)
-void shim_sceGameCustomDataDialogGetResult(GuestContext *ctx) {
-  const uint8_t *result = NULL;
-  if (ctx->rdi && ctx->rdi + GCDD_RESULT_RESERVED_OFFSET + GCDD_RESULT_RESERVED_SIZE <= ctx->mem_size) {
-    result = ctx->mem_base + ctx->rdi;
-  }
-  ctx->rax = (uint64_t)(int64_t)ps4_game_custom_data_dialog_get_result(result);
-  SHIM_RETURN();
-}

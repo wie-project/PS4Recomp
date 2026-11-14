@@ -45,7 +45,6 @@ void shim_sceRudpProcessEvents(GuestContext *ctx);
 void shim_sceRudpSetMaxSegmentSize(GuestContext *ctx);
 void shim_sceRudpSetOption(GuestContext *ctx);
 
-void shim_sysctl(GuestContext *ctx);
 void shim___Ux86_64_setcontext(GuestContext *ctx);
 
 #ifdef __cplusplus

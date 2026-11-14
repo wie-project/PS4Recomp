@@ -259,7 +259,7 @@ int32_t sceNpTusAddAndGetVariableVUserAsync(void);
 int32_t sceNpTusGetMultiSlotVariableVUserAsync(void);
 int32_t sceNpTssCreateNpTitleCtx(void);
 
-int32_t sceNpWebApiUnregisterServicePushEventCallback(void);
+
 int32_t sceNpWebApiDeleteHandle(int32_t handle);
 
 // GuestContext shims
@@ -386,7 +386,6 @@ void shim_sceNpTusGetMultiSlotVariable(GuestContext *ctx);
 void shim_sceNpTusGetMultiSlotVariableVUser(GuestContext *ctx);
 void shim_sceNpTusSetMultiSlotVariable(GuestContext *ctx);
 void shim_sceNpTusSetMultiSlotVariableVUser(GuestContext *ctx);
-void shim_sceNpTssGetData(GuestContext *ctx);
 void shim_sceNpScoreGetRankingByNpIdAsync(GuestContext *ctx);
 void shim_sceNpScoreGetRankingByRangeAsync(GuestContext *ctx);
 void shim_sceNpScoreGetFriendsRankingAsync(GuestContext *ctx);
@@ -410,7 +409,6 @@ void shim_sceNpTusAddAndGetVariableVUserAsync(GuestContext *ctx);
 void shim_sceNpTusGetMultiSlotVariableVUserAsync(GuestContext *ctx);
 void shim_sceNpTssCreateNpTitleCtx(GuestContext *ctx);
 
-void shim_sceNpWebApiUnregisterServicePushEventCallback(GuestContext *ctx);
 void shim_sceNpWebApiDeleteHandle(GuestContext *ctx);
 
 // libSceNpParty (ps4_np_party.c)

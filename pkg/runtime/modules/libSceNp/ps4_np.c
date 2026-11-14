@@ -337,14 +337,10 @@ int32_t sceNpCmpNpId(const OrbisNpId* id1, const OrbisNpId* id2) {
     return 0;
 }
 
-int32_t sceNpTssGetData(void *ctx, void *data) { (void)ctx; (void)data; return 0; }
 int32_t sceNpTssGetSmallStorage(void *ctx, void *storage) { (void)ctx; (void)storage; return 0; }
 int32_t sceNpTusAddAndGetVariableVUserAsync(void) { return 0; }
 int32_t sceNpTusGetMultiSlotVariableVUserAsync(void) { return 0; }
 int32_t sceNpTssCreateNpTitleCtx(void) { return 0; }
-
-int32_t sceNpWebApiUnregisterServicePushEventCallback(void) { return 0; }
-int32_t sceNpWebApiDeleteHandle(int32_t handle) { (void)handle; return 0; }
 
 // GuestContext shims for NpManager
 void shim_sceNpCheckNpAvailability(GuestContext *ctx) {
@@ -548,14 +544,11 @@ void shim_sceNpCmpNpId(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-void shim_sceNpTssGetData(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 void shim_sceNpTssGetSmallStorage(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 void shim_sceNpTusAddAndGetVariableVUserAsync(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 void shim_sceNpTusGetMultiSlotVariableVUserAsync(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 void shim_sceNpTssCreateNpTitleCtx(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 
-void shim_sceNpWebApiUnregisterServicePushEventCallback(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
-void shim_sceNpWebApiDeleteHandle(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
 
 //=============================================================================
 // libSceNpAuth
