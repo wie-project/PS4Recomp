@@ -658,7 +658,7 @@ void ForEachSrtTableRead(std::span<const u32> program, const u32* flat,
 }
 
 bool RunSrtProgram(std::span<const u32> program, const u32* user_data, u32* flat_dst,
-                   SrtReadFn read, void* read_ctx) {
+                   SrtReadFn read, void* read_ctx, SrtObserveReadFn observe, void* observe_ctx) {
     constexpr u64 AddrMask = 0xFFFFFFFFFFFFULL;
     u32 stack[64];
     u32 sp = 0;
@@ -668,6 +668,7 @@ bool RunSrtProgram(std::span<const u32> program, const u32* user_data, u32* flat
     bool ok = true;
     const auto read32 = [&](u64 addr) -> u32 {
         u32 v = 0;
+        if (observe) observe(observe_ctx, addr, sizeof(v));
         if (!SrtRead(read, read_ctx, addr, &v, sizeof(v))) {
             ok = false;
             return 0;
@@ -676,6 +677,7 @@ bool RunSrtProgram(std::span<const u32> program, const u32* user_data, u32* flat
     };
     const auto read64 = [&](u64 addr) -> u64 {
         u64 v = 0;
+        if (observe) observe(observe_ctx, addr, sizeof(v));
         if (!SrtRead(read, read_ctx, addr, &v, sizeof(v))) {
             ok = false;
             return 0;
