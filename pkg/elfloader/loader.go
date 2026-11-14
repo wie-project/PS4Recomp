@@ -164,6 +164,15 @@ func (l *LoadedELF) FunctionHasLSDA(fnStart, fnEnd uint64) bool {
 
 // LoadELF reads and parses a 64-bit ELF binary. PS4 SELF/FSELF containers are unwrapped first.
 func LoadELF(path string) (*LoadedELF, error) {
+	data, err := ReadELFImage(path)
+	if err != nil {
+		return nil, err
+	}
+	return LoadELFImage(path, data)
+}
+
+// ReadELFImage reads the ELF image at path, unwrapping a SELF/FSELF container.
+func ReadELFImage(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read '%s': %w", path, err)
@@ -174,6 +183,11 @@ func LoadELF(path string) (*LoadedELF, error) {
 			return nil, fmt.Errorf("failed to extract ELF from SELF '%s': %w", path, err)
 		}
 	}
+	return data, nil
+}
+
+// LoadELFImage parses data, the ELF image read from path (ReadELFImage).
+func LoadELFImage(path string, data []byte) (*LoadedELF, error) {
 	loaded, err := LoadELFBytes(data)
 	if err != nil {
 		return nil, err
