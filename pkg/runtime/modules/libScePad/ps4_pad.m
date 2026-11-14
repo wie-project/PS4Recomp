@@ -21,6 +21,7 @@ typedef struct {
   int32_t handle;
   int32_t userId;
   PadMotionState motion;
+  unsigned motion_calls_seen; // bit per PadMotionSetting: the game has called it on this handle
 } PadHandleSlot;
 
 static PadHandleSlot g_pad_slots[MAX_PAD_HANDLES];
@@ -196,6 +197,7 @@ int32_t scePadOpen(int32_t userID, int32_t type, int32_t index, void *param) {
   // A new handle starts with the motion sensor on, and tilt correction and deadband off. The
   // orientation starts at the identity (as after scePadResetOrientation).
   memset(&slot->motion, 0, sizeof(slot->motion));
+  slot->motion_calls_seen = 0;
   slot->motion.on = 1;
   const uint64_t now = pad_script_clock_us();
   PadMotionSample rest = virtual_sample(now);
@@ -794,6 +796,21 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
       }
     }
     GCMotion *gm = controller ? controller.motion : nil;
+    static GCController *motion_seen; // the controller whose motion profile was last checked
+    if (controller != motion_seen) {
+      motion_seen = controller;
+      if (controller && gm) {
+        fprintf(stderr,
+                "[pad] controller '%s' (%s): motion yes, sensorsRequireManualActivation %d, sensorsActive %d, "
+                "rotationRate %d, gravityAndUserAcceleration %d\n",
+                controller.vendorName.UTF8String, controller.productCategory.UTF8String,
+                gm.sensorsRequireManualActivation, gm.sensorsActive, gm.hasRotationRate,
+                gm.hasGravityAndUserAcceleration);
+      } else if (controller) {
+        fprintf(stderr, "[pad] controller '%s' (%s): no motion profile, the virtual pad's motion is used\n",
+                controller.vendorName.UTF8String, controller.productCategory.UTF8String);
+      }
+    }
     if (gm && slot->motion.on) {
       // Turn the controller's sensors on once per controller (a controller that refuses stays
       // off, and the virtual pad is used).
@@ -801,8 +818,12 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
       if (sensors_requested != controller) {
         sensors_requested = controller;
         gm.sensorsActive = YES;
+        fprintf(stderr, "[pad] motion sensors of '%s' requested on: sensorsActive %d\n",
+                controller.vendorName.UTF8String, gm.sensorsActive);
       }
-      if (gm.sensorsActive && gm.hasRotationRate && gm.hasGravityAndUserAcceleration) {
+      // A DualShock 4 / DualSense reports only the total acceleration (gravity included):
+      // hasGravityAndUserAcceleration is 0 for them, and GCMotion.acceleration is the reading.
+      if (gm.sensorsActive && gm.hasRotationRate) {
         GCRotationRate r = gm.rotationRate;
         GCAcceleration a = gm.acceleration;
         motion = pad_motion_from_gc((PadVec){r.x, r.y, r.z}, (PadVec){a.x, a.y, a.z});
@@ -814,6 +835,19 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
   data->quat = (vec_float4){mo.quat[0], mo.quat[1], mo.quat[2], mo.quat[3]};
   data->acell = (vec_float3){mo.accel[0], mo.accel[1], mo.accel[2]};
   data->vel = (vec_float3){mo.vel[0], mo.vel[1], mo.vel[2]};
+  // One line every 10 s of what the game reads, and each switch between device and virtual pad.
+  static int last_source = -1;
+  static uint64_t next_motion_log_us;
+  const uint64_t real_us = get_time_micros();
+  if (motion.device != last_source || real_us >= next_motion_log_us) {
+    fprintf(stderr,
+            "[pad] motion (%s, sensor %s): orientation (%.3f %.3f %.3f %.3f) acceleration (%.3f %.3f %.3f) g "
+            "angularVelocity (%.3f %.3f %.3f) rad/s\n",
+            motion.device ? "controller" : "virtual pad", slot->motion.on ? "on" : "off", mo.quat[0], mo.quat[1],
+            mo.quat[2], mo.quat[3], mo.accel[0], mo.accel[1], mo.accel[2], mo.vel[0], mo.vel[1], mo.vel[2]);
+    last_source = motion.device;
+    next_motion_log_us = real_us + 10000000;
+  }
 
   // The L2/R2 bits of a pad come from its analog triggers: a scripted or auto press of the bit
   // is a fully pulled trigger.
@@ -917,7 +951,7 @@ void shim_scePadGetHandle(GuestContext *ctx) {
 }
 
 // The three motion state calls and scePadResetOrientation act on one handle (see the motion
-// notes at the top). Each logs a change of state once.
+// notes in ps4_pad_motion.h). Each logs its first call on a handle and each change of state.
 typedef enum { PAD_MOTION_SENSOR, PAD_MOTION_TILT, PAD_MOTION_DEADBAND } PadMotionSetting;
 
 static int32_t pad_set_motion_state(int32_t handle, PadMotionSetting what, int32_t bEnable) {
@@ -932,8 +966,11 @@ static int32_t pad_set_motion_state(int32_t handle, PadMotionSetting what, int32
   PadMotionState *m = &slot->motion;
   int on = bEnable != 0;
   int *field = what == PAD_MOTION_SENSOR ? &m->on : what == PAD_MOTION_TILT ? &m->tilt : &m->deadband;
-  if (*field != on) {
+  if (*field != on || !(slot->motion_calls_seen & (1u << what))) {
+    slot->motion_calls_seen |= 1u << what;
     fprintf(stderr, "[pad] %s(handle %d, %d)\n", names[what], handle, on);
+  }
+  if (*field != on) {
     if (what == PAD_MOTION_SENSOR && on) {
       const uint64_t now = pad_script_clock_us();
       PadMotionSample s = virtual_sample(now);
@@ -969,6 +1006,8 @@ int32_t scePadResetOrientation(int32_t handle) {
     pthread_mutex_unlock(&g_pad_mutex);
     return ORBIS_PAD_ERROR_INVALID_HANDLE;
   }
+  static unsigned reset_calls;
+  if (reset_calls++ < 5) fprintf(stderr, "[pad] scePadResetOrientation(handle %d) call %u\n", handle, reset_calls);
   // The current pose becomes the identity. The gravity of the virtual pad (or, with a device,
   // the one last reported) defines the new reference up.
   const uint64_t now = pad_script_clock_us();
