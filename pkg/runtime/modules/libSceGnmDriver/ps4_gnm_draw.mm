@@ -808,7 +808,8 @@ struct State {
     GnmPendingWrites pending_writes;
     // The same, kept for the T# table hazard check (ResolveFlatHazards) until no draw or dispatch
     // whose tables the CP copied before they completed is left to encode (PruneTableWrites).
-    std::deque<std::pair<uint64_t, std::shared_ptr<const std::vector<GpuWrite>>>> table_written;
+    // One index per queue: an open write on one queue must survive the other's commit.
+    GnmPendingWrites table_writes[2];
     // completed_seq when the CP copied the tables of the draw or dispatch encoded last
     // (TableReadEncoded): every one still to be encoded copied them later
     uint64_t table_floor = 0;
@@ -2272,8 +2273,9 @@ void NoteGpuWrite(uint64_t addr, uint64_t size) {
     // the same range written again by this command buffer: only its latest write matters (the
     // hazard check and the texture invalidation both take the latest epoch of a range)
     uint32_t& slot = S.gpu_written_slot[((addr >> 8) ^ size) & 63];
-    S.pending_writes.Note(addr, size, S.write_epoch + 1,
-                          S.be->Target() == GnmCmdTarget::AsyncCompute ? kTgtAsync : kTgtMain);
+    const int target = S.be->Target() == GnmCmdTarget::AsyncCompute ? kTgtAsync : kTgtMain;
+    S.pending_writes.Note(addr, size, S.write_epoch + 1, target);
+    S.table_writes[target].Note(addr, size, S.write_epoch + 1);
     if (slot < S.gpu_written.size() && S.gpu_written[slot].addr == addr && S.gpu_written[slot].size == size) {
         S.gpu_written[slot].epoch = ++S.write_epoch;
         return;
@@ -2302,7 +2304,7 @@ void PruneCompletedWrites() {
 // the GPU drained. So the check judges a write by whether it had completed when the CP read the
 // tables: a draw or dispatch takes completed_seq first (TableReadBegin), and every write of a
 // command buffer committed after that (or still being recorded) counts, completed since or not.
-// S.table_written keeps those writes until no draw or dispatch that may need them is left: while
+// S.table_writes keeps those writes until no draw or dispatch that may need them is left: while
 // some are open, back to the snapshot of the last one encoded (later ones took theirs later: CP
 // calls are serialized and encoded in order). Ordering: the CP counts itself open, then reads
 // completed_pub; PruneTableWrites reads completed_pub, then the open count. If it sees none open,
@@ -2331,10 +2333,10 @@ struct TableReadEncoded {
 };
 
 void PruneTableWrites() {
-    if (S.table_written.empty()) return;
+    if (S.table_writes[kTgtMain].Empty() && S.table_writes[kTgtAsync].Empty()) return;
     uint64_t floor = S.completed_pub.load();
     if (g_table_reads_open.load() != 0) floor = std::min(floor, S.table_floor);
-    while (!S.table_written.empty() && S.table_written.front().first <= floor) S.table_written.pop_front();
+    for (auto& writes : S.table_writes) writes.Prune(floor);
 }
 
 // A write to [addr, addr + size) the CP could not have seen when it took `snap`: one recorded
@@ -2342,18 +2344,14 @@ void PruneTableWrites() {
 // one of them; *pending_seq: the newest command buffer among them (UINT64_MAX: the open one).
 bool OverlapsWriteAfter(uint64_t addr, uint64_t size, uint64_t snap, GpuWrite* hit, uint64_t* pending_seq) {
     bool any = false;
-    auto check = [&](const GpuWrite& r, uint64_t seq) {
-        if (r.addr < addr + size && addr < r.addr + r.size) {
-            if (!any) *hit = r;
-            any = true;
-            *pending_seq = std::max(*pending_seq, seq);
-        }
-    };
-    for (auto& r : S.gpu_written) check(r, UINT64_MAX);
-    for (auto& r : S.async.gpu_written) check(r, UINT64_MAX);
-    for (auto& [seq, w] : S.table_written)
-        if (seq > snap)
-            for (auto& r : *w) check(r, seq);
+    for (const auto& writes : S.table_writes) {
+        GnmPendingWrites::Range r;
+        uint64_t seq;
+        if (!writes.OverlapsAfter(addr, size, snap, &r, &seq)) continue;
+        if (!any) *hit = GpuWrite{r.addr, r.size, r.epoch};
+        any = true;
+        *pending_seq = std::max(*pending_seq, seq);
+    }
     return any;
 }
 
@@ -2845,9 +2843,9 @@ void Commit() {
         done->written = std::make_shared<std::vector<GpuWrite>>(S.gpu_written);
         S.inflight_written.push_back({seq, std::move(S.gpu_written)});
         S.gpu_written.clear();
-        S.table_written.push_back({seq, done->written});
     }
     S.pending_writes.Commit(seq);
+    S.table_writes[kTgtMain].Commit(seq);
     PruneTableWrites();
     done->tex_cache = S.tex;
     done->present_fail.swap(S.present_ops);
@@ -2969,9 +2967,9 @@ void CommitAsync() {
         done->written = std::make_shared<std::vector<GpuWrite>>(S.gpu_written);
         S.inflight_written.push_back({seq, std::move(S.gpu_written)});
         S.gpu_written.clear();
-        S.table_written.push_back({seq, done->written});
     }
     S.pending_writes.Commit(seq, kTgtAsync);
+    S.table_writes[kTgtAsync].Commit(seq);
     PruneTableWrites();
     done->tex_cache = S.tex;
     std::shared_ptr<WorkLog> log = done->log;
@@ -5557,7 +5555,7 @@ struct FlatStage {
 bool ResolveFlatHazards(const FlatStage* st, uint32_t n, uint64_t snap, bool* refreshed = nullptr) {
     if (refreshed) *refreshed = false;
     PruneTableWrites();
-    if (S.gpu_written.empty() && S.async.gpu_written.empty() && S.table_written.empty()) return true;
+    if (S.table_writes[kTgtMain].Empty() && S.table_writes[kTgtAsync].Empty()) return true;
     const Shader* hit_s = nullptr;
     GpuWrite hit{};
     uint64_t hit_read[2] = {}, pending_seq = 0;
