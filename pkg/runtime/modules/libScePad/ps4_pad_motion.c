@@ -99,13 +99,19 @@ void pad_motion_update(PadMotionState *m, const PadMotionSample *s, uint64_t now
        (float)deadband(s->rate.z, m->deadband)}};
 }
 
-// GameController -> pad axes, as SDL's MFi backend converts them (src/joystick/apple/SDL_mfijoystick.m):
-// rate (x, z, -y), acceleration -(x, y, z).
+// GameController -> pad axes. GCMotion of a DualSense (macOS, measured with the controller held
+// still in known poses): x to the right, y toward the triggers, z out of the top face, rotation
+// right-handed; acceleration is the gravity vector, so a pad lying flat reads (0, 0, -1) and one
+// standing on its near edge, triggers up, reads (0, -1, 0). The pad's axes are (x, z, -y) of
+// GameController's (rotation rate as SDL's MFi backend converts it), and its acceleration is the
+// opposite of the gravity vector: (-x, -z, y). (SDL's MFi backend negates the acceleration
+// without the axis change, but it reports no accelerometer for a DualSense at all: it requires
+// hasGravityAndUserAcceleration.)
 PadMotionSample pad_motion_from_gc(PadVec r, PadVec a) {
   PadMotionSample s = {0};
   s.device = 1;
   s.rate = (PadVec){r.x, r.z, -r.y};
-  s.accel = (PadVec){-a.x, -a.y, -a.z};
+  s.accel = (PadVec){-a.x, -a.z, a.y};
   s.pose = kPadQuatIdentity;
   return s;
 }

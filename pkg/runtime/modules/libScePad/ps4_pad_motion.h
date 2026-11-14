@@ -85,7 +85,7 @@ void pad_motion_reset(PadMotionState *m, const PadMotionSample *s, uint64_t now_
 void pad_motion_update(PadMotionState *m, const PadMotionSample *s, uint64_t now_us, PadMotionOut *out);
 
 // A GameController GCMotion sample (rotationRate in rad/s, acceleration in g, both in
-// GameController's axes) as a device sample in pad axes.
+// GameController's axes; see ps4_pad_motion.c) as a device sample in pad axes.
 PadMotionSample pad_motion_from_gc(PadVec gc_rate, PadVec gc_accel);
 
 #ifdef __cplusplus

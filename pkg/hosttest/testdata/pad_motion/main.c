@@ -141,10 +141,64 @@ static void case_reset(void) {
     CHECK(o.quat[3] == 1 && o.quat[0] == 0, "not identity after reset");
 }
 
+static int vec_near(PadVec v, double x, double y, double z) {
+    return NEAR(v.x, x, 1e-9) && NEAR(v.y, y, 1e-9) && NEAR(v.z, z, 1e-9);
+}
+
+// GCMotion of a DualSense in poses measured on macOS -> the pad's axes.
+static void case_gc_mapping(void) {
+    // Flat, buttons up: gravity vector (0, 0, -1) -> the pad's (0, +1, 0).
+    PadMotionSample s = pad_motion_from_gc((PadVec){0, 0, 0}, (PadVec){0, 0, -1});
+    CHECK(s.device && vec_near(s.accel, 0, 1, 0), "flat: %f %f %f", s.accel.x, s.accel.y, s.accel.z);
+    // Standing on its near edge, triggers up, buttons facing the player: the pad's z (toward the
+    // player when flat) now points down, so the measured acceleration is -z.
+    s = pad_motion_from_gc((PadVec){0, 0, 0}, (PadVec){0, -1, 0});
+    CHECK(vec_near(s.accel, 0, 0, -1), "standing: %f %f %f", s.accel.x, s.accel.y, s.accel.z);
+    // On its right side (right grip down): gravity along GameController's +x, the pad's -x is up.
+    s = pad_motion_from_gc((PadVec){0, 0, 0}, (PadVec){1, 0, 0});
+    CHECK(vec_near(s.accel, -1, 0, 0), "right side: %f %f %f", s.accel.x, s.accel.y, s.accel.z);
+    // Turning left on the desk (GameController +z) is the pad's +y; tipping the trigger edge up
+    // (GameController +x) is the pad's +x (top face toward the player).
+    s = pad_motion_from_gc((PadVec){0, 0, 1}, (PadVec){0, 0, -1});
+    CHECK(vec_near(s.rate, 0, 1, 0), "yaw: %f %f %f", s.rate.x, s.rate.y, s.rate.z);
+    s = pad_motion_from_gc((PadVec){1, 0, 0}, (PadVec){0, 0, -1});
+    CHECK(vec_near(s.rate, 1, 0, 0), "pitch: %f %f %f", s.rate.x, s.rate.y, s.rate.z);
+    // Rolling right (GameController -y, the right side goes down) is the pad's +z.
+    s = pad_motion_from_gc((PadVec){0, -1, 0}, (PadVec){0, 0, -1});
+    CHECK(vec_near(s.rate, 0, 0, 1), "roll: %f %f %f", s.rate.x, s.rate.y, s.rate.z);
+}
+
+// The gyro and the accelerometer, mapped, agree: standing the pad up (90 deg about its x in 1 s)
+// with tilt correction on ends at 90 deg about +x, and the reference up seen from the pad is the
+// measured acceleration. A wrong accelerometer mapping would have tilt correction pull the pose
+// away.
+static void case_gc_consistent(void) {
+    PadMotionState m = fresh(pad_motion_from_gc((PadVec){0, 0, 0}, (PadVec){0, 0, -1}));
+    m.tilt = 1;
+    uint64_t t = 0;
+    PadMotionOut o;
+    const int n = 250;
+    for (int i = 1; i <= n; i++) {
+        double th = M_PI / 2 * i / n;
+        PadMotionSample s = pad_motion_from_gc((PadVec){M_PI / 2, 0, 0}, (PadVec){0, -sin(th), -cos(th)});
+        t += 4000;
+        pad_motion_update(&m, &s, t, &o);
+    }
+    PadMotionSample rest = pad_motion_from_gc((PadVec){0, 0, 0}, (PadVec){0, -1, 0});
+    o = run(&m, rest, &t, 500);
+    const double h = sqrt(0.5);
+    CHECK(NEAR(o.quat[0], h, 1e-3) && NEAR(o.quat[1], 0, 1e-3) && NEAR(o.quat[2], 0, 1e-3) && NEAR(o.quat[3], h, 1e-3),
+          "quat %f %f %f %f", o.quat[0], o.quat[1], o.quat[2], o.quat[3]);
+    PadVec up = pad_quat_rotate_inv((PadQuat){o.quat[0], o.quat[1], o.quat[2], o.quat[3]}, (PadVec){0, 1, 0});
+    CHECK(NEAR(up.x, o.accel[0], 1e-3) && NEAR(up.y, o.accel[1], 1e-3) && NEAR(up.z, o.accel[2], 1e-3),
+          "up %f %f %f vs accel %f %f %f", up.x, up.y, up.z, o.accel[0], o.accel[1], o.accel[2]);
+}
+
 int main(int argc, char **argv) {
     static const struct { const char *name; void (*fn)(void); } cases[] = {
         {"rest", case_rest},   {"integrate", case_integrate}, {"deadband", case_deadband}, {"off", case_off},
         {"tilt", case_tilt},   {"gap", case_gap},             {"reset", case_reset},
+        {"gc-mapping", case_gc_mapping}, {"gc-consistent", case_gc_consistent},
     };
     if (argc != 2) return 2;
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
