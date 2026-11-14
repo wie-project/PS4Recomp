@@ -19,6 +19,7 @@
  *   PS4_GNM_TRACE=<n>        log every draw/dispatch of the first n submits that contain work
  *   PS4_GNM_MSL_DUMP=<dir>   write the generated MSL of every compiled shader
  *   PS4_GNM_GPU_TIMEOUT=<ms> command buffer watchdog (default 4000)
+ *   PS4_GNM_NO_DEPTH_COMPANION_MERGE=1  retain conservative guest-range splits (A/B diagnosis)
  */
 
 #import <Foundation/Foundation.h>
@@ -58,6 +59,7 @@
 
 #include "gcn_recompiler.h"
 #include "ps4_gnm_draw.h"
+#include "ps4_gnm_depth_companion.h"
 #include "ps4_gnm_guest_window.h"
 #include "ps4_gnm_membudget.h"
 #include "ps4_gnm_pending_writes.h"
@@ -6841,10 +6843,25 @@ gcn_push_data MakePushData(const Regs& regs) {
 
 bool StageHasAttachmentHazard(const PassKey& pass, const Shader* s, const std::vector<uint32_t>& flat) {
     if (!s || s->imgs.empty()) return false;
+    static const bool no_companion_merge = getenv("PS4_GNM_NO_DEPTH_COMPANION_MERGE") != nullptr;
     for (uint32_t i = 0; i < s->imgs.size(); ++i) {
         ImageDesc img;
         uint64_t approx = 0;
         if (!StageImage(s, flat, i, &img, &approx) || !img.valid || !img.address) continue;
+        // BindStage samples a separate R32F companion for non-shadow depth reads. Its
+        // guest address still names the depth attachment, but the Metal texture does not.
+        // Only exempt a prepared, current companion; PrepareDepthCompanions ends the
+        // encoder and refreshes it whenever the source depth version changes.
+        if (!no_companion_merge && !s->imgs[i].is_depth && !s->imgs[i].is_storage && S.tex && !StencilPlaneDepth(img)) {
+            if (id<MTLTexture> dt = DepthTargetFor(img.address, img)) {
+                void* depth_key = (__bridge void*)dt;
+                auto c = S.depth_comp.find(depth_key);
+                auto v = S.depth_version.find(depth_key);
+                if (c != S.depth_comp.end() && v != S.depth_version.end() &&
+                    IndependentDepthCompanion(c->second.tex, c->second.version, v->second, pass.depth, pass.color))
+                    continue;
+            }
+        }
         const uint64_t img_start = img.address;
         const uint64_t img_end = img.address + std::max<uint64_t>(approx, 1);
 
