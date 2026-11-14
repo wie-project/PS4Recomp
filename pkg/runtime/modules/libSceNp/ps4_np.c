@@ -1150,6 +1150,76 @@ void shim_sceNpTusGetDataAsync(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+// Synchronous TUS/TSS data and variable transfers and asynchronous score ranking queries are NP
+// server requests. Without a signed-in user they fail with SCE_NP_ERROR_SIGNED_OUT: shadPS4's
+// NpHandler (np_handler_tus.cpp, np_handler_score.cpp) returns it for every such request when no
+// client is signed in, and the libSceNpTus/libSceNpScore entry points pass it to the caller.
+static void np_server_request_signed_out(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_ERROR_SIGNED_OUT;
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusGetData(GuestContext *ctx) {
+    NP_LOG("sceNpTusGetData -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTusGetDataVUser(GuestContext *ctx) {
+    NP_LOG("sceNpTusGetDataVUser -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTusSetData(GuestContext *ctx) {
+    NP_LOG("sceNpTusSetData -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTusSetDataVUser(GuestContext *ctx) {
+    NP_LOG("sceNpTusSetDataVUser -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTusGetMultiSlotVariable(GuestContext *ctx) {
+    NP_LOG("sceNpTusGetMultiSlotVariable -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTusGetMultiSlotVariableVUser(GuestContext *ctx) {
+    NP_LOG("sceNpTusGetMultiSlotVariableVUser -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTusSetMultiSlotVariable(GuestContext *ctx) {
+    NP_LOG("sceNpTusSetMultiSlotVariable -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTusSetMultiSlotVariableVUser(GuestContext *ctx) {
+    NP_LOG("sceNpTusSetMultiSlotVariableVUser -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTssGetData(GuestContext *ctx) {
+    NP_LOG("sceNpTssGetData -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpScoreGetRankingByNpIdAsync(GuestContext *ctx) {
+    NP_LOG("sceNpScoreGetRankingByNpIdAsync -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpScoreGetRankingByRangeAsync(GuestContext *ctx) {
+    NP_LOG("sceNpScoreGetRankingByRangeAsync -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpScoreGetFriendsRankingAsync(GuestContext *ctx) {
+    NP_LOG("sceNpScoreGetFriendsRankingAsync -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+
 //=============================================================================
 // libSceNpCommerce
 //=============================================================================
