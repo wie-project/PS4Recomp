@@ -59,6 +59,7 @@
 
 #include "gcn_recompiler.h"
 #include "ps4_gnm_draw.h"
+#include "ps4_gnm_completion_fence.h"
 #include "ps4_gnm_depth_companion.h"
 #include "ps4_gnm_guest_window.h"
 #include "ps4_gnm_membudget.h"
@@ -10077,13 +10078,9 @@ void SetExtentHints(const uint32_t cb[8], uint32_t db) {
 // The submit-side bit controls the encoder drain that prevents the CPU from overwriting guest
 // inputs while the background encoder still reads them. A completion label only permits omitting
 // the per-present GPU drain; it does not remove that submit-side protection.
-static std::atomic<bool> g_has_gpu_fence{false};
-static std::atomic<bool> g_has_gpu_completion_label{false};
-void NoteGpuFence() {
-    g_has_gpu_fence.store(true, std::memory_order_relaxed);
-    g_has_gpu_completion_label.store(true, std::memory_order_relaxed);
-}
-void NoteGpuCompletionLabel() { g_has_gpu_completion_label.store(true, std::memory_order_relaxed); }
+static ps4gnm::CompletionFenceState g_gpu_fence_state;
+void NoteGpuFence() { g_gpu_fence_state.NoteSubmitFence(); }
+void NoteGpuCompletionLabel() { g_gpu_fence_state.NoteCompletionLabel(); }
 
 void OnSubmit() {
     S.submit_idx++;
@@ -10098,7 +10095,7 @@ void OnSubmit() {
     // GPU fences) can overwrite guest vertex/constant memory immediately after sceGnmSubmit*
     // returns while the background encoder thread is still reading it.
     static const bool async_no_fence = getenv("PS4_GNM_ASYNC_NO_FENCE") != nullptr;
-    if (!async_no_fence && !g_has_gpu_fence.load(std::memory_order_relaxed)) encq::Sync();
+    if (!async_no_fence && !g_gpu_fence_state.HasSubmitSideFence()) encq::Sync();
 }
 
 // The test hooks' wait: the open command buffer waits on the GPU until ev reaches value, and
@@ -14901,7 +14898,7 @@ bool Present(GuestContext* ctx, uint64_t addr, uint32_t width, uint32_t height, 
     }
     encq::Defer([run, f = std::move(on_done)]() mutable { run(std::move(f)); });
     static const bool async_no_fence = getenv("PS4_GNM_ASYNC_NO_FENCE") != nullptr;
-    if (!async_no_fence && !g_has_gpu_fence.load(std::memory_order_relaxed)) encq::Sync();
+    if (!async_no_fence && !g_gpu_fence_state.HasSubmitSideFence()) encq::Sync();
     return true;
 }
 
@@ -15030,9 +15027,7 @@ bool PresentImpl(GuestContext* ctx, uint64_t addr, uint32_t width, uint32_t heig
         static const bool wait_on_present = getenv("PS4_GNM_WAIT_ON_PRESENT") != nullptr;
         static const bool async_no_fence = getenv("PS4_GNM_ASYNC_NO_FENCE") != nullptr;
         static const bool writeback_all = getenv("PS4_GNM_WRITEBACK_ALL") != nullptr;
-        const bool no_fence_wait = !async_no_fence &&
-                                   !g_has_gpu_fence.load(std::memory_order_relaxed) &&
-                                   !g_has_gpu_completion_label.load(std::memory_order_relaxed);
+        const bool no_fence_wait = !async_no_fence && !g_gpu_fence_state.CanSkipPresentDrain();
         if ((wait_on_present || no_fence_wait) && !writeback_all) WaitAll();
         if (writeback_all) { // experiment: make every GPU surface CPU-visible
             WaitAll();
