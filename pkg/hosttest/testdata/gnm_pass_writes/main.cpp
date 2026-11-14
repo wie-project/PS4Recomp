@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Host test of ps4_gnm_pass_writes.h: which attachments of its render pass a draw writes, from
-// the decoded render state the renderer encodes it with. Driven by gnm_pass_writes_test.go: one
-// case per run, named by argv[1]; prints PASS or FAIL lines, exits non-zero on failure.
+// the decoded render state the renderer encodes it with, and the depth target plane sizes its
+// overlap check uses. Driven by gnm_pass_writes_test.go: one case per run, named by argv[1];
+// prints PASS or FAIL lines, exits non-zero on failure.
 #include "ps4_gnm_pass_writes.h"
 
 #include <stdio.h>
@@ -103,6 +104,34 @@ static void CaseDrawWrites() {
     CHECK((kPassAllAttachments & kPassDepth) && (kPassAllAttachments >> 9) == 0, "attachment bits");
 }
 
+// The plane sizes of a depth target (DepthTarget::DepthBytes / StencilBytes), with the registers
+// of Gravity Rush's 1920x1080 Z32F+S8 target: DB_DEPTH_SLICE.SLICE_TILE_MAX 0x8FFF (2048x1152
+// padded), Z at 0x4eff0000, stencil at 0x4f8f0000, its shadow map array at 0x4fb60000.
+static void CaseStencilPlane() {
+    DepthTarget d;
+    d.z_format = ZFormat::Z32Float;
+    d.stencil_format = StencilFormat::Stencil8;
+    d.z_read_address = 0x4eff0000;
+    d.stencil_read_address = 0x4f8f0000;
+    d.bpp = 32;
+    d.slice_bytes = (0x8FFF + 1) * 64 * 4; // DecodeDepthTarget
+    d.num_slices = 1;
+    CHECK(d.DepthBytes() == 0x900000, "depth plane 0x%llx", (unsigned long long)d.DepthBytes());
+    CHECK(d.StencilBytes() == 0x240000, "stencil plane 0x%llx", (unsigned long long)d.StencilBytes());
+    CHECK(d.stencil_read_address + d.StencilBytes() <= 0x4fb60000, "the stencil plane reaches the shadow map");
+    d.num_slices = 3;
+    CHECK(d.StencilBytes() == 3 * 0x240000, "3 slices: 0x%llx", (unsigned long long)d.StencilBytes());
+    d.num_slices = 1;
+    d.bpp = 16; // Z16: half the bytes per tile, the same stencil plane
+    d.slice_bytes = (0x8FFF + 1) * 64 * 2;
+    CHECK(d.StencilBytes() == 0x240000, "Z16 stencil plane 0x%llx", (unsigned long long)d.StencilBytes());
+    d.stencil_format = StencilFormat::Invalid;
+    CHECK(d.StencilBytes() == 0, "no stencil plane: 0x%llx", (unsigned long long)d.StencilBytes());
+    d.stencil_format = StencilFormat::Stencil8;
+    d.stencil_read_address = 0;
+    CHECK(d.StencilBytes() == 0, "no stencil base: 0x%llx", (unsigned long long)d.StencilBytes());
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) {
         printf("usage: %s <case>\n", argv[0]);
@@ -113,6 +142,7 @@ int main(int argc, char** argv) {
     else if (!strcmp(c, "stencil")) CaseStencil();
     else if (!strcmp(c, "clear")) CaseClear();
     else if (!strcmp(c, "draw-writes")) CaseDrawWrites();
+    else if (!strcmp(c, "stencil-plane")) CaseStencilPlane();
     else {
         printf("unknown case %s\n", c);
         return 2;

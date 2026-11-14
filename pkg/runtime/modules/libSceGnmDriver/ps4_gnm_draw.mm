@@ -6863,7 +6863,7 @@ uint32_t StageAttachmentHazard(const PassKey& pass, const Shader* s, const std::
                 const uint64_t d_end = pass.depth_addr + std::max<uint64_t>(pass.depth_size, 1);
                 if (img_start < d_end && img_end > d_start) m |= kPassDepth;
             }
-            if (pass.stencil_addr) {
+            if (pass.stencil_size) {
                 const uint64_t s_start = pass.stencil_addr;
                 const uint64_t s_end = pass.stencil_addr + std::max<uint64_t>(pass.stencil_size, 1);
                 if (img_start < s_end && img_end > s_start) m |= kPassDepth;
@@ -6953,7 +6953,7 @@ uint32_t ImageAttachment(const PassKey& pass, const ImageDesc& img, uint64_t app
     };
     if (pass.depth) {
         const bool lookup = S.tex && same(S.tex->FindDepthTarget(a), pass.depth);
-        if (a == pass.depth_addr || (pass.stencil_addr && a == pass.stencil_addr)) *how = 1;
+        if (a == pass.depth_addr || (pass.stencil_size && a == pass.stencil_addr)) *how = 1;
         else if (lookup) *how = 2;
         else if (ranged(pass.depth_addr, pass.depth_size) || ranged(pass.stencil_addr, pass.stencil_size)) *how = 3;
         else *how = 0;
@@ -11461,10 +11461,9 @@ void EncodeTessDraw(DrawRec& r) {
                                   ? std::min<uint32_t>(db.base_slice, (uint32_t)t.arrayLength - 1)
                                   : 0;
             key.depth_addr = db.z_read_address;
-            key.depth_size = db.slice_bytes ? (uint64_t)db.slice_bytes * std::max(1u, db.num_slices)
-                                            : (uint64_t)db.pitch * db.height * 4;
+            key.depth_size = db.DepthBytes();
             key.stencil_addr = db.stencil_read_address;
-            key.stencil_size = key.depth_size;
+            key.stencil_size = db.StencilBytes();
             hold[8] = t;
             depth_fmt = (uint32_t)t.pixelFormat;
             rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
@@ -11961,10 +11960,9 @@ void EncodeGsDraw(DrawRec& r) {
                                   ? std::min<uint32_t>(db.base_slice, (uint32_t)t.arrayLength - 1)
                                   : 0;
             key.depth_addr = db.z_read_address;
-            key.depth_size = db.slice_bytes ? (uint64_t)db.slice_bytes * std::max(1u, db.num_slices)
-                                            : (uint64_t)db.pitch * db.height * 4;
+            key.depth_size = db.DepthBytes();
             key.stencil_addr = db.stencil_read_address;
-            key.stencil_size = key.depth_size;
+            key.stencil_size = db.StencilBytes();
             hold[8] = t;
             depth_fmt = (uint32_t)t.pixelFormat;
             rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);
@@ -12534,7 +12532,7 @@ void ApplyPassLookahead(const DrawRec& cur, PassKey& key, __strong id<MTLTexture
         uint64_t cand_caddr[8] = {}, cand_csize[8] = {};
         id<MTLTexture> cand_depth = nil;
         uint32_t cand_dslice = 0;
-        uint64_t cand_daddr = 0, cand_saddr = 0, cand_dsize = 0;
+        uint64_t cand_daddr = 0, cand_saddr = 0, cand_dsize = 0, cand_ssize = 0;
         bool nx_any_rt = false;
         bool stop = false;
 
@@ -12635,14 +12633,14 @@ void ApplyPassLookahead(const DrawRec& cur, PassKey& key, __strong id<MTLTexture
                 cand_dslice = dsl;
                 cand_daddr = ndb.z_read_address;
                 cand_saddr = ndb.stencil_read_address;
-                cand_dsize = ndb.slice_bytes ? (uint64_t)ndb.slice_bytes * std::max(1u, ndb.num_slices)
-                                             : (uint64_t)ndb.pitch * ndb.height * 4;
+                cand_dsize = ndb.DepthBytes();
+                cand_ssize = ndb.StencilBytes();
                 cand.depth = dt;
                 cand.depth_slice = dsl;
                 cand.depth_addr = cand_daddr;
                 cand.depth_size = cand_dsize;
                 cand.stencil_addr = cand_saddr;
-                cand.stencil_size = cand_dsize;
+                cand.stencil_size = cand_ssize;
             }
         }
         if (!nx_any_rt) {
@@ -12691,7 +12689,7 @@ void ApplyPassLookahead(const DrawRec& cur, PassKey& key, __strong id<MTLTexture
                 key.depth_addr = cand_daddr;
                 key.depth_size = cand_dsize;
                 key.stencil_addr = cand_saddr;
-                key.stencil_size = cand_dsize;
+                key.stencil_size = cand_ssize;
                 hold[8] = cand_depth;
                 depth_fmt = (uint32_t)cand_depth.pixelFormat;
                 g_pass_splits.la_added++;
@@ -12851,10 +12849,9 @@ void DrawEncode(DrawRec& r) {
                                       ? std::min<uint32_t>(db.base_slice, (uint32_t)t.arrayLength - 1)
                                       : 0;
                 key.depth_addr = db.z_read_address;
-                key.depth_size = db.slice_bytes ? (uint64_t)db.slice_bytes * std::max(1u, db.num_slices)
-                                                : (uint64_t)db.pitch * db.height * 4;
+                key.depth_size = db.DepthBytes();
                 key.stencil_addr = db.stencil_read_address;
-                key.stencil_size = key.depth_size;
+                key.stencil_size = db.StencilBytes();
                 hold[8] = t;
                 depth_fmt = (uint32_t)t.pixelFormat;
                 rt_w = std::min<uint32_t>(rt_w, (uint32_t)t.width);

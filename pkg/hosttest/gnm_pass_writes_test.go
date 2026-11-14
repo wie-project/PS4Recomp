@@ -6,8 +6,8 @@ import "testing"
 
 // TestGnmPassWrites runs testdata/gnm_pass_writes/main.cpp: the attachments of its render pass a
 // draw writes (ps4_gnm_pass_writes.h), which decide whether a later draw that samples one of them
-// may continue the pass.
+// may continue the pass, and the depth target plane sizes its overlap check uses.
 func TestGnmPassWrites(t *testing.T) {
 	bin := buildHostCxx(t, "gnm_pass_writes", "../runtime/modules/libSceGnmDriver/ps4_gnm_pass_writes.h")
-	runHostCases(t, bin, []string{"depth", "stencil", "clear", "draw-writes"})
+	runHostCases(t, bin, []string{"depth", "stencil", "clear", "draw-writes", "stencil-plane"})
 }
