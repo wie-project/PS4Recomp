@@ -5467,7 +5467,8 @@ namespace {
 // ---- T# tables a shader indexes at run time (gcn_image_table) ----
 // Written by the encoder thread, read by GetImageTableStats from any thread.
 struct AtomicTableStats {
-    std::atomic<uint64_t> bound{0}, empty{0}, rejected{0}, unmapped{0}, hazard_drains{0}, hazard_skips{0};
+    std::atomic<uint64_t> bound{0}, empty{0}, rejected{0}, unmapped{0}, hazard_drains{0}, hazard_completed{0},
+        hazard_skips{0};
 } g_table_stats;
 bool g_address_check = false; // gcn_set_image_address_check installed (Init)
 struct StageImages;
@@ -5569,16 +5570,26 @@ bool ResolveFlatHazards(const FlatStage* st, uint32_t n, uint64_t snap, bool* re
     }
     if (!hit_s) return true;
     g_table_stats.hazard_drains.fetch_add(1, std::memory_order_relaxed);
+    // Other stages or ranges may depend on later writes than the first hit, on either queue.
+    // Only a write that has not completed yet needs the GPU drained: one that completed after the
+    // CP's snapshot is already in guest memory, so reading the data again (below) is enough.
+    // Draining on a completed write stalled the encoder once per draw of a batch that reads the
+    // same range, which is what the open-sea chapter's per-frame compute-written constants do.
+    const uint64_t done = CompletedSeq();
+    const bool pending = pending_seq == UINT64_MAX || pending_seq > done;
+    if (!pending) g_table_stats.hazard_completed.fetch_add(1, std::memory_order_relaxed);
     char key[64];
     snprintf(key, sizeof(key), "flat-hazard-%llx", (unsigned long long)hit_s->code_addr);
     RLog(key, "shader 0x%llx: flattened read 0x%llx+0x%llx written by GPU work pending when the CP read it "
-              "(0x%llx+0x%llx): draining, shader data read again",
+              "(0x%llx+0x%llx): %s, shader data read again",
          (unsigned long long)hit_s->code_addr, (unsigned long long)hit_read[0], (unsigned long long)hit_read[1],
-         (unsigned long long)hit.addr, (unsigned long long)hit.size);
-    // Other stages or ranges may depend on later writes than the first hit, on either queue.
-    Commit();
-    WaitAll();
-    if (S.hung) return false;
+         (unsigned long long)hit.addr, (unsigned long long)hit.size,
+         pending ? "draining" : "the write completed since");
+    if (pending) {
+        Commit();
+        WaitAll();
+        if (S.hung) return false;
+    }
     for (uint32_t k = 0; k < n; ++k) {
         const Shader* s = st[k].s;
         if (!s) continue;
@@ -15145,6 +15156,7 @@ ImageTableStats GetImageTableStats() {
     r.rejected = g_table_stats.rejected.load(std::memory_order_relaxed);
     r.unmapped = g_table_stats.unmapped.load(std::memory_order_relaxed);
     r.hazard_drains = g_table_stats.hazard_drains.load(std::memory_order_relaxed);
+    r.hazard_completed = g_table_stats.hazard_completed.load(std::memory_order_relaxed);
     r.hazard_skips = g_table_stats.hazard_skips.load(std::memory_order_relaxed);
     return r;
 }
