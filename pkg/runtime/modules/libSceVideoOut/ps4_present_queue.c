@@ -1,6 +1,8 @@
 // Present queue and pacing policy (see ps4_present_queue.h).
 #include "ps4_present_queue.h"
+#include "ps4_vblank_clock.h"
 
+#include <math.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
@@ -29,14 +31,46 @@ const char *ps4_present_mode_name(ps4_present_mode m) {
     }
 }
 
-double ps4_present_min_duration(ps4_present_mode mode, int guest_flip_rate, int guest_flip_mode, double display_hz) {
-    if (mode != PS4_PRESENT_VSYNC || guest_flip_mode == PS4_FLIP_MODE_HSYNC) return 0.0;
-    const int divider = (guest_flip_rate >= 0 && guest_flip_rate <= 2) ? guest_flip_rate + 1 : 1;
-    const double guest = divider / 60.0;
-    const double refresh = 1.0 / (display_hz > 0 ? display_hz : 60.0);
-    // the display cannot show frames faster than the guest asks for: vsync alone paces them
-    if (guest <= refresh * 1.05) return 0.0;
-    return guest - refresh * 0.5;
+// sceVideoOutSetFlipRate value -> vblanks per flip (unknown values as 60 Hz)
+static int flip_divider(int guest_flip_rate) {
+    return (guest_flip_rate >= 0 && guest_flip_rate <= 2) ? guest_flip_rate + 1 : 1;
+}
+
+static double display_hz(ps4_display_info d) {
+    return d.hz > 0 ? d.hz : 60.0;
+}
+
+bool ps4_display_paces_guest(ps4_display_info d, int guest_flip_rate) {
+    if (d.variable) return false;
+    const double hz = display_hz(d), guest_hz = (double)PS4_VBLANK_HZ / flip_divider(guest_flip_rate);
+    const double n = round(hz / guest_hz);
+    return n >= 1 && fabs(hz - n * guest_hz) <= 0.01 * hz;
+}
+
+void ps4_flip_pacer_init(ps4_flip_pacer *p, uint64_t epoch_ns) {
+    p->epoch_ns = epoch_ns;
+    p->last_tick = 0;
+    p->has_last = false;
+}
+
+ps4_present_plan ps4_flip_pacer_plan(ps4_flip_pacer *p, ps4_present_mode mode, int guest_flip_rate,
+                                     int guest_flip_mode, ps4_display_info d, uint64_t now_ns) {
+    ps4_present_plan plan = {0, 0.0};
+    if (mode != PS4_PRESENT_VSYNC || guest_flip_mode == PS4_FLIP_MODE_HSYNC) return plan;
+    const int divider = flip_divider(guest_flip_rate);
+    if (ps4_display_paces_guest(d, guest_flip_rate)) {
+        p->has_last = false; // the timeline starts over if the window moves to another display
+        const double guest = (double)divider / PS4_VBLANK_HZ, refresh = 1.0 / display_hz(d);
+        // the display cannot show frames faster than the guest asks for: vsync alone paces them
+        if (guest > refresh * 1.05) plan.min_duration = guest - refresh * 0.5;
+        return plan;
+    }
+    uint64_t tick = ps4_vblank_ticks_at(p->epoch_ns, now_ns) + 1; // the next vblank
+    if (p->has_last && p->last_tick + (uint64_t)divider > tick) tick = p->last_tick + (uint64_t)divider;
+    p->last_tick = tick;
+    p->has_last = true;
+    plan.not_before_ns = ps4_vblank_tick_ns(p->epoch_ns, tick);
+    return plan;
 }
 
 void ps4_pq_init(ps4_present_queue *q, int n, bool mailbox) {

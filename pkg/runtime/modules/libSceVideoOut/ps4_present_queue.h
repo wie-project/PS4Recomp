@@ -40,13 +40,46 @@ const char *ps4_present_mode_name(ps4_present_mode m);
 #define PS4_FLIP_MODE_VSYNC 1
 #define PS4_FLIP_MODE_HSYNC 2
 
-// Minimum time (seconds) the next frame must stay on screen after the previous one appeared:
-// the argument of -[MTLCommandBuffer presentDrawable:afterMinimumDuration:]; 0 = present at
-// the next refresh. guest_flip_rate is the sceVideoOutSetFlipRate value (0 = 60 Hz, 1 = 30 Hz,
-// 2 = 20 Hz), display_hz the window's screen refresh (<= 0 = unknown, taken as 60). The result
-// is half a refresh short of the guest interval, so a frame that is a little late still lands on
-// the refresh that matches the guest rate instead of slipping by one.
-double ps4_present_min_duration(ps4_present_mode mode, int guest_flip_rate, int guest_flip_mode, double display_hz);
+// The host display as the presenter sees it.
+typedef struct ps4_display_info {
+    double hz;     // its highest refresh rate (NSScreen maximumFramesPerSecond); <= 0 = unknown, taken as 60
+    bool variable; // adaptive refresh (ProMotion, VRR): no fixed grid of refreshes to pace by
+} ps4_display_info;
+
+// Does the display alone pace the guest's flip rate (sceVideoOutSetFlipRate: 0 = 60 Hz, 1 = 30 Hz,
+// 2 = 20 Hz) exactly? Only a fixed refresh at a whole multiple of it (60 or 120 Hz for 60 Hz, 1%
+// tolerance for 59.94 Hz panels): each frame is then shown for the same number of refreshes.
+bool ps4_display_paces_guest(ps4_display_info d, int guest_flip_rate);
+
+// Guest flip pacing of the presenter thread (one thread: no lock).
+typedef struct ps4_flip_pacer {
+    uint64_t epoch_ns;  // the guest vblank timeline (ps4_vblank_clock.h)
+    uint64_t last_tick; // guest vblank of the previous flip paced on the timeline
+    bool has_last;
+} ps4_flip_pacer;
+
+void ps4_flip_pacer_init(ps4_flip_pacer *p, uint64_t epoch_ns);
+
+// How the presenter shows the next frame.
+typedef struct ps4_present_plan {
+    // host time (ps4_vblank_now_ns) the presenter waits for before presenting; 0 = no wait
+    uint64_t not_before_ns;
+    // the argument of -[MTLCommandBuffer presentDrawable:afterMinimumDuration:]: the least time
+    // the frame comes after the previous one appeared; 0 = the next refresh
+    double min_duration;
+} ps4_present_plan;
+
+// The plan for a frame the presenter takes at now_ns. Only vsync mode with vsync flips paces
+// (immediate flips, uncapped and mailbox present at the next refresh). A display that paces the
+// guest rate (ps4_display_paces_guest) is left to do it: min_duration is half a refresh short of
+// the guest interval, so a frame that is a little late still lands on the refresh that matches
+// the guest rate instead of slipping by one. Any other display (72, 144 Hz, adaptive) cannot show
+// every frame for the same number of refreshes: like the PS4 display engine, a frame then flips on
+// the guest vblank timeline, on the first vblank after now and at least the flip rate's number of
+// vblanks after the previous flip, and goes to the display's next refresh. The deadlines are
+// vblank ticks, so pacing neither drifts nor bursts to catch up after a late frame.
+ps4_present_plan ps4_flip_pacer_plan(ps4_flip_pacer *p, ps4_present_mode mode, int guest_flip_rate,
+                                     int guest_flip_mode, ps4_display_info d, uint64_t now_ns);
 
 typedef enum ps4_pq_state {
     PS4_PQ_FREE = 0,
