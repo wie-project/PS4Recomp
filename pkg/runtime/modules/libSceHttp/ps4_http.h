@@ -85,6 +85,18 @@ bool ps4_http_ctx_has_custom_ca(int32_t libhttpCtxId);
 int32_t sceHttp2Init(int32_t net_id, int32_t ssl_id, uint64_t pool_size, int32_t max_requests);
 int32_t sceHttp2Term(int32_t ctx_id);
 
+int32_t sceCompanionHttpdInitialize2(const void *param);
+int32_t sceCompanionHttpdTerminate(void);
+int32_t sceCompanionHttpdStart(void);
+int32_t sceCompanionHttpdStop(void);
+int32_t sceCompanionHttpdGetEvent(void *event);
+int32_t sceCompanionHttpdRegisterRequestCallback2(int id, void *cb, void *userData);
+int32_t sceCompanionHttpdUnregisterRequestCallback(int id);
+
+int32_t sceHttpSetResolveTimeOut(int32_t id, uint32_t timeout);
+int32_t sceHttpSetCookieEnabled(int32_t id, int32_t enabled);
+int32_t sceHttpsGetCaList(int32_t id, void *buf, size_t size, size_t *requiredSize);
+
 // Shims
 void shim_sceHttpInit(GuestContext *ctx);
 void shim_sceHttpTerm(GuestContext *ctx);
@@ -128,6 +140,17 @@ void shim_sceHttpsSetSslCallback(GuestContext *ctx);
 void shim_sceHttpsLoadCert(GuestContext *ctx);
 void shim_sceHttp2Init(GuestContext *ctx);
 void shim_sceHttp2Term(GuestContext *ctx);
+void shim_sceCompanionHttpdInitialize2(GuestContext *ctx);
+void shim_sceCompanionHttpdTerminate(GuestContext *ctx);
+void shim_sceCompanionHttpdStart(GuestContext *ctx);
+void shim_sceCompanionHttpdStop(GuestContext *ctx);
+void shim_sceCompanionHttpdGetEvent(GuestContext *ctx);
+void shim_sceCompanionHttpdRegisterRequestCallback2(GuestContext *ctx);
+void shim_sceCompanionHttpdUnregisterRequestCallback(GuestContext *ctx);
+
+void shim_sceHttpSetResolveTimeOut(GuestContext *ctx);
+void shim_sceHttpSetCookieEnabled(GuestContext *ctx);
+void shim_sceHttpsGetCaList(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

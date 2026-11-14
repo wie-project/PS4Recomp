@@ -37,6 +37,11 @@ static uint32_t be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];
 }
 
+int32_t scePngEncQueryMemorySize(const void *param) { (void)param; return 1024; }
+int32_t scePngEncCreate(const void *param, void *handle) { (void)param; (void)handle; return 0; }
+int32_t scePngEncDelete(int32_t handle) { (void)handle; return 0; }
+int32_t scePngEncEncode(int32_t handle, const void *param, void *out_size) { (void)handle; (void)param; (void)out_size; return 0; }
+
 // int scePngDecQueryMemorySize(const ScePngDecCreateParam *param)
 void shim_scePngDecQueryMemorySize(GuestContext *ctx) {
     if (!ctx->rdi) {
@@ -138,3 +143,9 @@ void shim_scePngDecDecode(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)PNG_DEC_ERROR_UNSUPPORT_DATA;
     SHIM_RETURN();
 }
+
+
+void shim_scePngEncQueryMemorySize(GuestContext *ctx) { ctx->rax = 1024; SHIM_RETURN(); }
+void shim_scePngEncCreate(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
+void shim_scePngEncDelete(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
+void shim_scePngEncEncode(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }

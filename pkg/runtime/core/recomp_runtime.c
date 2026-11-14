@@ -2289,3 +2289,23 @@ void ps4_host_quit(int code) {
   ps4_log_drain_sync(1.0);
   _exit(code);
 }
+
+int32_t module_start(size_t args, const void *argp) {
+    (void)args; (void)argp;
+    return 0; // SCE_OK
+}
+
+int32_t module_stop(size_t args, const void *argp) {
+    (void)args; (void)argp;
+    return 0; // SCE_OK
+}
+
+void shim_module_start(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_module_stop(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}

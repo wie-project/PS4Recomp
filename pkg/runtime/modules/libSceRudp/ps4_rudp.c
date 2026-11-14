@@ -13,6 +13,12 @@ static pthread_mutex_t g_rudp_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool g_rudp_initialized = false;
 static int32_t g_rudp_next_ctx_id = 1;
 
+int32_t sysctl(void *name, unsigned int namelen, void *oldp, size_t *oldlenp, void *newp, size_t newlen) {
+    (void)name; (void)namelen; (void)oldp; (void)oldlenp; (void)newp; (void)newlen;
+    return 0;
+}
+int __Ux86_64_setcontext(void *ucp) { (void)ucp; return 0; }
+
 void shim_sceRudpInit(GuestContext *ctx) {
     pthread_mutex_lock(&g_rudp_mutex);
     g_rudp_initialized = true;
@@ -199,3 +205,7 @@ void shim_sceRudpSetOption(GuestContext *ctx) {
     ctx->rax = ORBIS_OK;
     SHIM_RETURN();
 }
+
+
+void shim_sysctl(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
+void shim___Ux86_64_setcontext(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }

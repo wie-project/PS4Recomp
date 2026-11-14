@@ -117,6 +117,56 @@ int32_t sceKernelGetSystemSwVersion(OrbisKernelSwVersion *version) {
     return 0;
 }
 
+int32_t scePthreadAttrSetstackaddr(OrbisPthreadAttr *attr, uint64_t stackaddrGuest) {
+    if (!attr || !stackaddrGuest) {
+        return -1;
+    }
+    attr->stackaddr = (void *)(uintptr_t)stackaddrGuest;
+    return 0;
+}
+
+int32_t scePthreadAttrSetguardsize(OrbisPthreadAttr *attr, uint64_t guardsize) {
+    if (!attr) {
+        return -1; // EINVAL
+    }
+    
+    // Store guardsize in your OrbisPthreadAttr struct
+    attr->guardsize = guardsize;
+    
+    return 0; // SCE_OK
+}
+
+int32_t sceKernelAddHRTimerEvent(uint64_t arg1, uint64_t arg2, uint64_t arg3) {
+    // Basic safe stub: acknowledge the timer registration request and return success (SCE_OK)
+    return 0;
+}
+
+int32_t sceKernelDeleteHRTimerEvent(uint64_t timer_id) {
+    // Basic safe stub: acknowledge deletion request and return success
+    return 0;
+}
+
+int32_t sigreturn(void *context) {
+    return 0;
+}
+
+int32_t sceKernelGetGPI(void) {
+    return 0; // SCE_OK
+}
+
+int32_t sceKernelSetPrtAperture(uint64_t address, size_t size) {
+    // Safe stub: return 0 (SCE_OK)
+    return 0;
+}
+
+int32_t sceKernelFutimes(const char *path, const struct timeval tv[2]) {
+    (void)path; (void)tv;
+    return 0; // SCE_OK
+}
+
+int32_t sceKernelAddTimerEvent(void) { return 0; }
+int32_t sceKernelDeleteTimerEvent(void) { return 0; }
+
 // Guest execution shims
 void shim_sceKernelGetProcessTimeCounter(GuestContext *ctx) {
     ctx->rax = sceKernelGetProcessTimeCounter();
@@ -445,6 +495,30 @@ void shim_sceKernelIsAddressSanitizerEnabled(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_sceKernelGetGPI(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceKernelGetGPI();
+    SHIM_RETURN();
+}
+
+void shim_sceKernelSetPrtAperture(GuestContext *ctx) {
+    uint64_t addr = ctx->rdi;
+    size_t size = (size_t)ctx->rsi;
+    ctx->rax = (uint64_t)(int64_t)sceKernelSetPrtAperture(addr, size);
+    SHIM_RETURN();
+}
+
+void shim_sceKernelFutimes(GuestContext *ctx) {
+    uint64_t pathGuest = ctx->rdi;
+    uint64_t tvGuest = ctx->rsi;
+    const char *path = pathGuest ? (const char *)(ctx->mem_base + pathGuest) : NULL;
+    const struct timeval *tv = tvGuest ? (const struct timeval *)(ctx->mem_base + tvGuest) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceKernelFutimes(path, tv);
+    SHIM_RETURN();
+}
+
+void shim_sceKernelAddTimerEvent(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
+void shim_sceKernelDeleteTimerEvent(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
+
 #include <signal.h>
 #include <pthread.h>
 #include "ps4_threading.h"
@@ -768,6 +842,47 @@ void shim_sceKernelPrintBacktraceWithModuleInfo(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_scePthreadAttrSetstackaddr(GuestContext *ctx) {
+    uint64_t attrGuest = ctx->rdi;
+    uint64_t stackaddrGuest = ctx->rsi;
+
+    // Translate only the attribute struct pointer to host memory
+    OrbisPthreadAttr *attr = attrGuest ? (OrbisPthreadAttr *)(ctx->mem_base + attrGuest) : NULL;
+
+    int32_t ret = scePthreadAttrSetstackaddr(attr, stackaddrGuest);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePthreadAttrSetguardsize(GuestContext *ctx) {
+    uint64_t attrGuest = ctx->rdi;
+    uint64_t guardsize = ctx->rsi;
+
+    OrbisPthreadAttr *attr = attrGuest ? (OrbisPthreadAttr *)(ctx->mem_base + attrGuest) : NULL;
+
+    int32_t ret = scePthreadAttrSetguardsize(attr, guardsize);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelAddHRTimerEvent(GuestContext *ctx) {
+    uint64_t arg1 = ctx->rdi;
+    uint64_t arg2 = ctx->rsi;
+    uint64_t arg3 = ctx->rdx;
+
+    int32_t ret = sceKernelAddHRTimerEvent(arg1, arg2, arg3);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelDeleteHRTimerEvent(GuestContext *ctx) {
+    uint64_t timer_id = ctx->rdi;
+
+    int32_t ret = sceKernelDeleteHRTimerEvent(timer_id);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
 typedef struct OrbisKernelModuleSegmentInfo {
     uint64_t address;
     uint32_t size;
@@ -1037,5 +1152,9 @@ void shim_Need_sceLibcInternal(GuestContext *ctx) {
 // is the entire observable behaviour the caller depends on.
 void shim_sceKernelSetFsstParam(GuestContext *ctx) {
     ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sigreturn(GuestContext *ctx) {
     SHIM_RETURN();
 }

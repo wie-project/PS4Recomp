@@ -102,6 +102,12 @@ OrbisCommonDialogStatus sceMsgDialogGetStatus(void);
 OrbisCommonDialogStatus sceMsgDialogUpdateStatus(void);
 int32_t sceMsgDialogClose(void);
 int32_t sceMsgDialogTerminate(void);
+int32_t sceGameCustomDataDialogInitialize(void);
+int32_t sceGameCustomDataDialogOpen(const void *param);
+int32_t sceGameCustomDataDialogUpdateStatus(void);
+int32_t sceGameCustomDataDialogGetResult(const void *result);
+int32_t sceGameCustomDataDialogClose(void);
+int32_t sceGameCustomDataDialogTerminate(void);
 
 // Shims
 void shim_sceCommonDialogInitialize(GuestContext *ctx);
@@ -116,5 +122,11 @@ void shim_sceMsgDialogTerminate(GuestContext *ctx);
 void shim_sceMsgDialogProgressBarInc(GuestContext *ctx);
 void shim_sceMsgDialogProgressBarSetMsg(GuestContext *ctx);
 void shim_sceMsgDialogProgressBarSetValue(GuestContext *ctx);
+void shim_sceGameCustomDataDialogInitialize(GuestContext *ctx);
+void shim_sceGameCustomDataDialogOpen(GuestContext *ctx);
+void shim_sceGameCustomDataDialogUpdateStatus(GuestContext *ctx);
+void shim_sceGameCustomDataDialogGetResult(GuestContext *ctx);
+void shim_sceGameCustomDataDialogClose(GuestContext *ctx);
+void shim_sceGameCustomDataDialogTerminate(GuestContext *ctx);
 
 #endif // PS4_DIALOG_H

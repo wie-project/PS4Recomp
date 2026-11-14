@@ -431,6 +431,18 @@ int32_t sceHttp2Term(int32_t ctx_id) {
     return 0;
 }
 
+int32_t sceCompanionHttpdInitialize2(const void *param) { (void)param; return 0; }
+int32_t sceCompanionHttpdTerminate(void) { return 0; }
+int32_t sceCompanionHttpdStart(void) { return 0; }
+int32_t sceCompanionHttpdStop(void) { return 0; }
+int32_t sceCompanionHttpdGetEvent(void *event) { (void)event; return 0; }
+int32_t sceCompanionHttpdRegisterRequestCallback2(int id, void *cb, void *userData) { (void)id; (void)cb; (void)userData; return 0; }
+int32_t sceCompanionHttpdUnregisterRequestCallback(int id) { (void)id; return 0; }
+
+int32_t sceHttpSetResolveTimeOut(int32_t id, uint32_t timeout) { (void)id; (void)timeout; return 0; }
+int32_t sceHttpSetCookieEnabled(int32_t id, int32_t enabled) { (void)id; (void)enabled; return 0; }
+int32_t sceHttpsGetCaList(int32_t id, void *buf, size_t size, size_t *requiredSize) { (void)id; (void)buf; (void)size; (void)requiredSize; return 0; }
+
 // Shims
 void shim_sceHttpInit(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpInit((int32_t)ctx->rdi, (int32_t)ctx->rsi, (uint64_t)ctx->rdx);
@@ -694,3 +706,50 @@ void shim_sceHttpsSetSslCallback(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpsSetSslCallback((int32_t)ctx->rdi, cbfunc, userArg);
     SHIM_RETURN();
 }
+
+
+
+void shim_sceCompanionHttpdInitialize2(GuestContext *ctx) {
+    const void *param = ctx->rdi ? (const void *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdInitialize2(param);
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdTerminate(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdTerminate();
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdStart(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdStart();
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdStop(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdStop();
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdGetEvent(GuestContext *ctx) {
+    void *event = ctx->rdi ? (void *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdGetEvent(event);
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdRegisterRequestCallback2(GuestContext *ctx) {
+    int id = (int)ctx->rdi;
+    void *cb = (void *)(ctx->mem_base + ctx->rsi);
+    void *userData = (void *)(ctx->mem_base + ctx->rdx);
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdRegisterRequestCallback2(id, cb, userData);
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdUnregisterRequestCallback(GuestContext *ctx) {
+    int id = (int)ctx->rdi;
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdUnregisterRequestCallback(id);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetResolveTimeOut(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
+void shim_sceHttpSetCookieEnabled(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
+void shim_sceHttpsGetCaList(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }

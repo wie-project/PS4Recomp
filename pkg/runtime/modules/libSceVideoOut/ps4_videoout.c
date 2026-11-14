@@ -1151,6 +1151,10 @@ int32_t sceVideoOutCursorSetImageAddress(int32_t handle, uint64_t addr) {
     return 0;
 }
 
+int32_t sceVideoOutSubmitChangeBufferAttribute(int32_t handle, uint32_t index, uint32_t attribute) {
+    return 0; // SCE_OK
+}
+
 void shim_sceVideoOutSetWindowModeMargins(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceVideoOutSetWindowModeMargins((int32_t)ctx->rdi, (int32_t)ctx->rsi, (int32_t)ctx->rdx);
     SHIM_RETURN();
@@ -1181,3 +1185,7 @@ void shim_sceVideoOutCursorSetImageAddress(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_sceVideoOutSubmitChangeBufferAttribute(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceVideoOutSubmitChangeBufferAttribute((int32_t)ctx->rdi, (uint32_t)ctx->rsi, (uint32_t)ctx->rdx);
+    SHIM_RETURN();
+}

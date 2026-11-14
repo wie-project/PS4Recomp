@@ -136,6 +136,12 @@ int32_t scePadDeviceClassParseData(int32_t handle, const OrbisPadData *pData, vo
 int32_t scePadEnableSpecificDeviceClass(int32_t deviceClass);
 int32_t scePadGetControllerInformation(int32_t handle, OrbisPadControllerInformation *info);
 
+int32_t scePadOpenExt(int32_t userId, int32_t type, int32_t index, const void *param);
+int32_t scePadOutputReport(int32_t handle, uint8_t reportId, void *buffer, size_t size);
+int32_t scePadGetExtControllerInformation(int32_t handle, void *info);
+int32_t scePadGetFeatureReport(int32_t handle, uint8_t reportId, void *buffer, size_t size);
+int32_t sceKernelGetOpenPsId(void *psId);
+
 // Host input helper (called by window event pump)
 void ps4_pad_handle_key(unsigned short keyCode, int isDown);
 
@@ -157,6 +163,11 @@ void shim_scePadDeviceClassGetExtendedInformation(GuestContext *ctx);
 void shim_scePadDeviceClassParseData(GuestContext *ctx);
 void shim_scePadEnableSpecificDeviceClass(GuestContext *ctx);
 void shim_scePadGetControllerInformation(GuestContext *ctx);
+void shim_scePadOpenExt(GuestContext *ctx);
+void shim_scePadOutputReport(GuestContext *ctx);
+void shim_scePadGetExtControllerInformation(GuestContext *ctx);
+void shim_scePadGetFeatureReport(GuestContext *ctx);
+void shim_sceKernelGetOpenPsId(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

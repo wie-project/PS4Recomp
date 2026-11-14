@@ -1175,6 +1175,25 @@ int32_t scePadGetControllerInformation(int32_t handle, OrbisPadControllerInforma
   return 0;
 }
 
+
+int32_t scePadOpenExt(int32_t userId, int32_t type, int32_t index, const void *param) {
+    (void)userId; (void)type; (void)index; (void)param; return 0;
+}
+int32_t scePadOutputReport(int32_t handle, uint8_t reportId, void *buffer, size_t size) {
+    (void)handle; (void)reportId; (void)buffer; (void)size; return 0;
+}
+int32_t scePadGetExtControllerInformation(int32_t handle, void *info) {
+    (void)handle; (void)info; return 0;
+}
+int32_t scePadGetFeatureReport(int32_t handle, uint8_t reportId, void *buffer, size_t size) {
+    (void)handle; (void)reportId; (void)buffer; (void)size; return 0;
+}
+int32_t sceKernelGetOpenPsId(void *psId) {
+    if (psId) memset(psId, 0, 16);
+    return 0;
+}
+
+
 void shim_scePadGetControllerInformation(GuestContext *ctx) {
   int32_t handle = (int32_t)ctx->rdi;
   uint64_t info_addr = ctx->rsi;
@@ -1244,4 +1263,43 @@ void shim_scePadEnableSpecificDeviceClass(GuestContext *ctx) {
   int32_t deviceClass = (int32_t)ctx->rdi;
   ctx->rax = (uint64_t)(int64_t)scePadEnableSpecificDeviceClass(deviceClass);
   SHIM_RETURN();
+}
+
+
+
+
+void shim_scePadOpenExt(GuestContext *ctx) {
+    int32_t userId = (int32_t)ctx->rdi;
+    int32_t type = (int32_t)ctx->rsi;
+    int32_t index = (int32_t)ctx->rdx;
+    const void *param = ctx->rcx ? (const void *)(ctx->mem_base + ctx->rcx) : NULL;
+    ctx->rax = (uint64_t)(int64_t)scePadOpenExt(userId, type, index, param);
+    SHIM_RETURN();
+}
+void shim_scePadOutputReport(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    uint8_t reportId = (uint8_t)ctx->rsi;
+    void *buffer = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+    size_t size = (size_t)ctx->rcx;
+    ctx->rax = (uint64_t)(int64_t)scePadOutputReport(handle, reportId, buffer, size);
+    SHIM_RETURN();
+}
+void shim_scePadGetExtControllerInformation(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    void *info = ctx->rsi ? (void *)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)scePadGetExtControllerInformation(handle, info);
+    SHIM_RETURN();
+}
+void shim_scePadGetFeatureReport(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    uint8_t reportId = (uint8_t)ctx->rsi;
+    void *buffer = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+    size_t size = (size_t)ctx->rcx;
+    ctx->rax = (uint64_t)(int64_t)scePadGetFeatureReport(handle, reportId, buffer, size);
+    SHIM_RETURN();
+}
+void shim_sceKernelGetOpenPsId(GuestContext *ctx) {
+    void *psId = ctx->rdi ? (void *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceKernelGetOpenPsId(psId);
+    SHIM_RETURN();
 }
