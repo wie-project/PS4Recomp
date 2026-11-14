@@ -2068,7 +2068,8 @@ func (l *Arm64Lifter) liftLeave(lines []string) []string {
 
 // liftShldShrd handles SHLD and SHRD (16/32/64-bit) with x86 flags: CF = last bit shifted out of
 // the destination, OF (count 1) = sign change, SF/ZF from the result. A masked count of 0
-// changes nothing. 16/32-bit operands are shifted as one 2*size-bit value in a 64-bit register.
+// changes nothing but still zero-extends a 32-bit register. 16/32-bit operands are shifted as
+// one 2*size-bit value in a 64-bit register.
 func (l *Arm64Lifter) liftShldShrd(inst disasm.Instruction, nextPC uint64, lines []string) ([]string, error) {
 	op := inst.Inst.Op
 	srcReg, okSrcReg := inst.Inst.Args[1].(x86asm.Reg)
@@ -2160,6 +2161,7 @@ func (l *Arm64Lifter) liftShldShrd(inst disasm.Instruction, nextPC uint64, lines
 	lines = append(lines, store(res)...)
 	if skip != "" {
 		lines = append(lines, skip+":")
+		lines = append(lines, zeroCountZext(inst)...)
 	}
 	return lines, nil
 }

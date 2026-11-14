@@ -73,6 +73,68 @@ func TestExecShifts(t *testing.T) {
 	runExecCases(t, cases)
 }
 
+// SHLD/SHRD by CL and by an immediate: the count is masked to 5 bits (6 for 64-bit operands),
+// a masked count of 0 leaves the value and every flag unchanged and still zero-extends a 32-bit
+// register, CF is the last bit shifted out of the destination, OF is defined for a count of 1.
+// 16-bit counts above 16 leave the result and flags undefined and are not run.
+func TestExecShiftDouble(t *testing.T) {
+	type form struct {
+		name  string
+		width int
+		cl    string // encoding of OP reg, reg, cl
+		imm   string // encoding of OP reg, reg, imm8 (count appended)
+	}
+	var forms []form
+	for _, op := range []struct {
+		name string
+		cl   string
+		imm  string
+	}{{"shld", "0fa5d0", "0fa4d0"}, {"shrd", "0fadd0", "0facd0"}} {
+		forms = append(forms,
+			form{op.name + " ax, dx", 16, "66" + op.cl, "66" + op.imm},
+			form{op.name + " eax, edx", 32, op.cl, op.imm},
+			form{op.name + " rax, rdx", 64, "48" + op.cl, "48" + op.imm},
+		)
+	}
+	values := []uint64{0x8000000180000001, 0x4000000040004041, 0xfffffffffffffffe, 1}
+	const src = 0xc3a50f1e8d7b2469
+	var cases []execCase
+	for _, f := range forms {
+		for _, count := range []uint64{0, 1, 2, 7, 15, 16, 31, 32, 33, 63, 64, 0xff} {
+			mask := uint64(0x1f)
+			if f.width == 64 {
+				mask = 0x3f
+			}
+			mc := count & mask
+			if mc > uint64(f.width) {
+				continue
+			}
+			cmp := uint64(readMask)
+			if mc > 1 {
+				cmp &^= fOF
+			}
+			for vi, v := range values {
+				for _, fl := range []uint64{0, fCF | fZF | fSF | fOF} {
+					for _, enc := range []string{f.cl, f.imm + fmt.Sprintf("%02x", count)} {
+						kind := "cl"
+						if enc != f.cl {
+							kind = "imm"
+						}
+						cases = append(cases, execCase{
+							name:     fmt.Sprintf("%s, %s=%d v%d flags=%#x", f.name, kind, count, vi, fl),
+							code:     []string{enc},
+							regs:     map[x86asm.Reg]uint64{x86asm.RAX: v, x86asm.RCX: 0xabcd00 | count, x86asm.RDX: src},
+							flags:    fl,
+							cmpFlags: cmp,
+						})
+					}
+				}
+			}
+		}
+	}
+	runExecCases(t, cases)
+}
+
 // String instructions (DF = 0): REP MOVS/STOS run element by element forward, so an overlapping
 // forward copy replicates the leading elements; REP MOVS/STOS/LODS keep every flag; REPE/REPNE
 // CMPS/SCAS compare at the operand width (SF/OF of a byte compare) and with RCX = 0 leave the
