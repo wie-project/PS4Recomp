@@ -612,6 +612,15 @@ GCN_API bool gcn_shader_build_flatbuf(const gcn_shader* s, const uint32_t user_d
                                       gcn_read_guest_fn read, void* ctx, uint32_t* out,
                                       size_t out_dw);
 
+/* As above, also reporting every attempted guest read, including intermediate pointers and
+ * failed reads. The synchronous observer has its own context; `read` and `ctx` retain their
+ * identity for the direct-memory fast path. No callback for data copied from user_data. */
+typedef void (*gcn_observe_read_fn)(void* ctx, uint64_t guest_addr, uint64_t size);
+GCN_API bool gcn_shader_build_flatbuf_tracked(const gcn_shader* s, const uint32_t user_data[16],
+                                              gcn_read_guest_fn read, void* ctx, uint32_t* out,
+                                              size_t out_dw, gcn_observe_read_fn observe,
+                                              void* observe_ctx);
+
 /* Sharps with post-ops applied (shadPS4 *Resource::GetSharp). Return false for a null/invalid
  * resource (out then holds the null descriptor; bind a dummy). code_addr is the shader's guest
  * code address (OffsetByProgramBase: inline constant buffers embedded in the shader). */

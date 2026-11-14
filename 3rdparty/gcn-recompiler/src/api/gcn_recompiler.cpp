@@ -1143,6 +1143,13 @@ GCN_API bool gcn_shader_get_vertex_attrib(const gcn_shader* s, uint32_t index,
 GCN_API bool gcn_shader_build_flatbuf(const gcn_shader* s, const uint32_t user_data[16],
                                       gcn_read_guest_fn read, void* ctx, uint32_t* out,
                                       size_t out_dw) {
+    return gcn_shader_build_flatbuf_tracked(s, user_data, read, ctx, out, out_dw, nullptr, nullptr);
+}
+
+GCN_API bool gcn_shader_build_flatbuf_tracked(const gcn_shader* s, const uint32_t user_data[16],
+                                              gcn_read_guest_fn read, void* ctx, uint32_t* out,
+                                              size_t out_dw, gcn_observe_read_fn observe,
+                                              void* observe_ctx) {
     if (!s || !user_data || !out || out_dw < s->info.srt_info.flattened_bufsize_dw) {
         return false;
     }
@@ -1151,7 +1158,7 @@ GCN_API bool gcn_shader_build_flatbuf(const gcn_shader* s, const uint32_t user_d
     if (s->info.srt_info.program.empty()) {
         return true;
     }
-    return RunSrtProgram(s->info.srt_info.program, user_data, out, read, ctx);
+    return RunSrtProgram(s->info.srt_info.program, user_data, out, read, ctx, observe, observe_ctx);
 }
 
 GCN_API bool gcn_shader_fetch_buffer_sharp(const gcn_shader* s, uint32_t index,
