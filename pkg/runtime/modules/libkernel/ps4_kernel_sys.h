@@ -66,7 +66,7 @@ int32_t sceKernelRemoveExceptionHandler(int32_t signum);
 int32_t sceKernelRaiseException(uint64_t thread, int32_t signum);
 
 int32_t sceKernelGetGPI(void);
-int32_t sceKernelSetPrtAperture(uint64_t address, size_t size);
+int32_t sceKernelSetPrtAperture(int32_t id,uint64_t address, size_t size);
 int32_t sceKernelFutimes(const char *path, const struct timeval tv[2]);
 int32_t sceKernelAddTimerEvent(void);
 int32_t sceKernelDeleteTimerEvent(void);

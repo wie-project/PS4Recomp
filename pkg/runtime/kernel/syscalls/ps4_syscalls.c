@@ -1389,12 +1389,6 @@ void shim_sceKernelStopUnloadModule(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-void shim_sceKernelGetPrtAperture(GuestContext *ctx) {
-  (void)ctx;
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
 // ioctl
 void shim_ioctl(GuestContext *ctx) {
   int fd = (int)ctx->rdi;

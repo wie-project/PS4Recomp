@@ -8,7 +8,6 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <uuid/uuid.h>
-
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_time.h>
@@ -155,10 +154,39 @@ int32_t sceKernelGetGPI(void) {
     return 0; // SCE_OK
 }
 
-int32_t sceKernelSetPrtAperture(uint64_t address, size_t size) {
-    // Safe stub: return 0 (SCE_OK)
+enum { MAX_PRT_APERTURES = 3 };
+
+static const uint64_t PRT_AREA_START_ADDR = UINT64_C(0x1000000000);
+static const uint64_t PRT_AREA_SIZE = UINT64_C(0xec00000000);
+
+typedef struct {
+    uint64_t address;
+    uint64_t size;
+} PrtAperture;
+
+static PrtAperture PrtApertures[MAX_PRT_APERTURES] = {0};
+
+int32_t sceKernelSetPrtAperture(int32_t id,uint64_t address, size_t size) {
+    if (id < 0 || id >= MAX_PRT_APERTURES) {
+        return -1;
+    }
+
+    if (address < PRT_AREA_START_ADDR || address + size > PRT_AREA_START_ADDR + PRT_AREA_SIZE) {
+        return -1;
+    }
+
+    if (address % 4096 != 0) {
+        return -1;
+    }
+
+    fprintf(stdout, "sceKernelSetPrtAperture: id=%d, address=0x%llx, size=0x%zx", id, address, size);
+    
+    PrtApertures[id].address = address;
+    PrtApertures[id].size = size;
+    
     return 0;
 }
+
 
 int32_t sceKernelFutimes(const char *path, const struct timeval tv[2]) {
     (void)path; (void)tv;
@@ -503,10 +531,38 @@ void shim_sceKernelGetGPI(GuestContext *ctx) {
 }
 
 void shim_sceKernelSetPrtAperture(GuestContext *ctx) {
-    uint64_t addr = ctx->rdi;
-    size_t size = (size_t)ctx->rsi;
-    ctx->rax = (uint64_t)(int64_t)sceKernelSetPrtAperture(addr, size);
+    int32_t id = (int32_t)ctx->rdi;
+    uint64_t address = ctx->rsi;
+    size_t size = (size_t)ctx->rdx;
+    ctx->rax = (uint64_t)(int64_t)sceKernelSetPrtAperture(id, address, size);
     SHIM_RETURN();
+}
+
+void shim_sceKernelGetPrtAperture(GuestContext *ctx) {
+  int32_t id = (int32_t)ctx->rdi;
+  uint64_t address_out = ctx->rsi;
+  uint64_t size_out = ctx->rdx;
+
+  if (id < 0 || id >= MAX_PRT_APERTURES) {
+      ctx->rax = (uint64_t)(int64_t)(int32_t)0x80020016; // EINVAL
+      SHIM_RETURN();
+  }
+
+  if (!ctx->mem_base || !address_out || !size_out ||
+      address_out > ctx->mem_size || size_out > ctx->mem_size ||
+      sizeof(uint64_t) > ctx->mem_size - address_out ||
+      sizeof(uint64_t) > ctx->mem_size - size_out) {
+      ctx->rax = (uint64_t)(int64_t)(int32_t)0x8002000e; // EFAULT
+      SHIM_RETURN();
+  }
+
+  uint64_t address = PrtApertures[id].address;
+  uint64_t size = PrtApertures[id].size;
+  memcpy(ctx->mem_base + address_out, &address, sizeof(address));
+  memcpy(ctx->mem_base + size_out, &size, sizeof(size));
+
+  ctx->rax = 0;
+  SHIM_RETURN();
 }
 
 void shim_sceKernelFutimes(GuestContext *ctx) {
