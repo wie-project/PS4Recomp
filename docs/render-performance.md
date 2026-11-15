@@ -115,8 +115,8 @@ Existing linear/sRGB color-alias and depth-companion regressions pass.
 Full Go tests, `go vet`, and Go escape analysis were run. Escape analysis describes Go heap
 behavior, not Objective-C++ renderer allocation counts or zero-allocation rendering.
 
-Visual checks cover this checkpoint only. The existing gray character material/pose issue is
-visible in baseline and candidate captures; this change does not fix it. Animated water,
-fire, NPC motion, and timing differences prevent pixel-identical game screenshots. The native
+Visual checks cover this checkpoint only. Darkening when the character takes damage and loses
+health is expected gameplay behavior, as confirmed by the user, not an identified rendering defect.
+Animated water, fire, NPC motion, and timing differences prevent pixel-identical game screenshots. The native
 tests provide exact pixel comparisons. Other games, GPU families, managed-storage devices,
 and long gameplay sessions were not validated.

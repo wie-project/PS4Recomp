@@ -103,6 +103,7 @@ and comparison script are local ignored artifacts under `ps4recomp/metal3-hazard
 The goal is lower resource consumption without a quality reduction. No weaker Mac was available
 for validation, so compatibility, memory fit, and a target frame rate on those machines are
 not established. Other games, long sessions, and Metal 4 are not validated by this comparison.
-The pre-existing gray character material/pose issue is not fixed. Animated scenes are not
+Darkening on damage/health loss is expected gameplay behavior, not evidence of a rendering defect.
+Animated scenes are not
 pixel-identical; the exact hazard-oracle comparisons establish matching dependency decisions,
 not complete visual equivalence of the renderer.
