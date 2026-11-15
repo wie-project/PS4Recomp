@@ -1091,7 +1091,9 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 		return l.liftFlagsOp(inst, lines)
 
 	case x86asm.PAUSE:
-		lines = append(lines, "    yield")
+		// The bridge stub preserves the guest registers and flags the guest keeps live while it
+		// counts consecutive pauses and may sleep briefly (PS4_SPIN_SLEEP_NS).
+		lines = append(lines, "    bl _recomp_spin_pause")
 		return lines, nil
 
 	case x86asm.MFENCE:

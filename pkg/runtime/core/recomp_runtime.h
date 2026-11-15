@@ -37,8 +37,12 @@ void recomp_dispatch_external(GuestContext *ctx, uint64_t target);
 // the pinned host registers; in host code (shims, the bridge, helpers) the GuestContext holds
 // what the last guest -> host transition stored. Async-signal-safe.
 bool recomp_pc_in_guest_code(uint64_t pc);
-// Reports guest longjmp / C++ throw (unsupported by the assembly backend) and aborts.
-void shim_guest_nonlocal_jump(GuestContext *ctx);
+// Called for every guest PAUSE from _recomp_spin_pause in the assembly bridge: counts consecutive
+// pauses in the general register set only and returns true when the throttle is due to sleep.
+bool recomp_spin_pause_impl(GuestContext *ctx);
+// The sleeping half of the PAUSE throttle; the bridge saves the vector registers around this call.
+void recomp_spin_pause_sleep(void);
+// Reports guest longjmp / C++ throw (unsupported by the assembly backend) and aborts.void shim_guest_nonlocal_jump(GuestContext *ctx);
 void shim_guest_cxa_throw(GuestContext *ctx);
 void recomp_free_runtime(GuestContext *ctx);
 GuestContext *recomp_create_thread_context(GuestContext *parent, uint64_t stack_size);

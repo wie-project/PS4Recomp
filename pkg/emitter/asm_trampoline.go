@@ -337,6 +337,37 @@ Lvpcmpe_stri_host:
     ldp  x29, x30, [sp], #16
     ret
 
+// Guest PAUSE: the lifter calls this for every PAUSE in a spin loop. The counting half runs in the
+// general register set only, so the stub preserves just x8 (guest r8, caller-saved in AAPCS64) and
+// NZCV (the guest flags). Only when the throttle decides to sleep does it call into the C library,
+// which may clobber any vector register: that call is wrapped in SAVE_Q0_31/LOAD_Q0_31 because the
+// guest keeps xmm0-15 and the ymm upper halves in v0-v31.
+GUEST_SECTION
+.globl _recomp_spin_pause
+_recomp_spin_pause:
+    stp  x29, x30, [sp, #-32]!
+    mov  x29, sp
+    mrs  x16, nzcv
+    str  x16, [sp, #16]
+    str  x8, [sp, #24]
+    b    Lspin_pause_host
+
+HOST_SECTION
+Lspin_pause_host:
+    add  x0, x27, #0x70      // the running context, from the TCB slot
+    ldr  x0, [x28, x0]
+    bl   _recomp_spin_pause_impl
+    cbz  w0, Lspin_pause_done
+    SAVE_Q0_31
+    bl   _recomp_spin_pause_sleep
+    LOAD_Q0_31
+Lspin_pause_done:
+    ldr  x8, [sp, #24]
+    ldr  x16, [sp, #16]
+    msr  nzcv, x16
+    ldp  x29, x30, [sp], #32
+    ret
+
 // (V)AESKEYGENASSIST as the lifter calls it: v0 = source, w0 = round constant; result in v0.
 // recomp_vaeskeygenassist_impl(xmm_reg_t s, uint8_t rcon) takes s in x0:x1 and rcon in w2
 // and returns in x0:x1 (AAPCS64, a 16-byte non-HFA union).

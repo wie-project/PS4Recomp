@@ -148,6 +148,15 @@ func TestRegressCarrySense(t *testing.T) {
 	requireInOrder(t, "adc", l[0], "cfinv", "adcs w12, w12, wzr")
 }
 
+// PAUSE lowers to a call into the assembly bridge, which counts consecutive pauses and may sleep
+// briefly instead of spinning (PS4_SPIN_SLEEP_NS). The bridge stub, not the lowered code, saves
+// what the guest keeps live across the hint.
+func TestRegressPauseThrottle(t *testing.T) {
+	l := liftBlock(t, "f390")
+	requireInOrder(t, "pause", l[0], "bl _recomp_spin_pause")
+	forbid(t, "pause", l[0], "yield")
+}
+
 // Shifts and rotates: a count of 0 leaves the flags unchanged, CF is the last bit shifted out,
 // OF is defined for counts of 1, and rotates set CF/OF. The lifter set only SF/ZF (TST).
 func TestRegressShiftFlags(t *testing.T) {

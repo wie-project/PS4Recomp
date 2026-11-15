@@ -116,6 +116,11 @@ typedef struct GuestContext {
 
   // Size of the static TLS area below the TCB (recomp_init_tls_modules)
   uint64_t static_tls_size;
+
+  // Consecutive guest PAUSE count of this thread's spin-wait throttle (recomp_spin_pause_impl).
+  // Lives here rather than in a C thread-local because the hot path must not call into the C
+  // library to reach it.
+  uint32_t spin_pause_streak;
 } GuestContext;
 
 #define RECOMP_MAX_JMP_RECORDS 64
