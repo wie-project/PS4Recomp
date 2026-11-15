@@ -8,8 +8,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 
 	"ps4-recomp/pkg/disasm"
 	"ps4-recomp/pkg/elfloader"
@@ -33,9 +36,12 @@ type GuestModule struct {
 }
 
 func writeFileIfChanged(path string, data []byte) error {
-	existing, err := os.ReadFile(path)
-	if err == nil && bytes.Equal(existing, data) {
-		return nil
+	// A different size already proves the file changed; only read it back when the sizes match.
+	if st, err := os.Stat(path); err == nil && st.Size() == int64(len(data)) {
+		existing, err := os.ReadFile(path)
+		if err == nil && bytes.Equal(existing, data) {
+			return nil
+		}
 	}
 	return os.WriteFile(path, data, 0o644)
 }
@@ -64,16 +70,17 @@ func uniqueModuleNames(fileName string, aliases []string) []string {
 
 // AsmEmitter emits Apple Silicon ARM64 assembly (.s) files from disassembled functions.
 type AsmEmitter struct {
-	elf          *elfloader.LoadedELF
-	disasm       *disasm.Disassembler
-	lifter       *lifter.Arm64Lifter
-	shimMap      map[uint64]string
-	AppDir       string
-	Modules      []GuestModule
-	ChunkSize    int
+	elf       *elfloader.LoadedELF
+	disasm    *disasm.Disassembler
+	lifter    *lifter.Arm64Lifter
+	shimMap   map[uint64]string
+	AppDir    string
+	Modules   []GuestModule
+	ChunkSize int
+	// Workers bounds the goroutines that emit chunks in parallel. Zero uses NumCPU.
+	Workers      int
 	Funcs        []disasm.ReachableFunc
 	HLE          *HLEReport
-	linesBuf     []string
 	knownFuncSet map[uint64]bool
 	bb60fps      bool
 	// unresolved describes every import slot (PLT stub and GOT slot address) that no host
@@ -343,13 +350,13 @@ func (e *AsmEmitter) instCountByAddr() map[uint64]int {
 	return m
 }
 
-func (e *AsmEmitter) loadFunction(addr uint64) (*disasm.Function, error) {
-	if e.disasm.Functions != nil {
-		if fn := e.disasm.Functions[addr]; fn != nil {
+func (e *AsmEmitter) loadFunction(d *disasm.Disassembler, addr uint64) (*disasm.Function, error) {
+	if d.Functions != nil {
+		if fn := d.Functions[addr]; fn != nil {
 			return fn, nil
 		}
 	}
-	fn, _, err := e.disasm.DisasmFunction(addr)
+	fn, _, err := d.DisasmFunction(addr)
 	return fn, err
 }
 
@@ -387,16 +394,57 @@ func (e *AsmEmitter) EmitChunkedAsm(outDir string, targetBudget int) ([]string, 
 		chunks = append(chunks, []uint64{})
 	}
 
-	var generatedFiles []string
-
-	for chunkIdx, chunkAddrs := range chunks {
-		chunkFileName := fmt.Sprintf("code_%03d.s", chunkIdx)
-		chunkPath := filepath.Join(outDir, chunkFileName)
-		regPath := filepath.Join(outDir, fmt.Sprintf("code_%03d_reg.c", chunkIdx))
-		if err := e.emitSingleAsmChunk(chunkPath, chunkIdx, chunkAddrs); err != nil {
-			return nil, fmt.Errorf("failed to emit %s: %w", chunkFileName, err)
+	// The emitted text of a chunk is roughly proportional to its instruction count; sizing the
+	// buffer up front avoids the repeated grow-and-copy of a cold bytes.Buffer.
+	chunkInsts := make([]int, len(chunks))
+	for i, addrs := range chunks {
+		n := 0
+		for _, addr := range addrs {
+			n += insts[addr]
 		}
-		generatedFiles = append(generatedFiles, chunkPath, regPath)
+		chunkInsts[i] = n
+	}
+
+	// Chunks are independent files: each worker lifts one chunk at a time with its own lifter
+	// and disassembler clone. The disassembler keeps per-function decode state, so sharing one
+	// would serialize the workers; a clone shares the immutable module indexes instead.
+	chunkErrs := make([]error, len(chunks))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	workers := e.Workers
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	workers = min(workers, len(chunks))
+	for range workers {
+		wg.Go(func() {
+			d := e.disasm
+			if len(d.Functions) == 0 {
+				d = d.Clone()
+			}
+			for chunkIdx := range jobs {
+				chunkFileName := fmt.Sprintf("code_%03d.s", chunkIdx)
+				chunkPath := filepath.Join(outDir, chunkFileName)
+				if err := e.emitSingleAsmChunk(d, chunkPath, chunkIdx, chunks[chunkIdx], chunkInsts[chunkIdx]); err != nil {
+					chunkErrs[chunkIdx] = fmt.Errorf("failed to emit %s: %w", chunkFileName, err)
+				}
+			}
+		})
+	}
+	for idx := range chunks {
+		jobs <- idx
+	}
+	close(jobs)
+	wg.Wait()
+
+	var generatedFiles []string
+	for chunkIdx := range chunks {
+		if err := chunkErrs[chunkIdx]; err != nil {
+			return nil, err
+		}
+		generatedFiles = append(generatedFiles,
+			filepath.Join(outDir, fmt.Sprintf("code_%03d.s", chunkIdx)),
+			filepath.Join(outDir, fmt.Sprintf("code_%03d_reg.c", chunkIdx)))
 	}
 
 	dispatchPath := filepath.Join(outDir, "dispatch.c")
@@ -408,22 +456,33 @@ func (e *AsmEmitter) EmitChunkedAsm(outDir string, targetBudget int) ([]string, 
 	return generatedFiles, nil
 }
 
-func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []uint64) error {
+func (e *AsmEmitter) emitSingleAsmChunk(d *disasm.Disassembler, path string, chunkIdx int, chunkAddrs []uint64, instBudget int) error {
 	var buf bytes.Buffer
-	w := bufio.NewWriter(&buf)
-
-	if _, err := fmt.Fprintf(w, "// Chunk %d (%d functions)\n%s\n.p2align 2\n\n", chunkIdx, len(chunkAddrs), guestTextSection); err != nil {
-		return err
+	if instBudget > 0 {
+		buf.Grow(instBudget * 192)
 	}
+	w := bufio.NewWriter(&buf)
+	// Chunk workers share the emitter, so lifting state is per call.
+	l := e.lifter.Clone()
+	var linesBuf []string
 
+	w.WriteString("// Chunk ")
+	w.WriteString(strconv.Itoa(chunkIdx))
+	w.WriteString(" (")
+	w.WriteString(strconv.Itoa(len(chunkAddrs)))
+	w.WriteString(" functions)\n")
+	w.WriteString(guestTextSection)
+	w.WriteString("\n.p2align 2\n\n")
+
+	var num [16]byte
 	for _, addr := range chunkAddrs {
 		if shim, isShimmed := e.shimMap[addr]; isShimmed {
 			// Forward directly to host shim via bridge
-			writeShimStub(w, fmt.Sprintf("_fn_0x%x", addr), shim, addr)
+			writeShimStub(w, fnSymbol(addr), shim, addr)
 			continue
 		}
 
-		fn, err := e.loadFunction(addr)
+		fn, err := e.loadFunction(d, addr)
 		if err != nil {
 			return fmt.Errorf("0x%x: %w", addr, err)
 		}
@@ -431,8 +490,13 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 			continue
 		}
 
-		fmt.Fprintf(w, ".globl _fn_0x%x\n_fn_0x%x:\n", addr, addr)
-		fmt.Fprintf(w, "    str x30, [sp, #-16]!\n")
+		// hexAddr must not alias num: the block labels below reuse num.
+		hexAddr := strconv.FormatUint(addr, 16)
+		w.WriteString(".globl _fn_0x")
+		w.WriteString(hexAddr)
+		w.WriteString("\n_fn_0x")
+		w.WriteString(hexAddr)
+		w.WriteString(":\n    str x30, [sp, #-16]!\n")
 
 		for bi, blockAddr := range fn.BlockOrder {
 			block := fn.Blocks[blockAddr]
@@ -440,8 +504,12 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 				continue
 			}
 
-			fmt.Fprintf(w, "\nL_fn_0x%x_loc_0x%x:\n", addr, blockAddr)
-			e.lifter.ResetFlags()
+			w.WriteString("\nL_fn_0x")
+			w.WriteString(hexAddr)
+			w.WriteString("_loc_0x")
+			w.Write(strconv.AppendUint(num[:0], blockAddr, 16))
+			w.WriteString(":\n")
+			l.ResetFlags()
 
 			var lastInst disasm.Instruction
 			for _, inst := range block.Insts {
@@ -458,11 +526,11 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 				}
 				lastInst = inst
 				nextPC := inst.Address + uint64(inst.Inst.Len)
-				lines, err := e.lifter.LiftInstructionToBuf(inst, nextPC, fn, e.linesBuf[:0])
+				lines, err := l.LiftInstructionToBuf(inst, nextPC, fn, linesBuf[:0])
 				if err != nil {
 					fmt.Fprintf(w, "    // 0x%x: %s [UNSUPPORTED: %v]\n    brk #0\n", inst.Address, inst.Inst.String(), err)
 				} else {
-					e.linesBuf = lines
+					linesBuf = lines
 					for _, line := range lines {
 						w.WriteString(line)
 						w.WriteByte('\n')
@@ -471,7 +539,7 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 			}
 			// A block that falls through hands the next one CF in the block-boundary sense.
 			if n := len(block.Insts); n > 0 {
-				for _, line := range e.lifter.EndBlock(lastInst) {
+				for _, line := range l.EndBlock(lastInst) {
 					w.WriteString(line)
 					w.WriteByte('\n')
 				}
@@ -485,7 +553,7 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 						break
 					}
 				}
-				for _, line := range e.lifter.FallThrough(fn, lastInst, next, hasNext) {
+				for _, line := range l.FallThrough(fn, lastInst, next, hasNext) {
 					w.WriteString(line)
 					w.WriteByte('\n')
 				}
@@ -511,37 +579,67 @@ func (e *AsmEmitter) emitSingleAsmChunk(path string, chunkIdx int, chunkAddrs []
 // runtime tells guest code from host code by this section (recomp_pc_in_guest_code).
 const guestTextSection = ".section __TEXT,__recomp_guest,regular,pure_instructions"
 
-// writeShimStub emits the guest-callable symbol sym of a host shim for guest address addr:
-// guest code calls it like any recompiled function, and it hands the shim and addr (stored
-// to ctx->rip, so diagnostics name the shim a thread is in) to _recomp_call_shim.
+// writeShimStub emits the guest-callable symbol of a host shim for guest address addr:
+// guest code calls it like any recompiled function (`_fn_0x<addr>`), and it hands the shim and
+// addr (stored to ctx->rip, so diagnostics name the shim a thread is in) to _recomp_call_shim.
 func writeShimStub(w io.Writer, sym, shim string, addr uint64) {
-	fmt.Fprintf(w, ".globl %s\n%s:\n", sym, sym)
-	fmt.Fprintf(w, "    adrp x0, _%s@PAGE\n", shim)
-	fmt.Fprintf(w, "    add  x0, x0, _%s@PAGEOFF\n", shim)
-	fmt.Fprintf(w, "    movz x1, #0x%x\n", addr&0xffff)
+	var num [20]byte
+	write := func(s string) { io.WriteString(w, s) }
+	write(".globl ")
+	write(sym)
+	write("\n")
+	write(sym)
+	write(":\n    adrp x0, _")
+	write(shim)
+	write("@PAGE\n    add  x0, x0, _")
+	write(shim)
+	write("@PAGEOFF\n    movz x1, #0x")
+	w.Write(strconv.AppendUint(num[:0], addr&0xffff, 16))
+	write("\n")
 	for shift := 16; shift < 64; shift += 16 {
 		if chunk := (addr >> shift) & 0xffff; chunk != 0 {
-			fmt.Fprintf(w, "    movk x1, #0x%x, lsl #%d\n", chunk, shift)
+			write("    movk x1, #0x")
+			w.Write(strconv.AppendUint(num[:0], chunk, 16))
+			write(", lsl #")
+			w.Write(strconv.AppendInt(num[:0], int64(shift), 10))
+			write("\n")
 		}
 	}
-	fmt.Fprintf(w, "    b    _recomp_call_shim\n\n")
+	write("    b    _recomp_call_shim\n\n")
+}
+
+// fnSymbol is the assembly symbol of the recompiled function at addr.
+func fnSymbol(addr uint64) string {
+	var num [20]byte
+	return "_fn_0x" + string(strconv.AppendUint(num[:0], addr, 16))
 }
 
 func (e *AsmEmitter) emitChunkRegistration(path string, chunkIdx int, chunkAddrs []uint64) error {
 	var buf bytes.Buffer
 	w := bufio.NewWriter(&buf)
 
-	fmt.Fprintf(w, "#include \"recomp_runtime.h\"\n\n")
+	w.WriteString("#include \"recomp_runtime.h\"\n\n")
 
+	var num [20]byte
 	for _, addr := range chunkAddrs {
-		fmt.Fprintf(w, "extern void fn_0x%x(GuestContext *ctx);\n", addr)
+		b := strconv.AppendUint(num[:0], addr, 16)
+		w.WriteString("extern void fn_0x")
+		w.Write(b)
+		w.WriteString("(GuestContext *ctx);\n")
 	}
 
-	fmt.Fprintf(w, "\nvoid recomp_init_dispatch_chunk_%d(void) {\n", chunkIdx)
+	w.WriteString("\nvoid recomp_init_dispatch_chunk_")
+	w.WriteString(strconv.Itoa(chunkIdx))
+	w.WriteString("(void) {\n")
 	for _, addr := range chunkAddrs {
-		fmt.Fprintf(w, "    recomp_register_fn(0x%xULL, fn_0x%x);\n", addr, addr)
+		b := strconv.AppendUint(num[:0], addr, 16)
+		w.WriteString("    recomp_register_fn(0x")
+		w.Write(b)
+		w.WriteString("ULL, fn_0x")
+		w.Write(b)
+		w.WriteString(");\n")
 	}
-	fmt.Fprintf(w, "}\n")
+	w.WriteString("}\n")
 
 	if err := w.Flush(); err != nil {
 		return err
@@ -945,10 +1043,10 @@ func (e *AsmEmitter) EmitGuestModules(path string) error {
 	sw := bufio.NewWriter(&sBuf)
 	sw.WriteString("// Synthetic shims ARM64 bridge\n" + guestTextSection + "\n.p2align 2\n\n")
 	for _, entry := range synthList {
-		writeShimStub(sw, fmt.Sprintf("_fn_0x%x", entry.addr), entry.shim, entry.addr)
+		writeShimStub(sw, fnSymbol(entry.addr), entry.shim, entry.addr)
 	}
 	for _, addr := range unresolvedSynth {
-		writeShimStub(sw, fmt.Sprintf("_fn_0x%x", addr), unresolvedStubShim, addr)
+		writeShimStub(sw, fnSymbol(addr), unresolvedStubShim, addr)
 	}
 	if err := sw.Flush(); err != nil {
 		return err
