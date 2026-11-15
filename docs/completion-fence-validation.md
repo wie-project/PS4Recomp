@@ -67,7 +67,9 @@ not a general performance benchmark.
 Full Go tests, `go vet`, Go escape analysis, and native runtime/application builds passed after
 the rebase. Go escape analysis does not establish zero native allocations.
 
-Raw logs, input script, native test build, and captures remain local and ignored under
-`ps4recomp/pr35-check/`. Other retail titles, weaker Macs, and long gameplay sessions were not
-validated. The available tests support marking this change ready for maintainer review within
-that stated scope; they do not establish universal renderer correctness.
+**Archive note:** the raw logs, input script, native test build, and captures were removed during
+workspace cleanup. They had been local ignored files under `ps4recomp/pr35-check/` and were never
+part of the source checkout, so the runs above cannot be re-derived from the repository; repeating
+them requires re-creating the input script and captures. Other retail titles, weaker Macs, and long
+gameplay sessions were not validated. The available tests support marking this change ready for
+maintainer review within that stated scope; they do not establish universal renderer correctness.

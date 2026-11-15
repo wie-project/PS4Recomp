@@ -29,9 +29,11 @@ the renderer's existing synchronization remains necessary.
 
 ## Measurements
 
-Local evidence is retained under the ignored `ps4recomp/render-performance/` directory,
-including native benchmark source, executables, logs, screenshots, CPU samples, Metal traces,
-and the game comparison script. These artifacts are not part of the source checkout.
+**Archive note:** the evidence for these measurements was removed during workspace cleanup. It had
+been local ignored files under `ps4recomp/render-performance/` — native benchmark source,
+executables, logs, screenshots, CPU samples, Metal traces, and the game comparison script — and was
+never part of the source checkout. The numbers below remain a historical record; reproducing them
+requires re-creating that benchmark and running a new matched comparison.
 
 The isolated benchmark calls the real texture cache, changes the source pixels each iteration,
 and validates every output pixel through a GPU compute shader. Each trial performs 120 uploads.

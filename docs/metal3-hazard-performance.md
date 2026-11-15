@@ -32,19 +32,19 @@ and backend selection remain unchanged. It adds no dependency and downloads noth
   a full write-event history. It exercises wide ranges, cross-bucket queries, pruning, and
   compaction, and checks that each returned hit belongs to the reference history.
 - The same cases pass with AddressSanitizer and UndefinedBehaviorSanitizer.
-- A separate diagnostic game binary retains the old full scan beside the index and aborts
+- A separate diagnostic game binary retained the old full scan beside the index and aborted
   on any overlap/newest-sequence mismatch. At least 16,777,216 actual shader-read queries
-  match in the 120-second menu-to-boat run. The diagnostic implementation is retained only
-  in the ignored validation artifacts; no diagnostic flag or parallel scan ships in production.
+  matched in the 120-second menu-to-boat run. The diagnostic implementation existed only in the
+  ignored validation artifacts that were removed during workspace cleanup; no diagnostic flag or
+  parallel scan ships in production.
 - The native runtime builds; full Go tests, `go vet`, and Go escape analysis pass. Go escape
   analysis does not measure native renderer allocations.
 
 ## Isolated query measurements
 
-The retained native microbenchmark uses 512 writes, eight committed batches, two queues,
-and 65,536 prebuilt queries repeated eight times per trial. Queries include hits, misses,
-and different snapshot ages. Both implementations produce the same checksum in each of
-three alternating trials:
+The native microbenchmark used 512 writes, eight committed batches, two queues, and 65,536
+prebuilt queries repeated eight times per trial, covering hits, misses, and different snapshot
+ages. Both implementations produced the same checksum in each of three alternating trials:
 
 | Implementation | ns/query, three trials | Allocations during queries |
 | --- | --- | ---: |
@@ -95,8 +95,10 @@ In the first matched post-present-6001 memory report, both variants charge 1,858
 resources and report 1,884 MiB of device allocation. Process footprint is 3,959 vs 3,958 MiB.
 These coarse samples do not establish a RAM saving or isolate the index's own memory usage.
 
-Raw game logs, screenshots, diagnostic source/build, benchmark source, sanitized test binary,
-and comparison script are local ignored artifacts under `ps4recomp/metal3-hazards/`.
+**Archive note:** the raw game logs, screenshots, diagnostic source/build, benchmark source,
+sanitized test binary, and comparison script were removed during workspace cleanup. They had been
+local ignored files under `ps4recomp/metal3-hazards/` and were never part of the source checkout.
+This report remains a historical record; reproducing the comparison requires a new matched run.
 
 ## Limits
 
