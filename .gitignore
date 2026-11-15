@@ -4,6 +4,7 @@ tools/
 /ps4-recomp
 /ps4recomp
 /bin/
+/build/
 libgcn_recompiler.a
 pkg/thirdparty/assets/*
 !pkg/thirdparty/assets/.gitkeep

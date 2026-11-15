@@ -42,7 +42,7 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 ### Prerequisites
 
 - **macOS**: Apple Silicon (M1 / M2 / M3 / M4)
-- **Go**: 1.22+
+- **Go**: 1.27.1+
 - **Xcode Command Line Tools**: `xcode-select --install`
 - **Build Tools & Libraries**:
   ```bash
@@ -173,7 +173,7 @@ When playing without a physical controller, built-in keyboard emulation is activ
 ```text
 ├── cmd/
 │   ├── ps4-recomp/              # Main CLI entry point
-│   └── lifter-difftest-asm/     # AMD64 vs ARM64 differential test harness                      # Guides (PKG extraction, dumping)
+│   └── lifter-difftest-asm/     # AMD64 vs ARM64 differential test harness
 └── pkg/
     ├── analyzer/                # Reachable CFG & instruction coverage analyzer
     ├── disasm/                  # Instruction decoder & jump-table recovery
