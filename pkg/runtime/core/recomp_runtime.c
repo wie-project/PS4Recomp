@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <stdatomic.h>
 #include <signal.h>
+#include <stdlib.h>
+#include <time.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <dlfcn.h>
@@ -2281,6 +2283,50 @@ __attribute__((weak)) void ps4_gnm_pso_archive_save_for_quit(double timeout_s) {
 // A GNM frame capture in progress (PS4_GNM_CAPTURE_FRAME) writes what it recorded; the Metal
 // driver provides the strong definition.
 __attribute__((weak)) void ps4_gnm_capture_save_for_quit(double timeout_s) { (void)timeout_s; }
+
+// ---- Guest spin-wait throttle -------------------------------------------------------------
+// x86 PAUSE carries no architectural effect: the guest thread is telling the CPU that it is
+// waiting for another thread to publish work. Spinning on the host keeps a core busy for nothing,
+// so after a run of consecutive PAUSEs the thread sleeps briefly instead. The run resets on the
+// sleep, so a spin loop that finds work within its first few iterations (the common case when the
+// guest is not idle) still polls at full speed.
+//
+// PS4_SPIN_SLEEP_NS sets the sleep in nanoseconds; 20000 (the default) throttles, 0 disables the
+// throttle and leaves PAUSE as a plain hint. PS4_SPIN_PAUSE_STREAK sets how many PAUSEs pass
+// between sleeps (default 64).
+//
+// recomp_spin_pause_impl is called for every guest PAUSE, so it must not run any code of its own
+// that may use vector registers: the assembly bridge then has to preserve only x8 and NZCV, not the
+// 32 vector registers that hold the guest's xmm/ymm state. The configuration therefore happens in a
+// constructor before any guest code runs, and the sleeping call, which the C library may clobber
+// them in, is a separate function that runs only when the throttle fires.
+static int32_t g_spin_sleep_ns;
+static int32_t g_spin_streak_limit = 64;
+
+__attribute__((constructor)) static void recomp_spin_throttle_init(void) {
+  const char *ns_env = getenv("PS4_SPIN_SLEEP_NS");
+  const char *streak_env = getenv("PS4_SPIN_PAUSE_STREAK");
+  g_spin_sleep_ns = ns_env ? (int32_t)atoi(ns_env) : 20000;
+  if (streak_env) g_spin_streak_limit = (int32_t)atoi(streak_env);
+  if (g_spin_streak_limit < 1) g_spin_streak_limit = 1;
+  if (g_spin_sleep_ns > 0) {
+    fprintf(stderr, "[recomp] guest PAUSE throttled: %d ns sleep every %d pauses\n", g_spin_sleep_ns,
+            g_spin_streak_limit);
+  }
+}
+
+__attribute__((target("general-regs-only"))) bool recomp_spin_pause_impl(GuestContext *ctx) {
+  if (g_spin_sleep_ns <= 0) return false;
+  if (++ctx->spin_pause_streak < (uint32_t)g_spin_streak_limit) return false;
+  ctx->spin_pause_streak = 0;
+  return true;
+}
+
+void recomp_spin_pause_sleep(void) {
+  if (g_spin_sleep_ns <= 0) return;
+  struct timespec ts = {0, g_spin_sleep_ns};
+  nanosleep(&ts, NULL);
+}
 
 void ps4_host_quit(int code) {
   ps4_gnm_pso_archive_save_for_quit(2.0);
