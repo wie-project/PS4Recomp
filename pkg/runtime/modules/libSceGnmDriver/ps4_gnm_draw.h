@@ -106,8 +106,10 @@ void SetExtentHints(const uint32_t cb[8], uint32_t db);
 // Called once per sceGnmSubmit* (trace windows, stats).
 void OnSubmit();
 
-// Called when the command processor observes a GPU->CPU completion fence (EOP/RELEASE_MEM/EOS/WRITE_DATA).
+// Called for a synchronization path that may elide the submit-side encoder drain.
 void NoteGpuFence();
+// Called when the command processor observes a valid fixed-value GPU completion label.
+void NoteGpuCompletionLabel();
 
 // End of a command stream run (CP thread): waits for compute kernels that its dispatches still
 // compile in the background (ps4_gnm_kernel_compile.h), so the CP does not run further ahead.
@@ -357,12 +359,14 @@ void TestHoldTextureCacheLock(bool hold);
 // loop entry); rejected: a T# was there but no texture could be bound for it (not a valid T#, or
 // not one Metal can create); unmapped: a T# at a provably unmapped guest address.
 // hazard_drains: draws / dispatches whose table reads overlapped GPU writes that had not completed
-// when the CP copied the tables (the GPU was drained if they were still pending, and the tables of
-// every stage read again), one per draw or dispatch; hazard_skips: of those, the ones skipped
+// when the CP copied the tables (the tables of every stage are read again), one per draw or
+// dispatch; hazard_completed: of those, the ones whose overlapping writes had already completed,
+// so the tables were read again without draining the GPU; hazard_skips: of those, the ones skipped
 // because the tables read again no longer fit a stage's specialization. Guest memory dispatches
 // count their entries once per probe (their pass binds what the probe bound).
 struct ImageTableStats {
-    uint64_t bound = 0, empty = 0, rejected = 0, unmapped = 0, hazard_drains = 0, hazard_skips = 0;
+    uint64_t bound = 0, empty = 0, rejected = 0, unmapped = 0, hazard_drains = 0, hazard_completed = 0,
+                 hazard_skips = 0;
 };
 ImageTableStats GetImageTableStats();
 

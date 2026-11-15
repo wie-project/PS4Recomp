@@ -82,7 +82,7 @@ func TestOverlappingInstructionsRun(t *testing.T) {
 	em := NewAsmEmitter(loaded, d, lifter.NewArm64Lifter(map[uint64]bool{0x40: true}))
 	dir := t.TempDir()
 	code := filepath.Join(dir, "code_000.s")
-	if err := em.emitSingleAsmChunk(code, 0, []uint64{0x40}); err != nil {
+	if err := em.emitSingleAsmChunk(d, code, 0, []uint64{0x40}, 8); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "driver.c"), []byte(overlapDriver), 0o644); err != nil {

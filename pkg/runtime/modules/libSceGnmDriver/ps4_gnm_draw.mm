@@ -19,6 +19,7 @@
  *   PS4_GNM_TRACE=<n>        log every draw/dispatch of the first n submits that contain work
  *   PS4_GNM_MSL_DUMP=<dir>   write the generated MSL of every compiled shader
  *   PS4_GNM_GPU_TIMEOUT=<ms> command buffer watchdog (default 4000)
+ *   PS4_GNM_NO_DEPTH_COMPANION_MERGE=1  retain conservative guest-range splits (A/B diagnosis)
  */
 
 #import <Foundation/Foundation.h>
@@ -58,6 +59,8 @@
 
 #include "gcn_recompiler.h"
 #include "ps4_gnm_draw.h"
+#include "ps4_gnm_completion_fence.h"
+#include "ps4_gnm_depth_companion.h"
 #include "ps4_gnm_guest_window.h"
 #include "ps4_gnm_membudget.h"
 #include "ps4_gnm_pending_writes.h"
@@ -805,7 +808,8 @@ struct State {
     GnmPendingWrites pending_writes;
     // The same, kept for the T# table hazard check (ResolveFlatHazards) until no draw or dispatch
     // whose tables the CP copied before they completed is left to encode (PruneTableWrites).
-    std::deque<std::pair<uint64_t, std::shared_ptr<const std::vector<GpuWrite>>>> table_written;
+    // One index per queue: an open write on one queue must survive the other's commit.
+    GnmPendingWrites table_writes[2];
     // completed_seq when the CP copied the tables of the draw or dispatch encoded last
     // (TableReadEncoded): every one still to be encoded copied them later
     uint64_t table_floor = 0;
@@ -2269,8 +2273,9 @@ void NoteGpuWrite(uint64_t addr, uint64_t size) {
     // the same range written again by this command buffer: only its latest write matters (the
     // hazard check and the texture invalidation both take the latest epoch of a range)
     uint32_t& slot = S.gpu_written_slot[((addr >> 8) ^ size) & 63];
-    S.pending_writes.Note(addr, size, S.write_epoch + 1,
-                          S.be->Target() == GnmCmdTarget::AsyncCompute ? kTgtAsync : kTgtMain);
+    const int target = S.be->Target() == GnmCmdTarget::AsyncCompute ? kTgtAsync : kTgtMain;
+    S.pending_writes.Note(addr, size, S.write_epoch + 1, target);
+    S.table_writes[target].Note(addr, size, S.write_epoch + 1);
     if (slot < S.gpu_written.size() && S.gpu_written[slot].addr == addr && S.gpu_written[slot].size == size) {
         S.gpu_written[slot].epoch = ++S.write_epoch;
         return;
@@ -2299,7 +2304,7 @@ void PruneCompletedWrites() {
 // the GPU drained. So the check judges a write by whether it had completed when the CP read the
 // tables: a draw or dispatch takes completed_seq first (TableReadBegin), and every write of a
 // command buffer committed after that (or still being recorded) counts, completed since or not.
-// S.table_written keeps those writes until no draw or dispatch that may need them is left: while
+// S.table_writes keeps those writes until no draw or dispatch that may need them is left: while
 // some are open, back to the snapshot of the last one encoded (later ones took theirs later: CP
 // calls are serialized and encoded in order). Ordering: the CP counts itself open, then reads
 // completed_pub; PruneTableWrites reads completed_pub, then the open count. If it sees none open,
@@ -2328,10 +2333,10 @@ struct TableReadEncoded {
 };
 
 void PruneTableWrites() {
-    if (S.table_written.empty()) return;
+    if (S.table_writes[kTgtMain].Empty() && S.table_writes[kTgtAsync].Empty()) return;
     uint64_t floor = S.completed_pub.load();
     if (g_table_reads_open.load() != 0) floor = std::min(floor, S.table_floor);
-    while (!S.table_written.empty() && S.table_written.front().first <= floor) S.table_written.pop_front();
+    for (auto& writes : S.table_writes) writes.Prune(floor);
 }
 
 // A write to [addr, addr + size) the CP could not have seen when it took `snap`: one recorded
@@ -2339,18 +2344,14 @@ void PruneTableWrites() {
 // one of them; *pending_seq: the newest command buffer among them (UINT64_MAX: the open one).
 bool OverlapsWriteAfter(uint64_t addr, uint64_t size, uint64_t snap, GpuWrite* hit, uint64_t* pending_seq) {
     bool any = false;
-    auto check = [&](const GpuWrite& r, uint64_t seq) {
-        if (r.addr < addr + size && addr < r.addr + r.size) {
-            if (!any) *hit = r;
-            any = true;
-            *pending_seq = std::max(*pending_seq, seq);
-        }
-    };
-    for (auto& r : S.gpu_written) check(r, UINT64_MAX);
-    for (auto& r : S.async.gpu_written) check(r, UINT64_MAX);
-    for (auto& [seq, w] : S.table_written)
-        if (seq > snap)
-            for (auto& r : *w) check(r, seq);
+    for (const auto& writes : S.table_writes) {
+        GnmPendingWrites::Range r;
+        uint64_t seq;
+        if (!writes.OverlapsAfter(addr, size, snap, &r, &seq)) continue;
+        if (!any) *hit = GpuWrite{r.addr, r.size, r.epoch};
+        any = true;
+        *pending_seq = std::max(*pending_seq, seq);
+    }
     return any;
 }
 
@@ -2842,9 +2843,9 @@ void Commit() {
         done->written = std::make_shared<std::vector<GpuWrite>>(S.gpu_written);
         S.inflight_written.push_back({seq, std::move(S.gpu_written)});
         S.gpu_written.clear();
-        S.table_written.push_back({seq, done->written});
     }
     S.pending_writes.Commit(seq);
+    S.table_writes[kTgtMain].Commit(seq);
     PruneTableWrites();
     done->tex_cache = S.tex;
     done->present_fail.swap(S.present_ops);
@@ -2966,9 +2967,9 @@ void CommitAsync() {
         done->written = std::make_shared<std::vector<GpuWrite>>(S.gpu_written);
         S.inflight_written.push_back({seq, std::move(S.gpu_written)});
         S.gpu_written.clear();
-        S.table_written.push_back({seq, done->written});
     }
     S.pending_writes.Commit(seq, kTgtAsync);
+    S.table_writes[kTgtAsync].Commit(seq);
     PruneTableWrites();
     done->tex_cache = S.tex;
     std::shared_ptr<WorkLog> log = done->log;
@@ -5467,7 +5468,8 @@ namespace {
 // ---- T# tables a shader indexes at run time (gcn_image_table) ----
 // Written by the encoder thread, read by GetImageTableStats from any thread.
 struct AtomicTableStats {
-    std::atomic<uint64_t> bound{0}, empty{0}, rejected{0}, unmapped{0}, hazard_drains{0}, hazard_skips{0};
+    std::atomic<uint64_t> bound{0}, empty{0}, rejected{0}, unmapped{0}, hazard_drains{0}, hazard_completed{0},
+        hazard_skips{0};
 } g_table_stats;
 bool g_address_check = false; // gcn_set_image_address_check installed (Init)
 struct StageImages;
@@ -5553,7 +5555,7 @@ struct FlatStage {
 bool ResolveFlatHazards(const FlatStage* st, uint32_t n, uint64_t snap, bool* refreshed = nullptr) {
     if (refreshed) *refreshed = false;
     PruneTableWrites();
-    if (S.gpu_written.empty() && S.async.gpu_written.empty() && S.table_written.empty()) return true;
+    if (S.table_writes[kTgtMain].Empty() && S.table_writes[kTgtAsync].Empty()) return true;
     const Shader* hit_s = nullptr;
     GpuWrite hit{};
     uint64_t hit_read[2] = {}, pending_seq = 0;
@@ -5569,16 +5571,26 @@ bool ResolveFlatHazards(const FlatStage* st, uint32_t n, uint64_t snap, bool* re
     }
     if (!hit_s) return true;
     g_table_stats.hazard_drains.fetch_add(1, std::memory_order_relaxed);
+    // Other stages or ranges may depend on later writes than the first hit, on either queue.
+    // Only a write that has not completed yet needs the GPU drained: one that completed after the
+    // CP's snapshot is already in guest memory, so reading the data again (below) is enough.
+    // Draining on a completed write stalled the encoder once per draw of a batch that reads the
+    // same range, which is what the open-sea chapter's per-frame compute-written constants do.
+    const uint64_t done = CompletedSeq();
+    const bool pending = pending_seq == UINT64_MAX || pending_seq > done;
+    if (!pending) g_table_stats.hazard_completed.fetch_add(1, std::memory_order_relaxed);
     char key[64];
     snprintf(key, sizeof(key), "flat-hazard-%llx", (unsigned long long)hit_s->code_addr);
     RLog(key, "shader 0x%llx: flattened read 0x%llx+0x%llx written by GPU work pending when the CP read it "
-              "(0x%llx+0x%llx): draining, shader data read again",
+              "(0x%llx+0x%llx): %s, shader data read again",
          (unsigned long long)hit_s->code_addr, (unsigned long long)hit_read[0], (unsigned long long)hit_read[1],
-         (unsigned long long)hit.addr, (unsigned long long)hit.size);
-    // Other stages or ranges may depend on later writes than the first hit, on either queue.
-    Commit();
-    WaitAll();
-    if (S.hung) return false;
+         (unsigned long long)hit.addr, (unsigned long long)hit.size,
+         pending ? "draining" : "the write completed since");
+    if (pending) {
+        Commit();
+        WaitAll();
+        if (S.hung) return false;
+    }
     for (uint32_t k = 0; k < n; ++k) {
         const Shader* s = st[k].s;
         if (!s) continue;
@@ -6830,10 +6842,25 @@ gcn_push_data MakePushData(const Regs& regs) {
 
 bool StageHasAttachmentHazard(const PassKey& pass, const Shader* s, const std::vector<uint32_t>& flat) {
     if (!s || s->imgs.empty()) return false;
+    static const bool no_companion_merge = getenv("PS4_GNM_NO_DEPTH_COMPANION_MERGE") != nullptr;
     for (uint32_t i = 0; i < s->imgs.size(); ++i) {
         ImageDesc img;
         uint64_t approx = 0;
         if (!StageImage(s, flat, i, &img, &approx) || !img.valid || !img.address) continue;
+        // BindStage samples a separate R32F companion for non-shadow depth reads. Its
+        // guest address still names the depth attachment, but the Metal texture does not.
+        // Only exempt a prepared, current companion; PrepareDepthCompanions ends the
+        // encoder and refreshes it whenever the source depth version changes.
+        if (!no_companion_merge && !s->imgs[i].is_depth && !s->imgs[i].is_storage && S.tex && !StencilPlaneDepth(img)) {
+            if (id<MTLTexture> dt = DepthTargetFor(img.address, img)) {
+                void* depth_key = (__bridge void*)dt;
+                auto c = S.depth_comp.find(depth_key);
+                auto v = S.depth_version.find(depth_key);
+                if (c != S.depth_comp.end() && v != S.depth_version.end() &&
+                    IndependentDepthCompanion(c->second.tex, c->second.version, v->second, pass.depth, pass.color))
+                    continue;
+            }
+        }
         const uint64_t img_start = img.address;
         const uint64_t img_end = img.address + std::max<uint64_t>(approx, 1);
 
@@ -10046,8 +10073,12 @@ void SetExtentHints(const uint32_t cb[8], uint32_t db) {
     S.db_extent = db;
 }
 
-static std::atomic<bool> g_has_gpu_fence{false};
-void NoteGpuFence() { g_has_gpu_fence.store(true, std::memory_order_relaxed); }
+// The submit-side bit controls the encoder drain that prevents the CPU from overwriting guest
+// inputs while the background encoder still reads them. A completion label only permits omitting
+// the per-present GPU drain; it does not remove that submit-side protection.
+static ps4gnm::CompletionFenceState g_gpu_fence_state;
+void NoteGpuFence() { g_gpu_fence_state.NoteSubmitFence(); }
+void NoteGpuCompletionLabel() { g_gpu_fence_state.NoteCompletionLabel(); }
 
 void OnSubmit() {
     S.submit_idx++;
@@ -10062,7 +10093,7 @@ void OnSubmit() {
     // GPU fences) can overwrite guest vertex/constant memory immediately after sceGnmSubmit*
     // returns while the background encoder thread is still reading it.
     static const bool async_no_fence = getenv("PS4_GNM_ASYNC_NO_FENCE") != nullptr;
-    if (!async_no_fence && !g_has_gpu_fence.load(std::memory_order_relaxed)) encq::Sync();
+    if (!async_no_fence && !g_gpu_fence_state.HasSubmitSideFence()) encq::Sync();
 }
 
 // The test hooks' wait: the open command buffer waits on the GPU until ev reaches value, and
@@ -14865,7 +14896,7 @@ bool Present(GuestContext* ctx, uint64_t addr, uint32_t width, uint32_t height, 
     }
     encq::Defer([run, f = std::move(on_done)]() mutable { run(std::move(f)); });
     static const bool async_no_fence = getenv("PS4_GNM_ASYNC_NO_FENCE") != nullptr;
-    if (!async_no_fence && !g_has_gpu_fence.load(std::memory_order_relaxed)) encq::Sync();
+    if (!async_no_fence && !g_gpu_fence_state.HasSubmitSideFence()) encq::Sync();
     return true;
 }
 
@@ -14994,7 +15025,7 @@ bool PresentImpl(GuestContext* ctx, uint64_t addr, uint32_t width, uint32_t heig
         static const bool wait_on_present = getenv("PS4_GNM_WAIT_ON_PRESENT") != nullptr;
         static const bool async_no_fence = getenv("PS4_GNM_ASYNC_NO_FENCE") != nullptr;
         static const bool writeback_all = getenv("PS4_GNM_WRITEBACK_ALL") != nullptr;
-        const bool no_fence_wait = !async_no_fence && !g_has_gpu_fence.load(std::memory_order_relaxed);
+        const bool no_fence_wait = !async_no_fence && !g_gpu_fence_state.CanSkipPresentDrain();
         if ((wait_on_present || no_fence_wait) && !writeback_all) WaitAll();
         if (writeback_all) { // experiment: make every GPU surface CPU-visible
             WaitAll();
@@ -15145,6 +15176,7 @@ ImageTableStats GetImageTableStats() {
     r.rejected = g_table_stats.rejected.load(std::memory_order_relaxed);
     r.unmapped = g_table_stats.unmapped.load(std::memory_order_relaxed);
     r.hazard_drains = g_table_stats.hazard_drains.load(std::memory_order_relaxed);
+    r.hazard_completed = g_table_stats.hazard_completed.load(std::memory_order_relaxed);
     r.hazard_skips = g_table_stats.hazard_skips.load(std::memory_order_relaxed);
     return r;
 }

@@ -13,16 +13,14 @@ func TestMetalColorTargetAlias(t *testing.T) {
 	if err != nil {
 		t.Skip("clang++ is required for the native Metal regression")
 	}
+	source := metalTestSource(t, "color_alias.mm")
 	bin := filepath.Join(t.TempDir(), "color-alias")
 	cmd := exec.Command(clang, "-std=c++17", "-fobjc-arc", "-O2", "-Wl,-dead_strip",
-		"-Imodules/libSceGnmDriver", "-Icore",
-		"../../tests/gnm_metal_test/color_alias.mm",
+		"-Imodules/libSceGnmDriver", "-Icore", source,
 		"modules/libSceGnmDriver/ps4_gnm_resources.mm",
 		"-framework", "Metal", "-framework", "Foundation", "-o", bin)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build native Metal regression: %v\n%s", err, out)
 	}
-	if out, err := exec.Command(bin).CombinedOutput(); err != nil {
-		t.Fatalf("native Metal regression: %v\n%s", err, out)
-	}
+	runMetalTestBinary(t, bin)
 }

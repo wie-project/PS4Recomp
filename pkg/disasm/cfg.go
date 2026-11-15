@@ -71,6 +71,11 @@ type Disassembler struct {
 	// bound jump-table recovery when a function has no symbol size.
 	funcSymAddrs []uint64
 
+	// relocAddends is the sorted unique set of positive relocation addends. A function only
+	// needs the addends inside its own extent as block leaders, so it binary-searches this
+	// index instead of scanning every relocation of the module for every function.
+	relocAddends []uint64
+
 	// noReturnAddrs contains PLT, GOT, and symbol addresses for functions that never return
 	// (e.g. abort, exit, __stack_chk_fail, __cxa_throw).
 	noReturnAddrs map[uint64]bool
@@ -104,8 +109,42 @@ func NewDisassembler(loaded *elfloader.LoadedELF) (*Disassembler, error) {
 		Functions:     make(map[uint64]*Function, 1024),
 		Blocks:        make(map[uint64]*BasicBlock, 4096),
 		funcSymAddrs:  collectFuncSymAddrs(loaded),
+		relocAddends:  collectRelocAddends(loaded),
 		noReturnAddrs: collectNoReturnAddrs(loaded),
 	}, nil
+}
+
+// Clone returns a disassembler over the same module with the immutable indexes shared and
+// fresh decode state. Independent decoders may run functions concurrently this way.
+func (d *Disassembler) Clone() *Disassembler {
+	if d == nil {
+		return nil
+	}
+	return &Disassembler{
+		elf:              d.elf,
+		textStart:        d.textStart,
+		textEnd:          d.textEnd,
+		Functions:        make(map[uint64]*Function, 1024),
+		Blocks:           make(map[uint64]*BasicBlock, 4096),
+		SkipFlagLiveness: d.SkipFlagLiveness,
+		funcSymAddrs:     d.funcSymAddrs,
+		relocAddends:     d.relocAddends,
+		noReturnAddrs:    d.noReturnAddrs,
+	}
+}
+
+func collectRelocAddends(loaded *elfloader.LoadedELF) []uint64 {
+	if loaded == nil || len(loaded.Relocations) == 0 {
+		return nil
+	}
+	addrs := make([]uint64, 0, len(loaded.Relocations))
+	for _, rel := range loaded.Relocations {
+		if rel.Addend > 0 {
+			addrs = append(addrs, uint64(rel.Addend))
+		}
+	}
+	slices.Sort(addrs)
+	return slices.Compact(addrs)
 }
 
 func collectFuncSymAddrs(loaded *elfloader.LoadedELF) []uint64 {
@@ -584,14 +623,12 @@ func (d *Disassembler) disasmLinearFunction(entryAddr uint64, size uint64) (*Fun
 		return nil, nil, fmt.Errorf("no instructions decoded for function at 0x%x", entryAddr)
 	}
 
-	// Relocation targets inside the function are leaders.
+	// Relocation targets inside the function are leaders. The addends are pre-sorted, so the
+	// function's own ones are one binary-searched range instead of a full relocation scan.
 	var relocLeaders []uint64
-	for _, rel := range d.elf.Relocations {
-		if rel.Addend > 0 {
-			target := uint64(rel.Addend)
-			if target >= entryAddr && target < fnEnd {
-				relocLeaders = append(relocLeaders, target)
-			}
+	if lo, _ := slices.BinarySearch(d.relocAddends, entryAddr); lo < len(d.relocAddends) {
+		if hi, _ := slices.BinarySearch(d.relocAddends, fnEnd); hi > lo {
+			relocLeaders = d.relocAddends[lo:hi]
 		}
 	}
 
@@ -713,26 +750,29 @@ func (d *Disassembler) linearBlocks(fn *Function, insts []Instruction, relocLead
 		}
 	}
 
-	// Build basic blocks. A block ends where its last instruction ends.
+	// Build basic blocks. A block ends where its last instruction ends. A block's run is
+	// contiguous in insts and instructions belong to exactly one block, so the block can view
+	// its run instead of copying it; the three-index slice caps the capacity so an append
+	// allocates instead of writing into the next block's tail.
 	var cur *BasicBlock
-	flush := func() {
-		if cur != nil && len(cur.Insts) > 0 {
-			last := cur.Insts[len(cur.Insts)-1]
-			cur.EndAddr = last.Address + uint64(last.Inst.Len)
-			fn.Blocks[cur.StartAddr] = cur
+	blockStart := 0
+	flush := func(end int) {
+		if cur == nil || end <= blockStart {
+			return
 		}
+		cur.Insts = insts[blockStart:end:end]
+		last := cur.Insts[len(cur.Insts)-1]
+		cur.EndAddr = last.Address + uint64(last.Inst.Len)
+		fn.Blocks[cur.StartAddr] = cur
 	}
-	for _, inst := range insts {
+	for i, inst := range insts {
 		if leaders[inst.Address] || cur == nil {
-			flush()
-			cur = &BasicBlock{
-				StartAddr: inst.Address,
-				Insts:     make([]Instruction, 0, 8),
-			}
+			flush(i)
+			cur = &BasicBlock{StartAddr: inst.Address}
+			blockStart = i
 		}
-		cur.Insts = append(cur.Insts, inst)
 	}
-	flush()
+	flush(len(insts))
 
 	for addr := range fn.Blocks {
 		fn.BlockOrder = append(fn.BlockOrder, addr)

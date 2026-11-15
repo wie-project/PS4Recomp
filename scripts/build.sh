@@ -43,6 +43,12 @@ fi
 # 3. GCN Recompiler
 echo "Building gcn-recompiler static library..."
 GCN_BUILD_DIR="${TMPDIR:-/tmp}/gcn_recompiler_build"
+# A CMake cache generated from another checkout makes configure fail, so start over in that case.
+GCN_SRC="$(cd 3rdparty/gcn-recompiler && pwd -P)"
+if [ -f "$GCN_BUILD_DIR/CMakeCache.txt" ] && ! grep -qF "CMAKE_HOME_DIRECTORY:INTERNAL=$GCN_SRC" "$GCN_BUILD_DIR/CMakeCache.txt"; then
+    echo "Discarding gcn-recompiler CMake cache left by a different source directory..."
+    rm -rf "$GCN_BUILD_DIR"
+fi
 mkdir -p "$GCN_BUILD_DIR"
 CMAKE_GEN=()
 if command -v ninja &>/dev/null; then

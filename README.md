@@ -6,6 +6,7 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 | :------------------------------------: | :------------------------------------: |
 |  ![Blood 1](images/blood_test_01.jpg)  |  ![Blood 2](images/blood_test_02.jpg)  |
 | ![Yakuza 1](images/yakuza_test_01.jpg) | ![Yakuza 2](images/yakuza_test_02.jpg) |
+| ![Drake’s Fortune — seaplane cabin](images/uncharted_test_01.jpg) | ![Drake’s Fortune — island shore and boat](images/uncharted_test_02.jpg) |
 
 ---
 
@@ -26,6 +27,8 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 | Title                                    | Title ID    | Engine / Type       | Status                 | Notes                                                                       |
 | ---------------------------------------- | ----------- | ------------------- | ---------------------- | --------------------------------------------------------------------------- |
 | **Yakuza 0**                             | `CUSA05070` | Kiwami Engine       | **Playble**            | Starts, settings works, cutscenes and gameplay works in first mission       |
+| **Gravity Rush Remastered**              | `CUSA01113` | SIE Japan Studio    | **Playable**           | Boots, menus, cutscenes, gravity shift via DualSense gyro                   |
+| **Uncharted: The Nathan Drake Collection** | `CUSA02343` | Naughty Dog Engine | **Playable** | Tested in *Drake’s Fortune* only: intro, cutscenes, gunplay, HUD and 2D overlays at 1080p; the other collection entries are untested. |
 | **Catherine: Full Body**                 | `CUSA14836` | Atlus Engine        | **In-Game**            | Starts. Has a graphic artifacts                                             |
 | **Bloodborne: Game of the Year Edition** | `CUSA03173` | FromSoftware Engine | **In-Game**            | Starts, settings, cutscenes and character editor works. The gameplay starts |
 | **The Last of Us Remastered**            | `CUSA00557` | Naughty Dog Engine  | **Bootable / In-Game** | Boots, renders 3D graphics and audio                                        |
@@ -39,7 +42,7 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 ### Prerequisites
 
 - **macOS**: Apple Silicon (M1 / M2 / M3 / M4)
-- **Go**: 1.22+
+- **Go**: 1.27.1+
 - **Xcode Command Line Tools**: `xcode-select --install`
 - **Build Tools & Libraries**:
   ```bash
@@ -170,7 +173,7 @@ When playing without a physical controller, built-in keyboard emulation is activ
 ```text
 ├── cmd/
 │   ├── ps4-recomp/              # Main CLI entry point
-│   └── lifter-difftest-asm/     # AMD64 vs ARM64 differential test harness                      # Guides (PKG extraction, dumping)
+│   └── lifter-difftest-asm/     # AMD64 vs ARM64 differential test harness
 └── pkg/
     ├── analyzer/                # Reachable CFG & instruction coverage analyzer
     ├── disasm/                  # Instruction decoder & jump-table recovery

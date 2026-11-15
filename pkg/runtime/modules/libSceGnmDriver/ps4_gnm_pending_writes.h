@@ -103,11 +103,22 @@ public:
     // True if a pending write overlaps [addr, addr + size); *hit (optional): the overlapping one
     // with the latest epoch.
     bool Overlaps(uint64_t addr, uint64_t size, Range* hit = nullptr) const {
+        return OverlapsAfter(addr, size, 0, hit);
+    }
+    // Also usable as retained write history: prune only to the oldest snapshot still needed.
+    // Keep one history index per queue so another queue's commit cannot hide an open write.
+    // Open writes always count; committed writes count only after `snap`. newest_seq receives
+    // the largest overlapping sequence (kOpen when an overlapping write is still open).
+    bool OverlapsAfter(uint64_t addr, uint64_t size, uint64_t snap, Range* hit = nullptr,
+                       uint64_t* newest_seq = nullptr) const {
         bool any = false;
+        if (newest_seq) *newest_seq = 0;
         auto check = [&](uint32_t i) {
             const Entry& r = e_[i];
+            if (r.seq != kOpen && r.seq <= snap) return;
             if (r.addr < addr + size && addr < r.addr + r.size) {
                 if (hit && (!any || r.epoch > hit->epoch)) *hit = Range{r.addr, r.size, r.epoch};
+                if (newest_seq) *newest_seq = std::max(*newest_seq, r.seq);
                 any = true;
             }
         };
