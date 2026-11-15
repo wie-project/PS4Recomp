@@ -3373,11 +3373,17 @@ bool TextureCache::UploadLockedImpl(Entry* e) {
             return true;
         }
     }
-    std::vector<uint8_t> lin((size_t)e->layout.total_size);
-    if (!DetileSurface(e->surf, e->layout, mem_base_ + e->address,
-                       (size_t)avail, lin.data(),
-                       lin.size(), 0, e->levels, true)) {
-        return false;
+    const size_t upload_size = e->layout.total_size;
+    const uint8_t* upload = mem_base_ + e->address;
+    std::vector<uint8_t> lin;
+    // Fully readable linear surfaces already have Metal's row/slice layout; replaceRegion copies synchronously.
+    const bool linear = e->surf.tile_mode == TileMode::DisplayLinearAligned ||
+                        e->surf.tile_mode == TileMode::DisplayLinearGeneral;
+    if (!linear || avail < upload_size) {
+        lin.resize(upload_size);
+        if (!DetileSurface(e->surf, e->layout, upload, (size_t)avail, lin.data(),
+                          lin.size(), 0, e->levels, true)) return false;
+        upload = lin.data();
     }
     const bool is3d = e->tex_type == MTLTextureType3D;
     bool complete = true;
@@ -3386,7 +3392,7 @@ bool TextureCache::UploadLockedImpl(Entry* e) {
     id<MTLBlitCommandEncoder> priv_bl = nil;
     if (e->tex.storageMode == MTLStorageModePrivate) {
         if (!queue_) return false;
-        priv_stg = [device_ newBufferWithBytes:lin.data() length:lin.size() options:MTLResourceStorageModeShared];
+        priv_stg = [device_ newBufferWithBytes:upload length:upload_size options:MTLResourceStorageModeShared];
         if (!priv_stg) return false;
         priv_cb = [queue_ commandBuffer];
         priv_bl = [priv_cb blitCommandEncoder];
@@ -3404,13 +3410,13 @@ bool TextureCache::UploadLockedImpl(Entry* e) {
         const uint64_t rows = (uint64_t)(h + bh - 1) / bh;
         const uint64_t rowbytes = (uint64_t)((w + bw - 1) / bw) * pf.bytes_per_block;
         const uint64_t slices_read = is3d ? std::max(1u, e->depth >> m) : std::min(e->layers, ml.slices);
-        if (rowbytes > row || (slices_read ? (uint64_t)ml.offset + (slices_read - 1) * (uint64_t)img + rows * row : 0) > lin.size()) {
+        if (rowbytes > row || (slices_read ? (uint64_t)ml.offset + (slices_read - 1) * (uint64_t)img + rows * row : 0) > upload_size) {
             static int warned = 0;
             if (warned++ < 16)
                 fprintf(stderr, "[gnm-tex] upload of 0x%llx mip %u out of bounds (fmt %u %ux%u pitch %u height %u bpe %u "
                                 "rows %llu slices %llu offset %u total %zu); skipped\n",
                         (unsigned long long)e->address, m, e->mtl_format, w, h, ml.pitch, ml.height, bpe,
-                        (unsigned long long)rows, (unsigned long long)slices_read, ml.offset, lin.size());
+                        (unsigned long long)rows, (unsigned long long)slices_read, ml.offset, upload_size);
             complete = false;
             break;
         }
@@ -3458,7 +3464,7 @@ bool TextureCache::UploadLockedImpl(Entry* e) {
             [e->tex replaceRegion:MTLRegionMake3D(0, 0, 0, w, h, d)
                       mipmapLevel:m
                             slice:0
-                        withBytes:lin.data() + ml.offset
+                        withBytes:upload + ml.offset
                       bytesPerRow:row
                     bytesPerImage:img];
         } else {
@@ -3471,7 +3477,7 @@ bool TextureCache::UploadLockedImpl(Entry* e) {
                                                                 e->tex_type == MTLTextureType1DArray ? 1 : h)
                           mipmapLevel:m
                                 slice:s
-                            withBytes:lin.data() + ml.offset + (size_t)s * img
+                            withBytes:upload + ml.offset + (size_t)s * img
                           bytesPerRow:row
                         bytesPerImage:0];
             }

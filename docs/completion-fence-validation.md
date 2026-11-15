@@ -49,14 +49,13 @@ at flip 6240, firing at 6360, movement at 6600, and the second shoulder sequence
 
 The inspected frame-6300 and frame-6420 captures show the same aiming/weapon pose in main and
 PR #35; at frame 6420 all three variants show ammunition reduced from 24 to 23. Frame 6660
-shows continuing movement in main and PR #35. The gray character material is also present in
-main and with forced present draining, so it is not evidence of a new #35 regression in this
-comparison. The earlier draft's unmatched-camera captures are superseded by this controlled
-action comparison.
+shows continuing movement in main and PR #35. Darkening when the character is hit and loses
+health is expected gameplay behavior, as confirmed by the user. The earlier interpretation as
+a rendering defect was incorrect. This controlled comparison supersedes the unmatched-camera captures.
 
 No new pose/geometry regression was observed in the inspected matching action captures.
 Water, fire lighting, NPC animation, and simulation timing vary across runs, so this is not a
-claim of pixel-identical whole frames or a fix for the existing rendering defects. L1/R1 inputs
+claim of pixel-identical whole frames. L1/R1 inputs
 were exercised; their complete animation sequence is not separately certified.
 
 All three processes exited normally, without logged fatal errors, assertions, Signal 11, GPU
