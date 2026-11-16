@@ -8,6 +8,17 @@
 
 #define MAX_EQUEUES 128
 #define EQUEUE_CAPACITY 64
+#define MAX_TIMERS_PER_EQUEUE 16
+
+typedef struct {
+    int in_use;
+    int is_hrtimer;
+    int one_shot;
+    uint64_t ident;
+    uint64_t interval_ns;
+    uint64_t next_fire_ns;
+    void *udata;
+} EqueueTimer;
 
 typedef struct {
     int32_t id;
@@ -20,6 +31,7 @@ typedef struct {
     int head;
     int tail;
     int count;
+    EqueueTimer timers[MAX_TIMERS_PER_EQUEUE];
 } KernelEqueueInternal;
 
 static KernelEqueueInternal g_equeues[MAX_EQUEUES];
@@ -59,6 +71,7 @@ int sceKernelCreateEqueue(OrbisKernelEqueue *eqOut, const char *name) {
     eq->head = 0;
     eq->tail = 0;
     eq->count = 0;
+    memset(eq->timers, 0, sizeof(eq->timers));
     if (name) {
         strncpy(eq->name, name, sizeof(eq->name) - 1);
         eq->name[sizeof(eq->name) - 1] = '\0';
@@ -89,6 +102,7 @@ int sceKernelDeleteEqueue(OrbisKernelEqueue id) {
 
     pthread_mutex_destroy(&eq->mutex);
     pthread_cond_destroy(&eq->cond);
+    memset(eq->timers, 0, sizeof(eq->timers));
     eq->in_use = 0;
 
     pthread_mutex_unlock(&g_eq_table_mutex);
@@ -230,6 +244,57 @@ int ps4_equeue_remove_events(OrbisKernelEqueue id, uint64_t ident, int16_t filte
     return 0;
 }
 
+static inline uint64_t get_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void check_timers_locked(KernelEqueueInternal *eq, uint64_t now_ns) {
+    for (int i = 0; i < MAX_TIMERS_PER_EQUEUE; i++) {
+        EqueueTimer *t = &eq->timers[i];
+        if (!t->in_use) continue;
+        if (now_ns >= t->next_fire_ns) {
+            int16_t filter = t->is_hrtimer ? ORBIS_KERNEL_EVFILT_HRTIMER : ORBIS_KERNEL_EVFILT_TIMER;
+            if (eq->count < EQUEUE_CAPACITY) {
+                OrbisKernelEvent *ev = &eq->events[eq->tail];
+                ev->ident = t->ident;
+                ev->filter = filter;
+                ev->flags = 0;
+                ev->fflags = 0;
+                ev->data = 1;
+                ev->udata = t->udata;
+                eq->tail = (eq->tail + 1) % EQUEUE_CAPACITY;
+                eq->count++;
+            }
+            if (t->one_shot) {
+                t->in_use = 0;
+            } else {
+                if (t->interval_ns > 0) {
+                    t->next_fire_ns += t->interval_ns;
+                    if (t->next_fire_ns <= now_ns) {
+                        t->next_fire_ns = now_ns + t->interval_ns;
+                    }
+                } else {
+                    t->in_use = 0;
+                }
+            }
+        }
+    }
+}
+
+static uint64_t get_earliest_timer_deadline_locked(KernelEqueueInternal *eq) {
+    uint64_t earliest = 0;
+    for (int i = 0; i < MAX_TIMERS_PER_EQUEUE; i++) {
+        EqueueTimer *t = &eq->timers[i];
+        if (!t->in_use) continue;
+        if (earliest == 0 || t->next_fire_ns < earliest) {
+            earliest = t->next_fire_ns;
+        }
+    }
+    return earliest;
+}
+
 int sceKernelWaitEqueue(OrbisKernelEqueue id, OrbisKernelEvent *eventsOut, int numEvents, int *outCount, const uint32_t *timeout) {
     if (outCount) {
         *outCount = 0;
@@ -256,6 +321,9 @@ int sceKernelWaitEqueue(OrbisKernelEqueue id, OrbisKernelEvent *eventsOut, int n
         return ORBIS_KERNEL_ERROR_EBADF;
     }
 
+    uint64_t now_ns = get_now_ns();
+    check_timers_locked(eq, now_ns);
+
     if (timeout && *timeout == 0) {
         // Poll mode: retrieve only events already present
         int n = 0;
@@ -275,27 +343,50 @@ int sceKernelWaitEqueue(OrbisKernelEqueue id, OrbisKernelEvent *eventsOut, int n
         return 0;
     }
 
-    struct timespec deadline = {0};
+    uint64_t user_deadline_ns = 0;
+    int has_user_timeout = 0;
     if (timeout) {
-        struct timespec now;
-        clock_gettime(CLOCK_REALTIME, &now);
-        uint64_t usec = (uint64_t)*timeout;
-        deadline.tv_sec = now.tv_sec + (time_t)(usec / 1000000ULL);
-        deadline.tv_nsec = now.tv_nsec + (long)((usec % 1000000ULL) * 1000ULL);
-        if (deadline.tv_nsec >= 1000000000L) {
-            deadline.tv_sec += deadline.tv_nsec / 1000000000L;
-            deadline.tv_nsec %= 1000000000L;
-        }
+        has_user_timeout = 1;
+        user_deadline_ns = now_ns + ((uint64_t)*timeout) * 1000ULL;
     }
 
     while (eq->count == 0 && !eq->is_deleted) {
-        if (timeout) {
-            int wait_rc = pthread_cond_timedwait(&eq->cond, &eq->mutex, &deadline);
-            if (wait_rc == ETIMEDOUT) {
-                break;
+        now_ns = get_now_ns();
+        check_timers_locked(eq, now_ns);
+        if (eq->count > 0 || eq->is_deleted) {
+            break;
+        }
+
+        uint64_t timer_deadline_ns = get_earliest_timer_deadline_locked(eq);
+        uint64_t wait_until_ns = 0;
+
+        if (has_user_timeout && timer_deadline_ns > 0) {
+            wait_until_ns = (user_deadline_ns < timer_deadline_ns) ? user_deadline_ns : timer_deadline_ns;
+        } else if (has_user_timeout) {
+            wait_until_ns = user_deadline_ns;
+        } else if (timer_deadline_ns > 0) {
+            wait_until_ns = timer_deadline_ns;
+        }
+
+        if (wait_until_ns > 0) {
+            if (now_ns >= wait_until_ns) {
+                if (has_user_timeout && now_ns >= user_deadline_ns) {
+                    break;
+                }
+                continue;
             }
+            struct timespec ts;
+            ts.tv_sec = (time_t)(wait_until_ns / 1000000000ULL);
+            ts.tv_nsec = (long)(wait_until_ns % 1000000000ULL);
+            pthread_cond_timedwait(&eq->cond, &eq->mutex, &ts);
         } else {
             pthread_cond_wait(&eq->cond, &eq->mutex);
+        }
+
+        now_ns = get_now_ns();
+        check_timers_locked(eq, now_ns);
+        if (has_user_timeout && now_ns >= user_deadline_ns && eq->count == 0) {
+            break;
         }
     }
 
@@ -504,5 +595,206 @@ void shim_sceKernelGetEventData(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceKernelGetEventData(ev);
     SHIM_RETURN();
 }
+
+int sceKernelAddTimerEvent(OrbisKernelEqueue id, int ident, uint64_t usec, void *udata) {
+    pthread_mutex_lock(&g_eq_table_mutex);
+    KernelEqueueInternal *eq = find_equeue_locked(id);
+    if (!eq) {
+        pthread_mutex_unlock(&g_eq_table_mutex);
+        return ORBIS_KERNEL_ERROR_EBADF;
+    }
+    pthread_mutex_lock(&eq->mutex);
+    pthread_mutex_unlock(&g_eq_table_mutex);
+
+    if (eq->is_deleted) {
+        pthread_mutex_unlock(&eq->mutex);
+        return ORBIS_KERNEL_ERROR_EBADF;
+    }
+
+    uint64_t now_ns = get_now_ns();
+    uint64_t interval_ns = usec * 1000ULL;
+
+    EqueueTimer *target = NULL;
+    for (int i = 0; i < MAX_TIMERS_PER_EQUEUE; i++) {
+        if (eq->timers[i].in_use && eq->timers[i].ident == (uint64_t)ident && !eq->timers[i].is_hrtimer) {
+            target = &eq->timers[i];
+            break;
+        }
+    }
+
+    if (!target) {
+        for (int i = 0; i < MAX_TIMERS_PER_EQUEUE; i++) {
+            if (!eq->timers[i].in_use) {
+                target = &eq->timers[i];
+                break;
+            }
+        }
+    }
+
+    if (!target) {
+        pthread_mutex_unlock(&eq->mutex);
+        return ORBIS_KERNEL_ERROR_ENOMEM;
+    }
+
+    target->in_use = 1;
+    target->is_hrtimer = 0;
+    target->one_shot = 0;
+    target->ident = (uint64_t)ident;
+    target->interval_ns = interval_ns;
+    target->next_fire_ns = now_ns + interval_ns;
+    target->udata = udata;
+
+    pthread_cond_broadcast(&eq->cond);
+    pthread_mutex_unlock(&eq->mutex);
+    return 0;
+}
+
+int sceKernelDeleteTimerEvent(OrbisKernelEqueue id, int ident) {
+    pthread_mutex_lock(&g_eq_table_mutex);
+    KernelEqueueInternal *eq = find_equeue_locked(id);
+    if (!eq) {
+        pthread_mutex_unlock(&g_eq_table_mutex);
+        return ORBIS_KERNEL_ERROR_EBADF;
+    }
+    pthread_mutex_lock(&eq->mutex);
+    pthread_mutex_unlock(&g_eq_table_mutex);
+
+    int found = 0;
+    for (int i = 0; i < MAX_TIMERS_PER_EQUEUE; i++) {
+        if (eq->timers[i].in_use && eq->timers[i].ident == (uint64_t)ident && !eq->timers[i].is_hrtimer) {
+            eq->timers[i].in_use = 0;
+            found = 1;
+            break;
+        }
+    }
+
+    remove_events_locked(eq, (uint64_t)ident, ORBIS_KERNEL_EVFILT_TIMER);
+
+    pthread_mutex_unlock(&eq->mutex);
+    return found ? 0 : ORBIS_KERNEL_ERROR_ENOENT;
+}
+
+int sceKernelAddHRTimerEvent(OrbisKernelEqueue id, int ident, const SceKernelTimespec *ts, void *udata) {
+    if (!ts) {
+        return ORBIS_KERNEL_ERROR_EFAULT;
+    }
+    if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+
+    pthread_mutex_lock(&g_eq_table_mutex);
+    KernelEqueueInternal *eq = find_equeue_locked(id);
+    if (!eq) {
+        pthread_mutex_unlock(&g_eq_table_mutex);
+        return ORBIS_KERNEL_ERROR_EBADF;
+    }
+    pthread_mutex_lock(&eq->mutex);
+    pthread_mutex_unlock(&g_eq_table_mutex);
+
+    if (eq->is_deleted) {
+        pthread_mutex_unlock(&eq->mutex);
+        return ORBIS_KERNEL_ERROR_EBADF;
+    }
+
+    uint64_t now_ns = get_now_ns();
+    uint64_t interval_ns = (uint64_t)ts->tv_sec * 1000000000ULL + (uint64_t)ts->tv_nsec;
+
+    EqueueTimer *target = NULL;
+    for (int i = 0; i < MAX_TIMERS_PER_EQUEUE; i++) {
+        if (eq->timers[i].in_use && eq->timers[i].ident == (uint64_t)ident && eq->timers[i].is_hrtimer) {
+            target = &eq->timers[i];
+            break;
+        }
+    }
+
+    if (!target) {
+        for (int i = 0; i < MAX_TIMERS_PER_EQUEUE; i++) {
+            if (!eq->timers[i].in_use) {
+                target = &eq->timers[i];
+                break;
+            }
+        }
+    }
+
+    if (!target) {
+        pthread_mutex_unlock(&eq->mutex);
+        return ORBIS_KERNEL_ERROR_ENOMEM;
+    }
+
+    target->in_use = 1;
+    target->is_hrtimer = 1;
+    target->one_shot = 1;
+    target->ident = (uint64_t)ident;
+    target->interval_ns = interval_ns;
+    target->next_fire_ns = now_ns + interval_ns;
+    target->udata = udata;
+
+    pthread_cond_broadcast(&eq->cond);
+    pthread_mutex_unlock(&eq->mutex);
+    return 0;
+}
+
+int sceKernelDeleteHRTimerEvent(OrbisKernelEqueue id, int ident) {
+    pthread_mutex_lock(&g_eq_table_mutex);
+    KernelEqueueInternal *eq = find_equeue_locked(id);
+    if (!eq) {
+        pthread_mutex_unlock(&g_eq_table_mutex);
+        return ORBIS_KERNEL_ERROR_EBADF;
+    }
+    pthread_mutex_lock(&eq->mutex);
+    pthread_mutex_unlock(&g_eq_table_mutex);
+
+    int found = 0;
+    for (int i = 0; i < MAX_TIMERS_PER_EQUEUE; i++) {
+        if (eq->timers[i].in_use && eq->timers[i].ident == (uint64_t)ident && eq->timers[i].is_hrtimer) {
+            eq->timers[i].in_use = 0;
+            found = 1;
+            break;
+        }
+    }
+
+    remove_events_locked(eq, (uint64_t)ident, ORBIS_KERNEL_EVFILT_HRTIMER);
+
+    pthread_mutex_unlock(&eq->mutex);
+    return found ? 0 : ORBIS_KERNEL_ERROR_ENOENT;
+}
+
+void shim_sceKernelAddTimerEvent(GuestContext *ctx) {
+    OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
+    int id = (int)ctx->rsi;
+    uint64_t usec = ctx->rdx;
+    void *udata = (void *)(uintptr_t)ctx->rcx;
+    int rc = sceKernelAddTimerEvent(eq, id, usec, udata);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelDeleteTimerEvent(GuestContext *ctx) {
+    OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
+    int id = (int)ctx->rsi;
+    int rc = sceKernelDeleteTimerEvent(eq, id);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelAddHRTimerEvent(GuestContext *ctx) {
+    OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
+    int id = (int)ctx->rsi;
+    uint64_t tsGuest = ctx->rdx;
+    void *udata = (void *)(uintptr_t)ctx->rcx;
+    const SceKernelTimespec *ts = tsGuest ? (const SceKernelTimespec *)(ctx->mem_base + tsGuest) : NULL;
+    int rc = sceKernelAddHRTimerEvent(eq, id, ts, udata);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+void shim_sceKernelDeleteHRTimerEvent(GuestContext *ctx) {
+    OrbisKernelEqueue eq = (OrbisKernelEqueue)ctx->rdi;
+    int id = (int)ctx->rsi;
+    int rc = sceKernelDeleteHRTimerEvent(eq, id);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
 
 

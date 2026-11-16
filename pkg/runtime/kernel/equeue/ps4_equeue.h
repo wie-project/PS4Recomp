@@ -15,11 +15,14 @@ extern "C" {
 #define ORBIS_KERNEL_EVFILT_TIMER    (-7)
 #define ORBIS_KERNEL_EVFILT_VIDEO_OUT (-13)
 #define ORBIS_KERNEL_EVFILT_GRAPHICS_CORE (-14)
+#define ORBIS_KERNEL_EVFILT_HRTIMER  (-15)
 
+#define ORBIS_KERNEL_ERROR_ENOENT     0x80020002
 #define ORBIS_KERNEL_ERROR_EBADF      0x80020009
+#define ORBIS_KERNEL_ERROR_ENOMEM     0x8002000c
+#define ORBIS_KERNEL_ERROR_EFAULT     0x8002000e
 #define ORBIS_KERNEL_ERROR_EINVAL     0x80020016
 #define ORBIS_KERNEL_ERROR_ETIMEDOUT   0x8002003c
-#define ORBIS_KERNEL_ERROR_EFAULT     0x8002000e
 
 typedef struct OrbisKernelEvent {
     uint64_t ident;
@@ -34,6 +37,11 @@ typedef struct SceKernelTimeval {
     int64_t tv_sec;
     int64_t tv_usec;
 } SceKernelTimeval;
+
+typedef struct SceKernelTimespec {
+    int64_t tv_sec;
+    int64_t tv_nsec;
+} SceKernelTimespec;
 
 typedef int32_t OrbisKernelEqueue;
 
@@ -53,6 +61,10 @@ int sceKernelAddUserEvent(OrbisKernelEqueue eq, int id);
 int sceKernelAddUserEventEdge(OrbisKernelEqueue eq, int id);
 int sceKernelTriggerUserEvent(OrbisKernelEqueue eq, int id, void *udata);
 int sceKernelDeleteUserEvent(OrbisKernelEqueue eq, int id);
+int sceKernelAddTimerEvent(OrbisKernelEqueue eq, int id, uint64_t usec, void *udata);
+int sceKernelDeleteTimerEvent(OrbisKernelEqueue eq, int id);
+int sceKernelAddHRTimerEvent(OrbisKernelEqueue eq, int id, const SceKernelTimespec *ts, void *udata);
+int sceKernelDeleteHRTimerEvent(OrbisKernelEqueue eq, int id);
 uint64_t sceKernelGetEventId(const OrbisKernelEvent *ev);
 int sceKernelGetEventFilter(const OrbisKernelEvent *ev);
 void *sceKernelGetEventUserData(const OrbisKernelEvent *ev);
@@ -65,6 +77,10 @@ void shim_sceKernelAddUserEvent(GuestContext *ctx);
 void shim_sceKernelAddUserEventEdge(GuestContext *ctx);
 void shim_sceKernelTriggerUserEvent(GuestContext *ctx);
 void shim_sceKernelDeleteUserEvent(GuestContext *ctx);
+void shim_sceKernelAddTimerEvent(GuestContext *ctx);
+void shim_sceKernelDeleteTimerEvent(GuestContext *ctx);
+void shim_sceKernelAddHRTimerEvent(GuestContext *ctx);
+void shim_sceKernelDeleteHRTimerEvent(GuestContext *ctx);
 void shim_sceKernelGetEventId(GuestContext *ctx);
 void shim_sceKernelGetEventFilter(GuestContext *ctx);
 void shim_sceKernelGetEventUserData(GuestContext *ctx);

@@ -957,16 +957,96 @@ void shim_scePthreadAttrGetstacksize(GuestContext *ctx) {
 }
 
 void shim_scePthreadAttrGetstack(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t addr_ptr = ctx->rsi;
+  uint64_t size_ptr = ctx->rdx;
+  if (!attr_addr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
+  if (!attr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  if (addr_ptr && addr_ptr < ctx->mem_size) {
+    *(uint64_t *)(ctx->mem_base + addr_ptr) = (uint64_t)(uintptr_t)attr->stackaddr_attr;
+  }
+  if (size_ptr && size_ptr < ctx->mem_size) {
+    *(uint64_t *)(ctx->mem_base + size_ptr) = (uint64_t)attr->stacksize_attr;
+  }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrGetstackaddr(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t addr_ptr = ctx->rsi;
+  if (!attr_addr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
+  if (!attr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  if (addr_ptr && addr_ptr < ctx->mem_size) {
+    *(uint64_t *)(ctx->mem_base + addr_ptr) = (uint64_t)(uintptr_t)attr->stackaddr_attr;
+  }
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrSetstackaddr(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t stackaddr = ctx->rsi;
+  if (!attr_addr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
+  if (!attr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  attr->stackaddr_attr = (void *)(uintptr_t)stackaddr;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadAttrSetguardsize(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  size_t guardsize = (size_t)ctx->rsi;
+  if (!attr_addr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
+  if (!attr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  attr->guardsize_attr = guardsize;
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
 void shim_scePthreadAttrSetstack(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  uint64_t stackaddr = ctx->rsi;
+  size_t stacksize = (size_t)ctx->rdx;
+  if (!attr_addr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
+  if (!attr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  attr->stackaddr_attr = (void *)(uintptr_t)stackaddr;
+  attr->stacksize_attr = stacksize;
   ctx->rax = 0;
   SHIM_RETURN();
 }

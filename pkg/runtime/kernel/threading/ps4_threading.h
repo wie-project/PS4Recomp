@@ -160,6 +160,8 @@ void shim_scePthreadSetcancelstate(GuestContext *ctx);
 void shim_scePthreadAttrGetstacksize(GuestContext *ctx);
 void shim_scePthreadAttrGetstack(GuestContext *ctx);
 void shim_scePthreadAttrGetstackaddr(GuestContext *ctx);
+void shim_scePthreadAttrSetstackaddr(GuestContext *ctx);
+void shim_scePthreadAttrSetguardsize(GuestContext *ctx);
 void shim_scePthreadAttrSetstack(GuestContext *ctx);
 void shim_scePthreadRename(GuestContext *ctx);
 void shim_scePthreadGetschedparam(GuestContext *ctx);
