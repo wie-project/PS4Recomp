@@ -130,7 +130,9 @@ int32_t sceVideoOutDeleteFlipEvent(OrbisKernelEqueue eq, int32_t handle);
 int32_t sceVideoOutGetEventData(const OrbisKernelEvent *ev, int64_t *data);
 int32_t sceVideoOutSetWindowModeMargins(int32_t handle, int32_t top, int32_t bottom);
 int32_t sceVideoOutCursorDisable(int32_t handle);
-int32_t sceVideoOutSubmitChangeBufferAttribute(int32_t handle, uint32_t index, uint32_t attribute) ;
+// Updates the attributes of the buffer set returned by sceVideoOutRegisterBuffers.
+int32_t sceVideoOutSubmitChangeBufferAttribute(int32_t handle, int32_t attributeIndex,
+                                               const OrbisVideoOutBufferAttribute *attr);
 
 void shim_sceVideoOutOpen(GuestContext *ctx);
 void shim_sceVideoOutClose(GuestContext *ctx);
