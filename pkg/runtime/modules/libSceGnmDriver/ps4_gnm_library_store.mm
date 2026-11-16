@@ -531,7 +531,9 @@ id<MTLFunction> Load(const Key& k, uint32_t stage, std::string* why) {
                 fail = std::string("library: ") + (e ? e.localizedDescription.UTF8String : "unknown error");
             } else {
                 for (NSString* name in lib.functionNames) {
-                    id<MTLFunction> f = [lib newFunctionWithName:name];
+                    MTLFunctionConstantValues* cv = [MTLFunctionConstantValues new];
+                    id<MTLFunction> f = [lib newFunctionWithName:name constantValues:cv error:nil];
+                    if (!f) f = [lib newFunctionWithName:name];
                     if (!f || (uint32_t)f.functionType != stage) continue;
                     if (fn) {
                         fail = "more than one function of the stage";

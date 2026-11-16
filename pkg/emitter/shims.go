@@ -1219,8 +1219,6 @@ var shimAliases = map[string]string{
 	"OOrLKB0bSDs": "shim_sceSharePlayGetCurrentConnectionInfo",
 	"ajVj3QG2um4": "shim_sceVoiceDisconnectIPortFromOPort",
 
-	"module_start": "shim_module_start",
-	"module_stop": "shim_module_stop",
 	// libSceZlib
 	"m1YErdIXCp4": "shim_sceZlibInitialize",
 	"TLar1HULv1Q": "shim_sceZlibInflate",
@@ -3132,8 +3130,6 @@ var knownDirectShims = []string{
 	"sceSharePlayGetCurrentConnectionInfo",
 	"sceVoiceDisconnectIPortFromOPort",
 
-	"module_start",
-	"module_stop",
 	// libSceZlib
 	"sceZlibInitialize",
 	"sceZlibInflate",

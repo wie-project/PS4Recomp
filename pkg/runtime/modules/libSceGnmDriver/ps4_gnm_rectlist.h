@@ -126,7 +126,13 @@ inline std::string PrepareMsl(const char* src, bool expand) {
 // and then status->compiling drops by one (release: who reads it at 0 sees *fn).
 inline void LibraryDone(id<MTLLibrary> lib, NSError* e, __strong id<MTLFunction>* fn, bool* pending,
                         LibraryStatus* status, uint64_t code_addr, bool expand) {
-    *fn = lib ? [lib newFunctionWithName:@"main0"] : nil;
+    if (lib) {
+        MTLFunctionConstantValues* cv = [MTLFunctionConstantValues new];
+        *fn = [lib newFunctionWithName:@"main0" constantValues:cv error:nil];
+        if (!*fn) *fn = [lib newFunctionWithName:@"main0"];
+    } else {
+        *fn = nil;
+    }
     if (!*fn) {
         std::fprintf(stderr, "[gnm-draw] VS 0x%llx: Metal rejected its RectList %s shader: %s\n",
                      (unsigned long long)code_addr, expand ? "expansion" : "capture",

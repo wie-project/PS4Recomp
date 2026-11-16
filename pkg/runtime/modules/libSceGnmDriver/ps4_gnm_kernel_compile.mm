@@ -121,7 +121,12 @@ void Compiler::Run(Queued q) {
         id<MTLLibrary> lib = [dev_ newLibraryWithSource:[NSString stringWithUTF8String:q.msl->c_str()]
                                                 options:make_options_()
                                                   error:&e];
-        id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"main0"] : nil;
+        id<MTLFunction> fn = nil;
+        if (lib) {
+            MTLFunctionConstantValues* cv = [MTLFunctionConstantValues new];
+            fn = [lib newFunctionWithName:@"main0" constantValues:cv error:nil];
+            if (!fn) fn = [lib newFunctionWithName:@"main0"];
+        }
         const double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0;
         std::string err;
         if (!fn) {

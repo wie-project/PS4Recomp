@@ -3328,6 +3328,17 @@ void StartShaderWarmup() {
     }
 }
 
+static id<MTLFunction> NewSpecializedFunction(id<MTLLibrary> lib, NSString* name) {
+    if (!lib || !name) return nil;
+    MTLFunctionConstantValues* cv = [MTLFunctionConstantValues new];
+    NSError* err = nil;
+    id<MTLFunction> fn = [lib newFunctionWithName:name constantValues:cv error:&err];
+    if (!fn) {
+        fn = [lib newFunctionWithName:name];
+    }
+    return fn;
+}
+
 // Applies finished background compilations (called on the submitting thread).
 Shader* FinishShader(gcn_shader* sh, gcn_hw_stage hw, uint64_t code_addr, uint64_t key, uint64_t fail_key,
                      bool allow_async, double t0);
@@ -3366,7 +3377,7 @@ void DrainAsyncCompiles() {
         if (r.lib) S.libs[r.mh] = r.lib;
         for (Shader* sh : it->second) {
             sh->pending = false;
-            if (r.lib) sh->fn = [r.lib newFunctionWithName:@"main0"];
+            if (r.lib) sh->fn = NewSpecializedFunction(r.lib, @"main0");
             if (!sh->fn) {
                 RLog("msl-fail", "Metal rejected MSL of shader 0x%llx (hw %u): %s", (unsigned long long)sh->code_addr,
                      sh->hw, r.err ? r.err.UTF8String : "no main0");
@@ -3450,7 +3461,7 @@ bool CompileFallbackFn(const Shader* s) {
     const double t0 = CFAbsoluteTimeGetCurrent();
     id<MTLLibrary> lib = [S.dev newLibraryWithSource:@(msl.c_str()) options:CompileOptions() error:&e];
     g_compile.lib_sync.Add((CFAbsoluteTimeGetCurrent() - t0) * 1000.0);
-    id<MTLFunction> fn = [lib newFunctionWithName:@"main0"];
+    id<MTLFunction> fn = NewSpecializedFunction(lib, @"main0");
     S.fallback_fns[s->msl_hash] = fn; // nil too: the shader is not retried again
     g_compile.store_fallbacks++;
     if (!fn)
@@ -3675,7 +3686,7 @@ Shader* FinishShader(gcn_shader* sh, gcn_hw_stage hw, uint64_t code_addr, uint64
         s->from_store = true;
     } else if (lib) {
         const double fn_t0 = CFAbsoluteTimeGetCurrent();
-        s->fn = [lib newFunctionWithName:@"main0"];
+        s->fn = NewSpecializedFunction(lib, @"main0");
         g_hitch.fn_ms += (CFAbsoluteTimeGetCurrent() - fn_t0) * 1000.0;
     }
     if (!s->fn && !s->pending && !s->kjob) {
@@ -7547,9 +7558,9 @@ id<MTLFunction> CompileStageFn(const char* raw_msl, bool invariant_pos, const ch
         }
         S.libs[mh] = lib;
     }
-    id<MTLFunction> fn = [lib newFunctionWithName:[NSString stringWithUTF8String:entry_name]];
+    id<MTLFunction> fn = NewSpecializedFunction(lib, [NSString stringWithUTF8String:entry_name]);
     if (!fn && fallback_entry)
-        fn = [lib newFunctionWithName:[NSString stringWithUTF8String:fallback_entry]];
+        fn = NewSpecializedFunction(lib, [NSString stringWithUTF8String:fallback_entry]);
     return fn;
 }
 

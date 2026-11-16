@@ -60,6 +60,7 @@ extern "C" {
 #define PM4_IT_WAIT_REG_MEM               0x3C
 #define PM4_IT_EVENT_WRITE                0x46
 #define PM4_IT_EVENT_WRITE_EOP            0x47
+#define PM4_IT_ACQUIRE_MEM                0x58
 #define PM4_IT_SET_CONFIG_REG             0x68
 #define PM4_IT_SET_CONTEXT_REG            0x69
 #define PM4_IT_SET_SH_REG                 0x76
@@ -94,6 +95,7 @@ int32_t sceGnmGetEqTimeStamp(void);
 int32_t sceGnmGetGpuBlockStatus(void);
 int32_t sceGnmGetGpuInfoStatus(void);
 int32_t sceGnmGetPhysicalCounterFromVirtualized(void);
+int32_t sceKernelIsNeoMode(void);
 
 // Hardware state initialization
 uint32_t sceGnmDrawInitDefaultHardwareState(uint32_t *cmdbuf, uint32_t size);
