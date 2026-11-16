@@ -2102,9 +2102,14 @@ uint64_t HtileSliceBytes(uint32_t pitch, uint32_t height, uint32_t pipes, bool l
 }
 
 uint64_t DepthHtileSliceBytes(const DepthTarget& d, bool neo_mode) {
-    if (neo_mode) return 0;
-    const PipeConfig pc = GetPipeConfig(d.tile_mode);
-    if (pc != PipeConfig::P8_32x32_16x16 && pc != PipeConfig::P8_32x32_8x16 && pc != PipeConfig::P2) return 0;
+    // Neo mode's depth surfaces use the alternate tiling: the 16-pipe tiled layout, or the 2-pipe
+    // layout for display-linear surfaces (GetAltPipeConfig). The HTILE still holds one 32-bit
+    // entry per 8x8 depth tile, padded to the metadata macro tile, which HtileSliceBytes computes
+    // for the selected pipe count.
+    const PipeConfig pc = neo_mode ? GetAltPipeConfig(d.tile_mode) : GetPipeConfig(d.tile_mode);
+    if (pc != PipeConfig::P8_32x32_16x16 && pc != PipeConfig::P8_32x32_8x16 && pc != PipeConfig::P2 &&
+        pc != PipeConfig::P16_32x32_8x16)
+        return 0;
     return HtileSliceBytes(d.pitch, d.height, GetPipeCount(pc), d.htile_linear);
 }
 

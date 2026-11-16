@@ -715,9 +715,9 @@ void DecodeDepthTarget(const uint32_t* regs, DepthTarget* out);
 // macro tile, ComputeTileDataWidthAndHeight with 16 KiB cache bits; linear HTILE
 // (DB_HTILE_SURFACE.LINEAR): 128 x 8*pipes texels). 0 for an unsupported pipe count.
 uint64_t HtileSliceBytes(uint32_t pitch, uint32_t height, uint32_t pipes, bool linear);
-// The same for a decoded depth target: its pipe config from its tile mode on the base PS4. 0 when
-// the layout is not known exactly: Neo mode (the depth target's alternate tiling, with 16 pipes,
-// is not decoded) and pipe configs other than 2 / 8 pipes.
+// The same for a decoded depth target: its pipe config from its tile mode on the base PS4, or the
+// alternate tiling's pipe config (16 pipes tiled, 2 pipes linear) in Neo mode. 0 for a pipe config
+// the metadata layout is not known for.
 uint64_t DepthHtileSliceBytes(const DepthTarget& d, bool neo_mode);
 void DecodeRenderState(const uint32_t* regs, RenderState* out);
 void PrintRenderState(const RenderState& rs, FILE* f, bool verbose = false);

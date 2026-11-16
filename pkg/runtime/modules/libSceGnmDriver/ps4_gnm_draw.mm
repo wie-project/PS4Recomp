@@ -7258,7 +7258,9 @@ uint64_t CmaskSliceBytesOf(const ColorTarget& c) {
 // the draw's DB_DEPTH_VIEW (a slice-0 view says nothing about slices 1..n): the slice-0 draw of a
 // frame whose array has not grown yet must leave the clear pending for slices 1..n. Each covered
 // slice takes the clear once; it stays pending until all of them have (as the HTILE of a slice
-// no draw touched stays cleared on the GPU).
+// no draw touched stays cleared on the GPU). The slice size of a depth surface is decoded from its
+// tile mode (base and Neo alternate tiling); when it is 0 the metadata layout is unknown and the
+// clear covers the first slice only.
 bool IsMetaClearedPending(uint64_t addr, uint32_t slice = 0, uint64_t slice_bytes = 0) {
     auto it = S.meta.find(addr);
     if (it == S.meta.end() || !it->second.cleared) return false;
@@ -7280,6 +7282,16 @@ bool TakeMetaCleared(uint64_t addr, uint64_t* seq = nullptr, uint32_t slice = 0,
         covered = std::max<uint64_t>(1, std::min<uint64_t>(64, m.cleared_bytes == kAllMeta ? 64 : m.cleared_bytes / slice_bytes));
     else if (m.cleared_bytes == kAllMeta)
         covered = 64;
+    if (slice_bytes && m.cleared_bytes != kAllMeta && m.cleared_bytes % slice_bytes) {
+        // A metadata clear covers whole slices; a remainder means the lay-out this run decodes is
+        // not the one the guest cleared (logged once, the count above is then a lower bound).
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true))
+            RLog("meta-clear-size",
+                 "metadata clear of 0x%llx wrote %llu bytes, not a multiple of the %llu-byte slice size: the "
+                 "covered slice count is a lower bound",
+                 (unsigned long long)addr, (unsigned long long)m.cleared_bytes, (unsigned long long)slice_bytes);
+    }
     if (slice >= covered || (m.taken_slices >> slice & 1)) return false;
     m.taken_slices |= 1ull << slice;
     if ((uint64_t)__builtin_popcountll(m.taken_slices) >= covered) m.cleared = false;
@@ -7320,16 +7332,16 @@ struct MetaTakeUndo {
     MetaTakeUndo& operator=(const MetaTakeUndo&) = delete;
 };
 
-// HTILE bytes per slice of a depth target (0: not known exactly, a clear then covers one slice, as
-// before; logged once)
+// HTILE bytes per slice of a depth target (0: metadata layout not known, a clear then covers the
+// first slice only; logged once)
 uint64_t HtileSliceBytesOf(const DepthTarget& db) {
     static const bool neo = sceKernelIsNeoMode() != 0;
     const uint64_t b = DepthHtileSliceBytes(db, neo);
     static std::atomic<bool> logged{false};
     if (!b && !logged.exchange(true))
-        RLog(neo ? "htile-neo" : "htile-pipes",
-             "HTILE slice size not known (%s, tile mode %u): a metadata clear of a depth array covers its first "
-             "slice only", neo ? "Neo depth tiling" : "pipe config", (uint32_t)db.tile_mode);
+        RLog("htile-size",
+             "HTILE slice size not known (tile mode %u): a metadata clear of a depth array covers its first "
+             "slice only", (uint32_t)db.tile_mode);
     return b;
 }
 
