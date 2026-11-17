@@ -36,6 +36,17 @@ static void test_device_list(void) {
     int64_t err = sceUsbdGetDeviceList(NULL);
     assert(err == (int64_t)ORBIS_USBD_ERROR_INVALID_PARAM);
 
+    _Alignas(uint64_t) uint8_t guest_mem[64] = {0};
+    GuestContext ctx = {0};
+    ctx.mem_base = guest_mem;
+    ctx.rdi = 16;
+    ctx.rsp = 0;
+    *(uint64_t *)(void *)(guest_mem + ctx.rdi) = 0x1234;
+    shim_sceUsbdGetDeviceList(&ctx);
+    assert(ctx.rax == 0);
+    assert(*(uint64_t *)(void *)(guest_mem + ctx.rdi) == 0);
+    assert(ctx.rsp == 8);
+
     sceUsbdFreeDeviceList(NULL, 0);
     printf("PASS device-list\n");
 }

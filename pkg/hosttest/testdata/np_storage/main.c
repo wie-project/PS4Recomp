@@ -61,11 +61,27 @@ static void test_module_lifecycle(void) {
     printf("PASS module-lifecycle\n");
 }
 
+static void test_party_state_shim(void) {
+    _Alignas(uint32_t) uint8_t guest_mem[32] = {0};
+    GuestContext ctx = {0};
+    ctx.mem_base = guest_mem;
+    ctx.rdi = 8;
+    ctx.rsp = 0;
+    *(uint32_t *)(void *)(guest_mem + ctx.rdi) = 0xffffffff;
+
+    shim_sceNpPartyGetState(&ctx);
+    assert(ctx.rax == 0);
+    assert(*(uint32_t *)(void *)(guest_mem + ctx.rdi) == 2);
+    assert(ctx.rsp == 8);
+    printf("PASS party-state-shim\n");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) return 1;
     const char *name = argv[1];
     if (!strcmp(name, "np-storage")) test_np_storage();
     else if (!strcmp(name, "module-lifecycle")) test_module_lifecycle();
+    else if (!strcmp(name, "party-state-shim")) test_party_state_shim();
     else {
         fprintf(stderr, "Unknown test: %s\n", name);
         return 2;
