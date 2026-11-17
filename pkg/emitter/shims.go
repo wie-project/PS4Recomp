@@ -1317,6 +1317,8 @@ var shimAliases = map[string]string{
 	"iqQQW2cBmWU": "shim_sceVoiceQoSCreateRemoteEndpoint",
 	"kE0kdvcHTiY": "shim_sceVoiceQoSDeleteLocalEndpoint",
 	"lvNClhNHzxI": "shim_sceVoiceQoSCreateLocalEndpoint",
+	"BaOKcng8g88": "shim_module_start",
+	"KpDMrPHvt3Q": "shim_module_stop",
 }
 
 // knownDirectShims contains symbol names whose host shim is "shim_" + name.

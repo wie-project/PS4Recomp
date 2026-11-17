@@ -254,10 +254,10 @@ int32_t sceNpGameIntentInitialize(void);
 int32_t sceNpGameIntentTerminate(void);
 
 int32_t sceNpTssGetData(void *ctx, void *data);
-int32_t sceNpTssGetSmallStorage(void *ctx, void *storage);
-int32_t sceNpTusAddAndGetVariableVUserAsync(void);
-int32_t sceNpTusGetMultiSlotVariableVUserAsync(void);
-int32_t sceNpTssCreateNpTitleCtx(void);
+int32_t sceNpTssGetSmallStorage(int32_t reqId, void *data, uint64_t maxSize, uint64_t *contentLength, void *option);
+int32_t sceNpTusAddAndGetVariableVUserAsync(int32_t reqId, uint64_t targetVirtualUserId, int32_t slotId, int64_t inVariable, void *outVariable, void *option);
+int32_t sceNpTusGetMultiSlotVariableVUserAsync(int32_t reqId, uint64_t targetVirtualUserId, const int32_t *slotIdArray, uint32_t slotIdNum, void *outVariableArray, void *option);
+int32_t sceNpTssCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel, OrbisNpId* npId);
 
 
 int32_t sceNpWebApiDeleteHandle(int32_t handle);
