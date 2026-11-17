@@ -173,13 +173,6 @@ int32_t sceMsgDialogTerminate(void) {
   return 0;
 }
 
-int32_t sceGameCustomDataDialogInitialize(void) { return 0; }
-int32_t sceGameCustomDataDialogOpen(const void *param) { (void)param; return 0; }
-int32_t sceGameCustomDataDialogUpdateStatus(void) { return 0; }
-int32_t sceGameCustomDataDialogGetResult(const void *result) { (void)result; return 0; }
-int32_t sceGameCustomDataDialogClose(void) { return 0; }
-int32_t sceGameCustomDataDialogTerminate(void) { return 0; }
-
 // ---------------------------------------------------------------------------
 // Shims for Guest ABI
 // ---------------------------------------------------------------------------

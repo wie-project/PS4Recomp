@@ -80,7 +80,9 @@ int32_t scePlayGoGetChunkId(OrbisPlayGoHandle handle, OrbisPlayGoChunkId *outChu
 int32_t scePlayGoDialogInitialize(void);
 int32_t scePlayGoDialogOpen(const void *param);
 int32_t scePlayGoDialogUpdateStatus(void);
+int32_t scePlayGoDialogGetStatus(void);
 int32_t scePlayGoDialogGetResult(const void *result);
+int32_t scePlayGoDialogClose(void);
 int32_t scePlayGoDialogTerminate(void);
 
 // Guest ABI shims
@@ -99,6 +101,14 @@ void shim_scePlayGoSetToDoList(GuestContext *ctx);
 void shim_scePlayGoGetEta(GuestContext *ctx);
 void shim_scePlayGoPrefetch(GuestContext *ctx);
 void shim_scePlayGoGetChunkId(GuestContext *ctx);
+
+void shim_scePlayGoDialogInitialize(GuestContext *ctx);
+void shim_scePlayGoDialogOpen(GuestContext *ctx);
+void shim_scePlayGoDialogUpdateStatus(GuestContext *ctx);
+void shim_scePlayGoDialogGetStatus(GuestContext *ctx);
+void shim_scePlayGoDialogGetResult(GuestContext *ctx);
+void shim_scePlayGoDialogClose(GuestContext *ctx);
+void shim_scePlayGoDialogTerminate(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

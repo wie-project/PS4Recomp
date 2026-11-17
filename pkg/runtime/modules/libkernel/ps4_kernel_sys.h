@@ -57,6 +57,7 @@ int32_t sceKernelUuidCreate(void *uuid);
 int32_t sceKernelSetGPO(uint32_t gpo);
 int32_t sceKernelIsProspero(void);
 int32_t sigreturn(void *context);
+int __Ux86_64_setcontext(void *ucp);
 int32_t sceKernelInstallExceptionHandler(int32_t signum, uint64_t handler);
 int32_t sceKernelRemoveExceptionHandler(int32_t signum);
 int32_t sceKernelRaiseException(uint64_t thread, int32_t signum);
@@ -122,6 +123,7 @@ void shim_getargv(GuestContext *ctx);
 void shim_sceLibcHeapGetTraceInfo(GuestContext *ctx);
 void shim_Need_sceLibcInternal(GuestContext *ctx);
 void shim_sigreturn(GuestContext *ctx);
+void shim___Ux86_64_setcontext(GuestContext *ctx);
 
 void shim_sceKernelGetGPI(GuestContext *ctx);
 void shim_sceKernelSetPrtAperture(GuestContext *ctx);

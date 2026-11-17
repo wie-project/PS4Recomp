@@ -337,10 +337,39 @@ int32_t sceNpCmpNpId(const OrbisNpId* id1, const OrbisNpId* id2) {
     return 0;
 }
 
-int32_t sceNpTssGetSmallStorage(void *ctx, void *storage) { (void)ctx; (void)storage; return 0; }
-int32_t sceNpTusAddAndGetVariableVUserAsync(void) { return 0; }
-int32_t sceNpTusGetMultiSlotVariableVUserAsync(void) { return 0; }
-int32_t sceNpTssCreateNpTitleCtx(void) { return 0; }
+int32_t sceNpTssCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel, OrbisNpId* npId) {
+    return sceNpTusCreateNpTitleCtx(serviceLabel, npId);
+}
+
+int32_t sceNpTssGetSmallStorage(int32_t reqId, void *data, uint64_t maxSize, uint64_t *contentLength, void *option) {
+    (void)data;
+    (void)maxSize;
+    (void)contentLength;
+    if (reqId <= 0 || option != NULL) {
+        return ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    }
+    return ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+}
+
+int32_t sceNpTusAddAndGetVariableVUserAsync(int32_t reqId, uint64_t targetVirtualUserId, int32_t slotId, int64_t inVariable, void *outVariable, void *option) {
+    (void)targetVirtualUserId;
+    (void)slotId;
+    (void)inVariable;
+    (void)outVariable;
+    if (reqId <= 0 || option != NULL) {
+        return ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    }
+    return 0; // Async operation started, returns NO_LOGIN on poll/wait
+}
+
+int32_t sceNpTusGetMultiSlotVariableVUserAsync(int32_t reqId, uint64_t targetVirtualUserId, const int32_t *slotIdArray, uint32_t slotIdNum, void *outVariableArray, void *option) {
+    (void)targetVirtualUserId;
+    (void)outVariableArray;
+    if (reqId <= 0 || !slotIdArray || slotIdNum == 0 || option != NULL) {
+        return ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    }
+    return 0; // Async operation started, returns NO_LOGIN on poll/wait
+}
 
 // GuestContext shims for NpManager
 void shim_sceNpCheckNpAvailability(GuestContext *ctx) {
@@ -544,10 +573,42 @@ void shim_sceNpCmpNpId(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-void shim_sceNpTssGetSmallStorage(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
-void shim_sceNpTusAddAndGetVariableVUserAsync(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
-void shim_sceNpTusGetMultiSlotVariableVUserAsync(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
-void shim_sceNpTssCreateNpTitleCtx(GuestContext *ctx) { ctx->rax = 0; SHIM_RETURN(); }
+void shim_sceNpTssGetSmallStorage(GuestContext *ctx) {
+    int32_t reqId = (int32_t)ctx->rdi;
+    void *data = (void *)NP_GPTR(ctx, ctx->rsi);
+    uint64_t maxSize = (uint64_t)ctx->rdx;
+    uint64_t *contentLength = (uint64_t *)NP_GPTR(ctx, ctx->rcx);
+    void *option = (void *)NP_GPTR(ctx, ctx->r8);
+    ctx->rax = (uint64_t)(int64_t)sceNpTssGetSmallStorage(reqId, data, maxSize, contentLength, option);
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusAddAndGetVariableVUserAsync(GuestContext *ctx) {
+    int32_t reqId = (int32_t)ctx->rdi;
+    uint64_t vuid = (uint64_t)ctx->rsi;
+    int32_t slotId = (int32_t)ctx->rdx;
+    int64_t inVar = (int64_t)ctx->rcx;
+    void *outVar = (void *)NP_GPTR(ctx, ctx->r8);
+    void *opt = (void *)NP_GPTR(ctx, ctx->r9);
+    ctx->rax = (uint64_t)(int64_t)sceNpTusAddAndGetVariableVUserAsync(reqId, vuid, slotId, inVar, outVar, opt);
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusGetMultiSlotVariableVUserAsync(GuestContext *ctx) {
+    int32_t reqId = (int32_t)ctx->rdi;
+    uint64_t vuid = (uint64_t)ctx->rsi;
+    const int32_t *slots = (const int32_t *)NP_GPTR(ctx, ctx->rdx);
+    uint32_t slotNum = (uint32_t)ctx->rcx;
+    void *outVars = (void *)NP_GPTR(ctx, ctx->r8);
+    void *opt = (void *)NP_GPTR(ctx, ctx->r9);
+    ctx->rax = (uint64_t)(int64_t)sceNpTusGetMultiSlotVariableVUserAsync(reqId, vuid, slots, slotNum, outVars, opt);
+    SHIM_RETURN();
+}
+
+void shim_sceNpTssCreateNpTitleCtx(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceNpTssCreateNpTitleCtx((OrbisNpServiceLabel)ctx->rdi, (OrbisNpId*)NP_GPTR(ctx, ctx->rsi));
+    SHIM_RETURN();
+}
 
 
 //=============================================================================
