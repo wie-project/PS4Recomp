@@ -327,17 +327,17 @@ int32_t scePlayGoGetToDoList(OrbisPlayGoHandle handle, OrbisPlayGoToDo *outToDoL
     if (handle != kValidPlayGoHandle) {
         return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
     }
-    if (!outNumEntries) {
-        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
-    }
-    if (outToDoList && maxEntries == 0) {
-        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
-    }
     if (!g_playgo_initialized) {
         return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
     }
+    if (!outNumEntries || (maxEntries != 0 && !outToDoList)) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (g_playgo_file_size == 0) {
+        return ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO;
+    }
 
-    *outNumEntries = 0; // nothing to do, all chunks local
+    *outNumEntries = 0;
     return 0;
 }
 
@@ -345,6 +345,37 @@ int32_t scePlayGoSetToDoList(OrbisPlayGoHandle handle, const OrbisPlayGoToDo *to
     if (handle != kValidPlayGoHandle) {
         return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
     }
+    if (!g_playgo_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    if (!toDoList) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (numEntries == 0) {
+        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
+    }
+    if (g_playgo_file_size == 0) {
+        return ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO;
+    }
+    if (numEntries > g_playgo_chunk_count) {
+        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
+    }
+
+    for (uint32_t i = 0; i < numEntries; i++) {
+        if (toDoList[i].chunkId >= g_playgo_chunk_count) {
+            return ORBIS_PLAYGO_ERROR_BAD_CHUNK_ID;
+        }
+        switch (toDoList[i].locus) {
+        case ORBIS_PLAYGO_LOCUS_NOT_DOWNLOADED:
+        case ORBIS_PLAYGO_LOCUS_LOCAL_SLOW:
+        case ORBIS_PLAYGO_LOCUS_LOCAL_FAST:
+            break;
+        default:
+            return ORBIS_PLAYGO_ERROR_BAD_LOCUS;
+        }
+    }
+
+    // The local runtime has no download queue; all installed chunks are already available.
     return 0;
 }
 
@@ -539,14 +570,16 @@ void shim_scePlayGoGetToDoList(GuestContext *ctx) {
 }
 
 void shim_scePlayGoSetToDoList(GuestContext *ctx) {
-OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
+    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
     uint64_t toDoGuest = ctx->rsi;
     uint32_t numEntries = (uint32_t)ctx->rdx;
-    
-    const OrbisPlayGoToDo *toDo = toDoGuest ? (const OrbisPlayGoToDo *)(ctx->mem_base + toDoGuest) : NULL;
-    
+
+    const OrbisPlayGoToDo *toDo =
+        toDoGuest ? (const OrbisPlayGoToDo *)(ctx->mem_base + toDoGuest) : NULL;
+
     int32_t ret = scePlayGoSetToDoList(handle, toDo, numEntries);
     ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
 }
 
 void shim_scePlayGoGetEta(GuestContext *ctx) {

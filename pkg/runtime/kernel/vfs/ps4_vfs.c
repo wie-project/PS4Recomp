@@ -1,5 +1,6 @@
 #include "ps4_vfs.h"
 #include "ps4_pak.h"
+#include "ps4_datx.h"
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -23,10 +24,12 @@ static pthread_mutex_t g_vfs_mutex = PTHREAD_MUTEX_INITIALIZER;
 #define MAX_VIRTUAL_FILES 256
 typedef struct {
   int active;
+  int is_datx;
   int pak_fd;
   uint64_t data_offset;
   uint64_t file_size;
   off_t cur_offset;
+  ps4_datx_entry_t datx_entry;
   char path[512];
 } VirtualPakFile;
 
@@ -203,7 +206,12 @@ void ps4_vfs_init(const char *app_root) {
 
   pthread_mutex_unlock(&g_vfs_mutex);
 
-  // Initialize universal PAK provider
+  // Initialize archive providers
+  int datx_result = ps4_datx_init(g_app_root);
+  if (datx_result < 0) {
+    fprintf(stderr, "[ps4-vfs] DriveClub DATX index unavailable: %s\n",
+            strerror(errno));
+  }
   ps4_pak_init(g_app_root);
 }
 
@@ -560,12 +568,52 @@ int ps4_vfs_open(const char *guest_path, int host_flags, mode_t mode) {
     cur_guest[sizeof(cur_guest) - 1] = '\0';
   }
 
-  // Path not on physical disk. Check universal PAK archive provider
+  // Path not on physical disk. Preserve the existing PAK provider precedence.
   const char *subpath = get_app0_subpath(guest_path);
   if (subpath) {
     ps4_pak_entry_t entry;
     if (ps4_pak_lookup(subpath, &entry)) {
       // PAK archives are strictly read-only
+      if ((host_flags & O_ACCMODE) != O_RDONLY) {
+        errno = EROFS;
+        return -1;
+      }
+
+      pthread_mutex_lock(&g_vfile_mutex);
+      int slot = -1;
+      for (int i = 0; i < MAX_VIRTUAL_FILES; i++) {
+        if (!g_vfiles[i].active) {
+          slot = i;
+          break;
+        }
+      }
+      if (slot < 0) {
+        pthread_mutex_unlock(&g_vfile_mutex);
+        errno = ENFILE;
+        return -1;
+      }
+      g_vfiles[slot].active = 1;
+      g_vfiles[slot].is_datx = 0;
+      g_vfiles[slot].pak_fd = entry.pak_fd;
+      g_vfiles[slot].data_offset = entry.data_offset;
+      g_vfiles[slot].file_size = entry.size;
+      g_vfiles[slot].cur_offset = 0;
+      memset(&g_vfiles[slot].datx_entry, 0,
+             sizeof(g_vfiles[slot].datx_entry));
+      strncpy(g_vfiles[slot].path, guest_path, sizeof(g_vfiles[slot].path) - 1);
+      g_vfiles[slot].path[sizeof(g_vfiles[slot].path) - 1] = '\0';
+      pthread_mutex_unlock(&g_vfile_mutex);
+
+      int vfd = PS4_VFS_VIRTUAL_FD_BASE + slot;
+      printf("[ps4-vfs] Virtual open: '%s' -> vfd=%d (pak_offset=0x%llx, "
+             "size=%llu)\n",
+             guest_path, vfd, (unsigned long long)entry.data_offset,
+             (unsigned long long)entry.size);
+      return vfd;
+    }
+
+    ps4_datx_entry_t datx_entry;
+    if (ps4_datx_lookup(subpath, &datx_entry)) {
       if ((host_flags & O_ACCMODE) != O_RDONLY) {
         errno = EROFS;
         return -1;
@@ -585,20 +633,20 @@ int ps4_vfs_open(const char *guest_path, int host_flags, mode_t mode) {
         errno = ENFILE;
         return -1;
       }
-
       g_vfiles[slot].active = 1;
-      g_vfiles[slot].pak_fd = entry.pak_fd;
-      g_vfiles[slot].data_offset = entry.data_offset;
-      g_vfiles[slot].file_size = entry.size;
+      g_vfiles[slot].is_datx = 1;
+      g_vfiles[slot].pak_fd = -1;
+      g_vfiles[slot].data_offset = 0;
+      g_vfiles[slot].file_size = datx_entry.size;
       g_vfiles[slot].cur_offset = 0;
+      g_vfiles[slot].datx_entry = datx_entry;
       strncpy(g_vfiles[slot].path, guest_path, sizeof(g_vfiles[slot].path) - 1);
+      g_vfiles[slot].path[sizeof(g_vfiles[slot].path) - 1] = '\0';
       pthread_mutex_unlock(&g_vfile_mutex);
 
       int vfd = PS4_VFS_VIRTUAL_FD_BASE + slot;
-      printf("[ps4-vfs] Virtual open: '%s' -> vfd=%d (pak_offset=0x%llx, "
-             "size=%llu)\n",
-             guest_path, vfd, (unsigned long long)entry.data_offset,
-             (unsigned long long)entry.size);
+      printf("[ps4-vfs] DATX open: '%s' -> vfd=%d (size=%llu)\n",
+             guest_path, vfd, (unsigned long long)datx_entry.size);
       return vfd;
     }
   }
@@ -646,6 +694,13 @@ ssize_t ps4_vfs_read(int fd, void *buf, size_t count) {
 
     size_t total = 0;
     char *p = (char *)buf;
+    if (vf->is_datx) {
+      ssize_t got = ps4_datx_pread(&vf->datx_entry, buf, to_read,
+                                   vf->cur_offset);
+      if (got > 0) vf->cur_offset += got;
+      pthread_mutex_unlock(&g_vfile_mutex);
+      return got;
+    }
     while (total < to_read) {
       ssize_t ret = pread(vf->pak_fd, p + total, to_read - total,
                           (off_t)(vf->data_offset + (uint64_t)vf->cur_offset + total));
@@ -711,6 +766,11 @@ ssize_t ps4_vfs_pread(int fd, void *buf, size_t count, off_t offset) {
 
     size_t total = 0;
     char *p = (char *)buf;
+    if (vf->is_datx) {
+      ssize_t got = ps4_datx_pread(&vf->datx_entry, buf, to_read, offset);
+      pthread_mutex_unlock(&g_vfile_mutex);
+      return got;
+    }
     while (total < to_read) {
       ssize_t ret = pread(vf->pak_fd, p + total, to_read - total,
                           (off_t)(vf->data_offset + (uint64_t)offset + total));
@@ -868,6 +928,24 @@ int ps4_vfs_stat(const char *guest_path, struct stat *st) {
       st->st_blksize = 4096;
       return 0;
     }
+    ps4_datx_entry_t datx_entry;
+    if (ps4_datx_lookup(subpath, &datx_entry)) {
+      memset(st, 0, sizeof(*st));
+      st->st_mode = S_IFREG | 0644;
+      st->st_nlink = 1;
+      st->st_size = (off_t)datx_entry.size;
+      st->st_blksize = 4096;
+      st->st_blocks = (off_t)((datx_entry.size + 511) / 512);
+      return 0;
+    }
+    if (ps4_datx_dir_exists(subpath)) {
+      memset(st, 0, sizeof(*st));
+      st->st_mode = S_IFDIR | 0755;
+      st->st_nlink = 2;
+      st->st_size = 4096;
+      st->st_blksize = 4096;
+      return 0;
+    }
   }
 
   errno = ENOENT;
@@ -915,6 +993,13 @@ int ps4_vfs_access(const char *guest_path, int mode) {
       }
       return 0;
     }
+    if (ps4_datx_lookup(subpath, NULL) || ps4_datx_dir_exists(subpath)) {
+      if (mode & W_OK) {
+        errno = EACCES;
+        return -1;
+      }
+      return 0;
+    }
   }
 
   errno = ENOENT;
@@ -940,14 +1025,28 @@ void *ps4_vfs_mmap(void *addr, size_t len, int prot, int flags, int fd,
     }
     if (offset >= 0 && (uint64_t)offset < vf->file_size) {
       size_t to_read = len;
-      if ((uint64_t)offset + to_read > vf->file_size) {
+      if ((uint64_t)to_read > vf->file_size - (uint64_t)offset) {
         to_read = (size_t)(vf->file_size - (uint64_t)offset);
       }
-      pread(vf->pak_fd, mem, to_read,
-            (off_t)(vf->data_offset + (uint64_t)offset));
+      ssize_t got = vf->is_datx
+                        ? ps4_datx_pread(&vf->datx_entry, mem, to_read, offset)
+                        : pread(vf->pak_fd, mem, to_read,
+                                (off_t)(vf->data_offset + (uint64_t)offset));
+      if (got < 0 || (size_t)got != to_read) {
+        int saved = got < 0 ? errno : EIO;
+        munmap(mem, len);
+        pthread_mutex_unlock(&g_vfile_mutex);
+        errno = saved;
+        return MAP_FAILED;
+      }
     }
     pthread_mutex_unlock(&g_vfile_mutex);
-    mprotect(mem, len, prot);
+    if (mprotect(mem, len, prot) != 0) {
+      int saved = errno;
+      munmap(mem, len);
+      errno = saved;
+      return MAP_FAILED;
+    }
     return mem;
   }
   return mmap(addr, len, prot, flags, fd, offset);
@@ -968,5 +1067,6 @@ void ps4_vfs_destroy(void) {
 
   pthread_mutex_unlock(&g_vfs_mutex);
 
+  ps4_datx_destroy();
   ps4_pak_destroy();
 }

@@ -2461,9 +2461,28 @@ void DecodeRenderState(const uint32_t* regs, RenderState* rs) {
     rs->scissor_empty = rs->scissor.width == 0 || rs->scissor.height == 0;
     for (uint32_t i = 0; i < rs->num_viewports; ++i)
         rs->scissor_empty |= rs->scissors[i].width == 0 || rs->scissors[i].height == 0;
-    rs->msaa_samples = 1u << Bits(regs[reg::PA_SC_AA_CONFIG], 0, 3);
     rs->render_width = min_w == 0xFFFFFFFF ? 0 : min_w;
     rs->render_height = min_h == 0xFFFFFFFF ? 0 : min_h;
+    const bool scissor_unset =
+        regs[reg::PA_SC_WINDOW_OFFSET] == 0 && regs[reg::PA_SC_WINDOW_SCISSOR_TL] == 0 &&
+        regs[reg::PA_SC_WINDOW_SCISSOR_BR] == 0 && regs[reg::PA_SC_GENERIC_SCISSOR_TL] == 0 &&
+        regs[reg::PA_SC_GENERIC_SCISSOR_BR] == 0 && regs[reg::PA_SC_SCREEN_SCISSOR_TL] == 0 &&
+        regs[reg::PA_SC_SCREEN_SCISSOR_BR] == 0 && !vport_scissor;
+    // The full-range window/generic defaults with an unset screen scissor also mean "no clip".
+    const bool missing_screen_scissor =
+        regs[reg::PA_SC_SCREEN_SCISSOR_TL] == 0 && regs[reg::PA_SC_SCREEN_SCISSOR_BR] == 0 &&
+        regs[reg::PA_SC_WINDOW_OFFSET] == 0 && regs[reg::PA_SC_WINDOW_SCISSOR_TL] == 0x80000000u &&
+        regs[reg::PA_SC_WINDOW_SCISSOR_BR] == 0x40004000u &&
+        regs[reg::PA_SC_GENERIC_SCISSOR_TL] == 0x80000000u &&
+        regs[reg::PA_SC_GENERIC_SCISSOR_BR] == 0x40004000u && vport_scissor && rs->num_viewports == 0 &&
+        regs[reg::PA_SC_VPORT_SCISSOR_0_TL] == 0x80000000u &&
+        regs[reg::PA_SC_VPORT_SCISSOR_0_TL + 1] == 0x40004000u;
+    if (rs->scissor_empty && (scissor_unset || missing_screen_scissor) && rs->render_width && rs->render_height) {
+        rs->scissor = {0, 0, rs->render_width, rs->render_height};
+        for (uint32_t i = 0; i < rs->num_viewports; ++i) rs->scissors[i] = rs->scissor;
+        rs->scissor_empty = false;
+    }
+    rs->msaa_samples = 1u << Bits(regs[reg::PA_SC_AA_CONFIG], 0, 3);
 }
 
 static const char* MtlFmtName(uint32_t f) {

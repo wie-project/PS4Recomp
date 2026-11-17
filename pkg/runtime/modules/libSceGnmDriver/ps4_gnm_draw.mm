@@ -10748,6 +10748,16 @@ bool Draw(GuestContext* ctx, const uint32_t* regs, const DrawArgs& args) {
         }
         rs.depth.extent_width = S.db_extent & 0xFFFF;
         rs.depth.extent_height = S.db_extent >> 16;
+        if (rs.scissor_empty)
+            RLog("scissor-input",
+                 "%s: empty scissor raw screen=%08x/%08x window=%08x/%08x generic=%08x/%08x offset=%08x "
+                 "mode=%08x vp0=%08x/%08x scale=%08x target=%ux%u viewports=%u",
+                 args.name, regs[reg::PA_SC_SCREEN_SCISSOR_TL], regs[reg::PA_SC_SCREEN_SCISSOR_BR],
+                 regs[reg::PA_SC_WINDOW_SCISSOR_TL], regs[reg::PA_SC_WINDOW_SCISSOR_BR],
+                 regs[reg::PA_SC_GENERIC_SCISSOR_TL], regs[reg::PA_SC_GENERIC_SCISSOR_BR],
+                 regs[reg::PA_SC_WINDOW_OFFSET], regs[reg::PA_SC_MODE_CNTL_0],
+                 regs[reg::PA_SC_VPORT_SCISSOR_0_TL], regs[reg::PA_SC_VPORT_SCISSOR_0_TL + 1],
+                 regs[reg::PA_CL_VPORT_XSCALE], rs.render_width, rs.render_height, rs.num_viewports);
         const bool trace = r.trace = ShouldTrace();
 
         // ---- FilterDraw

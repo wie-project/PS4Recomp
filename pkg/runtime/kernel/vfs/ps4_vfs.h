@@ -30,7 +30,7 @@ int ps4_vfs_unmount(const char *guest_prefix);
 // Returns 0 on success, or negative errno on error.
 int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz);
 
-// Check if an fd is a virtual file descriptor managed by VFS (e.g. backed by PAK)
+// Check if an fd is a virtual file descriptor managed by VFS (e.g. backed by PAK or DATX)
 bool ps4_vfs_is_virtual_fd(int fd);
 
 // Unified VFS operations handling both host filesystem and virtual archive files
