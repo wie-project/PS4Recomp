@@ -1219,6 +1219,16 @@ var shimAliases = map[string]string{
 	"OOrLKB0bSDs": "shim_sceSharePlayGetCurrentConnectionInfo",
 	"ajVj3QG2um4": "shim_sceVoiceDisconnectIPortFromOPort",
 
+	// libScePlayGo & PlayGoDialog
+	"gUPGiOQ1tmQ": "shim_scePlayGoSetToDoList",
+	"fECamTJKpsM": "shim_scePlayGoDialogInitialize",
+	"kHd72ukqbxw": "shim_scePlayGoDialogOpen",
+	"Yb60K7BST48": "shim_scePlayGoDialogUpdateStatus",
+	"wx9TDplJKB4": "shim_scePlayGoDialogGetResult",
+	"okgIGdr5Iz0": "shim_scePlayGoDialogTerminate",
+	"fbigNQiZpm0": "shim_scePlayGoDialogClose",
+	"NOAMxY2EGS0": "shim_scePlayGoDialogGetStatus",
+
 	// libSceZlib
 	"m1YErdIXCp4": "shim_sceZlibInitialize",
 	"TLar1HULv1Q": "shim_sceZlibInflate",

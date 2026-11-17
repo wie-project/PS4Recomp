@@ -23,8 +23,9 @@ func buildHostC(t *testing.T, name string, sources ...string) string {
 	bin := filepath.Join(t.TempDir(), name)
 	args := []string{"-O2", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
 		"-I../runtime/core",
+		"-I../runtime/kernel/vfs",
 		filepath.Join("testdata", name, "main.c")}
-	seen := map[string]bool{"../runtime/core": true}
+	seen := map[string]bool{"../runtime/core": true, "../runtime/kernel/vfs": true}
 	for _, s := range sources {
 		args = append(args, s)
 		if d := filepath.Dir(s); !seen[d] {
