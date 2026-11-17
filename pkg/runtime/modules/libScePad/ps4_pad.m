@@ -1093,16 +1093,56 @@ int32_t scePadGetControllerInformation(int32_t handle, OrbisPadControllerInforma
 
 
 int32_t scePadOpenExt(int32_t userId, int32_t type, int32_t index, const void *param) {
-    (void)userId; (void)type; (void)index; (void)param; return 0;
+  (void)param;
+  return scePadOpen(userId, type, index, NULL);
 }
+
 int32_t scePadOutputReport(int32_t handle, uint8_t reportId, void *buffer, size_t size) {
-    (void)handle; (void)reportId; (void)buffer; (void)size; return 0;
+  if (handle <= 0)
+    return ORBIS_PAD_ERROR_INVALID_HANDLE;
+  pthread_mutex_lock(&g_pad_mutex);
+  int found = 0;
+  for (int i = 0; i < MAX_PAD_HANDLES; i++) {
+    if (g_pad_slots[i].in_use && g_pad_slots[i].handle == handle) {
+      found = 1;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_pad_mutex);
+  if (!found)
+    return ORBIS_PAD_ERROR_INVALID_HANDLE;
+  if (!buffer || size == 0)
+    return ORBIS_PAD_ERROR_INVALID_ARG;
+  (void)reportId;
+  return 0;
 }
-int32_t scePadGetExtControllerInformation(int32_t handle, void *info) {
-    (void)handle; (void)info; return 0;
+
+int32_t scePadGetExtControllerInformation(int32_t handle, OrbisPadExtendedControllerInformation *info) {
+  if (!info)
+    return ORBIS_PAD_ERROR_INVALID_ARG;
+  memset(info, 0, sizeof(*info));
+  return scePadGetControllerInformation(handle, &info->base);
 }
+
 int32_t scePadGetFeatureReport(int32_t handle, uint8_t reportId, void *buffer, size_t size) {
-    (void)handle; (void)reportId; (void)buffer; (void)size; return 0;
+  if (handle <= 0)
+    return ORBIS_PAD_ERROR_INVALID_HANDLE;
+  pthread_mutex_lock(&g_pad_mutex);
+  int found = 0;
+  for (int i = 0; i < MAX_PAD_HANDLES; i++) {
+    if (g_pad_slots[i].in_use && g_pad_slots[i].handle == handle) {
+      found = 1;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_pad_mutex);
+  if (!found)
+    return ORBIS_PAD_ERROR_INVALID_HANDLE;
+  if (!buffer || size == 0)
+    return ORBIS_PAD_ERROR_INVALID_ARG;
+  memset(buffer, 0, size);
+  (void)reportId;
+  return 0;
 }
 int32_t sceKernelGetOpenPsId(void *psId) {
     if (!psId) return -EINVAL;
@@ -1207,7 +1247,8 @@ void shim_scePadOutputReport(GuestContext *ctx) {
 }
 void shim_scePadGetExtControllerInformation(GuestContext *ctx) {
     int32_t handle = (int32_t)ctx->rdi;
-    void *info = ctx->rsi ? (void *)(ctx->mem_base + ctx->rsi) : NULL;
+    OrbisPadExtendedControllerInformation *info =
+        ctx->rsi ? (OrbisPadExtendedControllerInformation *)(ctx->mem_base + ctx->rsi) : NULL;
     ctx->rax = (uint64_t)(int64_t)scePadGetExtControllerInformation(handle, info);
     SHIM_RETURN();
 }

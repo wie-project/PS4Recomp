@@ -118,6 +118,12 @@ int32_t sceKernelGetSystemSwVersion(OrbisKernelSwVersion *version) {
 }
 
 int32_t sigreturn(void *context) {
+    if (!context) return -1;
+    return 0;
+}
+
+int __Ux86_64_setcontext(void *ucp) {
+    if (!ucp) return -1;
     return 0;
 }
 
@@ -1123,6 +1129,40 @@ void shim_sceKernelSetFsstParam(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+static int32_t restore_ucontext(GuestContext *ctx, uint64_t ucp_addr) {
+    if (!ctx || !ctx->mem_base || !ucp_addr || ucp_addr + 0x100ULL > ctx->mem_size) {
+        return -1;
+    }
+    const uint8_t *ucp = ctx->mem_base + ucp_addr;
+    ctx->rdi = *(const uint64_t *)(ucp + 0x48ULL);
+    ctx->rsi = *(const uint64_t *)(ucp + 0x50ULL);
+    ctx->rdx = *(const uint64_t *)(ucp + 0x58ULL);
+    ctx->rcx = *(const uint64_t *)(ucp + 0x60ULL);
+    ctx->r8  = *(const uint64_t *)(ucp + 0x68ULL);
+    ctx->r9  = *(const uint64_t *)(ucp + 0x70ULL);
+    ctx->rax = *(const uint64_t *)(ucp + 0x78ULL);
+    ctx->rbx = *(const uint64_t *)(ucp + 0x80ULL);
+    ctx->rbp = *(const uint64_t *)(ucp + 0x88ULL);
+    ctx->r10 = *(const uint64_t *)(ucp + 0x90ULL);
+    ctx->r11 = *(const uint64_t *)(ucp + 0x98ULL);
+    ctx->r12 = *(const uint64_t *)(ucp + 0xa0ULL);
+    ctx->r13 = *(const uint64_t *)(ucp + 0xa8ULL);
+    ctx->r14 = *(const uint64_t *)(ucp + 0xb0ULL);
+    ctx->r15 = *(const uint64_t *)(ucp + 0xb8ULL);
+    ctx->rip = *(const uint64_t *)(ucp + 0xe0ULL);
+    ctx->rsp = *(const uint64_t *)(ucp + 0xf8ULL);
+    return 0;
+}
+
 void shim_sigreturn(GuestContext *ctx) {
+    uint64_t ucp_guest = ctx->rdi;
+    restore_ucontext(ctx, ucp_guest);
+    SHIM_RETURN();
+}
+
+void shim___Ux86_64_setcontext(GuestContext *ctx) {
+    uint64_t ucp_guest = ctx->rdi;
+    int rc = restore_ucontext(ctx, ucp_guest);
+    ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }
