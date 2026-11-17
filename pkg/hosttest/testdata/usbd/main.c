@@ -139,6 +139,41 @@ static void test_interrupt_transfer(void) {
     printf("PASS interrupt-transfer\n");
 }
 
+static void test_handle_events(void) {
+    // Null timeout: sleeps default 10ms
+    int rc = sceUsbdHandleEventsTimeout(NULL);
+    assert(rc == ORBIS_USBD_SUCCESS);
+
+    // Negative timeout: error
+    int64_t bad_tv[2] = {-1, 0};
+    rc = sceUsbdHandleEventsTimeout(bad_tv);
+    assert(rc == (int)ORBIS_USBD_ERROR_INVALID_PARAM);
+
+    // Zero timeout: clamps to 1ms without busy-spinning
+    int64_t zero_tv[2] = {0, 0};
+    rc = sceUsbdHandleEventsTimeout(zero_tv);
+    assert(rc == ORBIS_USBD_SUCCESS);
+
+    // 1ms timeout
+    int64_t tv[2] = {0, 1000};
+    rc = sceUsbdHandleEventsTimeout(tv);
+    assert(rc == ORBIS_USBD_SUCCESS);
+
+    // Shim test with guest memory translation
+    _Alignas(uint64_t) uint8_t guest_mem[64] = {0};
+    GuestContext ctx = {0};
+    ctx.mem_base = guest_mem;
+    ctx.rdi = 16; // offset in guest_mem
+    int64_t *guest_tv = (int64_t *)(guest_mem + ctx.rdi);
+    guest_tv[0] = 0;
+    guest_tv[1] = 1000;
+    shim_sceUsbdHandleEventsTimeout(&ctx);
+    assert(ctx.rax == 0);
+    assert(ctx.rsp == 8);
+
+    printf("PASS handle-events\n");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) return 1;
     const char *name = argv[1];
@@ -147,6 +182,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(name, "device-ops")) test_device_ops();
     else if (!strcmp(name, "control-transfer")) test_control_transfer();
     else if (!strcmp(name, "interrupt-transfer")) test_interrupt_transfer();
+    else if (!strcmp(name, "handle-events")) test_handle_events();
     else {
         fprintf(stderr, "Unknown test: %s\n", name);
         return 2;

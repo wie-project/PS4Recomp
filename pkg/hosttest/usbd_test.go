@@ -16,5 +16,6 @@ func TestUsbd(t *testing.T) {
 		"device-ops",
 		"control-transfer",
 		"interrupt-transfer",
+		"handle-events",
 	})
 }

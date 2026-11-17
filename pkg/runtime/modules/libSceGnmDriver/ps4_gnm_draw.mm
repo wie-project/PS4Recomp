@@ -1764,7 +1764,8 @@ void EvictTextures() {
     TextureCache* tc = S.tex;
     if (!tc) return;
     ForgetRetiredTextures(tc);
-    const bool gpu_purge = g_mem.tex_purge;
+    const bool over = g_mem.over.load(std::memory_order_relaxed);
+    const bool gpu_purge = g_mem.tex_purge || over;
     g_mem.tex_purge = false;
     const uint64_t now = g_mem.tick;
     // superseded GPU-owned surfaces: once a second (with the purge too), idle 10 s (2 s over budget)

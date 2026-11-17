@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 
 //=============================================================================
 // libSceUsbd C Implementation
@@ -217,8 +218,29 @@ int32_t sceUsbdInterruptTransfer(SceUsbdDeviceHandle *dev_handle, uint8_t endpoi
     return ORBIS_USBD_ERROR_NO_DEVICE;
 }
 
+typedef struct SceUsbdTimeval {
+    int64_t tv_sec;
+    int64_t tv_usec;
+} SceUsbdTimeval;
+
 int32_t sceUsbdHandleEventsTimeout(void *tv) {
-    (void)tv;
+    int64_t sleep_usec = 10000; // default 10ms if tv is NULL
+    if (tv != NULL) {
+        const SceUsbdTimeval *otv = (const SceUsbdTimeval *)tv;
+        if (otv->tv_sec < 0 || otv->tv_usec < 0) {
+            return ORBIS_USBD_ERROR_INVALID_PARAM;
+        }
+        sleep_usec = otv->tv_sec * 1000000LL + otv->tv_usec;
+        // In an event loop without physical USB devices connected,
+        // a 0 or sub-millisecond timeout causes a 100% CPU busy-spin loop.
+        // Sleep for at least 1ms to yield the CPU, and clamp to at most 50ms.
+        if (sleep_usec <= 0) {
+            sleep_usec = 1000; // 1 ms
+        } else if (sleep_usec > 50000) {
+            sleep_usec = 50000; // 50 ms
+        }
+    }
+    usleep((useconds_t)sleep_usec);
     return ORBIS_USBD_SUCCESS;
 }
 
@@ -238,7 +260,8 @@ void shim_sceUsbdExit(GuestContext *ctx) {
 }
 
 void shim_sceUsbdOpen(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceUsbdOpen((SceUsbdDevice *)ctx->rdi, (SceUsbdDeviceHandle **)ctx->rsi);
+    SceUsbdDeviceHandle **dev_handle = ctx->rsi ? (SceUsbdDeviceHandle **)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceUsbdOpen((SceUsbdDevice *)ctx->rdi, dev_handle);
     SHIM_RETURN();
 }
 
@@ -261,7 +284,8 @@ void shim_sceUsbdFreeDeviceList(GuestContext *ctx) {
 }
 
 void shim_sceUsbdHandleEventsTimeout(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceUsbdHandleEventsTimeout((void *)ctx->rdi);
+    void *tv = ctx->rdi ? (void *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceUsbdHandleEventsTimeout(tv);
     SHIM_RETURN();
 }
 
@@ -277,13 +301,15 @@ void shim_sceUsbdAllocTransfer(GuestContext *ctx) {
 }
 
 void shim_sceUsbdFillControlTransfer(GuestContext *ctx) {
-    sceUsbdFillControlTransfer((SceUsbdTransfer *)ctx->rdi, (SceUsbdDeviceHandle *)ctx->rsi, (uint8_t *)ctx->rdx, (SceUsbdTransferCallback)ctx->rcx, (void *)ctx->r8, (uint32_t)ctx->r9);
+    uint8_t *buffer = ctx->rdx ? (uint8_t *)(ctx->mem_base + ctx->rdx) : NULL;
+    sceUsbdFillControlTransfer((SceUsbdTransfer *)ctx->rdi, (SceUsbdDeviceHandle *)ctx->rsi, buffer, (SceUsbdTransferCallback)ctx->rcx, (void *)ctx->r8, (uint32_t)ctx->r9);
     ctx->rax = 0;
     SHIM_RETURN();
 }
 
 void shim_sceUsbdFillControlSetup(GuestContext *ctx) {
-    sceUsbdFillControlSetup((uint8_t *)ctx->rdi, (uint8_t)ctx->rsi, (uint8_t)ctx->rdx, (uint16_t)ctx->rcx, (uint16_t)ctx->r8, (uint16_t)ctx->r9);
+    uint8_t *buf = ctx->rdi ? (uint8_t *)(ctx->mem_base + ctx->rdi) : NULL;
+    sceUsbdFillControlSetup(buf, (uint8_t)ctx->rsi, (uint8_t)ctx->rdx, (uint16_t)ctx->rcx, (uint16_t)ctx->r8, (uint16_t)ctx->r9);
     ctx->rax = 0;
     SHIM_RETURN();
 }
@@ -299,7 +325,8 @@ void shim_sceUsbdAttachKernelDriver(GuestContext *ctx) {
 }
 
 void shim_sceUsbdGetConfigDescriptor(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceUsbdGetConfigDescriptor((SceUsbdDevice *)ctx->rdi, (uint8_t)ctx->rsi, (SceUsbdConfigDescriptor **)ctx->rdx);
+    SceUsbdConfigDescriptor **config = ctx->rdx ? (SceUsbdConfigDescriptor **)(ctx->mem_base + ctx->rdx) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceUsbdGetConfigDescriptor((SceUsbdDevice *)ctx->rdi, (uint8_t)ctx->rsi, config);
     SHIM_RETURN();
 }
 
@@ -342,7 +369,8 @@ void shim_sceUsbdKernelDriverActive(GuestContext *ctx) {
 void shim_sceUsbdControlTransfer(GuestContext *ctx) {
     int32_t length = (int32_t)*(uint64_t *)(ctx->rsp + 8);
     uint32_t timeout = (uint32_t)*(uint64_t *)(ctx->rsp + 16);
-    ctx->rax = (uint64_t)(int64_t)sceUsbdControlTransfer((SceUsbdDeviceHandle *)ctx->rdi, (uint8_t)ctx->rsi, (uint8_t)ctx->rdx, (uint16_t)ctx->rcx, (uint16_t)ctx->r8, (uint8_t *)ctx->r9, length, timeout);
+    uint8_t *data = ctx->r9 ? (uint8_t *)(ctx->mem_base + ctx->r9) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceUsbdControlTransfer((SceUsbdDeviceHandle *)ctx->rdi, (uint8_t)ctx->rsi, (uint8_t)ctx->rdx, (uint16_t)ctx->rcx, (uint16_t)ctx->r8, data, length, timeout);
     SHIM_RETURN();
 }
 
@@ -352,14 +380,16 @@ void shim_sceUsbdControlTransferGetData(GuestContext *ctx) {
 }
 
 void shim_sceUsbdGetDeviceDescriptor(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceUsbdGetDeviceDescriptor((SceUsbdDevice *)ctx->rdi, (SceUsbdDeviceDescriptor *)ctx->rsi);
+    SceUsbdDeviceDescriptor *desc = ctx->rsi ? (SceUsbdDeviceDescriptor *)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceUsbdGetDeviceDescriptor((SceUsbdDevice *)ctx->rdi, desc);
     SHIM_RETURN();
 }
 
 void shim_sceUsbdFillInterruptTransfer(GuestContext *ctx) {
+    uint8_t *buffer = ctx->rcx ? (uint8_t *)(ctx->mem_base + ctx->rcx) : NULL;
     void *user_data = (void *)*(uint64_t *)(ctx->rsp + 8);
     uint32_t timeout = (uint32_t)*(uint64_t *)(ctx->rsp + 16);
-    sceUsbdFillInterruptTransfer((SceUsbdTransfer *)ctx->rdi, (SceUsbdDeviceHandle *)ctx->rsi, (uint8_t)ctx->rdx, (uint8_t *)ctx->rcx, (int32_t)ctx->r8, (SceUsbdTransferCallback)ctx->r9, user_data, timeout);
+    sceUsbdFillInterruptTransfer((SceUsbdTransfer *)ctx->rdi, (SceUsbdDeviceHandle *)ctx->rsi, (uint8_t)ctx->rdx, buffer, (int32_t)ctx->r8, (SceUsbdTransferCallback)ctx->r9, user_data, timeout);
     ctx->rax = 0;
     SHIM_RETURN();
 }
@@ -375,6 +405,8 @@ void shim_sceUsbdGetMaxPacketSize(GuestContext *ctx) {
 }
 
 void shim_sceUsbdInterruptTransfer(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceUsbdInterruptTransfer((SceUsbdDeviceHandle *)ctx->rdi, (uint8_t)ctx->rsi, (uint8_t *)ctx->rdx, (int32_t)ctx->rcx, (int32_t *)ctx->r8, (uint32_t)ctx->r9);
+    uint8_t *data = ctx->rdx ? (uint8_t *)(ctx->mem_base + ctx->rdx) : NULL;
+    int32_t *transferred = ctx->r8 ? (int32_t *)(ctx->mem_base + ctx->r8) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceUsbdInterruptTransfer((SceUsbdDeviceHandle *)ctx->rdi, (uint8_t)ctx->rsi, data, (int32_t)ctx->rcx, transferred, (uint32_t)ctx->r9);
     SHIM_RETURN();
 }

@@ -351,6 +351,9 @@ int32_t scePlayGoSetToDoList(OrbisPlayGoHandle handle, const OrbisPlayGoToDo *to
     if (numEntries == 0) {
         return ORBIS_PLAYGO_ERROR_BAD_SIZE;
     }
+    if (!g_playgo_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
     if (g_playgo_file_size == 0) {
         return ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO;
     }
