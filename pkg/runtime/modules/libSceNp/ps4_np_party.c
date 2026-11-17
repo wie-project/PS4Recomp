@@ -120,6 +120,12 @@ int32_t sceNpPartySetVoiceChatPriority(uint64_t in_gaddr) {
     return party_voice_priority(in_gaddr);
 }
 
+int32_t sceNpPartyGetState(uint64_t state_gaddr) {
+    if (!state_gaddr) return NP_PARTY_ERROR_INVALID_ARGUMENT;
+    *(uint32_t *)state_gaddr = 2; // NotInParty
+    return 0;
+}
+
 // Test hooks: the recorded handler blocks (0 = none).
 uint64_t ps4_np_party_handler(bool private_handler) {
     pthread_mutex_lock(&g_party_mutex);
@@ -149,4 +155,7 @@ void shim_sceNpPartyGetVoiceChatPriority(GuestContext *ctx) {
 }
 void shim_sceNpPartySetVoiceChatPriority(GuestContext *ctx) {
     PARTY_SHIM_RET(sceNpPartySetVoiceChatPriority(ctx->rdi));
+}
+void shim_sceNpPartyGetState(GuestContext *ctx) {
+    PARTY_SHIM_RET(sceNpPartyGetState(ctx->rdi));
 }

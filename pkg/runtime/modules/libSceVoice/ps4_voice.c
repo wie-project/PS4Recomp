@@ -125,6 +125,12 @@ void shim_sceVoiceConnectIPortToOPort(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+// int sceVoiceDisconnectIPortFromOPort(uint32_t ips, uint32_t ops)
+void shim_sceVoiceDisconnectIPortFromOPort(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
 // int sceVoiceGetPortInfo(uint32_t portId, SceVoiceBasePortInfo *pInfo)
 void shim_sceVoiceGetPortInfo(GuestContext *ctx) {
     if (!ctx->rsi) {

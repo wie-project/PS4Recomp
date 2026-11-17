@@ -147,3 +147,8 @@ void shim_sceGameLiveStreamingSetStandbyScreenResource(GuestContext *ctx) {
   ctx->rax = ORBIS_OK;
   SHIM_RETURN();
 }
+
+void shim_sceGameLiveStreamingPostSocialMessage(GuestContext *ctx) {
+  ctx->rax = ORBIS_OK;
+  SHIM_RETURN();
+}

@@ -128,3 +128,14 @@ void shim_sceNpSnsFacebookDialogGetResult(GuestContext *ctx) {
     ctx->rax = 0;
     SHIM_RETURN();
 }
+
+// int sceNpSnsFacebookDialogClose(void)
+void shim_sceNpSnsFacebookDialogClose(GuestContext *ctx) {
+    pthread_mutex_lock(&g_sns_mutex);
+    if (g_fbdlg_status == CDLG_STATUS_RUNNING || g_fbdlg_status == CDLG_STATUS_FINISHED) {
+        g_fbdlg_status = CDLG_STATUS_INITIALIZED;
+    }
+    pthread_mutex_unlock(&g_sns_mutex);
+    ctx->rax = 0;
+    SHIM_RETURN();
+}

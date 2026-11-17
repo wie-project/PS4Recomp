@@ -25,5 +25,6 @@ void shim_sceGameLiveStreamingSetMetadata(GuestContext *ctx);
 void shim_sceGameLiveStreamingSetMaxBitrate(GuestContext *ctx);
 void shim_sceGameLiveStreamingEnableSocialFeedback(GuestContext *ctx);
 void shim_sceGameLiveStreamingSetStandbyScreenResource(GuestContext *ctx);
+void shim_sceGameLiveStreamingPostSocialMessage(GuestContext *ctx);
 
 #endif // PS4_GAMELIVESTREAMING_H
