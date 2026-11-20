@@ -7430,6 +7430,9 @@ id<MTLRenderPipelineState> GetGfxPipeline(const Shader* vs, const Shader* ps, co
     MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
     d.vertexFunction = PipelineFn(vs);
     d.fragmentFunction = ps ? PipelineFn(ps) : nil;
+    // the shaders' MSL hashes, for profilers and GPU captures (as the compute pipelines' label)
+    d.label = [NSString stringWithFormat:@"vs %016llx ps %016llx", (unsigned long long)vs->msl_hash,
+                                         (unsigned long long)ps_mh];
     for (int i = 0; i < 8; ++i) {
         if (!color_fmt[i]) continue;
         MTLRenderPipelineColorAttachmentDescriptor* ca = d.colorAttachments[i];
@@ -13801,6 +13804,43 @@ void GmAfterPass(const DispatchRec& r, const GmResult& res, const GmPages* pred)
     GmLearn(r.cs->uid, res.written);
 }
 
+// Debug request from PS4_PAD_CTL "gpucapture": the next sync-path guest memory dispatch (probe,
+// gate, pass, harvest and any re-runs, nothing else) is written as a Metal GPU trace to
+// PS4_SCREENSHOT_DIR/gm_<CS address>_<n>.gputrace, for Xcode's shader profiler. Needs
+// MTL_CAPTURE_ENABLED=1 in the environment.
+extern "C" volatile int g_ps4_gnm_gpu_capture_request;
+volatile int g_ps4_gnm_gpu_capture_request;
+
+// Starts the requested capture: true if a capture is running (stop it with StopGpuCapture).
+bool StartGpuCapture(uint64_t cs_addr) {
+    if (!g_ps4_gnm_gpu_capture_request) return false;
+    g_ps4_gnm_gpu_capture_request = 0;
+    const char* dir = getenv("PS4_SCREENSHOT_DIR");
+    MTLCaptureManager* cm = [MTLCaptureManager sharedCaptureManager];
+    if (!dir || !*dir || ![cm supportsDestination:MTLCaptureDestinationGPUTraceDocument]) {
+        fprintf(stderr, "[gnm-capture] gpucapture needs PS4_SCREENSHOT_DIR and MTL_CAPTURE_ENABLED=1\n");
+        return false;
+    }
+    static int n = 0;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/gm_%llx_%d.gputrace", dir, (unsigned long long)cs_addr, n++);
+    // the work encoded before the dispatch goes out first, so the trace holds only the dispatch
+    EndEncoders();
+    Commit();
+    MTLCaptureDescriptor* d = [MTLCaptureDescriptor new];
+    d.captureObject = S.dev;
+    d.destination = MTLCaptureDestinationGPUTraceDocument;
+    d.outputURL = [NSURL fileURLWithPath:@(path)];
+    NSError* e = nil;
+    if (![cm startCaptureWithDescriptor:d error:&e]) {
+        fprintf(stderr, "[gnm-capture] gpucapture failed: %s\n", e.localizedDescription.UTF8String);
+        return false;
+    }
+    fprintf(stderr, "[gnm-capture] capturing guest memory dispatch CS 0x%llx to %s\n", (unsigned long long)cs_addr,
+            path);
+    return true;
+}
+
 // Sync path (the CP thread waits for it in encq::Run).
 bool GmDispatchSync(DispatchRec& r, id<MTLComputePipelineState> pso, MTLSize tg) {
     g_gm_stats.sync++;
@@ -13813,7 +13853,9 @@ bool GmDispatchSync(DispatchRec& r, id<MTLComputePipelineState> pso, MTLSize tg)
     }
     GmResult res;
     std::vector<std::pair<uint64_t, uint64_t>> stores;
+    const bool capturing = StartGpuCapture(r.cs->code_addr);
     const bool ran = GmRunSync(false, r, pso, tg, slot, &res, nullptr, &stores);
+    if (capturing) [[MTLCaptureManager sharedCaptureManager] stopCapture]; // GmRunSync waited for the GPU
     if (!S.hung) GmReleaseSlot(slot);
     if (ran) {
         GmAfterPass(r, res, nullptr);
@@ -14267,6 +14309,10 @@ void DispatchEncode(DispatchRec*& rp) {
             MTLComputePipelineDescriptor* cpd = [MTLComputePipelineDescriptor new];
             cpd.computeFunction = PipelineFn(cs);
             if (wg > 0 && wg <= 1024) cpd.maxTotalThreadsPerThreadgroup = (NSUInteger)wg;
+            // Names the kernel by its MSL hash (<hash>.metal in the MSL cache) in Instruments' Shader
+            // Timeline and GPU captures, which otherwise show every guest shader as "main0".
+            // Binary archive lookups ignore pipeline labels.
+            cpd.label = [NSString stringWithFormat:@"cs %016llx", (unsigned long long)cs->msl_hash];
             const uint64_t ck[2] = {cs->msl_hash, wg};
             const uint64_t cstable = Fnv(ck, sizeof(ck), 0x5ca1ab1e5ca1ab1eull);
             ps4gnm_pso_archive::Attach(cpd);
