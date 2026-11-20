@@ -452,14 +452,18 @@ void ps4_pad_handle_key(unsigned short keyCode, int isDown) {
 //                                                frame / the color target after each of its
 //                                                draws (needs PS4_SCREENSHOT_DIR)
 //   trace                                        log the GPU work of the next frame
+//   gpucapture                                   write the next sync-path guest memory dispatch as
+//                                                a Metal GPU trace (needs PS4_SCREENSHOT_DIR and
+//                                                MTL_CAPTURE_ENABLED=1)
 //   close / terminate                            quit through the window close button / Cmd+Q
 // Stick values are 0..255 (128 = center); -1 keeps the stick untouched.
 // Menus auto-repeat a held direction: Uncharted 4's menus move twice for a 300 ms hold and
 // once for 100 ms, so taps should be short.
 extern volatile int g_ps4_screenshot_request;
 extern volatile int g_ps4_gnm_dump_request;
+extern volatile int g_ps4_gnm_gpu_capture_request;
 typedef enum {
-  PAD_CTL_HOLD, PAD_CTL_SHOT, PAD_CTL_DUMPRT, PAD_CTL_DUMPDRAWS, PAD_CTL_TRACE, PAD_CTL_CLOSE,
+  PAD_CTL_HOLD, PAD_CTL_SHOT, PAD_CTL_DUMPRT, PAD_CTL_DUMPDRAWS, PAD_CTL_TRACE, PAD_CTL_GPUCAPTURE, PAD_CTL_CLOSE,
   PAD_CTL_TERMINATE
 } PadCtlKind;
 typedef struct { PadCtlKind kind; long dur; uint32_t mask; int lx, ly, rx, ry; } PadCtlCmd;
@@ -470,6 +474,7 @@ static void ps4_pad_control_action(PadCtlKind kind) {
   case PAD_CTL_DUMPRT: g_ps4_gnm_dump_request |= 1; break;
   case PAD_CTL_DUMPDRAWS: g_ps4_gnm_dump_request |= 2; break;
   case PAD_CTL_TRACE: g_ps4_gnm_dump_request |= 4; break;
+  case PAD_CTL_GPUCAPTURE: g_ps4_gnm_gpu_capture_request = 1; break;
   case PAD_CTL_CLOSE: {
     extern void ps4_metal_screen_request_close(void);
     ps4_metal_screen_request_close();
@@ -522,6 +527,8 @@ static void ps4_pad_control_file(uint32_t *buttons, uint8_t *lx, uint8_t *ly, ui
       cmd.kind = PAD_CTL_DUMPDRAWS;
     } else if (strncmp(line, "trace", 5) == 0) {
       cmd.kind = PAD_CTL_TRACE;
+    } else if (strncmp(line, "gpucapture", 10) == 0) {
+      cmd.kind = PAD_CTL_GPUCAPTURE;
     } else if (strncmp(line, "close", 5) == 0) {
       cmd.kind = PAD_CTL_CLOSE;
     } else if (strncmp(line, "terminate", 9) == 0) {
