@@ -132,7 +132,7 @@ struct RegSnapRange {
     uint16_t lo, hi;
 };
 constexpr RegSnapRange kRegSnapRanges[] = {
-    {0xA000, 0xA020}, {0xA100, 0xA190}, {0xA200, 0xA210}, {0xA290, 0xA2B0}, {0xA2D0, 0xA310}};
+    {0xA000, 0xA020}, {0xA100, 0xA190}, {0xA200, 0xA210}, {0xA280, 0xA282}, {0xA290, 0xA2B0}, {0xA2D0, 0xA310}};
 // index in RegSnap::a of the context registers 0xA000..0xA30F (0xFFFF: not captured)
 struct RegSnapIndex {
     uint16_t at[0x310];
@@ -5685,6 +5685,7 @@ id<MTLBuffer> GmDrawSlot() {
     return slot.buf;
 }
 
+static bool IsMipChainType(uint32_t mtl_type);
 bool BindStage(const Shader* s, const uint32_t ud[16], const std::vector<uint32_t>& flat, Binder& b,
                const BindCtx& bc, const gcn_push_data& push, std::string* why) {
     (void)ud;
@@ -5882,6 +5883,21 @@ bool BindStage(const Shader* s, const uint32_t ud[16], const std::vector<uint32_
                                (unsigned long long)img.address, img.raw_dfmt, img.raw_nfmt, img.width, img.height,
                                (uint32_t)img.tile_mode);
             } else if (ib.is_storage) {
+                // A store to mip level N of a mip chain (down-sampling compute passes): the renderer keeps
+                // every level as its own GPU texture at the level's address (MipChainSources reads them
+                // back), so bind that one. Binding the base surface would write level N over level 0.
+                if (img.base_level > 0 && img.num_levels > 1 && IsMipChainType(img.mtl_texture_type) &&
+                    !img.pixel.compressed) {
+                    SurfaceLayout layout;
+                    if (ComputeSurfaceLayout(img.ToSurfaceDesc(), &layout) && img.base_level < layout.num_mips) {
+                        img.address += layout.mips[img.base_level].offset;
+                        img.width = std::max(1u, img.width >> img.base_level);
+                        img.height = std::max(1u, img.height >> img.base_level);
+                        img.base_level = 0;
+                        img.last_level = 0;
+                        img.num_levels = 1;
+                    }
+                }
                 tex = S.tex->GetStorageTexture(img);
                 if (tex) {
                     // storage writes go to a GPU-owned texture
@@ -6849,6 +6865,10 @@ gcn_push_data MakePushData(const Regs& regs) {
     p.xoffset = (vte & 2) ? AsF(regs[0xA110]) : 0.f;
     p.yscale = (vte & 4) ? AsF(regs[0xA111]) : 1.f;
     p.yoffset = (vte & 8) ? AsF(regs[0xA112]) : 0.f;
+    // PA_SU_POINT_SIZE: width in bits 31:16, 1/8 pixel units; PA_SU_POINT_MINMAX: min 15:0, max 31:16
+    const uint32_t mm = regs[0xA281];
+    const float lo = float(mm & 0xffff) / 8.f, hi = float(mm >> 16) / 8.f;
+    p.point_size = std::min(std::max(float(regs[0xA280] >> 16) / 8.f, lo), hi);
     return p;
 }
 

@@ -589,7 +589,7 @@ GCN_API bool gcn_vertex_format_fetchable(uint32_t dfmt, uint32_t nfmt);
 GCN_API bool gcn_shader_get_vertex_attrib(const gcn_shader* s, uint32_t index,
                                           gcn_vertex_attrib* out);
 
-/* Push constant block (std430, 280 bytes; MSL: `constant AuxData& push_data`).
+/* Push constant block (std430, 284 bytes; MSL: `constant AuxData& push_data`).
  * xoffset..yscale: PA_CL_VPORT_XOFFSET/YOFFSET/XSCALE/YSCALE of viewport 0 (or 0/1 when the
  * corresponding PA_CL_VTE_CNTL enable bit is clear) - only read by VS with clip_disable.
  * buf_offsets: per buffer_slot byte offset (only with profile.needs_buffer_offsets).
@@ -601,6 +601,7 @@ typedef struct gcn_push_data {
     float xoffset, yoffset, xscale, yscale;
     uint8_t buf_offsets[40];
     uint32_t buf_sizes[GCN_MAX_BUFFERS];
+    float point_size; /* pixels: PA_SU_POINT_SIZE clamped by PA_SU_POINT_MINMAX; read by a VS that writes none */
 } gcn_push_data;
 
 /* ---- Draw-time helpers ------------------------------------------------------------------- */

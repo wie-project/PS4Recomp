@@ -1677,3 +1677,4 @@ GCN_API const char* gcn_version(void) {
 
 static_assert(GCN_MAX_BUFFERS == Shader::NUM_BUFFERS, "gcn_push_data.buf_sizes size");
 static_assert(offsetof(gcn_push_data, buf_sizes) == 56, "push block layout (DefinePushDataBlock)");
+static_assert(offsetof(gcn_push_data, point_size) == 56 + 4 * GCN_MAX_BUFFERS, "push block layout (point_size)");

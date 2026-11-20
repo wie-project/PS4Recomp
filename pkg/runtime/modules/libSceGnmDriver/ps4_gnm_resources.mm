@@ -4816,7 +4816,7 @@ id<MTLTexture> TextureCache::GetStorageTexture(const ImageDesc& img, bool guest_
         if (is3d != (c->tex_type == MTLTextureType3D)) return false;
         if (is3d && (c->width != width || c->height != height || c->depth != depth)) return false;
         return c->samples == 1 && GetPixelFormat(c->dfmt, c->nfmt).bytes_per_block == img.pixel.bytes_per_block &&
-               c->width >= width && c->height >= height && c->layers >= layers;
+               c->width == width && c->height == height && c->layers >= layers; // exact: another size is another surface
     };
     if (Entry* e = LastWrittenLocked(img.address, Entry::Color, holds)) {
         MTLTextureUsage needed = MTLTextureUsageShaderWrite;

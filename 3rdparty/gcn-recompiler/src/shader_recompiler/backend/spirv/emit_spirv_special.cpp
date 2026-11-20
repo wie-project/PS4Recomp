@@ -16,6 +16,12 @@ void EmitPrologue(EmitContext& ctx) {
         ctx.DefineWorkgroupIndex();
     }
     ctx.DefineBufferProperties();
+    if (ctx.hw_stage == HwStage::Vertex && ctx.sw_stage == SwStage::Vertex &&
+        !ctx.info.stores.GetAny(IR::Attribute::PointSize)) {
+        const Id ptr{ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.F32[1]),
+                                       ctx.push_data_block, ctx.ConstU32(PushData::PointSizeIndex))};
+        ctx.OpStore(ctx.output_point_size, ctx.OpLoad(ctx.F32[1], ptr));
+    }
 }
 
 void ConvertDepthMode(EmitContext& ctx) {
