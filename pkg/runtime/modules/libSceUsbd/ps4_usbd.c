@@ -272,7 +272,8 @@ void shim_sceUsbdClose(GuestContext *ctx) {
 }
 
 void shim_sceUsbdGetDeviceList(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceUsbdGetDeviceList((SceUsbdDevice ***)ctx->rdi);
+    // rdi is a guest address: translate it before the host function writes the (guest) list pointer
+    ctx->rax = (uint64_t)sceUsbdGetDeviceList(ctx->rdi ? (SceUsbdDevice ***)(ctx->mem_base + ctx->rdi) : NULL);
     SHIM_RETURN();
 }
 

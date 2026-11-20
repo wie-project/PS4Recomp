@@ -420,7 +420,7 @@ int32_t sceNpPartyUnregisterPrivateHandler(void);
 int32_t sceNpPartyCheckCallback(void);
 int32_t sceNpPartyGetVoiceChatPriority(uint64_t out_gaddr);
 int32_t sceNpPartySetVoiceChatPriority(uint64_t in_gaddr);
-int32_t sceNpPartyGetState(uint64_t state_gaddr);
+int32_t sceNpPartyGetState(uint32_t *state);
 uint64_t ps4_np_party_handler(bool private_handler);
 void shim_sceNpPartyInitialize(GuestContext *ctx);
 void shim_sceNpPartyTerminate(GuestContext *ctx);
