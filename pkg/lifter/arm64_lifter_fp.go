@@ -1169,9 +1169,11 @@ func (l *Arm64Lifter) liftCvtdq(inst disasm.Instruction, nextPC uint64, lines []
 		return lines, nil
 	}
 
+	// A memory source goes to v26/v27, not v28-v31: packedFpToInt32X86 and fpToIntX86 use
+	// those as scratch.
 	srcYmm := false
-	sLowV := "v30"
-	sHighV := "v31"
+	sLowV := "v26"
+	sHighV := "v27"
 	if sReg, okSrc := src.(x86asm.Reg); okSrc {
 		if ymm, _, _, rLowV, rHighV, _, _, okS := getVectorDesc(sReg); okS {
 			srcYmm = ymm
@@ -1182,15 +1184,15 @@ func (l *Arm64Lifter) liftCvtdq(inst disasm.Instruction, nextPC uint64, lines []
 		lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
 		mem64 := (!dstYmm && (op == x86asm.CVTPS2PD || op == x86asm.VCVTPS2PD ||
 			op == x86asm.CVTDQ2PD || op == x86asm.VCVTDQ2PD || op == x86asm.VCVTPH2PS))
-		if mem64 {
-			lines = append(lines, "    ldr d30, [x28, x16]")
-		} else {
-			lines = append(lines, "    ldr q30, [x28, x16]")
-			if op == x86asm.CVTTPD2DQ || op == x86asm.VCVTTPD2DQ || op == x86asm.CVTPD2PS || op == x86asm.VCVTPD2PS {
-				// If AVX instruction operating on YMM memory (256-bit to 128-bit)
-				// For memory operands, x86asm doesn't have YMM register for src, but we check if dst is YMM or prefix is 256-bit
-				// But CVTTPD2DQ destination is XMM! We check if operand has 256-bit attribute or inst is 256-bit
-			}
+		switch {
+		case mem64:
+			lines = append(lines, "    ldr d26, [x28, x16]")
+		case inst.Inst.MemBytes == 32:
+			// m256 source (VEX.256): both halves, also for the XMM-destination narrowing forms.
+			lines = append(lines, "    add x16, x28, x16", "    ldp q26, q27, [x16]")
+			srcYmm = true
+		default:
+			lines = append(lines, "    ldr q26, [x28, x16]")
 		}
 	} else {
 		lines = append(lines, l.emitUnsupported(inst, "unsupported cvtdq src")...)

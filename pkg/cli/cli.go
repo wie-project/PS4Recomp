@@ -1880,7 +1880,6 @@ func bundleDylibDependencies(contentsDir, bundleBin string) error {
 				}
 				if existing, ok := copiedByReal[realSrc]; ok {
 					dstPath = existing
-					alreadyCopied = true
 				} else {
 					dstPath = filepath.Join(frameworksDir, depBase)
 					if err := copyFile(realSrc, dstPath); err != nil {
@@ -1903,8 +1902,9 @@ func bundleDylibDependencies(contentsDir, bundleBin string) error {
 				}
 			}
 
-			// Update reference in current to @rpath/<depBase>
-			if wantRef := "@rpath/" + depBase; dep != wantRef {
+			// Point the reference at the bundled file's name: a dependency reached under a second
+			// name (a symlink) was copied under the first one.
+			if wantRef := "@rpath/" + filepath.Base(dstPath); dep != wantRef {
 				_ = exec.Command("install_name_tool", "-change", dep, wantRef, current.bundlePath).Run()
 			}
 		}

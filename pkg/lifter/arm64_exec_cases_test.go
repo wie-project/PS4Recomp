@@ -694,3 +694,36 @@ func TestExecVcvtps2phRounding(t *testing.T) {
 	}
 	runExecCases(t, cases)
 }
+
+// Packed conversions read all 32 bytes of a 256-bit memory source: the YMM-destination forms
+// convert eight lanes, the XMM-destination forms (VCVTPD2PS/VCVTTPD2DQ m256) narrow four doubles.
+// The m128 SSE forms check that the float-to-int fix-up scratch does not clobber the loaded source.
+func TestExecVcvtMem256(t *testing.T) {
+	ints := make([]byte, 32)
+	floats := make([]byte, 32)
+	doubles := make([]byte, 32)
+	for i := 0; i < 8; i++ {
+		binary.LittleEndian.PutUint32(ints[4*i:], uint32(int32(-3+7*i)))
+		binary.LittleEndian.PutUint32(floats[4*i:], math.Float32bits(float32(i)*1.75-5))
+	}
+	for i := 0; i < 4; i++ {
+		binary.LittleEndian.PutUint64(doubles[8*i:], math.Float64bits(float64(i)*-2.5+1.25))
+	}
+	regs := map[x86asm.Reg]uint64{x86asm.RDI: execMemBase + 0x100}
+	runExecCases(t, []execCase{
+		{name: "vcvtdq2ps ymm0, [rdi]", regs: regs, mem: map[int][]byte{0x100: ints},
+			code: []string{"c5fc5b07", "c5fc114740"}}, // vmovups [rdi+0x40], ymm0
+		{name: "vcvttps2dq ymm0, [rdi]", regs: regs, mem: map[int][]byte{0x100: floats},
+			code: []string{"c5fe5b07", "c5fc114740"}},
+		{name: "vcvtpd2ps xmm0, ymmword [rdi]", regs: regs, mem: map[int][]byte{0x100: doubles},
+			code: []string{"c5fd5a07", "c5f8114740"}}, // vmovups [rdi+0x40], xmm0
+		{name: "vcvttpd2dq xmm0, ymmword [rdi]", regs: regs, mem: map[int][]byte{0x100: doubles},
+			code: []string{"c5fde607", "c5f8114740"}},
+		{name: "cvttps2dq xmm0, [rdi]", regs: regs, mem: map[int][]byte{0x100: floats},
+			code: []string{"f30f5b07", "0f114740"}}, // movups [rdi+0x40], xmm0
+		{name: "cvtps2dq xmm0, [rdi]", regs: regs, mem: map[int][]byte{0x100: floats},
+			code: []string{"660f5b07", "0f114740"}},
+		{name: "cvttpd2dq xmm0, [rdi]", regs: regs, mem: map[int][]byte{0x100: doubles},
+			code: []string{"660fe607", "0f114740"}},
+	})
+}
