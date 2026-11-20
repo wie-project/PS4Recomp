@@ -327,17 +327,58 @@ int32_t scePlayGoGetToDoList(OrbisPlayGoHandle handle, OrbisPlayGoToDo *outToDoL
     if (handle != kValidPlayGoHandle) {
         return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
     }
-    if (!outNumEntries) {
+    if (!g_playgo_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    if (!outNumEntries || (maxEntries != 0 && !outToDoList)) {
         return ORBIS_PLAYGO_ERROR_BAD_POINTER;
     }
-    if (outToDoList && maxEntries == 0) {
+    if (g_playgo_file_size == 0) {
+        return ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO;
+    }
+
+    *outNumEntries = 0;
+    return 0;
+}
+
+int32_t scePlayGoSetToDoList(OrbisPlayGoHandle handle, const OrbisPlayGoToDo *toDoList, uint32_t numEntries) {
+    if (handle != kValidPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!toDoList) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (numEntries == 0) {
         return ORBIS_PLAYGO_ERROR_BAD_SIZE;
     }
     if (!g_playgo_initialized) {
         return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
     }
+    if (g_playgo_file_size == 0) {
+        return ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO;
+    }
+    if (numEntries > g_playgo_chunk_count) {
+        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
+    }
 
-    *outNumEntries = 0; // nothing to do, all chunks local
+    for (uint32_t i = 0; i < numEntries; i++) {
+        if (toDoList[i].chunkId >= g_playgo_chunk_count) {
+            return ORBIS_PLAYGO_ERROR_BAD_CHUNK_ID;
+        }
+        switch (toDoList[i].locus) {
+        case ORBIS_PLAYGO_LOCUS_NOT_DOWNLOADED:
+        case ORBIS_PLAYGO_LOCUS_LOCAL_SLOW:
+        case ORBIS_PLAYGO_LOCUS_LOCAL_FAST:
+            break;
+        default:
+            return ORBIS_PLAYGO_ERROR_BAD_LOCUS;
+        }
+    }
+
+    // The local runtime has no download queue; all installed chunks are already available.
+    if (!g_playgo_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
     return 0;
 }
 
@@ -409,6 +450,100 @@ int32_t scePlayGoGetChunkId(OrbisPlayGoHandle handle, OrbisPlayGoChunkId *outChu
         outChunkIdList[i] = (OrbisPlayGoChunkId)i;
     }
     *outEntries = numberOfEntries;
+    return 0;
+}
+
+static pthread_mutex_t g_playgo_dialog_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int32_t g_playgo_dialog_status = 0; // COMMON_DIALOG_STATUS_NONE
+
+int32_t scePlayGoDialogInitialize(void) {
+    pthread_mutex_lock(&g_playgo_dialog_mutex);
+    int32_t rc = 0;
+    if (g_playgo_dialog_status != 0) {
+        rc = (int32_t)0x80B80004; // COMMON_DIALOG_ERROR_ALREADY_INITIALIZED
+    } else {
+        g_playgo_dialog_status = 1; // COMMON_DIALOG_STATUS_INITIALIZED
+    }
+    pthread_mutex_unlock(&g_playgo_dialog_mutex);
+    return rc;
+}
+
+int32_t scePlayGoDialogTerminate(void) {
+    pthread_mutex_lock(&g_playgo_dialog_mutex);
+    int32_t rc = 0;
+    if (g_playgo_dialog_status == 0) {
+        rc = (int32_t)0x80B80003; // COMMON_DIALOG_ERROR_NOT_INITIALIZED
+    } else {
+        g_playgo_dialog_status = 0;
+    }
+    pthread_mutex_unlock(&g_playgo_dialog_mutex);
+    return rc;
+}
+
+int32_t scePlayGoDialogOpen(const void *param) {
+    if (!param) {
+        return (int32_t)0x80B8000D; // COMMON_DIALOG_ERROR_ARG_NULL
+    }
+    pthread_mutex_lock(&g_playgo_dialog_mutex);
+    int32_t rc = 0;
+    if (g_playgo_dialog_status == 1 || g_playgo_dialog_status == 3) {
+        g_playgo_dialog_status = 2; // COMMON_DIALOG_STATUS_RUNNING
+    } else if (g_playgo_dialog_status == 0) {
+        rc = (int32_t)0x80B80003; // COMMON_DIALOG_ERROR_NOT_INITIALIZED
+    } else {
+        rc = (int32_t)0x80B80006; // COMMON_DIALOG_ERROR_INVALID_STATE
+    }
+    pthread_mutex_unlock(&g_playgo_dialog_mutex);
+    return rc;
+}
+
+int32_t scePlayGoDialogClose(void) {
+    pthread_mutex_lock(&g_playgo_dialog_mutex);
+    int32_t rc = 0;
+    if (g_playgo_dialog_status == 0) {
+        rc = (int32_t)0x80B80003; // COMMON_DIALOG_ERROR_NOT_INITIALIZED
+    } else if (g_playgo_dialog_status != 2) {
+        rc = (int32_t)0x80B80007; // COMMON_DIALOG_ERROR_NOT_RUNNING
+    } else {
+        g_playgo_dialog_status = 3; // COMMON_DIALOG_STATUS_FINISHED
+    }
+    pthread_mutex_unlock(&g_playgo_dialog_mutex);
+    return rc;
+}
+
+int32_t scePlayGoDialogUpdateStatus(void) {
+    pthread_mutex_lock(&g_playgo_dialog_mutex);
+    if (g_playgo_dialog_status == 2) { // RUNNING -> FINISHED
+        g_playgo_dialog_status = 3;
+    }
+    int32_t st = g_playgo_dialog_status;
+    pthread_mutex_unlock(&g_playgo_dialog_mutex);
+    return st;
+}
+
+int32_t scePlayGoDialogGetStatus(void) {
+    pthread_mutex_lock(&g_playgo_dialog_mutex);
+    int32_t st = g_playgo_dialog_status;
+    pthread_mutex_unlock(&g_playgo_dialog_mutex);
+    return st;
+}
+
+int32_t scePlayGoDialogGetResult(const void *result) {
+    if (!result) {
+        return (int32_t)0x80B8000D; // COMMON_DIALOG_ERROR_ARG_NULL
+    }
+    pthread_mutex_lock(&g_playgo_dialog_mutex);
+    int32_t st = g_playgo_dialog_status;
+    pthread_mutex_unlock(&g_playgo_dialog_mutex);
+    if (st == 0) {
+        return (int32_t)0x80B80003; // COMMON_DIALOG_ERROR_NOT_INITIALIZED
+    }
+    if (st != 3) {
+        return (int32_t)0x80B80005; // COMMON_DIALOG_ERROR_NOT_FINISHED
+    }
+    int32_t *res = (int32_t *)result;
+    res[0] = 0;
+    res[1] = 3; // allowed to proceed
     return 0;
 }
 
@@ -525,6 +660,19 @@ void shim_scePlayGoGetToDoList(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_scePlayGoSetToDoList(GuestContext *ctx) {
+    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
+    uint64_t toDoGuest = ctx->rsi;
+    uint32_t numEntries = (uint32_t)ctx->rdx;
+
+    const OrbisPlayGoToDo *toDo =
+        toDoGuest ? (const OrbisPlayGoToDo *)(ctx->mem_base + toDoGuest) : NULL;
+
+    int32_t ret = scePlayGoSetToDoList(handle, toDo, numEntries);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
 void shim_scePlayGoGetEta(GuestContext *ctx) {
     OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
     uint64_t chunkIdsGuest = ctx->rsi;
@@ -561,6 +709,52 @@ void shim_scePlayGoGetChunkId(GuestContext *ctx) {
     uint32_t *outEntries = outEntriesGuest ? (uint32_t *)(ctx->mem_base + outEntriesGuest) : NULL;
 
     int32_t ret = scePlayGoGetChunkId(handle, outChunkIdList, numberOfEntries, outEntries);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogInitialize(GuestContext *ctx) {
+    int32_t ret = scePlayGoDialogInitialize();
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogOpen(GuestContext *ctx) {
+    uint64_t paramGuest = ctx->rdi;
+    const void *param = paramGuest ? (const void *)(ctx->mem_base + paramGuest) : NULL;
+    int32_t ret = scePlayGoDialogOpen(param);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogUpdateStatus(GuestContext *ctx) {
+    int32_t ret = scePlayGoDialogUpdateStatus();
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogGetResult(GuestContext *ctx) {
+    uint64_t resultGuest = ctx->rdi;
+    void *result = resultGuest ? (void *)(ctx->mem_base + resultGuest) : NULL;
+    int32_t ret = scePlayGoDialogGetResult(result);
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogTerminate(GuestContext *ctx) {
+    int32_t ret = scePlayGoDialogTerminate();
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogClose(GuestContext *ctx) {
+    int32_t ret = scePlayGoDialogClose();
+    ctx->rax = (uint64_t)(int64_t)ret;
+    SHIM_RETURN();
+}
+
+void shim_scePlayGoDialogGetStatus(GuestContext *ctx) {
+    int32_t ret = scePlayGoDialogGetStatus();
     ctx->rax = (uint64_t)(int64_t)ret;
     SHIM_RETURN();
 }

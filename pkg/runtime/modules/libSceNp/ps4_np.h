@@ -253,6 +253,15 @@ int32_t sceNpUtilityTerm(void);
 int32_t sceNpGameIntentInitialize(void);
 int32_t sceNpGameIntentTerminate(void);
 
+int32_t sceNpTssGetData(void *ctx, void *data);
+int32_t sceNpTssGetSmallStorage(int32_t reqId, void *data, uint64_t maxSize, uint64_t *contentLength, void *option);
+int32_t sceNpTusAddAndGetVariableVUserAsync(int32_t reqId, uint64_t targetVirtualUserId, int32_t slotId, int64_t inVariable, void *outVariable, void *option);
+int32_t sceNpTusGetMultiSlotVariableVUserAsync(int32_t reqId, uint64_t targetVirtualUserId, const int32_t *slotIdArray, uint32_t slotIdNum, void *outVariableArray, void *option);
+int32_t sceNpTssCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel, OrbisNpId* npId);
+
+
+int32_t sceNpWebApiDeleteHandle(int32_t handle);
+
 // GuestContext shims
 void shim_sceNpCheckNpAvailability(GuestContext *ctx);
 void shim_sceNpCheckNpAvailabilityA(GuestContext *ctx);
@@ -377,7 +386,6 @@ void shim_sceNpTusGetMultiSlotVariable(GuestContext *ctx);
 void shim_sceNpTusGetMultiSlotVariableVUser(GuestContext *ctx);
 void shim_sceNpTusSetMultiSlotVariable(GuestContext *ctx);
 void shim_sceNpTusSetMultiSlotVariableVUser(GuestContext *ctx);
-void shim_sceNpTssGetData(GuestContext *ctx);
 void shim_sceNpScoreGetRankingByNpIdAsync(GuestContext *ctx);
 void shim_sceNpScoreGetRankingByRangeAsync(GuestContext *ctx);
 void shim_sceNpScoreGetFriendsRankingAsync(GuestContext *ctx);
@@ -395,6 +403,14 @@ void shim_sceNpUtilityTerm(GuestContext *ctx);
 void shim_sceNpGameIntentInitialize(GuestContext *ctx);
 void shim_sceNpGameIntentTerminate(GuestContext *ctx);
 
+void shim_sceNpTssGetData(GuestContext *ctx);
+void shim_sceNpTssGetSmallStorage(GuestContext *ctx);
+void shim_sceNpTusAddAndGetVariableVUserAsync(GuestContext *ctx);
+void shim_sceNpTusGetMultiSlotVariableVUserAsync(GuestContext *ctx);
+void shim_sceNpTssCreateNpTitleCtx(GuestContext *ctx);
+
+void shim_sceNpWebApiDeleteHandle(GuestContext *ctx);
+
 // libSceNpParty (ps4_np_party.c)
 int32_t sceNpPartyInitialize(void);
 int32_t sceNpPartyTerminate(void);
@@ -404,6 +420,7 @@ int32_t sceNpPartyUnregisterPrivateHandler(void);
 int32_t sceNpPartyCheckCallback(void);
 int32_t sceNpPartyGetVoiceChatPriority(uint64_t out_gaddr);
 int32_t sceNpPartySetVoiceChatPriority(uint64_t in_gaddr);
+int32_t sceNpPartyGetState(uint64_t state_gaddr);
 uint64_t ps4_np_party_handler(bool private_handler);
 void shim_sceNpPartyInitialize(GuestContext *ctx);
 void shim_sceNpPartyTerminate(GuestContext *ctx);
@@ -413,6 +430,7 @@ void shim_sceNpPartyUnregisterPrivateHandler(GuestContext *ctx);
 void shim_sceNpPartyCheckCallback(GuestContext *ctx);
 void shim_sceNpPartyGetVoiceChatPriority(GuestContext *ctx);
 void shim_sceNpPartySetVoiceChatPriority(GuestContext *ctx);
+void shim_sceNpPartyGetState(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

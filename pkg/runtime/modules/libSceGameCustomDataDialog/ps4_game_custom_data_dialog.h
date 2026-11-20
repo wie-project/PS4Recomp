@@ -3,6 +3,10 @@
 #include <stdint.h>
 #include "recomp_runtime.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Common dialog status values and error codes (shadPS4 system/commondialog.h).
 #define GCDD_STATUS_NONE 0
 #define GCDD_STATUS_INITIALIZED 1
@@ -11,6 +15,8 @@
 #define GCDD_ERROR_NOT_INITIALIZED ((int32_t)0x80B80003)
 #define GCDD_ERROR_ALREADY_INITIALIZED ((int32_t)0x80B80004)
 #define GCDD_ERROR_NOT_FINISHED ((int32_t)0x80B80005)
+#define GCDD_ERROR_INVALID_STATE ((int32_t)0x80B80006)
+#define GCDD_ERROR_NOT_RUNNING ((int32_t)0x80B80007)
 #define GCDD_ERROR_PARAM_INVALID ((int32_t)0x80B8000A)
 #define GCDD_ERROR_ARG_NULL ((int32_t)0x80B8000D)
 
@@ -20,7 +26,20 @@
 
 int32_t ps4_game_custom_data_dialog_initialize(void);
 int32_t ps4_game_custom_data_dialog_terminate(void);
+int32_t ps4_game_custom_data_dialog_open(const void *param);
+int32_t ps4_game_custom_data_dialog_close(void);
 int32_t ps4_game_custom_data_dialog_update_status(void);
 int32_t ps4_game_custom_data_dialog_get_result(const uint8_t *result);
+
+int32_t sceGameCustomDataDialogInitialize(void);
+int32_t sceGameCustomDataDialogOpen(const void *param);
+int32_t sceGameCustomDataDialogUpdateStatus(void);
+int32_t sceGameCustomDataDialogGetResult(const void *result);
+int32_t sceGameCustomDataDialogClose(void);
+int32_t sceGameCustomDataDialogTerminate(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

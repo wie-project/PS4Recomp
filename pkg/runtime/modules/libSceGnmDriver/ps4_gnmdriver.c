@@ -296,10 +296,51 @@ uint32_t sceGnmDrawInitToDefaultContextState400(uint32_t *cmdbuf, uint32_t size)
 }
 
 uint32_t sceGnmDispatchInitDefaultHardwareState(uint32_t *cmdbuf, uint32_t size) {
-    if (!cmdbuf || size < 4) return 0;
-    cmdbuf[0] = PM4_TYPE3_HEADER(PM4_IT_NOP, size - 2, 1, 0);
-    memset(cmdbuf + 1, 0, (size - 1) * sizeof(uint32_t));
-    return size;
+    if (!cmdbuf || size < PM4_HW_INIT_PACKET_SIZE) return 0;
+    uint32_t *cur = cmdbuf;
+    uint32_t *cmdbuf_end = cmdbuf + PM4_HW_INIT_PACKET_SIZE;
+
+    // COMPUTE_STATIC_THREAD_MGMT_SE0 (0x216)
+    *cur++ = PM4_TYPE3_HEADER(PM4_IT_SET_SH_REG, 1, 1, 0);
+    *cur++ = 0x216u;
+    *cur++ = 0xffffffffu;
+
+    // COMPUTE_STATIC_THREAD_MGMT_SE1 (0x217)
+    *cur++ = PM4_TYPE3_HEADER(PM4_IT_SET_SH_REG, 1, 1, 0);
+    *cur++ = 0x217u;
+    *cur++ = 0xffffffffu;
+
+    if (sceKernelIsNeoMode()) {
+        // COMPUTE_STATIC_THREAD_MGMT_SE2 (0x219)
+        *cur++ = PM4_TYPE3_HEADER(PM4_IT_SET_SH_REG, 1, 1, 0);
+        *cur++ = 0x219u;
+        *cur++ = 0xffffffffu;
+
+        // COMPUTE_STATIC_THREAD_MGMT_SE3 (0x21a)
+        *cur++ = PM4_TYPE3_HEADER(PM4_IT_SET_SH_REG, 1, 1, 0);
+        *cur++ = 0x21au;
+        *cur++ = 0xffffffffu;
+    }
+
+    // COMPUTE_RESOURCE_LIMITS (0x215)
+    *cur++ = PM4_TYPE3_HEADER(PM4_IT_SET_SH_REG, 1, 1, 0);
+    *cur++ = 0x215u;
+    *cur++ = 0x170u;
+
+    // AcquireMem
+    *cur++ = PM4_TYPE3_HEADER(PM4_IT_ACQUIRE_MEM, 6, 0, 0);
+    *cur++ = 0x28000000u;
+    *cur++ = 0u;
+    *cur++ = 0u;
+    *cur++ = 0u;
+    *cur++ = 0u;
+    *cur++ = 0xau;
+
+    if (cur < cmdbuf_end - 1) {
+        uint32_t left = (uint32_t)(cmdbuf_end - cur - 1);
+        write_trailing_nop(cur, left);
+    }
+    return PM4_HW_INIT_PACKET_SIZE;
 }
 
 int32_t sceGnmResetVgtControl(uint32_t *cmdbuf, uint32_t size) {

@@ -2,13 +2,13 @@
 #include "ps4_kernel_sys.h"
 #include "ps4_sysmodule.h"
 #include "ps4_fiber.h"
+#include "ps4_syscalls.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <errno.h>
 #include <uuid/uuid.h>
-
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_time.h>
@@ -114,6 +114,54 @@ int32_t sceKernelGetSystemSwVersion(OrbisKernelSwVersion *version) {
     version->Size = sizeof(OrbisKernelSwVersion);
     strncpy(version->VersionString, " 9.000.001", sizeof(version->VersionString) - 1);
     version->Version = 0x09000001;
+    return 0;
+}
+
+int32_t sigreturn(void *context) {
+    if (!context) return -1;
+    return 0;
+}
+
+int __Ux86_64_setcontext(void *ucp) {
+    if (!ucp) return -1;
+    return 0;
+}
+
+// stubbed on non-devkit consoles
+int32_t sceKernelGetGPI(void) {
+    return 0; // SCE_OK
+}
+
+enum { MAX_PRT_APERTURES = 3 };
+
+static const uint64_t PRT_AREA_START_ADDR = UINT64_C(0x1000000000);
+static const uint64_t PRT_AREA_SIZE = UINT64_C(0xec00000000);
+
+typedef struct {
+    uint64_t address;
+    uint64_t size;
+} PrtAperture;
+
+static PrtAperture PrtApertures[MAX_PRT_APERTURES] = {0};
+
+int32_t sceKernelSetPrtAperture(int32_t id,uint64_t address, size_t size) {
+    if (id < 0 || id >= MAX_PRT_APERTURES) {
+        return -1;
+    }
+
+    if (address < PRT_AREA_START_ADDR || address + size > PRT_AREA_START_ADDR + PRT_AREA_SIZE) {
+        return -1;
+    }
+
+    if (address % 4096 != 0) {
+        return -1;
+    }
+
+    fprintf(stdout, "sceKernelSetPrtAperture: id=%d, address=0x%llx, size=0x%zx", id, address, size);
+    
+    PrtApertures[id].address = address;
+    PrtApertures[id].size = size;
+    
     return 0;
 }
 
@@ -442,6 +490,52 @@ void shim_sceKernelGetSanitizerMallocReplaceExternal(GuestContext *ctx) {
 
 void shim_sceKernelIsAddressSanitizerEnabled(GuestContext *ctx) {
     ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+// stubbed on non-devkit consoles
+void shim_sceKernelGetGPI(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceKernelGetGPI();
+    SHIM_RETURN();
+}
+
+void shim_sceKernelSetPrtAperture(GuestContext *ctx) {
+    int32_t id = (int32_t)ctx->rdi;
+    uint64_t address = ctx->rsi;
+    size_t size = (size_t)ctx->rdx;
+    ctx->rax = (uint64_t)(int64_t)sceKernelSetPrtAperture(id, address, size);
+    SHIM_RETURN();
+}
+
+void shim_sceKernelGetPrtAperture(GuestContext *ctx) {
+  int32_t id = (int32_t)ctx->rdi;
+  uint64_t address_out = ctx->rsi;
+  uint64_t size_out = ctx->rdx;
+
+  if (id < 0 || id >= MAX_PRT_APERTURES) {
+      ctx->rax = (uint64_t)(int64_t)(int32_t)0x80020016; // EINVAL
+      SHIM_RETURN();
+  }
+
+  if (!ctx->mem_base || !address_out || !size_out ||
+      address_out > ctx->mem_size || size_out > ctx->mem_size ||
+      sizeof(uint64_t) > ctx->mem_size - address_out ||
+      sizeof(uint64_t) > ctx->mem_size - size_out) {
+      ctx->rax = (uint64_t)(int64_t)(int32_t)0x8002000e; // EFAULT
+      SHIM_RETURN();
+  }
+
+  uint64_t address = PrtApertures[id].address;
+  uint64_t size = PrtApertures[id].size;
+  memcpy(ctx->mem_base + address_out, &address, sizeof(address));
+  memcpy(ctx->mem_base + size_out, &size, sizeof(size));
+
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_sceKernelFutimes(GuestContext *ctx) {
+    shim_futimes(ctx);
     SHIM_RETURN();
 }
 
@@ -1032,5 +1126,43 @@ void shim_Need_sceLibcInternal(GuestContext *ctx) {
 // is the entire observable behaviour the caller depends on.
 void shim_sceKernelSetFsstParam(GuestContext *ctx) {
     ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+static int32_t restore_ucontext(GuestContext *ctx, uint64_t ucp_addr) {
+    if (!ctx || !ctx->mem_base || !ucp_addr || ucp_addr + 0x100ULL > ctx->mem_size) {
+        return -1;
+    }
+    const uint8_t *ucp = ctx->mem_base + ucp_addr;
+    ctx->rdi = *(const uint64_t *)(ucp + 0x48ULL);
+    ctx->rsi = *(const uint64_t *)(ucp + 0x50ULL);
+    ctx->rdx = *(const uint64_t *)(ucp + 0x58ULL);
+    ctx->rcx = *(const uint64_t *)(ucp + 0x60ULL);
+    ctx->r8  = *(const uint64_t *)(ucp + 0x68ULL);
+    ctx->r9  = *(const uint64_t *)(ucp + 0x70ULL);
+    ctx->rax = *(const uint64_t *)(ucp + 0x78ULL);
+    ctx->rbx = *(const uint64_t *)(ucp + 0x80ULL);
+    ctx->rbp = *(const uint64_t *)(ucp + 0x88ULL);
+    ctx->r10 = *(const uint64_t *)(ucp + 0x90ULL);
+    ctx->r11 = *(const uint64_t *)(ucp + 0x98ULL);
+    ctx->r12 = *(const uint64_t *)(ucp + 0xa0ULL);
+    ctx->r13 = *(const uint64_t *)(ucp + 0xa8ULL);
+    ctx->r14 = *(const uint64_t *)(ucp + 0xb0ULL);
+    ctx->r15 = *(const uint64_t *)(ucp + 0xb8ULL);
+    ctx->rip = *(const uint64_t *)(ucp + 0xe0ULL);
+    ctx->rsp = *(const uint64_t *)(ucp + 0xf8ULL);
+    return 0;
+}
+
+void shim_sigreturn(GuestContext *ctx) {
+    uint64_t ucp_guest = ctx->rdi;
+    restore_ucontext(ctx, ucp_guest);
+    SHIM_RETURN();
+}
+
+void shim___Ux86_64_setcontext(GuestContext *ctx) {
+    uint64_t ucp_guest = ctx->rdi;
+    int rc = restore_ucontext(ctx, ucp_guest);
+    ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
 }

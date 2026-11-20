@@ -1098,6 +1098,70 @@ int32_t scePadGetControllerInformation(int32_t handle, OrbisPadControllerInforma
   return 0;
 }
 
+
+int32_t scePadOpenExt(int32_t userId, int32_t type, int32_t index, const void *param) {
+  (void)param;
+  return scePadOpen(userId, type, index, NULL);
+}
+
+int32_t scePadOutputReport(int32_t handle, uint8_t reportId, void *buffer, size_t size) {
+  if (handle <= 0)
+    return ORBIS_PAD_ERROR_INVALID_HANDLE;
+  pthread_mutex_lock(&g_pad_mutex);
+  int found = 0;
+  for (int i = 0; i < MAX_PAD_HANDLES; i++) {
+    if (g_pad_slots[i].in_use && g_pad_slots[i].handle == handle) {
+      found = 1;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_pad_mutex);
+  if (!found)
+    return ORBIS_PAD_ERROR_INVALID_HANDLE;
+  if (!buffer || size == 0)
+    return ORBIS_PAD_ERROR_INVALID_ARG;
+  (void)reportId;
+  return 0;
+}
+
+int32_t scePadGetExtControllerInformation(int32_t handle, OrbisPadExtendedControllerInformation *info) {
+  if (!info)
+    return ORBIS_PAD_ERROR_INVALID_ARG;
+  memset(info, 0, sizeof(*info));
+  return scePadGetControllerInformation(handle, &info->base);
+}
+
+int32_t scePadGetFeatureReport(int32_t handle, uint8_t reportId, void *buffer, size_t size) {
+  if (handle <= 0)
+    return ORBIS_PAD_ERROR_INVALID_HANDLE;
+  pthread_mutex_lock(&g_pad_mutex);
+  int found = 0;
+  for (int i = 0; i < MAX_PAD_HANDLES; i++) {
+    if (g_pad_slots[i].in_use && g_pad_slots[i].handle == handle) {
+      found = 1;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&g_pad_mutex);
+  if (!found)
+    return ORBIS_PAD_ERROR_INVALID_HANDLE;
+  if (!buffer || size == 0)
+    return ORBIS_PAD_ERROR_INVALID_ARG;
+  memset(buffer, 0, size);
+  (void)reportId;
+  return 0;
+}
+int32_t sceKernelGetOpenPsId(void *psId) {
+    if (!psId) return -EINVAL;
+    static const uint8_t default_psid[16] = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10
+    };
+    memcpy(psId, default_psid, sizeof(default_psid));
+    return 0;
+}
+
+
 void shim_scePadGetControllerInformation(GuestContext *ctx) {
   int32_t handle = (int32_t)ctx->rdi;
   uint64_t info_addr = ctx->rsi;
@@ -1167,4 +1231,44 @@ void shim_scePadEnableSpecificDeviceClass(GuestContext *ctx) {
   int32_t deviceClass = (int32_t)ctx->rdi;
   ctx->rax = (uint64_t)(int64_t)scePadEnableSpecificDeviceClass(deviceClass);
   SHIM_RETURN();
+}
+
+
+
+
+void shim_scePadOpenExt(GuestContext *ctx) {
+    int32_t userId = (int32_t)ctx->rdi;
+    int32_t type = (int32_t)ctx->rsi;
+    int32_t index = (int32_t)ctx->rdx;
+    const void *param = ctx->rcx ? (const void *)(ctx->mem_base + ctx->rcx) : NULL;
+    ctx->rax = (uint64_t)(int64_t)scePadOpenExt(userId, type, index, param);
+    SHIM_RETURN();
+}
+void shim_scePadOutputReport(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    uint8_t reportId = (uint8_t)ctx->rsi;
+    void *buffer = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+    size_t size = (size_t)ctx->rcx;
+    ctx->rax = (uint64_t)(int64_t)scePadOutputReport(handle, reportId, buffer, size);
+    SHIM_RETURN();
+}
+void shim_scePadGetExtControllerInformation(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    OrbisPadExtendedControllerInformation *info =
+        ctx->rsi ? (OrbisPadExtendedControllerInformation *)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)scePadGetExtControllerInformation(handle, info);
+    SHIM_RETURN();
+}
+void shim_scePadGetFeatureReport(GuestContext *ctx) {
+    int32_t handle = (int32_t)ctx->rdi;
+    uint8_t reportId = (uint8_t)ctx->rsi;
+    void *buffer = ctx->rdx ? (void *)(ctx->mem_base + ctx->rdx) : NULL;
+    size_t size = (size_t)ctx->rcx;
+    ctx->rax = (uint64_t)(int64_t)scePadGetFeatureReport(handle, reportId, buffer, size);
+    SHIM_RETURN();
+}
+void shim_sceKernelGetOpenPsId(GuestContext *ctx) {
+    void *psId = ctx->rdi ? (void *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceKernelGetOpenPsId(psId);
+    SHIM_RETURN();
 }

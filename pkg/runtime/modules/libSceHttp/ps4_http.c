@@ -431,6 +431,162 @@ int32_t sceHttp2Term(int32_t ctx_id) {
     return 0;
 }
 
+static pthread_mutex_t g_companion_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool g_companion_inited = false;
+static bool g_companion_started = false;
+static void *g_companion_cb = NULL;
+static void *g_companion_userdata = NULL;
+
+int32_t sceCompanionHttpdInitialize2(const void *param) {
+    (void)param;
+    pthread_mutex_lock(&g_companion_mutex);
+    if (g_companion_inited) {
+        pthread_mutex_unlock(&g_companion_mutex);
+        return ORBIS_COMPANION_HTTPD_ERROR_ALREADY_INITIALIZED;
+    }
+    g_companion_inited = true;
+    g_companion_started = false;
+    g_companion_cb = NULL;
+    g_companion_userdata = NULL;
+    pthread_mutex_unlock(&g_companion_mutex);
+    return 0;
+}
+
+int32_t sceCompanionHttpdTerminate(void) {
+    pthread_mutex_lock(&g_companion_mutex);
+    if (!g_companion_inited) {
+        pthread_mutex_unlock(&g_companion_mutex);
+        return ORBIS_COMPANION_HTTPD_ERROR_NOT_INITIALIZED;
+    }
+    g_companion_inited = false;
+    g_companion_started = false;
+    g_companion_cb = NULL;
+    g_companion_userdata = NULL;
+    pthread_mutex_unlock(&g_companion_mutex);
+    return 0;
+}
+
+int32_t sceCompanionHttpdStart(void) {
+    pthread_mutex_lock(&g_companion_mutex);
+    if (!g_companion_inited) {
+        pthread_mutex_unlock(&g_companion_mutex);
+        return ORBIS_COMPANION_HTTPD_ERROR_NOT_INITIALIZED;
+    }
+    if (g_companion_started) {
+        pthread_mutex_unlock(&g_companion_mutex);
+        return ORBIS_COMPANION_HTTPD_ERROR_ALREADY_STARTED;
+    }
+    g_companion_started = true;
+    pthread_mutex_unlock(&g_companion_mutex);
+    return 0;
+}
+
+int32_t sceCompanionHttpdStop(void) {
+    pthread_mutex_lock(&g_companion_mutex);
+    if (!g_companion_inited) {
+        pthread_mutex_unlock(&g_companion_mutex);
+        return ORBIS_COMPANION_HTTPD_ERROR_NOT_INITIALIZED;
+    }
+    if (!g_companion_started) {
+        pthread_mutex_unlock(&g_companion_mutex);
+        return ORBIS_COMPANION_HTTPD_ERROR_NOT_STARTED;
+    }
+    g_companion_started = false;
+    pthread_mutex_unlock(&g_companion_mutex);
+    return 0;
+}
+
+int32_t sceCompanionHttpdGetEvent(OrbisCompanionHttpdEvent *event) {
+    if (!event) {
+        return ORBIS_COMPANION_HTTPD_ERROR_INVALID_PARAM;
+    }
+    pthread_mutex_lock(&g_companion_mutex);
+    if (!g_companion_inited) {
+        pthread_mutex_unlock(&g_companion_mutex);
+        return ORBIS_COMPANION_HTTPD_ERROR_NOT_INITIALIZED;
+    }
+    memset(event, 0, sizeof(*event));
+    event->event = ORBIS_COMPANION_HTTPD_EVENT_DISCONNECT;
+    pthread_mutex_unlock(&g_companion_mutex);
+    return ORBIS_COMPANION_HTTPD_ERROR_NO_EVENT;
+}
+
+int32_t sceCompanionHttpdRegisterRequestCallback2(void *cb, void *userData) {
+    pthread_mutex_lock(&g_companion_mutex);
+    if (!g_companion_inited) {
+        pthread_mutex_unlock(&g_companion_mutex);
+        return ORBIS_COMPANION_HTTPD_ERROR_NOT_INITIALIZED;
+    }
+    g_companion_cb = cb;
+    g_companion_userdata = userData;
+    pthread_mutex_unlock(&g_companion_mutex);
+    return 0;
+}
+
+int32_t sceCompanionHttpdUnregisterRequestCallback(void) {
+    pthread_mutex_lock(&g_companion_mutex);
+    if (!g_companion_inited) {
+        pthread_mutex_unlock(&g_companion_mutex);
+        return ORBIS_COMPANION_HTTPD_ERROR_NOT_INITIALIZED;
+    }
+    g_companion_cb = NULL;
+    g_companion_userdata = NULL;
+    pthread_mutex_unlock(&g_companion_mutex);
+    return 0;
+}
+
+int32_t sceHttpSetResolveTimeOut(int32_t id, uint32_t timeout) {
+    if (id <= 0) {
+        return (int32_t)ORBIS_HTTP_ERROR_INVALID_ID;
+    }
+    pthread_mutex_lock(&g_http_mutex);
+    if (id >= g_http_next_id) {
+        pthread_mutex_unlock(&g_http_mutex);
+        return (int32_t)ORBIS_HTTP_ERROR_INVALID_ID;
+    }
+    pthread_mutex_unlock(&g_http_mutex);
+    (void)timeout;
+    return 0;
+}
+
+int32_t sceHttpSetCookieEnabled(int32_t id, int32_t enabled) {
+    if (id <= 0) {
+        return (int32_t)ORBIS_HTTP_ERROR_INVALID_ID;
+    }
+    pthread_mutex_lock(&g_http_mutex);
+    if (id >= g_http_next_id) {
+        pthread_mutex_unlock(&g_http_mutex);
+        return (int32_t)ORBIS_HTTP_ERROR_INVALID_ID;
+    }
+    pthread_mutex_unlock(&g_http_mutex);
+    (void)enabled;
+    return 0;
+}
+
+int32_t sceHttpsGetCaList(int32_t id, OrbisHttpsCaList *list) {
+    if (id <= 0) {
+        return (int32_t)ORBIS_HTTP_ERROR_INVALID_ID;
+    }
+    if (!list) {
+        return (int32_t)ORBIS_HTTP_ERROR_INVALID_VALUE;
+    }
+    pthread_mutex_lock(&g_http_mutex);
+    bool valid = false;
+    for (int i = 0; i < HTTP_MAX_CTX; i++) {
+        if (g_http_ctx[i].id == id) {
+            valid = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_http_mutex);
+    if (!valid) {
+        return (int32_t)ORBIS_HTTP_ERROR_INVALID_ID;
+    }
+    list->certs = NULL;
+    list->certsNum = 0;
+    return 0;
+}
+
 // Shims
 void shim_sceHttpInit(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpInit((int32_t)ctx->rdi, (int32_t)ctx->rsi, (uint64_t)ctx->rdx);
@@ -692,5 +848,69 @@ void shim_sceHttpsSetSslCallback(GuestContext *ctx) {
     void *cbfunc = (void *)guest_to_host(ctx, ctx->rsi);
     void *userArg = (void *)guest_to_host(ctx, ctx->rdx);
     ctx->rax = (uint64_t)sceHttpsSetSslCallback((int32_t)ctx->rdi, cbfunc, userArg);
+    SHIM_RETURN();
+}
+
+
+
+void shim_sceCompanionHttpdInitialize2(GuestContext *ctx) {
+    const void *param = (const void *)guest_to_host(ctx, ctx->rdi);
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdInitialize2(param);
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdTerminate(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdTerminate();
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdStart(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdStart();
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdStop(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdStop();
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdGetEvent(GuestContext *ctx) {
+    OrbisCompanionHttpdEvent *event = (OrbisCompanionHttpdEvent *)guest_to_host(ctx, ctx->rdi);
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdGetEvent(event);
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdRegisterRequestCallback2(GuestContext *ctx) {
+    void *cb = NULL;
+    void *userData = NULL;
+    if (ctx->rdi > 0x10000) {
+        cb = (void *)guest_to_host(ctx, ctx->rdi);
+        userData = (void *)guest_to_host(ctx, ctx->rsi);
+    } else {
+        cb = (void *)guest_to_host(ctx, ctx->rsi);
+        userData = (void *)guest_to_host(ctx, ctx->rdx);
+    }
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdRegisterRequestCallback2(cb, userData);
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdUnregisterRequestCallback(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdUnregisterRequestCallback();
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetResolveTimeOut(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceHttpSetResolveTimeOut((int32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetCookieEnabled(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceHttpSetCookieEnabled((int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpsGetCaList(GuestContext *ctx) {
+    OrbisHttpsCaList *list = (OrbisHttpsCaList *)guest_to_host(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceHttpsGetCaList((int32_t)ctx->rdi, list);
     SHIM_RETURN();
 }

@@ -233,6 +233,14 @@ void sceVideoOutSetBufferAttribute(OrbisVideoOutBufferAttribute *attr, uint32_t 
     attr->option = ORBIS_VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_NONE;
 }
 
+static uint32_t validate_video_out_buffer_attribute(const OrbisVideoOutBufferAttribute *attr) {
+    if (attr->reserved0 || attr->reserved1) return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
+    if (attr->aspect != 0) return ORBIS_VIDEO_OUT_ERROR_INVALID_ASPECT_RATIO;
+    if (attr->width > attr->pixelPitch) return ORBIS_VIDEO_OUT_ERROR_INVALID_PITCH;
+    if (attr->tmode < 0 || attr->tmode > 1) return ORBIS_VIDEO_OUT_ERROR_INVALID_TILING_MODE;
+    return 0;
+}
+
 int32_t sceVideoOutRegisterBuffers(int32_t handle, int32_t startIndex, void * const *bufferArray, int32_t bufferCount, const OrbisVideoOutBufferAttribute *attr) {
     if (!bufferArray || !attr) return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS;
     pthread_mutex_lock(&g_video_table_mutex);
@@ -258,12 +266,7 @@ int32_t sceVideoOutRegisterBuffers(int32_t handle, int32_t startIndex, void * co
         for (int i = 0; i < bufferCount && !err; i++)
             if (vh->bufferSet[startIndex + i] >= 0) err = ORBIS_VIDEO_OUT_ERROR_SLOT_OCCUPIED;
     }
-    if (!err) {
-        if (attr->reserved0 || attr->reserved1) err = ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
-        else if (attr->aspect != 0) err = ORBIS_VIDEO_OUT_ERROR_INVALID_ASPECT_RATIO;
-        else if (attr->width > attr->pixelPitch) err = ORBIS_VIDEO_OUT_ERROR_INVALID_PITCH;
-        else if (attr->tmode < 0 || attr->tmode > 1) err = ORBIS_VIDEO_OUT_ERROR_INVALID_TILING_MODE;
-    }
+    if (!err) err = validate_video_out_buffer_attribute(attr);
     if (err) {
         pthread_mutex_unlock(&vh->mutex);
         fprintf(stderr, "[videoout] RegisterBuffers(handle=%d, start=%d, count=%d) failed: 0x%08x\n", handle, startIndex,
@@ -283,6 +286,42 @@ int32_t sceVideoOutRegisterBuffers(int32_t handle, int32_t startIndex, void * co
             handle, startIndex, bufferCount, set, attr->width, attr->height, attr->pixelPitch, (unsigned)attr->format,
             attr->tmode, attr->option);
     return set;
+}
+
+int32_t sceVideoOutSubmitChangeBufferAttribute(int32_t handle, int32_t attributeIndex,
+                                               const OrbisVideoOutBufferAttribute *attr) {
+    if (!attr) return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS;
+
+    pthread_mutex_lock(&g_video_table_mutex);
+    VideoOutHandle *vh = find_video_handle_locked(handle);
+    if (!vh) {
+        pthread_mutex_unlock(&g_video_table_mutex);
+        return (int32_t)ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE;
+    }
+    pthread_mutex_lock(&vh->mutex);
+    pthread_mutex_unlock(&g_video_table_mutex);
+
+    uint32_t err = 0;
+    if (attributeIndex < 0 || attributeIndex >= PS4_VIDEO_OUT_MAX_BUFFER_SETS ||
+        vh->sets[attributeIndex].count == 0) {
+        err = ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE;
+    } else {
+        err = validate_video_out_buffer_attribute(attr);
+    }
+    if (err) {
+        pthread_mutex_unlock(&vh->mutex);
+        fprintf(stderr, "[videoout] SubmitChangeBufferAttribute(handle=%d, index=%d) failed: 0x%08x\n",
+                handle, attributeIndex, err);
+        return (int32_t)err;
+    }
+
+    vh->sets[attributeIndex].attr = *attr;
+    pthread_mutex_unlock(&vh->mutex);
+    fprintf(stderr,
+            "[videoout] SubmitChangeBufferAttribute(handle=%d, index=%d): %ux%u pitch %u, fmt 0x%x, tmode %d, option 0x%x\n",
+            handle, attributeIndex, attr->width, attr->height, attr->pixelPitch,
+            (unsigned)attr->format, attr->tmode, attr->option);
+    return 0;
 }
 
 int32_t sceVideoOutSetFlipRate(int32_t handle, int32_t fliprate) {
@@ -1190,3 +1229,11 @@ void shim_sceVideoOutCursorSetImageAddress(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_sceVideoOutSubmitChangeBufferAttribute(GuestContext *ctx) {
+    uint64_t attrGuest = ctx->rdx;
+    const OrbisVideoOutBufferAttribute *attr =
+        attrGuest ? (const OrbisVideoOutBufferAttribute *)(ctx->mem_base + attrGuest) : NULL;
+    int32_t rc = sceVideoOutSubmitChangeBufferAttribute((int32_t)ctx->rdi, (int32_t)ctx->rsi, attr);
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}

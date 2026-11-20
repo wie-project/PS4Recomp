@@ -127,6 +127,8 @@ static std::atomic<bool> s_logged_wait_reg_mem{false};
 static std::atomic<bool> s_logged_bad_data_sel{false};
 static std::atomic<bool> s_logged_bad_addr{false};
 static std::atomic<bool> s_logged_ib_depth{false};
+static std::atomic<bool> s_logged_dma_ib_sync{false};
+static std::atomic<bool> s_logged_dma_ib_dispatch{false};
 
 static inline bool LogOnce(std::atomic<bool> &flag) {
     bool expected = false;
@@ -535,10 +537,40 @@ static const int kMaxIbDepth = ps4gnm_ib::kMaxDepth;
 // PS4_GNM_STRICT_BARRIERS=1 puts a barrier at every sync packet.
 static const bool g_min_barriers = getenv("PS4_GNM_STRICT_BARRIERS") == nullptr;
 
-// CP DMA (IT_DMA_DATA): memory/GDS copies and fills, executed synchronously
-// on the CPU (guest GPU memory is host memory) after draining encoded GPU work.
+// CP DMA (IT_DMA_DATA): memory/GDS copies and fills. Copies can stay on the GPU timeline,
+// except when the CPU parser needs a destination updated before decoding the next compute packet.
 // Layout as in shadPS4 src/video_core/amdgpu/pm4_cmds.h (PM4DmaData).
-static void HandleDmaData(GuestContext *ctx, const uint32_t *p, uint32_t payload_dw) {
+static bool DmaWritesUnparsedComputeIb(GuestContext *ctx, const uint32_t *p, uint32_t payload_dw,
+                                       const std::vector<ps4gnm_ib::Frame> &frames) {
+    if (payload_dw < 6 || !ctx || !ctx->mem_base) return false;
+    const uint32_t ctl = p[0];
+    const uint32_t dst_sel = (ctl >> 20) & 3;
+    const uint64_t dst = (uint64_t)p[3] | ((uint64_t)p[4] << 32);
+    const uint32_t cmd = p[5];
+    const uint32_t n = cmd & 0x1FFFFF;
+    const bool sas = (cmd >> 26) & 1, das = (cmd >> 27) & 1;
+    if (dst_sel == 1 || n == 0 || p[3] == 0x3022C || das || sas || dst == 0 ||
+        dst >= ctx->mem_size || n > ctx->mem_size - dst)
+        return false;
+
+    const uintptr_t base = (uintptr_t)ctx->mem_base;
+    const uint64_t dst_end = dst + n;
+    for (const ps4gnm_ib::Frame &frame : frames) {
+        const uintptr_t words = (uintptr_t)frame.words;
+        if (words < base || frame.pc >= frame.dw) continue;
+        const uint64_t frame_base_offset = (uint64_t)(words - base);
+        const uint64_t frame_pc_offset = (uint64_t)frame.pc * sizeof(uint32_t);
+        if (frame_base_offset > ctx->mem_size || frame_pc_offset > ctx->mem_size - frame_base_offset)
+            continue;
+        const uint64_t frame_offset = frame_base_offset + frame_pc_offset;
+        const uint64_t frame_size = (uint64_t)(frame.dw - frame.pc) * sizeof(uint32_t);
+        if (frame_offset > ctx->mem_size || frame_size > ctx->mem_size - frame_offset) continue;
+        if (dst < frame_offset + frame_size && frame_offset < dst_end) return true;
+    }
+    return false;
+}
+
+static void HandleDmaData(GuestContext *ctx, const uint32_t *p, uint32_t payload_dw, bool force_sync = false) {
     if (payload_dw < 6 || !ctx || !ctx->mem_base) return;
     uint32_t ctl = p[0];
     uint32_t dst_sel = (ctl >> 20) & 3;
@@ -562,7 +594,7 @@ static void HandleDmaData(GuestContext *ctx, const uint32_t *p, uint32_t payload
     }
     // With GPU work pending, run the copy on the GPU timeline behind it instead of draining
     // (games read GDS append counters back this way every frame).
-    if (ps4draw::HasPendingWork() &&
+    if (!force_sync && ps4draw::HasPendingWork() &&
         ps4draw::GpuDma(src_gds, src_sel == 2, src_sel == 2 ? 0 : (src_gds ? p[1] : src), p[1], dst_gds,
                         dst_gds ? p[3] : dst, n, CpQueue()))
         return;
@@ -1172,6 +1204,7 @@ struct ComputeSubmit {
     uint32_t pipe_id = 0, slot = 0;
     uint32_t *read_ptr = nullptr; // ring read pointer, advanced as depth-0 packets complete
     uint32_t ring_size_dw = 0, read_base_dw = 0;
+    bool log_dispatch_after_dma_sync = false;
     std::vector<ps4gnm_ib::Frame> frames;
 };
 using ComputeQueueState = ps4gnm_wq::WaitQueue<ComputeSubmit>;
@@ -1248,7 +1281,19 @@ static bool ProcessComputePackets(ComputeSubmit &sub, bool skip_wait) {
             }
             break;
         case PM4_OP_DMA_DATA:
-            HandleDmaData(ctx, payload, payload_dw);
+            if (DmaWritesUnparsedComputeIb(ctx, payload, payload_dw, sub.frames)) {
+                if (LogOnce(s_logged_dma_ib_sync)) {
+                    const uint64_t dst = (uint64_t)payload[3] | ((uint64_t)payload[4] << 32);
+                    fprintf(stderr,
+                            "[ps4-gnm] DMA_DATA writes into an active compute IB; synchronizing before parsing "
+                            "(dst=0x%llx size=%u)\n",
+                            (unsigned long long)dst, payload[5] & 0x1FFFFF);
+                }
+                HandleDmaData(ctx, payload, payload_dw, true);
+                sub.log_dispatch_after_dma_sync = true;
+            } else {
+                HandleDmaData(ctx, payload, payload_dw);
+            }
             break;
         case PM4_OP_SET_SH_REG: {
             const uint32_t off = payload[0] & 0xFFFF;
@@ -1262,8 +1307,19 @@ static bool ProcessComputePackets(ComputeSubmit &sub, bool skip_wait) {
             break;
         }
         case PM4_OP_DISPATCH_DIRECT:
-            if (payload_dw >= 4 && (payload[3] & 1))
-                ComputeDispatch(ctx, slot, payload[0], payload[1], payload[2], 0, "asc");
+            if (payload_dw >= 4) {
+                if (sub.log_dispatch_after_dma_sync) {
+                    if (LogOnce(s_logged_dma_ib_dispatch)) {
+                        fprintf(stderr,
+                                "[ps4-gnm] dispatch after active-IB DMA sync at pc=%u: groups=%u,%u,%u "
+                                "initiator=0x%x\n",
+                                f.pc, payload[0], payload[1], payload[2], payload[3]);
+                    }
+                    sub.log_dispatch_after_dma_sync = false;
+                }
+                if (payload[3] & 1)
+                    ComputeDispatch(ctx, slot, payload[0], payload[1], payload[2], 0, "asc");
+            }
             break;
         case PM4_OP_DISPATCH_INDIRECT:
             if (payload_dw >= 3 && (payload[2] & 1)) {

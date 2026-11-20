@@ -11,9 +11,43 @@ extern "C" {
 #endif
 
 // Error codes
-#define ORBIS_HTTP_ERROR_NETWORK   0x80431063
-#define ORBIS_HTTP_ERROR_TIMEOUT   0x80431068
-#define ORBIS_HTTP_ERROR_INVALID_ID 0x80431100
+#define ORBIS_HTTP_ERROR_BEFORE_INIT 0x80431020
+#define ORBIS_HTTP_ERROR_NETWORK     0x80431063
+#define ORBIS_HTTP_ERROR_TIMEOUT     0x80431068
+#define ORBIS_HTTP_ERROR_INVALID_ID  0x80431100
+#define ORBIS_HTTP_ERROR_INVALID_VALUE 0x804311FE
+
+// Companion HTTPD event codes
+#define ORBIS_COMPANION_HTTPD_EVENT_CONNECT    0x10000001
+#define ORBIS_COMPANION_HTTPD_EVENT_DISCONNECT 0x10000002
+
+// Companion HTTPD error codes
+#define ORBIS_COMPANION_HTTPD_ERROR_UNKNOWN             ((int32_t)0x80E40001)
+#define ORBIS_COMPANION_HTTPD_ERROR_FATAL               ((int32_t)0x80E40002)
+#define ORBIS_COMPANION_HTTPD_ERROR_NOMEM               ((int32_t)0x80E40003)
+#define ORBIS_COMPANION_HTTPD_ERROR_INVALID_PARAM       ((int32_t)0x80E40004)
+#define ORBIS_COMPANION_HTTPD_ERROR_INVALID_OPERATION   ((int32_t)0x80E40005)
+#define ORBIS_COMPANION_HTTPD_ERROR_NOT_INITIALIZED     ((int32_t)0x80E40006)
+#define ORBIS_COMPANION_HTTPD_ERROR_ALREADY_INITIALIZED ((int32_t)0x80E40007)
+#define ORBIS_COMPANION_HTTPD_ERROR_NO_EVENT            ((int32_t)0x80E40008)
+#define ORBIS_COMPANION_HTTPD_ERROR_NOT_GENERATE_RESPONSE ((int32_t)0x80E40009)
+#define ORBIS_COMPANION_HTTPD_ERROR_ALREADY_STARTED     ((int32_t)0x80E4000A)
+#define ORBIS_COMPANION_HTTPD_ERROR_NOT_STARTED         ((int32_t)0x80E4000B)
+#define ORBIS_COMPANION_HTTPD_ERROR_ALREADY_REGISTERED  ((int32_t)0x80E4000C)
+#define ORBIS_COMPANION_HTTPD_ERROR_NOT_CONNECTED       ((int32_t)0x80E4000D)
+#define ORBIS_COMPANION_HTTPD_ERROR_USER_NOT_FOUND      ((int32_t)0x80E4000E)
+
+typedef struct OrbisCompanionHttpdEvent {
+    int32_t event;
+    union {
+        char reserved[256];
+    } data;
+} OrbisCompanionHttpdEvent;
+
+typedef struct OrbisHttpsCaList {
+    void *certs;
+    int32_t certsNum;
+} OrbisHttpsCaList;
 
 typedef void* OrbisHttpEpollHandle;
 
@@ -85,6 +119,18 @@ bool ps4_http_ctx_has_custom_ca(int32_t libhttpCtxId);
 int32_t sceHttp2Init(int32_t net_id, int32_t ssl_id, uint64_t pool_size, int32_t max_requests);
 int32_t sceHttp2Term(int32_t ctx_id);
 
+int32_t sceCompanionHttpdInitialize2(const void *param);
+int32_t sceCompanionHttpdTerminate(void);
+int32_t sceCompanionHttpdStart(void);
+int32_t sceCompanionHttpdStop(void);
+int32_t sceCompanionHttpdGetEvent(OrbisCompanionHttpdEvent *event);
+int32_t sceCompanionHttpdRegisterRequestCallback2(void *cb, void *userData);
+int32_t sceCompanionHttpdUnregisterRequestCallback(void);
+
+int32_t sceHttpSetResolveTimeOut(int32_t id, uint32_t timeout);
+int32_t sceHttpSetCookieEnabled(int32_t id, int32_t enabled);
+int32_t sceHttpsGetCaList(int32_t id, OrbisHttpsCaList *list);
+
 // Shims
 void shim_sceHttpInit(GuestContext *ctx);
 void shim_sceHttpTerm(GuestContext *ctx);
@@ -128,6 +174,17 @@ void shim_sceHttpsSetSslCallback(GuestContext *ctx);
 void shim_sceHttpsLoadCert(GuestContext *ctx);
 void shim_sceHttp2Init(GuestContext *ctx);
 void shim_sceHttp2Term(GuestContext *ctx);
+void shim_sceCompanionHttpdInitialize2(GuestContext *ctx);
+void shim_sceCompanionHttpdTerminate(GuestContext *ctx);
+void shim_sceCompanionHttpdStart(GuestContext *ctx);
+void shim_sceCompanionHttpdStop(GuestContext *ctx);
+void shim_sceCompanionHttpdGetEvent(GuestContext *ctx);
+void shim_sceCompanionHttpdRegisterRequestCallback2(GuestContext *ctx);
+void shim_sceCompanionHttpdUnregisterRequestCallback(GuestContext *ctx);
+
+void shim_sceHttpSetResolveTimeOut(GuestContext *ctx);
+void shim_sceHttpSetCookieEnabled(GuestContext *ctx);
+void shim_sceHttpsGetCaList(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

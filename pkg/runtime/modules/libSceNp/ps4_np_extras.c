@@ -435,6 +435,15 @@ void shim_sceNpSignalingDeactivateConnection(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+void shim_sceNpSignalingGetLocalNetInfo(GuestContext *ctx) {
+    if (!ctx->rsi) {
+        ctx->rax = (uint64_t)(int64_t)0x80552702; // ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT
+        SHIM_RETURN();
+    }
+    ctx->rax = (uint64_t)(int64_t)0x80552701; // ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED
+    SHIM_RETURN();
+}
+
 //=============================================================================
 // Additional libSceNpScore
 //=============================================================================

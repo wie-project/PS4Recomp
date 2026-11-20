@@ -25,6 +25,18 @@ typedef struct OrbisKernelSwVersion {
     uint32_t Version;
 } OrbisKernelSwVersion;
 
+typedef struct OrbisPthreadAttr {
+    uint32_t size;
+    uint32_t flags;
+    void *stackaddr;
+    uint64_t stacksize;
+    uint64_t guardsize;
+    uint64_t schedpolicy;
+    uint64_t schedparam;
+    // Padding or reserved fields to match typical SDK sizing if necessary
+    char     reserved[32];
+} OrbisPthreadAttr;
+
 // High-resolution process timers
 uint64_t sceKernelGetProcessTimeCounter(void);
 uint64_t sceKernelGetProcessTimeCounterFrequency(void);
@@ -44,6 +56,15 @@ int32_t sceKernelGetSystemSwVersion(OrbisKernelSwVersion *version);
 int32_t sceKernelUuidCreate(void *uuid);
 int32_t sceKernelSetGPO(uint32_t gpo);
 int32_t sceKernelIsProspero(void);
+int32_t sigreturn(void *context);
+int __Ux86_64_setcontext(void *ucp);
+int32_t sceKernelInstallExceptionHandler(int32_t signum, uint64_t handler);
+int32_t sceKernelRemoveExceptionHandler(int32_t signum);
+int32_t sceKernelRaiseException(uint64_t thread, int32_t signum);
+
+int32_t sceKernelGetGPI(void);
+int32_t sceKernelSetPrtAperture(int32_t id,uint64_t address, size_t size);
+int32_t sceKernelFutimes(const char *path, const struct timeval tv[2]);
 
 // Guest execution shims
 void shim_sceKernelGetProcessTimeCounter(GuestContext *ctx);
@@ -84,9 +105,6 @@ void shim_Func_E7EBCE96E92F91F8(GuestContext *ctx);
 void shim_sceKernelGetSanitizerNewReplaceExternal(GuestContext *ctx);
 void shim_sceKernelGetSanitizerMallocReplaceExternal(GuestContext *ctx);
 void shim_sceKernelIsAddressSanitizerEnabled(GuestContext *ctx);
-int32_t sceKernelInstallExceptionHandler(int32_t signum, uint64_t handler);
-int32_t sceKernelRemoveExceptionHandler(int32_t signum);
-int32_t sceKernelRaiseException(uint64_t thread, int32_t signum);
 
 void shim_sceKernelInstallExceptionHandler(GuestContext *ctx);
 void shim_sceKernelRemoveExceptionHandler(GuestContext *ctx);
@@ -104,6 +122,12 @@ void shim___progname(GuestContext *ctx);
 void shim_getargv(GuestContext *ctx);
 void shim_sceLibcHeapGetTraceInfo(GuestContext *ctx);
 void shim_Need_sceLibcInternal(GuestContext *ctx);
+void shim_sigreturn(GuestContext *ctx);
+void shim___Ux86_64_setcontext(GuestContext *ctx);
+
+void shim_sceKernelGetGPI(GuestContext *ctx);
+void shim_sceKernelSetPrtAperture(GuestContext *ctx);
+void shim_sceKernelFutimes(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

@@ -262,6 +262,11 @@ struct StreamDesc {
     AvPlayerStreamInfo info;
 };
 
+struct DecoderPacket {
+    AVPacket *packet;
+    bool flush_decoder;
+};
+
 enum class AvState {
     Unknown,
     Initial,
@@ -736,11 +741,11 @@ private:
         if (m_audio_decoder_thread.joinable()) m_audio_decoder_thread.join();
 
         while (auto pkt = m_video_packets.pop()) {
-            AVPacket *p = *pkt;
+            AVPacket *p = pkt->packet;
             av_packet_free(&p);
         }
         while (auto pkt = m_audio_packets.pop()) {
-            AVPacket *p = *pkt;
+            AVPacket *p = pkt->packet;
             av_packet_free(&p);
         }
 
@@ -808,9 +813,17 @@ private:
                 av_packet_free(&pkt);
                 if (m_is_looping.load()) {
                     AVPLAYER_LOG("Demuxer EOF reached, looping back to start");
-                    avformat_seek_file(m_fmt_ctx, -1, 0, 0, 0, 0);
-                    if (m_video_codec_ctx) avcodec_flush_buffers(m_video_codec_ctx);
-                    if (m_audio_codec_ctx) avcodec_flush_buffers(m_audio_codec_ctx);
+                    if (avformat_seek_file(m_fmt_ctx, -1, 0, 0, 0, 0) < 0) {
+                        AVPLAYER_LOG("Failed to seek to start while looping");
+                        m_is_eof.store(true);
+                        m_video_packets.notify_all();
+                        m_audio_packets.notify_all();
+                        break;
+                    }
+                    // Keep the flush ordered after queued packets and execute it on each decoder's
+                    // own thread; FFmpeg codec contexts are not safe to flush from the demuxer.
+                    if (m_video_stream_idx >= 0) m_video_packets.push(DecoderPacket{nullptr, true});
+                    if (m_audio_stream_idx >= 0) m_audio_packets.push(DecoderPacket{nullptr, true});
                     m_start_time = std::chrono::steady_clock::now();
                     m_total_pause_duration = std::chrono::steady_clock::duration(0);
                     continue;
@@ -823,9 +836,9 @@ private:
             }
 
             if (pkt->stream_index == m_video_stream_idx) {
-                m_video_packets.push(std::move(pkt));
+                m_video_packets.push(DecoderPacket{pkt, false});
             } else if (pkt->stream_index == m_audio_stream_idx) {
-                m_audio_packets.push(std::move(pkt));
+                m_audio_packets.push(DecoderPacket{pkt, false});
             } else {
                 av_packet_free(&pkt);
             }
@@ -845,11 +858,17 @@ private:
             if (m_video_packets.size() == 0 && m_is_eof.load()) {
                 break;
             }
-            AVPacket *pkt = nullptr;
-            if (!m_video_packets.wait_pop(m_workers_stop, pkt) || !pkt) {
+            DecoderPacket item{};
+            if (!m_video_packets.wait_pop(m_workers_stop, item)) {
                 if (m_is_eof.load() && m_video_packets.size() == 0) break;
                 continue;
             }
+            if (item.flush_decoder) {
+                if (m_video_codec_ctx) avcodec_flush_buffers(m_video_codec_ctx);
+                continue;
+            }
+            AVPacket *pkt = item.packet;
+            if (!pkt) continue;
 
             int ret = avcodec_send_packet(m_video_codec_ctx, pkt);
             av_packet_free(&pkt);
@@ -917,11 +936,17 @@ private:
             if (m_audio_packets.size() == 0 && m_is_eof.load()) {
                 break;
             }
-            AVPacket *pkt = nullptr;
-            if (!m_audio_packets.wait_pop(m_workers_stop, pkt) || !pkt) {
+            DecoderPacket item{};
+            if (!m_audio_packets.wait_pop(m_workers_stop, item)) {
                 if (m_is_eof.load() && m_audio_packets.size() == 0) break;
                 continue;
             }
+            if (item.flush_decoder) {
+                if (m_audio_codec_ctx) avcodec_flush_buffers(m_audio_codec_ctx);
+                continue;
+            }
+            AVPacket *pkt = item.packet;
+            if (!pkt) continue;
 
             int ret = avcodec_send_packet(m_audio_codec_ctx, pkt);
             av_packet_free(&pkt);
@@ -1034,8 +1059,8 @@ private:
     SwsContext *m_sws_ctx = nullptr;
     AvPlayerAudioConverter m_audio_converter;
 
-    SafeQueue<AVPacket *> m_video_packets;
-    SafeQueue<AVPacket *> m_audio_packets;
+    SafeQueue<DecoderPacket> m_video_packets;
+    SafeQueue<DecoderPacket> m_audio_packets;
     SafeQueue<GuestBuffer> m_free_video_buffers;
     SafeQueue<GuestBuffer> m_free_audio_buffers;
     SafeQueue<DecodedVideoFrame> m_ready_video_frames;

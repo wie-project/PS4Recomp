@@ -1,5 +1,6 @@
 #include "ps4_shareplay.h"
 #include <stdbool.h>
+#include <string.h>
 
 static bool g_shareplay_initialized = false;
 static int32_t g_shareplay_prohibited = 0;
@@ -19,6 +20,15 @@ int32_t sceSharePlaySetProhibition(int32_t prohibited) {
     return 0;
 }
 
+int32_t sceSharePlayGetCurrentConnectionInfo(OrbisSharePlayConnectionInfo *pInfo) {
+    if (!pInfo) {
+        return ORBIS_SHARE_PLAY_ERROR_INVALID_ARGUMENT;
+    }
+    memset(pInfo, 0, sizeof(*pInfo));
+    pInfo->status = ORBIS_SHARE_PLAY_CONNECTION_STATUS_DORMANT;
+    return 0;
+}
+
 // Shims
 void shim_sceSharePlayInitialize(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSharePlayInitialize();
@@ -32,5 +42,10 @@ void shim_sceSharePlayTerminate(GuestContext *ctx) {
 
 void shim_sceSharePlaySetProhibition(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceSharePlaySetProhibition((int32_t)ctx->rdi);
+    SHIM_RETURN();
+}
+
+void shim_sceSharePlayGetCurrentConnectionInfo(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSharePlayGetCurrentConnectionInfo((OrbisSharePlayConnectionInfo *)ctx->rdi);
     SHIM_RETURN();
 }
