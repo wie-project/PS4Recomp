@@ -931,7 +931,10 @@ struct State {
     // textures with mip chains whose levels were rendered as separate render targets
     struct MipChain {
         id<MTLTexture> tex;
+        id<MTLTexture> sample_view;
+        CompMapping sample_swizzle{};
         uint64_t built_submit = ~0ull;
+        std::array<std::pair<uint64_t, uint64_t>, kMaxMips> versions{};
     };
     std::unordered_map<uint64_t, MipChain> mip_chains; // key: hash of T# identity
     uint32_t cb_extent[8] = {};
@@ -2204,7 +2207,7 @@ void OcclBeforeDraw(uint32_t count_control);
 // The GPU depth surface a T# at `address` reads: the last written one with the T#'s sample count
 // (a 1x surface and its 2x checkerboard twin share the memory), else the last written one.
 id<MTLTexture> DepthTargetFor(uint64_t address, const ImageDesc& img);
-id<MTLTexture> MipChainFor(const ImageDesc& img, bool encode);
+id<MTLTexture> MipChainFor(ImageDesc& img, bool encode);
 // The color target at `address` for a level of `w` x `h`: the last written one of that size, else
 // the last written one.
 id<MTLTexture> ColorTargetFor(uint64_t address, uint32_t w, uint32_t h);
@@ -5919,16 +5922,7 @@ bool BindStage(const Shader* s, const uint32_t ud[16], const std::vector<uint32_
                 if (!tex) RLog("depth-as-color", "depth surface 0x%llx sampled as color: no companion",
                                (unsigned long long)img.address);
             } else if (id<MTLTexture> mc = MipChainFor(img, false)) {
-                const NSUInteger mc_slices =
-                    (mc.textureType == MTLTextureTypeCube || mc.textureType == MTLTextureTypeCubeArray)
-                        ? mc.arrayLength * 6
-                        : mc.arrayLength;
-                id<MTLTexture> mv = [mc newTextureViewWithPixelFormat:(MTLPixelFormat)img.pixel.mtl_format
-                                                          textureType:mc.textureType
-                                                               levels:NSMakeRange(0, mc.mipmapLevelCount)
-                                                               slices:NSMakeRange(0, std::max<NSUInteger>(1, mc_slices))
-                                                              swizzle:ToMTLSwizzle(img.view_swizzle)];
-                tex = mv ? mv : mc;
+                tex = mc;
             } else {
                 tex = SampledTexture(img);
                 static const bool texdbg3d = getenv("PS4_GNM_TEXDBG3D") != nullptr;
@@ -6309,11 +6303,11 @@ static uint32_t TextureTotalSlices(id<MTLTexture> t) {
                : (uint32_t)t.arrayLength;
 }
 
-uint64_t MipChainKey(const ImageDesc& img) {
-    uint64_t k[5] = {img.address, ((uint64_t)img.width << 32) | img.height,
+uint64_t MipChainKey(const ImageDesc& img, uint32_t first_slice, uint32_t slices) {
+    uint64_t k[6] = {img.address, ((uint64_t)img.width << 32) | img.height,
                      ((uint64_t)img.pixel.mtl_format << 32) | img.num_levels,
                      ((uint64_t)img.tile_mode << 32) | img.mtl_texture_type,
-                     img.num_layers};
+                     img.num_layers, ((uint64_t)first_slice << 32) | slices};
     return Fnv(k, sizeof(k));
 }
 
@@ -6378,16 +6372,38 @@ uint32_t MipChainSources(const ImageDesc& img, id<MTLTexture> base, __strong id<
 // target: the game rendered each level separately (bloom/downsample/IBL chains). Assemble a
 // mipmapped copy from the render targets found at the mip addresses (blits encoded into the
 // current command buffer).
-id<MTLTexture> MipChainFor(const ImageDesc& img, bool encode) {
+id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
     if (!IsMipChainType(img.mtl_texture_type) || img.num_levels < 2 || img.pixel.compressed) return nil;
-    const uint32_t want_slices = (img.mtl_texture_type == MTLTextureType2D) ? 1u : std::max(1u, img.num_layers);
+    const uint32_t total_slices = (img.mtl_texture_type == MTLTextureType2D) ? 1u : std::max(1u, img.num_layers);
     id<MTLTexture> base = ColorTargetFor(img.address, img.width, img.height);
     if (!base || base.sampleCount > 1 || base.width != img.width || base.height != img.height ||
-        TextureTotalSlices(base) < want_slices)
+        TextureTotalSlices(base) < total_slices)
         return nil;
-    const uint64_t key = MipChainKey(img);
+    // Cube shaders use 2D face arrays; assemble only the faces (or array layers) the T# can see.
+    const uint32_t first_slice = std::min(img.base_array, total_slices - 1);
+    const uint32_t last_slice = std::min(std::max(img.last_array, first_slice), total_slices - 1);
+    const uint32_t want_slices = last_slice - first_slice + 1;
+    const bool compact = want_slices < total_slices;
+    const MTLTextureType type = compact ? MTLTextureType2DArray : (MTLTextureType)img.mtl_texture_type;
+    const uint64_t key = MipChainKey(img, first_slice, want_slices);
     auto it = S.mip_chains.find(key);
-    if (!encode) return it != S.mip_chains.end() ? it->second.tex : nil;
+    if (!encode) {
+        if (it == S.mip_chains.end() || !it->second.tex) return nil;
+        if (compact) {
+            img.base_array = 0;
+            img.last_array = want_slices - 1;
+        }
+        State::MipChain& mc = it->second;
+        if (!mc.sample_view || !(mc.sample_swizzle == img.view_swizzle)) {
+            mc.sample_view = [mc.tex newTextureViewWithPixelFormat:(MTLPixelFormat)img.pixel.mtl_format
+                                                       textureType:mc.tex.textureType
+                                                            levels:NSMakeRange(0, mc.tex.mipmapLevelCount)
+                                                            slices:NSMakeRange(0, TextureTotalSlices(mc.tex))
+                                                           swizzle:ToMTLSwizzle(img.view_swizzle)];
+            mc.sample_swizzle = img.view_swizzle;
+        }
+        return mc.sample_view ? mc.sample_view : mc.tex;
+    }
     if (!BackendHas(kGnmCapCopies, "mip chain of render targets")) return nil;
     State::MipChain& mc = S.mip_chains[key];
     const uint64_t stamp = S.submit_idx + (S.n_draws << 20) + (S.n_dispatches << 40);
@@ -6399,19 +6415,36 @@ id<MTLTexture> MipChainFor(const ImageDesc& img, bool encode) {
     // the targets of the other levels are read by the blits below (level 0: ResolveTextureHazards)
     for (uint32_t m = 1; m < levels; ++m)
         if (srcs[m]) RefreshGuestNewer(addrs[m], srcs[m], false);
-    if (!mc.tex || mc.tex.mipmapLevelCount != levels || mc.tex.textureType != (MTLTextureType)img.mtl_texture_type ||
-        TextureTotalSlices(mc.tex) != want_slices) {
+    const bool allocate = !mc.tex || mc.tex.mipmapLevelCount != levels || mc.tex.pixelFormat != base.pixelFormat ||
+                          mc.tex.textureType != type || TextureTotalSlices(mc.tex) != want_slices;
+    std::array<std::pair<uint64_t, uint64_t>, kMaxMips> versions{};
+    // Probe generation often updates one mip at a time. Refresh only the changed subresources.
+    const bool track_versions = !g_async_compute;
+    static_assert(kMaxMips <= 32);
+    uint32_t dirty = 0;
+    for (uint32_t m = 0; m < levels; ++m) {
+        if (!srcs[m]) continue;
+        if (track_versions) versions[m] = S.tex->ColorTargetVersion(addrs[m], srcs[m]);
+        if (allocate || !versions[m].first || versions[m] != mc.versions[m]) dirty |= 1u << m;
+    }
+    if (!allocate && !dirty) {
+        mc.built_submit = stamp;
+        mc.versions = versions;
+        return mc.tex;
+    }
+    if (allocate) {
         MTLTextureDescriptor* td = [MTLTextureDescriptor new];
-        td.textureType = (MTLTextureType)img.mtl_texture_type;
+        td.textureType = type;
         td.pixelFormat = base.pixelFormat;
         td.width = img.width;
         td.height = img.height;
         td.mipmapLevelCount = levels;
-        if (img.mtl_texture_type == MTLTextureTypeCube) td.arrayLength = 1;
-        else if (img.mtl_texture_type == MTLTextureTypeCubeArray) td.arrayLength = std::max(1u, want_slices / 6);
+        if (type == MTLTextureTypeCube) td.arrayLength = 1;
+        else if (type == MTLTextureTypeCubeArray) td.arrayLength = want_slices / 6;
         else td.arrayLength = want_slices;
         td.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
         td.storageMode = MTLStorageModePrivate;
+        mc.sample_view = nil;
         OwnTextureDropped(mc.tex); // the chain with another level count
         mc.tex = [S.dev newTextureWithDescriptor:td];
         if (!mc.tex) return nil;
@@ -6421,17 +6454,25 @@ id<MTLTexture> MipChainFor(const ImageDesc& img, bool encode) {
     EnsureCmd();
     S.be->BeginCopies();
     for (uint32_t m = 0; m < levels; ++m) {
+        if (!(dirty & (1u << m))) continue;
         const uint32_t w = std::max(1u, img.width >> m), h = std::max(1u, img.height >> m);
         id<MTLTexture> src = srcs[m];
         if (!src || src.pixelFormat != base.pixelFormat || src.sampleCount > 1 || src.width < w || src.height < h) continue;
-        const uint32_t copy_slices = std::min(want_slices, TextureTotalSlices(src));
+        const uint32_t available = TextureTotalSlices(src);
+        if (available <= first_slice) continue;
+        const uint32_t copy_slices = std::min(want_slices, available - first_slice);
+        if (copy_slices > 1 && src.width == w && src.height == h && src.textureType != MTLTextureType3D) {
+            S.be->CopyTextureSlices(src, first_slice, mc.tex, m, copy_slices);
+            continue;
+        }
         for (uint32_t sl = 0; sl < copy_slices; ++sl)
-            S.be->CopyTextureRegion(src, sl, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), mc.tex, sl, m,
+            S.be->CopyTextureRegion(src, first_slice + sl, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), mc.tex, sl, m,
                                     MTLOriginMake(0, 0, 0));
     }
     S.be->EndEncoder();
     S.pending = true;
     mc.built_submit = stamp;
+    mc.versions = versions;
     LogWork("mip chain assembly");
     return mc.tex;
 }
