@@ -272,8 +272,7 @@ void shim_sceUsbdClose(GuestContext *ctx) {
 }
 
 void shim_sceUsbdGetDeviceList(GuestContext *ctx) {
-    SceUsbdDevice ***list = ctx->rdi ? (SceUsbdDevice ***)(ctx->mem_base + ctx->rdi) : NULL;
-    ctx->rax = (uint64_t)sceUsbdGetDeviceList(list);
+    ctx->rax = (uint64_t)sceUsbdGetDeviceList((SceUsbdDevice ***)ctx->rdi);
     SHIM_RETURN();
 }
 

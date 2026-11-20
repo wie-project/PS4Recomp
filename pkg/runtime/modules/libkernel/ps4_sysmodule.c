@@ -445,11 +445,6 @@ int32_t sceKernelLoadStartModule(const char *name, size_t argc, const void *argv
         return -EINVAL;
     }
 
-    if (module_names_match(name, "logiWheel.prx")) {
-        fprintf(stderr, "[diag] blocking %s\n", name);
-        return -ENOSYS;
-    }
-
     printf("[ps4-recomp] sceKernelLoadStartModule: %s\n", name);
 
     pthread_mutex_lock(&g_sysmodule_mutex);

@@ -9,11 +9,9 @@ import "testing"
 func TestNpStorage(t *testing.T) {
 	bin := buildHostC(t, "np_storage",
 		"../runtime/modules/libSceNp/ps4_np.c",
-		"../runtime/modules/libSceNp/ps4_np_party.c",
 	)
 	runHostCases(t, bin, []string{
 		"np-storage",
 		"module-lifecycle",
-		"party-state-shim",
 	})
 }

@@ -801,18 +801,14 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
       motion_seen = controller;
       if (controller && gm) {
         fprintf(stderr,
-                "[pad] controller '%s' (%s): extendedGamepad %s, motion yes, "
-                "sensorsRequireManualActivation %d, sensorsActive %d, rotationRate %d, "
-                "gravityAndUserAcceleration %d\n",
+                "[pad] controller '%s' (%s): motion yes, sensorsRequireManualActivation %d, sensorsActive %d, "
+                "rotationRate %d, gravityAndUserAcceleration %d\n",
                 controller.vendorName.UTF8String, controller.productCategory.UTF8String,
-                controller.extendedGamepad ? "yes" : "no", gm.sensorsRequireManualActivation,
-                gm.sensorsActive, gm.hasRotationRate, gm.hasGravityAndUserAcceleration);
+                gm.sensorsRequireManualActivation, gm.sensorsActive, gm.hasRotationRate,
+                gm.hasGravityAndUserAcceleration);
       } else if (controller) {
-        fprintf(stderr,
-                "[pad] controller '%s' (%s): extendedGamepad %s, no motion profile, "
-                "the virtual pad's motion is used\n",
-                controller.vendorName.UTF8String, controller.productCategory.UTF8String,
-                controller.extendedGamepad ? "yes" : "no");
+        fprintf(stderr, "[pad] controller '%s' (%s): no motion profile, the virtual pad's motion is used\n",
+                controller.vendorName.UTF8String, controller.productCategory.UTF8String);
       }
     }
     if (gm && slot->motion.on) {
@@ -885,81 +881,6 @@ int32_t scePadRead(int32_t handle, OrbisPadData *data, int32_t count) {
 }
 
 // Guest ABI Shims
-static void log_guest_pad_data(int32_t handle, int32_t ret, const OrbisPadData *data) {
-  if (!getenv("PS4_PAD_LOG_STATE") || ret != 0 || !data)
-    return;
-
-  typedef struct {
-    int seen;
-    int32_t handle;
-    uint32_t buttons;
-    uint8_t connected, count;
-    uint64_t next_log_us;
-  } PadDataLogState;
-  static PadDataLogState states[MAX_PAD_HANDLES];
-
-  pthread_mutex_lock(&g_pad_mutex);
-  PadHandleSlot *slot = find_slot(handle);
-  if (!slot) {
-    pthread_mutex_unlock(&g_pad_mutex);
-    return;
-  }
-  PadDataLogState *state = &states[slot - g_pad_slots];
-  const uint64_t now = get_time_micros();
-  if (!state->seen || handle != state->handle || data->buttons != state->buttons ||
-      data->connected != state->connected || data->count != state->count ||
-      now >= state->next_log_us) {
-    fprintf(stderr,
-            "[pad] guest state handle=%d connected=%u count=%u buttons=0x%08x "
-            "sticks=%u,%u/%u,%u\n",
-            handle, data->connected, data->count, data->buttons, data->leftStick.x,
-            data->leftStick.y, data->rightStick.x, data->rightStick.y);
-    state->seen = 1;
-    state->handle = handle;
-    state->buttons = data->buttons;
-    state->connected = data->connected;
-    state->count = data->count;
-    state->next_log_us = now + 1000000;
-  }
-  pthread_mutex_unlock(&g_pad_mutex);
-}
-
-static void log_guest_pad_controller_info(int32_t handle, int32_t ret,
-                                          const OrbisPadControllerInformation *info) {
-  if (!getenv("PS4_PAD_LOG_STATE") || ret != 0 || !info)
-    return;
-
-  typedef struct {
-    int seen;
-    int32_t handle, device_class;
-    uint8_t connected, count, connection_type;
-  } PadControllerInfoLogState;
-  static PadControllerInfoLogState states[MAX_PAD_HANDLES];
-
-  pthread_mutex_lock(&g_pad_mutex);
-  PadHandleSlot *slot = find_slot(handle);
-  if (!slot) {
-    pthread_mutex_unlock(&g_pad_mutex);
-    return;
-  }
-  PadControllerInfoLogState *state = &states[slot - g_pad_slots];
-  if (!state->seen || handle != state->handle || info->connected != state->connected ||
-      info->connectedCount != state->count || info->connectionType != state->connection_type ||
-      info->deviceClass != state->device_class) {
-    fprintf(stderr,
-            "[pad] guest controller info handle=%d connected=%u connectedCount=%u "
-            "connectionType=%u deviceClass=%d\n",
-            handle, info->connected, info->connectedCount, info->connectionType, info->deviceClass);
-    state->seen = 1;
-    state->handle = handle;
-    state->connected = info->connected;
-    state->count = info->connectedCount;
-    state->connection_type = info->connectionType;
-    state->device_class = info->deviceClass;
-  }
-  pthread_mutex_unlock(&g_pad_mutex);
-}
-
 void shim_scePadInit(GuestContext *ctx) {
   int32_t ret = scePadInit();
   ctx->rax = (uint64_t)(int64_t)ret;
@@ -992,7 +913,6 @@ void shim_scePadReadState(GuestContext *ctx) {
       dataGuest ? (OrbisPadData *)(ctx->mem_base + dataGuest) : NULL;
 
   int32_t ret = scePadReadState(handle, data);
-  log_guest_pad_data(handle, ret, data);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
 }
@@ -1005,7 +925,6 @@ void shim_scePadRead(GuestContext *ctx) {
       dataGuest ? (OrbisPadData *)(ctx->mem_base + dataGuest) : NULL;
 
   int32_t ret = scePadRead(handle, data, count);
-  log_guest_pad_data(handle, ret, data);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
 }
@@ -1241,9 +1160,7 @@ void shim_scePadGetControllerInformation(GuestContext *ctx) {
   uint64_t info_addr = ctx->rsi;
   OrbisPadControllerInformation *info =
       info_addr ? (OrbisPadControllerInformation *)(ctx->mem_base + info_addr) : NULL;
-  int32_t ret = scePadGetControllerInformation(handle, info);
-  log_guest_pad_controller_info(handle, ret, info);
-  ctx->rax = (uint64_t)(int64_t)ret;
+  ctx->rax = (uint64_t)(int64_t)scePadGetControllerInformation(handle, info);
   SHIM_RETURN();
 }
 

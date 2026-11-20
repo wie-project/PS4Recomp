@@ -120,9 +120,9 @@ int32_t sceNpPartySetVoiceChatPriority(uint64_t in_gaddr) {
     return party_voice_priority(in_gaddr);
 }
 
-int32_t sceNpPartyGetState(uint32_t *state) {
-    if (!state) return NP_PARTY_ERROR_INVALID_ARGUMENT;
-    *state = 2; // NotInParty
+int32_t sceNpPartyGetState(uint64_t state_gaddr) {
+    if (!state_gaddr) return NP_PARTY_ERROR_INVALID_ARGUMENT;
+    *(uint32_t *)state_gaddr = 2; // NotInParty
     return 0;
 }
 
@@ -157,6 +157,5 @@ void shim_sceNpPartySetVoiceChatPriority(GuestContext *ctx) {
     PARTY_SHIM_RET(sceNpPartySetVoiceChatPriority(ctx->rdi));
 }
 void shim_sceNpPartyGetState(GuestContext *ctx) {
-    uint32_t *state = ctx->rdi ? (uint32_t *)(ctx->mem_base + ctx->rdi) : NULL;
-    PARTY_SHIM_RET(sceNpPartyGetState(state));
+    PARTY_SHIM_RET(sceNpPartyGetState(ctx->rdi));
 }
