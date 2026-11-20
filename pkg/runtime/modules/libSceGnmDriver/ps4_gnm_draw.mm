@@ -6917,6 +6917,36 @@ gcn_push_data MakePushData(const Regs& regs) {
     return p;
 }
 
+static bool SameTextureOrView(id<MTLTexture> a, id<MTLTexture> b) {
+    return a == b || (a.parentTexture && a.parentTexture == b) || (b.parentTexture && a == b.parentTexture);
+}
+
+// Whether an image at [address, address + size) aliases one of the pass's attachments, by guest
+// address range or by the render target texture found at its address.
+static bool ImageHitsAttachment(const PassKey& pass, uint64_t address, uint64_t size) {
+    const uint64_t end = address + size;
+    const auto overlaps = [&](uint64_t a, uint64_t n) { return a && address < a + std::max<uint64_t>(n, 1) && end > a; };
+    if (pass.depth && (overlaps(pass.depth_addr, pass.depth_size) || overlaps(pass.stencil_addr, pass.stencil_size)))
+        return true;
+    bool any_color = false;
+    for (int c = 0; c < 8; ++c) {
+        if (!pass.color[c]) continue;
+        any_color = true;
+        if (overlaps(pass.color_addr[c], pass.color_size[c])) return true;
+    }
+    if (!S.tex) return false;
+    if (pass.depth) {
+        if (id<MTLTexture> dt = S.tex->FindDepthTarget(address))
+            if (SameTextureOrView(dt, pass.depth)) return true;
+    }
+    if (any_color) {
+        if (id<MTLTexture> ct = S.tex->FindColorTarget(address))
+            for (int c = 0; c < 8; ++c)
+                if (pass.color[c] && SameTextureOrView(ct, pass.color[c])) return true;
+    }
+    return false;
+}
+
 bool StageHasAttachmentHazard(const PassKey& pass, const Shader* s, const std::vector<uint32_t>& flat) {
     if (!s || s->imgs.empty()) return false;
     static const bool no_companion_merge = getenv("PS4_GNM_NO_DEPTH_COMPANION_MERGE") != nullptr;
@@ -6924,10 +6954,12 @@ bool StageHasAttachmentHazard(const PassKey& pass, const Shader* s, const std::v
         ImageDesc img;
         uint64_t approx = 0;
         if (!StageImage(s, flat, i, &img, &approx) || !img.valid || !img.address) continue;
+        if (!ImageHitsAttachment(pass, img.address, std::max<uint64_t>(approx, 1))) continue;
         // BindStage samples a separate R32F companion for non-shadow depth reads. Its
         // guest address still names the depth attachment, but the Metal texture does not.
         // Only exempt a prepared, current companion; PrepareDepthCompanions ends the
         // encoder and refreshes it whenever the source depth version changes.
+        // Checked only after a hit: these lookups are the expensive part, and hits are rare.
         if (!no_companion_merge && !s->imgs[i].is_depth && !s->imgs[i].is_storage && S.tex && !StencilPlaneDepth(img)) {
             if (id<MTLTexture> dt = DepthTargetFor(img.address, img)) {
                 void* depth_key = (__bridge void*)dt;
@@ -6938,44 +6970,7 @@ bool StageHasAttachmentHazard(const PassKey& pass, const Shader* s, const std::v
                     continue;
             }
         }
-        const uint64_t img_start = img.address;
-        const uint64_t img_end = img.address + std::max<uint64_t>(approx, 1);
-
-        if (pass.depth) {
-            if (pass.depth_addr) {
-                const uint64_t d_start = pass.depth_addr;
-                const uint64_t d_end = pass.depth_addr + std::max<uint64_t>(pass.depth_size, 1);
-                if (img_start < d_end && img_end > d_start) return true;
-            }
-            if (pass.stencil_addr) {
-                const uint64_t s_start = pass.stencil_addr;
-                const uint64_t s_end = pass.stencil_addr + std::max<uint64_t>(pass.stencil_size, 1);
-                if (img_start < s_end && img_end > s_start) return true;
-            }
-        }
-        for (int c = 0; c < 8; ++c) {
-            if (!pass.color[c] || !pass.color_addr[c]) continue;
-            const uint64_t c_start = pass.color_addr[c];
-            const uint64_t c_end = pass.color_addr[c] + std::max<uint64_t>(pass.color_size[c], 1);
-            if (img_start < c_end && img_end > c_start) return true;
-        }
-        if (S.tex) {
-            if (pass.depth) {
-                if (id<MTLTexture> dt = S.tex->FindDepthTarget(img.address)) {
-                    if (dt == pass.depth || (dt.parentTexture && dt.parentTexture == pass.depth) ||
-                        (pass.depth.parentTexture && dt == pass.depth.parentTexture))
-                        return true;
-                }
-            }
-            for (int c = 0; c < 8; ++c) {
-                if (!pass.color[c]) continue;
-                if (id<MTLTexture> ct = S.tex->FindColorTarget(img.address)) {
-                    if (ct == pass.color[c] || (ct.parentTexture && ct.parentTexture == pass.color[c]) ||
-                        (pass.color[c].parentTexture && ct == pass.color[c].parentTexture))
-                        return true;
-                }
-            }
-        }
+        return true;
     }
     return false;
 }
