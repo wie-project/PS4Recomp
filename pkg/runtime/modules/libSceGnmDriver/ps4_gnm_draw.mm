@@ -150,7 +150,11 @@ constexpr RegSnapIndex kRegSnapIndex{};
 struct RegSnap {
     using Range = RegSnapRange;
     static constexpr const auto& kRanges = kRegSnapRanges;
-    static constexpr uint32_t kSize = 0x20 + 0x90 + 0x10 + 0x20 + 0x40;
+    static constexpr uint32_t kSize = [] {
+        uint32_t size = 0;
+        for (const auto& range : kRegSnapRanges) size += range.hi - range.lo;
+        return size;
+    }();
     uint32_t a[kSize];
     uint32_t cs_num_thread[3]; // COMPUTE_NUM_THREAD_X/Y/Z
     void Capture(const uint32_t* r) {
