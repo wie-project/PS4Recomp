@@ -13103,11 +13103,16 @@ void DrawEncode(DrawRec& r) {
         }
         const uint32_t inst = std::max(1u, args.num_instances);
         ps4gnm_rect::Buffers rect_bufs{};
+        uint32_t rect_vertices = 0; // the vertices of the complete rectangles
         if (rect) {
             // capture index of every vertex, and room for every captured vertex
-            const uint32_t n = args.count;
-            if (n % 3) {
-                RLog("rect-count", "%s: RectList with %u vertices (not 3 per rectangle); skipped", args.name, n);
+            // The VGT assembles a rectangle from every 3 vertices and drops an incomplete last one
+            // (Driveclub draws its fullscreen rectangle with 4).
+            rect_vertices = args.count - args.count % 3;
+            const uint32_t n = rect_vertices;
+            if (!n) {
+                RLog("rect-count", "%s: RectList with %u vertices (no complete rectangle); skipped", args.name,
+                     args.count);
                 NoteSkip(SkipReason::RectCount);
                 return;
             }
@@ -13323,7 +13328,7 @@ void DrawEncode(DrawRec& r) {
             S.be->Draw(d);
         } else if (rect) {
             ps4gnm_rect::Geometry g;
-            g.count = args.count;
+            g.count = rect_vertices;
             g.instances = inst;
             g.base_instance = instance_offset;
             g.vertex_start = vertex_offset;
