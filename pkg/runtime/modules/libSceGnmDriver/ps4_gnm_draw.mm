@@ -5821,8 +5821,9 @@ bool BindStage(const Shader* s, const uint32_t ud[16], const std::vector<uint32_
             if (bb.is_written) {
                 NoteGpuWrite(base, bd.size_bytes);
                 if (!unbounded) NoteBufferStore(bd.base_address, bd.size_bytes);
+                // a store-only compute write of CMASK/HTILE is a fast clear; a read-modify-write is not
                 auto mit = S.meta.find(base);
-                if (mit != S.meta.end() && b.stage == Stage::Compute)
+                if (mit != S.meta.end() && b.stage == Stage::Compute && !bb.is_read)
                     ArmMetaClear(mit->second, bd.size_bytes, S.committed_seq + 1);
             }
             break;
@@ -14705,7 +14706,9 @@ void DispatchEncode(DispatchRec*& rp) {
                 gcn_decode_buffer(v, &bd);
                 if (!S.meta.count(bd.base_address)) continue;
                 if (cs->bufs[i].is_written) meta_written = bd.base_address, meta_bytes = bd.size_bytes;
-                else reads_meta = true;
+                // A read-modify-write of the metadata (e.g. marking HTILE tiles expanded before the
+                // depth is sampled) is not a fast clear.
+                if (!cs->bufs[i].is_written || cs->bufs[i].is_read) reads_meta = true;
             }
             // Surface copies through buffers (shadPS4 Rasterizer::IsComputeImageCopy): one read and
             // one written buffer of the same size, the source being a GPU-owned surface.
