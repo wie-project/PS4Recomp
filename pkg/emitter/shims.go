@@ -1328,6 +1328,27 @@ var shimAliases = map[string]string{
 	"lBtrk+7lk14": "shim_sceNpTssCreateNpTitleCtxA",
 	"+YX0z-GUSNw": "shim_sceCoredumpAttachMemoryRegion",
 	"Uxqkdta7wEg": "shim_sceCoredumpSetUserDataType",
+
+	// libSceShareUtility
+	"j7DlalBzHh8": "shim_sceShareUtilityInitializeEx2",
+	"8hZ2EEl2Tto": "shim_sceShareUtilityOpenShareMenuDefault",
+	"u4bCGkqhOB4": "shim_sceShareUtilityAdvanceInitialize",
+	"karnJhakdKg": "shim_sceShareUtilityAdvanceSetUploadContentData",
+	"Jlv-lYxEnvM": "shim_sceShareUtilityInitialize",
+	"DUWhxkyVPj4": "shim_sceShareUtilityTerminate",
+	"Lqp4EDIRXSo": "shim_sceShareUtilityOpenShareMenu",
+	"xfB04bSjrZY": "shim_sceShareUtilityAdvanceTerminate",
+
+	// libSceJobManager
+	"cwMzzdesLlY": "shim__ZN3sce3Job10JobManagerC1Ev",
+	"HciaSIulWeo": "shim__ZN3sce3Job10JobManagerC1Ev",
+	"4g1ee34TMH8": "shim__ZN3sce3Job10JobManagerD1Ev",
+	"djt40NyfD-U": "shim__ZN3sce3Job10JobManagerD1Ev",
+	"Nm2BhAwYNFk": "shim__ZN3sce3Job10JobManager27calculateRequiredMemorySizeEPKNS1_21MemorySizeQueryParamsE",
+	"GS9DSbzC+MY": "shim__ZN3sce3Job10JobManager10initializeEPvmjjjmPKNS1_12ConfigParamsE",
+	"VTKezfYu-v4": "shim__ZN3sce3Job10JobManager24setPersistentThreadCountEj",
+	"W-yXgQmaozU": "shim__ZN3sce3Job10JobManager27getSequenceFactoryInterfaceENS1_8PriorityE",
+	"chxnvsxxfBY": "shim__ZN3sce3Job10JobManager8shutdownEv",
 }
 
 // knownDirectShims contains symbol names whose host shim is "shim_" + name.
@@ -1351,6 +1372,24 @@ var knownDirectShims = []string{
 	"sceSystemServiceGetPlatformPrivacySetting",
 	"sceNpTusSetThreadParam",
 	"sceNpTssCreateNpTitleCtxA",
+	"sceShareUtilityInitialize",
+	"sceShareUtilityInitializeEx2",
+	"sceShareUtilityTerminate",
+	"sceShareUtilityOpenShareMenu",
+	"sceShareUtilityOpenShareMenuDefault",
+	"sceShareUtilityAdvanceInitialize",
+	"sceShareUtilityAdvanceTerminate",
+	"sceShareUtilityAdvanceSetUploadContentData",
+	// libSceJobManager
+	"_ZN3sce3Job10JobManagerC1Ev",
+	"_ZN3sce3Job10JobManagerC2Ev",
+	"_ZN3sce3Job10JobManagerD1Ev",
+	"_ZN3sce3Job10JobManagerD2Ev",
+	"_ZN3sce3Job10JobManager27calculateRequiredMemorySizeEPKNS1_21MemorySizeQueryParamsE",
+	"_ZN3sce3Job10JobManager10initializeEPvmjjjmPKNS1_12ConfigParamsE",
+	"_ZN3sce3Job10JobManager24setPersistentThreadCountEj",
+	"_ZN3sce3Job10JobManager27getSequenceFactoryInterfaceENS1_8PriorityE",
+	"_ZN3sce3Job10JobManager8shutdownEv",
 	"sceCoredumpGetStopInfoGpu",
 	"sceKernelSync",
 	"sceRemoteplayTerminate",

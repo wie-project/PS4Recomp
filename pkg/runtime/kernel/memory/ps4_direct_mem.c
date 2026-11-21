@@ -1120,17 +1120,19 @@ int sceKernelSetVirtualRangeName(GuestContext *ctx, const void *addr, size_t len
     uint64_t vend = vaddr + len;
 
     pthread_mutex_lock(&proc->vm_mutex);
+    recomp_vm_split_extent_at(proc, vaddr);
+    recomp_vm_split_extent_at(proc, vend);
     GuestVMExtent *curr = proc->vm_extents;
     while (curr) {
         uint64_t cstart = curr->addr;
         uint64_t cend = curr->addr + curr->size;
-        if (!curr->is_free && cstart < vend && cend > vaddr) {
+        if (!curr->is_free && cstart >= vaddr && cend <= vend) {
             strncpy(curr->name, name, sizeof(curr->name) - 1);
             curr->name[sizeof(curr->name) - 1] = '\0';
         }
         curr = curr->next;
     }
-    recomp_vm_note_change(); // a renamed reservation is no longer one (recomp_vm_unmapped_ranges)
+    recomp_vm_note_change();
     pthread_mutex_unlock(&proc->vm_mutex);
 
     printf("[ps4-mem] sceKernelSetVirtualRangeName: addr=%p len=%zu name='%s'\n", addr, len, name);

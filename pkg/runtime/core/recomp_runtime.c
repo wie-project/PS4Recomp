@@ -1242,6 +1242,7 @@ uint64_t recomp_vm_alloc_named_aligned(GuestContext *ctx, size_t size,
   }
 
   best->is_free = false;
+  best->is_reserved = (name && (strcmp(name, "reserved") == 0 || strstr(name, "reserved") != NULL));
   best->prot = prot;
   best->flags = flags;
   if (name) {
@@ -1292,7 +1293,7 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
 
   GuestVMExtent *curr = proc->vm_extents;
   while (curr) {
-    if ((curr->is_free || (curr->name[0] && strstr(curr->name, "reserved"))) &&
+    if ((curr->is_free || curr->is_reserved || (curr->name[0] && strstr(curr->name, "reserved"))) &&
         curr->addr <= aligned_addr &&
         (curr->addr + curr->size) >= (aligned_addr + aligned_size)) {
       break;
@@ -1305,6 +1306,11 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
     return (uint64_t)-1;
   }
 
+  bool was_reserved = curr->is_reserved || (curr->name[0] && strstr(curr->name, "reserved") != NULL);
+  char parent_name[32];
+  strncpy(parent_name, curr->name, sizeof(parent_name));
+  parent_name[sizeof(parent_name) - 1] = '\0';
+
   // Split leading part if desired_addr > curr->addr
   if (aligned_addr > curr->addr) {
     GuestVMExtent *prefix = (GuestVMExtent *)calloc(1, sizeof(GuestVMExtent));
@@ -1314,7 +1320,11 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
     }
     prefix->addr = curr->addr;
     prefix->size = aligned_addr - curr->addr;
-    prefix->is_free = true;
+    prefix->is_free = !was_reserved;
+    prefix->is_reserved = was_reserved;
+    if (was_reserved) {
+      strncpy(prefix->name, parent_name, sizeof(prefix->name) - 1);
+    }
     prefix->prev = curr->prev;
     prefix->next = curr;
     if (curr->prev) {
@@ -1333,7 +1343,11 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
     if (suffix) {
       suffix->addr = curr->addr + aligned_size;
       suffix->size = curr->size - aligned_size;
-      suffix->is_free = true;
+      suffix->is_free = !was_reserved;
+      suffix->is_reserved = was_reserved;
+      if (was_reserved) {
+        strncpy(suffix->name, parent_name, sizeof(suffix->name) - 1);
+      }
       suffix->prev = curr;
       suffix->next = curr->next;
       if (curr->next) {
@@ -1345,6 +1359,7 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
   }
 
   curr->is_free = false;
+  curr->is_reserved = (name && (strcmp(name, "reserved") == 0 || strstr(name, "reserved") != NULL));
   curr->prot = prot;
   curr->flags = flags;
   if (name) {
@@ -1397,7 +1412,7 @@ uint64_t recomp_vm_generation(void) {
 }
 
 static bool vm_extent_unmapped(const GuestVMExtent *e) {
-  return e->is_free || strcmp(e->name, "reserved") == 0;
+  return e->is_free || e->is_reserved || strcmp(e->name, "reserved") == 0;
 }
 
 size_t recomp_vm_unmapped_ranges(GuestContext *ctx, uint64_t (*out)[2], size_t max, uint64_t *gen) {
@@ -1549,8 +1564,11 @@ int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
   pthread_mutex_lock(&proc->vm_mutex);
   for (size_t i = 0; i < k; i++)
     for (GuestVMExtent *e = proc->vm_extents; e; e = e->next)
-      if (!e->is_free && e->addr >= ranges[i].addr && e->addr + e->size <= ranges[i].addr + ranges[i].size)
+      if (!e->is_free && e->addr >= ranges[i].addr && e->addr + e->size <= ranges[i].addr + ranges[i].size) {
         e->is_free = true;
+        e->is_reserved = false;
+        e->name[0] = '\0';
+      }
   vm_coalesce_free(proc, start, end);
   recomp_vm_note_change();
   pthread_mutex_unlock(&proc->vm_mutex);
