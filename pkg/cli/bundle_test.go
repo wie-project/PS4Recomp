@@ -62,6 +62,30 @@ func TestPackageAppBundleWithGameMode(t *testing.T) {
 	}
 }
 
+func TestStandaloneBundleIncludesGuestEboot(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("app bundles are macOS only")
+	}
+	cfg := &Config{AppDir: t.TempDir(), OutDir: t.TempDir(), CopyResources: true}
+	cfg.ElfPath = filepath.Join(cfg.AppDir, "eboot.bin")
+	const eboot = "original guest executable"
+	if err := os.WriteFile(cfg.ElfPath, []byte(eboot), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(cfg.OutDir, "ps4_app")
+	if err := copyFile("/usr/bin/true", bin); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := packageAppBundle(cfg, "eboot", bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(bundle, "Contents", "SharedSupport", "eboot.bin"))
+	if err != nil || string(got) != eboot {
+		t.Fatalf("bundled eboot.bin = %q, %v; want original guest file", got, err)
+	}
+}
+
 func TestInfoPlistFromSFO(t *testing.T) {
 	p := appInfoPlist("eboot", true, bundleMeta{BundleID: "org.ps4recomp.CUSA04529", DisplayName: "Uncharted 4: A Thief’s End & <Co>", Version: "01.32"})
 	for _, want := range []string{

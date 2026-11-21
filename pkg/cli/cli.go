@@ -1407,11 +1407,12 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 					}
 					srcPath := filepath.Join(cfg.AppDir, name)
 					absSrc, _ := filepath.Abs(srcPath)
-					if absSrc == absOut || absSrc == absElf {
+					// Some games probe /app0/eboot.bin to select the installed-data path.
+					if absSrc == absOut || (absSrc == absElf && !strings.EqualFold(name, "eboot.bin")) {
 						continue
 					}
 					ext := strings.ToLower(filepath.Ext(name))
-					if ext == ".prx" || ext == ".elf" || strings.EqualFold(name, "eboot.bin") {
+					if ext == ".prx" || ext == ".elf" {
 						continue
 					}
 					dstPath := filepath.Join(sharedSupportDir, name)
