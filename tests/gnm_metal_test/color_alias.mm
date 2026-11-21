@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Native Metal regression: a linear HUD must load the scene written through an sRGB attachment.
+// Native Metal regressions for shared UNORM and sRGB render target bytes.
 #import <Metal/Metal.h>
 #include "ps4_gnm_resources.h"
 #include "ps4_hitch.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <vector>
 
@@ -103,6 +104,41 @@ static void Run(id<MTLDevice> device, id<MTLCommandQueue> queue, bool srgb_first
           "cloned target retained the source's attachment view");
 }
 
+static void RunMipCopy(id<MTLDevice> device, id<MTLCommandQueue> queue, bool srgb_dst) {
+    const MTLPixelFormat linear = MTLPixelFormatRGBA8Unorm, srgb = MTLPixelFormatRGBA8Unorm_sRGB;
+    const MTLPixelFormat format = srgb_dst ? srgb : linear;
+    MTLTextureDescriptor* sd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:srgb_dst ? linear : srgb
+                                                                                 width:2 height:2 mipmapped:NO];
+    sd.usage = MTLTextureUsageShaderRead;
+    sd.storageMode = MTLStorageModeShared;
+    id<MTLTexture> src = [device newTextureWithDescriptor:sd];
+    Check(src, "mip copy source missing");
+    const uint8_t colors[] = {18, 141, 72, 255, 175, 26, 82, 192, 91, 29, 210, 250, 2, 50, 65, 32};
+    [src replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0 withBytes:colors bytesPerRow:8];
+    MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                 width:4 height:4 mipmapped:YES];
+    dd.storageMode = MTLStorageModeShared;
+    Check(!ps4gnm::MipCopySourceView(src, MTLPixelFormatBGRA8Unorm), "unrelated layouts treated as twins");
+    for (uint32_t slices : {0u, 1u}) {
+        id<MTLTexture> dst = [device newTextureWithDescriptor:dd];
+        Check(dst, "mip copy destination missing");
+        id<MTLTexture> view = ps4gnm::MipCopySourceView(src, format, slices);
+        Check(view && view.pixelFormat == format && view.parentTexture == src, "mip source view missing");
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        [blit copyFromTexture:view sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(2, 2, 1) toTexture:dst destinationSlice:0 destinationLevel:1
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        Check(cb.status == MTLCommandBufferStatusCompleted, "mip copy failed");
+        uint8_t copied[sizeof(colors)] = {};
+        [dst getBytes:copied bytesPerRow:8 fromRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:1];
+        Check(memcmp(copied, colors, sizeof(colors)) == 0, "mip copy changed encoded color bytes");
+    }
+}
+
 int main() {
     @autoreleasepool {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -113,6 +149,8 @@ int main() {
         id<MTLCommandQueue> queue = [device newCommandQueue];
         Run(device, queue, true);
         Run(device, queue, false);
-        puts("linear/sRGB render target alias regression passed");
+        RunMipCopy(device, queue, true);
+        RunMipCopy(device, queue, false);
+        puts("linear/sRGB render target alias and mip copy regressions passed");
     }
 }

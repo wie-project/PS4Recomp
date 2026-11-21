@@ -914,6 +914,18 @@ void Metal4Backend::CopyTextureRegion(id<MTLTexture> src, uint32_t src_slice, ui
     x.copied = true;
 }
 
+void Metal4Backend::CopyTextureToBuffer(id<MTLTexture> src, MTLSize size, id<MTLBuffer> dst, uint64_t row_bytes) {
+    BeforeCommand();
+    if (check_residency_) CheckResident(src, "copy source"), CheckResident(dst, "copy destination");
+    TargetState& x = Cur();
+    Keep(x, src);
+    BeforeCopy(x);
+    [x.cenc copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSize:size toBuffer:dst destinationOffset:0 destinationBytesPerRow:row_bytes
+   destinationBytesPerImage:0];
+    x.copied = true;
+}
+
 void Metal4Backend::CopyBufferToTexture(id<MTLBuffer> src, uint64_t src_off, uint64_t row_bytes, uint64_t image_bytes,
                                         MTLSize size, id<MTLTexture> dst, uint32_t slice, uint32_t level, MTLOrigin origin) {
     BeforeCommand();

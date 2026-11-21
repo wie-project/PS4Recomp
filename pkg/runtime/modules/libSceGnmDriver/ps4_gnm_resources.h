@@ -48,6 +48,9 @@ namespace ps4gnm {
 // 1. Formats
 // =====================================================================================
 
+// Keep encoded texels intact when copying a level between UNORM and sRGB views.
+id<MTLTexture> MipCopySourceView(id<MTLTexture> src, MTLPixelFormat format, uint32_t array_slices = 0);
+
 // Table 8.13 Data and Image Formats [Sea Islands Series Instruction Set Architecture]
 // (CB_COLORn_INFO.FORMAT uses the same numbering for the color formats.)
 enum class DataFormat : uint32_t {
@@ -890,6 +893,9 @@ public:
     // Color target at an address with the given size (several surfaces of different sizes can
     // share an address over time); nil if none matches.
     id<MTLTexture> FindColorTarget(uint64_t address, uint32_t width, uint32_t height) const;
+    // Find a BC mip chain produced as one RGBA32Uint target per level (one texel per block).
+    uint32_t FindPackedMipTargets(const ImageDesc& img, __strong id<MTLTexture> (&srcs)[kMaxMips],
+                                  uint64_t* addrs = nullptr) const;
     // Version of a GPU-owned color surface for derived copies; zero means it cannot be reused.
     std::pair<uint64_t, uint64_t> ColorTargetVersion(uint64_t address, id<MTLTexture> tex) const;
     id<MTLTexture> FindDepthTarget(uint64_t address) const;

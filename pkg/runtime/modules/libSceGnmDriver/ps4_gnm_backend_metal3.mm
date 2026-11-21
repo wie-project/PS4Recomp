@@ -350,7 +350,13 @@ void Metal3Backend::CopyTextureRegion(id<MTLTexture> src, uint32_t src_slice, ui
                       toTexture:dst destinationSlice:dst_slice destinationLevel:dst_level destinationOrigin:dst_origin];
 }
 
-// EncodeGpuUploadAt (:5292)
+void Metal3Backend::CopyTextureToBuffer(id<MTLTexture> src, MTLSize size, id<MTLBuffer> dst, uint64_t row_bytes) {
+    BeforeCommand();
+    [Cur().blit copyFromTexture:src sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:size toBuffer:dst destinationOffset:0 destinationBytesPerRow:row_bytes
+     destinationBytesPerImage:0];
+}
+
 void Metal3Backend::CopyBufferToTexture(id<MTLBuffer> src, uint64_t src_off, uint64_t row_bytes, uint64_t image_bytes,
                                         MTLSize size, id<MTLTexture> dst, uint32_t slice, uint32_t level, MTLOrigin origin) {
     BeforeCommand();
