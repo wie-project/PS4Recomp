@@ -457,6 +457,10 @@ func (l *Arm64Lifter) emitUnsupported(inst disasm.Instruction, reason string) []
 	return lines
 }
 
+// UnsupportedCount is how many instructions this lifter has lowered to a diagnostic stub
+// (emitUnsupported) so far.
+func (l *Arm64Lifter) UnsupportedCount() uint64 { return l.unsuppCounter }
+
 // IsKnownFunc reports whether addr is the entry point of a known function.
 func (l *Arm64Lifter) IsKnownFunc(addr uint64) bool {
 	return l != nil && l.knownFuncs != nil && l.knownFuncs[addr]
