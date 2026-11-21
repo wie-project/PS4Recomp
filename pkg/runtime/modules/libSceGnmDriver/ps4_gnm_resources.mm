@@ -1887,6 +1887,9 @@ MTLSamplerDescriptor* MakeSamplerDescriptor(const SamplerDesc& s, bool compare) 
     d.lodMaxClamp = std::max(s.min_lod, s.max_lod);
     d.normalizedCoordinates = YES;
     if (compare) d.compareFunction = (MTLCompareFunction)s.mtl_compare;
+    // The S# LOD bias (games bias detail textures down and blurred reflections up). Earlier macOS
+    // has no sampler LOD bias, and the sampler there samples without it.
+    if (@available(macOS 26.0, *)) d.lodBias = s.lod_bias;
     d.supportArgumentBuffers = YES;
     return d;
 }
@@ -2925,6 +2928,9 @@ struct TextureCache::Entry {
     id<MTLTexture> alias = nil;
     uint64_t alias_generation = ~0ull;
     uint32_t alias_key = 0;
+    // the newer prefix surface merged into the alias copy (GetTextureImpl), and its generation
+    const void* alias_prefix = nullptr;
+    uint64_t alias_prefix_generation = ~0ull;
     uint64_t gpu_upload_epoch = 0; // sampled: contents copied on the GPU after writes < this epoch
     uint64_t alloc_bytes = 0;      // tex.allocatedSize, as counted in MemStats
     mutable uint64_t last_seq = 0, last_ns = 0; // last use (SetUse values at the last lookup)
@@ -3760,6 +3766,7 @@ id<MTLTexture> TextureCache::GetTextureImpl(const ImageDesc& img, const uint64_t
         return ensure_image_layout() && c->size >= image_layout.total_size;
     };
     Entry* rt = nullptr;
+    Entry* prefix = nullptr;
     if (!img.pixel.compressed) {
         rt = LastWrittenLocked(img.address, Entry::Color,
                                [&](const Entry* c) { return texel_fits(c) && c->width >= width && c->height >= height; });
@@ -3769,11 +3776,23 @@ id<MTLTexture> TextureCache::GetTextureImpl(const ImageDesc& img, const uint64_t
         } else if (newest && newest->write_order > rt->write_order &&
                    skipped_newer_logged_.insert(img.address).second) {
             // The newer surface's bytes are part of the image, but only the covering surface is
-            // read: merging the newer one's region into the copy is not done yet.
+            // read: only a newer surface with the image's row layout is merged (prefix below).
             fprintf(stderr,
                     "[gnm-tex] 0x%llx: a %ux%u T# reads the older %ux%u surface; the newer %ux%u one there does not "
                     "cover it (logged once per address)\n",
                     (unsigned long long)img.address, width, height, rt->width, rt->height, newest->width, newest->height);
+        }
+        // A newer surface with fewer rows than the image but the image's row layout (pitch, tile
+        // mode, texel size) holds the image's first rows: DRIVECLUB's reflection probe draws a
+        // 768x384 target and samples it with a 768x512 mipmapped T# of the same pitch. Its rows
+        // are copied over the covering surface's (see the copy below).
+        if (rt && img.mtl_texture_type == MTLTextureType2D && img.base_level == 0) {
+            prefix = LastWrittenLocked(img.address, Entry::Color, [&](const Entry* c) {
+                return c != rt && c->write_order > rt->write_order && c->tex_type == MTLTextureType2D &&
+                       c->samples == 1 && c->mtl_format == rt->mtl_format && c->surf.pitch == sd.pitch &&
+                       c->surf.tile_mode == sd.tile_mode && c->surf.alt_tile == sd.alt_tile &&
+                       GetPixelFormat(c->dfmt, c->nfmt).bytes_per_block == img.pixel.bytes_per_block;
+            });
         }
     }
     if (Entry* e = rt) {
@@ -3783,7 +3802,7 @@ id<MTLTexture> TextureCache::GetTextureImpl(const ImageDesc& img, const uint64_t
             is3d || (img.mtl_texture_type == MTLTextureTypeCube ? e->layers >= 6
                      : img.mtl_texture_type == MTLTextureTypeCubeArray ? e->layers >= 6
                                                                        : e->layers >= layers);
-        if (e->width == width && e->height == height && can_view_slices) {
+        if (e->width == width && e->height == height && can_view_slices && !prefix) {
             uint32_t first_slice = 0;
             uint32_t alias_slices = 1;
             if (is3d) {
@@ -3821,9 +3840,12 @@ id<MTLTexture> TextureCache::GetTextureImpl(const ImageDesc& img, const uint64_t
             }
             return TouchLocked(e), e->alias;
         }
-        // different dimensions: copy the overlapping region into a sampled texture
+        // different dimensions: copy the overlapping region into a sampled texture, then a newer
+        // prefix surface's rows over it
+        const void* prefix_tex = prefix ? (__bridge const void*)prefix->tex : nullptr;
         if (!e->alias || e->alias_generation != e->generation || e->alias.width != width ||
-            e->alias.height != height || e->alias.pixelFormat != (MTLPixelFormat)img.pixel.mtl_format) {
+            e->alias.height != height || e->alias.pixelFormat != (MTLPixelFormat)img.pixel.mtl_format ||
+            e->alias_prefix != prefix_tex || (prefix && e->alias_prefix_generation != prefix->generation)) {
             MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(MTLPixelFormat)e->mtl_format
                                                                                           width:width
                                                                                          height:height
@@ -3849,6 +3871,29 @@ id<MTLTexture> TextureCache::GetTextureImpl(const ImageDesc& img, const uint64_t
                 [bl endEncoding];
                 [cb commit];
             }
+            if (prefix) {
+                const MTLSize psz = MTLSizeMake(std::min(width, prefix->width), std::min(height, prefix->height), 1);
+                if (copy_hook_.copy) {
+                    copy_hook_.copy(copy_hook_.ctx, prefix->tex, copy, psz);
+                } else {
+                    id<MTLCommandBuffer> cb = [queue_ commandBuffer];
+                    id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+                    [bl copyFromTexture:prefix->tex
+                            sourceSlice:0
+                            sourceLevel:0
+                           sourceOrigin:MTLOriginMake(0, 0, 0)
+                             sourceSize:psz
+                              toTexture:copy
+                       destinationSlice:0
+                       destinationLevel:0
+                      destinationOrigin:MTLOriginMake(0, 0, 0)];
+                    [bl endEncoding];
+                    [cb commit];
+                }
+                TouchLocked(prefix);
+            }
+            e->alias_prefix = prefix_tex;
+            e->alias_prefix_generation = prefix ? prefix->generation : ~0ull;
             ReleaseTextureLocked(AliasCopy(e)); // the copy this one replaces
             e->alias = [copy newTextureViewWithPixelFormat:(MTLPixelFormat)img.pixel.mtl_format
                                                textureType:MTLTextureType2D
