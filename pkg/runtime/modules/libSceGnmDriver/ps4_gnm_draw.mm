@@ -150,7 +150,11 @@ constexpr RegSnapIndex kRegSnapIndex{};
 struct RegSnap {
     using Range = RegSnapRange;
     static constexpr const auto& kRanges = kRegSnapRanges;
-    static constexpr uint32_t kSize = 0x20 + 0x90 + 0x10 + 0x20 + 0x40;
+    static constexpr uint32_t kSize = [] {
+        uint32_t size = 0;
+        for (const auto& range : kRegSnapRanges) size += range.hi - range.lo;
+        return size;
+    }();
     uint32_t a[kSize];
     uint32_t cs_num_thread[3]; // COMPUTE_NUM_THREAD_X/Y/Z
     void Capture(const uint32_t* r) {
@@ -837,6 +841,7 @@ struct State {
     // quad_indices_pso: the indexed conversion, dispatched from that size; args_patch_pso: the
     // corrected offsets of an indirect triangle-list record (IndirectRecordOffsets)
     id<MTLComputePipelineState> quad_prep_pso = nil, quad_indices_pso = nil, args_patch_pso = nil;
+    id<MTLComputePipelineState> mip_copy_pso = nil; // MipChainFor's copies inside a compute encoder
     id<MTLBuffer> quad_pattern = nil, quad_need = nil;
     uint32_t quad_pattern_quads = 0;
     // the open seq's current pool of converted quad indices (QuadRegion): a region of each draw's
@@ -927,7 +932,14 @@ struct State {
     // textures with mip chains whose levels were rendered as separate render targets
     struct MipChain {
         id<MTLTexture> tex;
+        id<MTLTexture> sample_view;
+        CompMapping sample_swizzle{};
         uint64_t built_submit = ~0ull;
+        std::array<std::pair<uint64_t, uint64_t>, kMaxMips> versions{};
+        // the compute copy's views: level m of tex, and level 0 of the source of level m as a 2D
+        // array (its parentTexture; ForgetTexture drops it with the source)
+        id<MTLTexture> dst_views[kMaxMips];
+        id<MTLTexture> src_views[kMaxMips];
     };
     std::unordered_map<uint64_t, MipChain> mip_chains; // key: hash of T# identity
     uint32_t cb_extent[8] = {};
@@ -1740,6 +1752,9 @@ void OwnTextureDropped(id<MTLTexture> t) {
 }
 
 void ForgetTexture(void* key) {
+    for (auto& [k, mc] : S.mip_chains)
+        for (auto& v : mc.src_views)
+            if (v && (__bridge void*)v.parentTexture == key) v = nil;
     if (auto dc = S.depth_comp.find(key); dc != S.depth_comp.end()) OwnTextureDropped(dc->second.tex);
     S.depth_comp.erase(key);
     S.depth_version.erase(key);
@@ -2200,7 +2215,7 @@ void OcclBeforeDraw(uint32_t count_control);
 // The GPU depth surface a T# at `address` reads: the last written one with the T#'s sample count
 // (a 1x surface and its 2x checkerboard twin share the memory), else the last written one.
 id<MTLTexture> DepthTargetFor(uint64_t address, const ImageDesc& img);
-id<MTLTexture> MipChainFor(const ImageDesc& img, bool encode);
+id<MTLTexture> MipChainFor(ImageDesc& img, bool encode);
 // The color target at `address` for a level of `w` x `h`: the last written one of that size, else
 // the last written one.
 id<MTLTexture> ColorTargetFor(uint64_t address, uint32_t w, uint32_t h);
@@ -5915,16 +5930,7 @@ bool BindStage(const Shader* s, const uint32_t ud[16], const std::vector<uint32_
                 if (!tex) RLog("depth-as-color", "depth surface 0x%llx sampled as color: no companion",
                                (unsigned long long)img.address);
             } else if (id<MTLTexture> mc = MipChainFor(img, false)) {
-                const NSUInteger mc_slices =
-                    (mc.textureType == MTLTextureTypeCube || mc.textureType == MTLTextureTypeCubeArray)
-                        ? mc.arrayLength * 6
-                        : mc.arrayLength;
-                id<MTLTexture> mv = [mc newTextureViewWithPixelFormat:(MTLPixelFormat)img.pixel.mtl_format
-                                                          textureType:mc.textureType
-                                                               levels:NSMakeRange(0, mc.mipmapLevelCount)
-                                                               slices:NSMakeRange(0, std::max<NSUInteger>(1, mc_slices))
-                                                              swizzle:ToMTLSwizzle(img.view_swizzle)];
-                tex = mv ? mv : mc;
+                tex = mc;
             } else {
                 tex = SampledTexture(img);
                 static const bool texdbg3d = getenv("PS4_GNM_TEXDBG3D") != nullptr;
@@ -6305,11 +6311,11 @@ static uint32_t TextureTotalSlices(id<MTLTexture> t) {
                : (uint32_t)t.arrayLength;
 }
 
-uint64_t MipChainKey(const ImageDesc& img) {
-    uint64_t k[5] = {img.address, ((uint64_t)img.width << 32) | img.height,
+uint64_t MipChainKey(const ImageDesc& img, uint32_t first_slice, uint32_t slices) {
+    uint64_t k[6] = {img.address, ((uint64_t)img.width << 32) | img.height,
                      ((uint64_t)img.pixel.mtl_format << 32) | img.num_levels,
                      ((uint64_t)img.tile_mode << 32) | img.mtl_texture_type,
-                     img.num_layers};
+                     img.num_layers, ((uint64_t)first_slice << 32) | slices};
     return Fnv(k, sizeof(k));
 }
 
@@ -6370,20 +6376,57 @@ uint32_t MipChainSources(const ImageDesc& img, id<MTLTexture> base, __strong id<
     return levels;
 }
 
+// Formats whose texels a float read and write in a shader reproduce bit for bit (NaN payloads
+// aside): no sRGB or snorm conversion, no integer formats.
+bool FloatCopyExact(MTLPixelFormat f) {
+    switch (f) {
+    case MTLPixelFormatR8Unorm: case MTLPixelFormatRG8Unorm: case MTLPixelFormatRGBA8Unorm:
+    case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatR16Unorm:
+    case MTLPixelFormatRG16Unorm: case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatR16Float:
+    case MTLPixelFormatRG16Float: case MTLPixelFormatRGBA16Float: case MTLPixelFormatR32Float:
+    case MTLPixelFormatRG32Float: case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG11B10Float:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // A sampled 2D / array / cube texture with several mip levels whose base level is a GPU render
 // target: the game rendered each level separately (bloom/downsample/IBL chains). Assemble a
 // mipmapped copy from the render targets found at the mip addresses (blits encoded into the
 // current command buffer).
-id<MTLTexture> MipChainFor(const ImageDesc& img, bool encode) {
+id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
     if (!IsMipChainType(img.mtl_texture_type) || img.num_levels < 2 || img.pixel.compressed) return nil;
-    const uint32_t want_slices = (img.mtl_texture_type == MTLTextureType2D) ? 1u : std::max(1u, img.num_layers);
+    const uint32_t total_slices = (img.mtl_texture_type == MTLTextureType2D) ? 1u : std::max(1u, img.num_layers);
     id<MTLTexture> base = ColorTargetFor(img.address, img.width, img.height);
     if (!base || base.sampleCount > 1 || base.width != img.width || base.height != img.height ||
-        TextureTotalSlices(base) < want_slices)
+        TextureTotalSlices(base) < total_slices)
         return nil;
-    const uint64_t key = MipChainKey(img);
+    // Cube shaders use 2D face arrays; assemble only the faces (or array layers) the T# can see.
+    const uint32_t first_slice = std::min(img.base_array, total_slices - 1);
+    const uint32_t last_slice = std::min(std::max(img.last_array, first_slice), total_slices - 1);
+    const uint32_t want_slices = last_slice - first_slice + 1;
+    const bool compact = want_slices < total_slices;
+    const MTLTextureType type = compact ? MTLTextureType2DArray : (MTLTextureType)img.mtl_texture_type;
+    const uint64_t key = MipChainKey(img, first_slice, want_slices);
     auto it = S.mip_chains.find(key);
-    if (!encode) return it != S.mip_chains.end() ? it->second.tex : nil;
+    if (!encode) {
+        if (it == S.mip_chains.end() || !it->second.tex) return nil;
+        if (compact) {
+            img.base_array = 0;
+            img.last_array = want_slices - 1;
+        }
+        State::MipChain& mc = it->second;
+        if (!mc.sample_view || !(mc.sample_swizzle == img.view_swizzle)) {
+            mc.sample_view = [mc.tex newTextureViewWithPixelFormat:(MTLPixelFormat)img.pixel.mtl_format
+                                                       textureType:mc.tex.textureType
+                                                            levels:NSMakeRange(0, mc.tex.mipmapLevelCount)
+                                                            slices:NSMakeRange(0, TextureTotalSlices(mc.tex))
+                                                           swizzle:ToMTLSwizzle(img.view_swizzle)];
+            mc.sample_swizzle = img.view_swizzle;
+        }
+        return mc.sample_view ? mc.sample_view : mc.tex;
+    }
     if (!BackendHas(kGnmCapCopies, "mip chain of render targets")) return nil;
     State::MipChain& mc = S.mip_chains[key];
     const uint64_t stamp = S.submit_idx + (S.n_draws << 20) + (S.n_dispatches << 40);
@@ -6395,39 +6438,111 @@ id<MTLTexture> MipChainFor(const ImageDesc& img, bool encode) {
     // the targets of the other levels are read by the blits below (level 0: ResolveTextureHazards)
     for (uint32_t m = 1; m < levels; ++m)
         if (srcs[m]) RefreshGuestNewer(addrs[m], srcs[m], false);
-    if (!mc.tex || mc.tex.mipmapLevelCount != levels || mc.tex.textureType != (MTLTextureType)img.mtl_texture_type ||
-        TextureTotalSlices(mc.tex) != want_slices) {
+    // Probe filtering alternates dispatches that store one level with dispatches that sample the
+    // chain: between compute dispatches the levels are copied by a dispatch in the open encoder,
+    // without the blit encoder's encoder switches and per-copy texture views.
+    const bool compute_copy = S.mip_copy_pso && !g_async_compute && S.be->OpenEncoder() == GnmEncoder::Compute &&
+                              type != MTLTextureType3D && FloatCopyExact(base.pixelFormat);
+    const bool allocate = !mc.tex || mc.tex.mipmapLevelCount != levels || mc.tex.pixelFormat != base.pixelFormat ||
+                          mc.tex.textureType != type || TextureTotalSlices(mc.tex) != want_slices ||
+                          (compute_copy && !(mc.tex.usage & MTLTextureUsageShaderWrite));
+    std::array<std::pair<uint64_t, uint64_t>, kMaxMips> versions{};
+    // Probe generation often updates one mip at a time. Refresh only the changed subresources.
+    const bool track_versions = !g_async_compute;
+    static_assert(kMaxMips <= 32);
+    uint32_t dirty = 0;
+    for (uint32_t m = 0; m < levels; ++m) {
+        if (!srcs[m]) continue;
+        if (track_versions) versions[m] = S.tex->ColorTargetVersion(addrs[m], srcs[m]);
+        if (allocate || !versions[m].first || versions[m] != mc.versions[m]) dirty |= 1u << m;
+    }
+    if (!allocate && !dirty) {
+        mc.built_submit = stamp;
+        mc.versions = versions;
+        return mc.tex;
+    }
+    if (allocate) {
         MTLTextureDescriptor* td = [MTLTextureDescriptor new];
-        td.textureType = (MTLTextureType)img.mtl_texture_type;
+        td.textureType = type;
         td.pixelFormat = base.pixelFormat;
         td.width = img.width;
         td.height = img.height;
         td.mipmapLevelCount = levels;
-        if (img.mtl_texture_type == MTLTextureTypeCube) td.arrayLength = 1;
-        else if (img.mtl_texture_type == MTLTextureTypeCubeArray) td.arrayLength = std::max(1u, want_slices / 6);
+        if (type == MTLTextureTypeCube) td.arrayLength = 1;
+        else if (type == MTLTextureTypeCubeArray) td.arrayLength = want_slices / 6;
         else td.arrayLength = want_slices;
         td.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        if (FloatCopyExact(base.pixelFormat)) td.usage |= MTLTextureUsageShaderWrite; // the compute copy
         td.storageMode = MTLStorageModePrivate;
+        mc.sample_view = nil;
+        for (auto& v : mc.dst_views) v = nil;
         OwnTextureDropped(mc.tex); // the chain with another level count
         mc.tex = [S.dev newTextureWithDescriptor:td];
         if (!mc.tex) return nil;
         OwnTextureMade(mc.tex);
     }
+    if (compute_copy) {
+        const uint32_t chain_slices = TextureTotalSlices(mc.tex);
+        ComputeEncoder(); // the open one; closes an open guest memory chain, as other work does
+        S.be->Barrier(kGnmStageDispatch, kGnmStageDispatch, kGnmScopeTextures); // after the stores before it
+        S.be->SetComputePipeline(S.mip_copy_pso);
+        for (uint32_t m = 0; m < levels; ++m) {
+            if (!(dirty & (1u << m))) continue;
+            const uint32_t w = std::max(1u, img.width >> m), h = std::max(1u, img.height >> m);
+            id<MTLTexture> src = srcs[m];
+            if (!src || src.pixelFormat != base.pixelFormat || src.sampleCount > 1 || src.width < w || src.height < h ||
+                src.textureType == MTLTextureType3D)
+                continue;
+            const uint32_t available = TextureTotalSlices(src);
+            if (available <= first_slice) continue;
+            const uint32_t copy_slices = std::min(want_slices, available - first_slice);
+            if (!mc.src_views[m] || mc.src_views[m].parentTexture != src)
+                mc.src_views[m] = [src newTextureViewWithPixelFormat:src.pixelFormat textureType:MTLTextureType2DArray
+                                                              levels:NSMakeRange(0, 1)
+                                                              slices:NSMakeRange(0, available)];
+            if (!mc.dst_views[m])
+                mc.dst_views[m] = [mc.tex newTextureViewWithPixelFormat:mc.tex.pixelFormat
+                                                            textureType:MTLTextureType2DArray
+                                                                 levels:NSMakeRange(m, 1)
+                                                                 slices:NSMakeRange(0, chain_slices)];
+            if (!mc.src_views[m] || !mc.dst_views[m]) continue;
+            const uint32_t p[4] = {w, h, first_slice, copy_slices};
+            S.be->BindTexture(GnmStage::Compute, 0, mc.src_views[m]);
+            S.be->BindTexture(GnmStage::Compute, 1, mc.dst_views[m]);
+            S.be->BindBytes(GnmStage::Compute, 0, p, sizeof(p));
+            S.be->DispatchThreads(MTLSizeMake(w, h, copy_slices), MTLSizeMake(8, 8, 1));
+        }
+        S.be->Barrier(kGnmStageDispatch, kGnmStageDispatch, kGnmScopeTextures); // the dispatch sampling the chain
+        g_cstate.Reset(S.be->EncoderSerial());
+        S.pending = true;
+        mc.built_submit = stamp;
+        mc.versions = versions;
+        LogWork("mip chain assembly (compute)");
+        return mc.tex;
+    }
     EndEncoders();
     EnsureCmd();
     S.be->BeginCopies();
     for (uint32_t m = 0; m < levels; ++m) {
+        if (!(dirty & (1u << m))) continue;
         const uint32_t w = std::max(1u, img.width >> m), h = std::max(1u, img.height >> m);
         id<MTLTexture> src = srcs[m];
         if (!src || src.pixelFormat != base.pixelFormat || src.sampleCount > 1 || src.width < w || src.height < h) continue;
-        const uint32_t copy_slices = std::min(want_slices, TextureTotalSlices(src));
+        const uint32_t available = TextureTotalSlices(src);
+        if (available <= first_slice) continue;
+        const uint32_t copy_slices = std::min(want_slices, available - first_slice);
+        if (copy_slices > 1 && src.width == w && src.height == h && src.textureType != MTLTextureType3D) {
+            S.be->CopyTextureSlices(src, first_slice, mc.tex, m, copy_slices);
+            continue;
+        }
         for (uint32_t sl = 0; sl < copy_slices; ++sl)
-            S.be->CopyTextureRegion(src, sl, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), mc.tex, sl, m,
+            S.be->CopyTextureRegion(src, first_slice + sl, 0, MTLOriginMake(0, 0, 0), MTLSizeMake(w, h, 1), mc.tex, sl, m,
                                     MTLOriginMake(0, 0, 0));
     }
     S.be->EndEncoder();
     S.pending = true;
     mc.built_submit = stamp;
+    mc.versions = versions;
     LogWork("mip chain assembly");
     return mc.tex;
 }
@@ -6872,6 +6987,36 @@ gcn_push_data MakePushData(const Regs& regs) {
     return p;
 }
 
+static bool SameTextureOrView(id<MTLTexture> a, id<MTLTexture> b) {
+    return a == b || (a.parentTexture && a.parentTexture == b) || (b.parentTexture && a == b.parentTexture);
+}
+
+// Whether an image at [address, address + size) aliases one of the pass's attachments, by guest
+// address range or by the render target texture found at its address.
+static bool ImageHitsAttachment(const PassKey& pass, uint64_t address, uint64_t size) {
+    const uint64_t end = address + size;
+    const auto overlaps = [&](uint64_t a, uint64_t n) { return a && address < a + std::max<uint64_t>(n, 1) && end > a; };
+    if (pass.depth && (overlaps(pass.depth_addr, pass.depth_size) || overlaps(pass.stencil_addr, pass.stencil_size)))
+        return true;
+    bool any_color = false;
+    for (int c = 0; c < 8; ++c) {
+        if (!pass.color[c]) continue;
+        any_color = true;
+        if (overlaps(pass.color_addr[c], pass.color_size[c])) return true;
+    }
+    if (!S.tex) return false;
+    if (pass.depth) {
+        if (id<MTLTexture> dt = S.tex->FindDepthTarget(address))
+            if (SameTextureOrView(dt, pass.depth)) return true;
+    }
+    if (any_color) {
+        if (id<MTLTexture> ct = S.tex->FindColorTarget(address))
+            for (int c = 0; c < 8; ++c)
+                if (pass.color[c] && SameTextureOrView(ct, pass.color[c])) return true;
+    }
+    return false;
+}
+
 bool StageHasAttachmentHazard(const PassKey& pass, const Shader* s, const std::vector<uint32_t>& flat) {
     if (!s || s->imgs.empty()) return false;
     static const bool no_companion_merge = getenv("PS4_GNM_NO_DEPTH_COMPANION_MERGE") != nullptr;
@@ -6879,10 +7024,12 @@ bool StageHasAttachmentHazard(const PassKey& pass, const Shader* s, const std::v
         ImageDesc img;
         uint64_t approx = 0;
         if (!StageImage(s, flat, i, &img, &approx) || !img.valid || !img.address) continue;
+        if (!ImageHitsAttachment(pass, img.address, std::max<uint64_t>(approx, 1))) continue;
         // BindStage samples a separate R32F companion for non-shadow depth reads. Its
         // guest address still names the depth attachment, but the Metal texture does not.
         // Only exempt a prepared, current companion; PrepareDepthCompanions ends the
         // encoder and refreshes it whenever the source depth version changes.
+        // Checked only after a hit: these lookups are the expensive part, and hits are rare.
         if (!no_companion_merge && !s->imgs[i].is_depth && !s->imgs[i].is_storage && S.tex && !StencilPlaneDepth(img)) {
             if (id<MTLTexture> dt = DepthTargetFor(img.address, img)) {
                 void* depth_key = (__bridge void*)dt;
@@ -6893,44 +7040,7 @@ bool StageHasAttachmentHazard(const PassKey& pass, const Shader* s, const std::v
                     continue;
             }
         }
-        const uint64_t img_start = img.address;
-        const uint64_t img_end = img.address + std::max<uint64_t>(approx, 1);
-
-        if (pass.depth) {
-            if (pass.depth_addr) {
-                const uint64_t d_start = pass.depth_addr;
-                const uint64_t d_end = pass.depth_addr + std::max<uint64_t>(pass.depth_size, 1);
-                if (img_start < d_end && img_end > d_start) return true;
-            }
-            if (pass.stencil_addr) {
-                const uint64_t s_start = pass.stencil_addr;
-                const uint64_t s_end = pass.stencil_addr + std::max<uint64_t>(pass.stencil_size, 1);
-                if (img_start < s_end && img_end > s_start) return true;
-            }
-        }
-        for (int c = 0; c < 8; ++c) {
-            if (!pass.color[c] || !pass.color_addr[c]) continue;
-            const uint64_t c_start = pass.color_addr[c];
-            const uint64_t c_end = pass.color_addr[c] + std::max<uint64_t>(pass.color_size[c], 1);
-            if (img_start < c_end && img_end > c_start) return true;
-        }
-        if (S.tex) {
-            if (pass.depth) {
-                if (id<MTLTexture> dt = S.tex->FindDepthTarget(img.address)) {
-                    if (dt == pass.depth || (dt.parentTexture && dt.parentTexture == pass.depth) ||
-                        (pass.depth.parentTexture && dt == pass.depth.parentTexture))
-                        return true;
-                }
-            }
-            for (int c = 0; c < 8; ++c) {
-                if (!pass.color[c]) continue;
-                if (id<MTLTexture> ct = S.tex->FindColorTarget(img.address)) {
-                    if (ct == pass.color[c] || (ct.parentTexture && ct.parentTexture == pass.color[c]) ||
-                        (pass.color[c].parentTexture && ct == pass.color[c].parentTexture))
-                        return true;
-                }
-            }
-        }
+        return true;
     }
     return false;
 }
@@ -9450,6 +9560,7 @@ bool Init(GuestContext* ctx) {
             S.quad_prep_pso = util.quad_prep;
             S.quad_indices_pso = util.quad_indices;
             S.args_patch_pso = util.args_patch;
+            S.mip_copy_pso = util.mip_copy;
         }
         if (!S.present_pso) fprintf(stderr, "[gnm-draw] present pipeline failed: %s\n", uwhy.c_str());
     }

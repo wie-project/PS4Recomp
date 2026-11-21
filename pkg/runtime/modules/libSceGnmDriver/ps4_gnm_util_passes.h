@@ -21,6 +21,7 @@ struct GnmUtil {
     id<MTLComputePipelineState> quad_prep = nil;    // quad_list_prep (indirect quad-list draws)
     id<MTLComputePipelineState> quad_indices = nil; // quad_list_indices (their indexed conversion)
     id<MTLComputePipelineState> args_patch = nil;   // indirect_args_patch (record offsets)
+    id<MTLComputePipelineState> mip_copy = nil;     // mip_level_copy (MipChainFor between dispatches)
 };
 // Compiles kGnmUtilMsl and builds the three pipelines. False (why set) only when the library does
 // not compile; a pipeline that fails stays nil and why says which.

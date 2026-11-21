@@ -890,6 +890,8 @@ public:
     // Color target at an address with the given size (several surfaces of different sizes can
     // share an address over time); nil if none matches.
     id<MTLTexture> FindColorTarget(uint64_t address, uint32_t width, uint32_t height) const;
+    // Version of a GPU-owned color surface for derived copies; zero means it cannot be reused.
+    std::pair<uint64_t, uint64_t> ColorTargetVersion(uint64_t address, id<MTLTexture> tex) const;
     id<MTLTexture> FindDepthTarget(uint64_t address) const;
     // The depth surface at the address with `samples` samples (a 1x surface and its 2x twin of PS4
     // Pro checkerboard rendering share the memory); nil if none.
@@ -1080,6 +1082,9 @@ private:
     uint64_t mem_size_;
     mutable std::mutex mutex_;
     std::unordered_multimap<uint64_t, Entry*> entries_; // keyed by guest address
+    // Sampled entries sorted by address, with the running maximum end of each prefix.
+    std::vector<std::pair<Entry*, uint64_t>> sampled_ranges_;
+    bool sampled_ranges_dirty_ = false;
     // Address ranges of GPU-owned entries sorted by start, with the running maximum of their
     // ends, for OverlapsGpuTexture. gpu_version_ changes whenever a GPU-owned entry is added,
     // removed or resized (TrackLocked); the index is rebuilt when it was built for another

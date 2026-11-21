@@ -74,6 +74,37 @@ static void CheckMipsAndSlices(id<MTLDevice> device, id<MTLCommandQueue> queue) 
     }
 }
 
+static void CheckRangeInvalidation(id<MTLDevice> device, id<MTLCommandQueue> queue) {
+    using namespace ps4gnm;
+    std::vector<uint8_t> memory(1 << 20);
+    TextureCache cache(device, queue, memory.data(), memory.size());
+    ImageDesc image;
+    image.valid = true;
+    image.width = image.height = image.pitch = 64;
+    image.tile_mode = TileMode::DisplayLinearAligned;
+    image.type = ImageType::Color2D;
+    image.mtl_texture_type = MTLTextureType2D;
+    image.dfmt = DataFormat::Format8_8_8_8;
+    image.nfmt = NumberFormat::Unorm;
+    image.pixel = GetPixelFormat(image.dfmt, image.nfmt);
+    SurfaceLayout layout;
+    Check(ComputeSurfaceLayout(image.ToSurfaceDesc(), &layout), "invalidation layout unavailable");
+    const uint64_t base = 65536, end = base + layout.total_size;
+    image.address = base;
+    Check(cache.GetTexture(image) != nil, "outer sampled texture missing");
+    cache.InvalidateRange(end, 1);
+    Check(cache.stats.invalidations == 0, "touching the end must not invalidate");
+    image.address = base + layout.total_size / 2;
+    Check(cache.GetTexture(image) != nil, "overlapping sampled texture missing");
+    cache.InvalidateRange(end - 1, 1);
+    Check(cache.stats.invalidations == 2, "overlapping write must invalidate both sampled textures");
+    cache.InvalidateRange(base, 1);
+    Check(cache.stats.invalidations == 3, "write before the inner address must invalidate only the outer texture");
+    cache.Clear();
+    cache.InvalidateRange(base, layout.total_size);
+    Check(cache.stats.invalidations == 3, "cleared textures must not remain indexed");
+}
+
 int main() {
     @autoreleasepool {
         using namespace ps4gnm;
@@ -134,6 +165,7 @@ int main() {
             }
         }
         CheckMipsAndSlices(device, queue);
+        CheckRangeInvalidation(device, queue);
         printf("sampled texture CPU updates reached GPU readers (%.3f ms uploading)\n", upload_ms);
     }
 }

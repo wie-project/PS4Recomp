@@ -3195,8 +3195,11 @@ bool TextureCache::HintNear(uint64_t addr, uint64_t size) const {
 
 void TextureCache::TrackLocked(const Entry* e, int sign) {
     const bool sampled = e->kind == Entry::Sampled;
-    if (!sampled) ++gpu_version_;
-    if (!sampled && sign > 0) HintAddLocked(e->address, e->size);
+    if (sampled) sampled_ranges_dirty_ = true;
+    else {
+        ++gpu_version_;
+        if (sign > 0) HintAddLocked(e->address, e->size);
+    }
     std::atomic<uint64_t>& count = sampled ? sampled_count_ : gpu_count_;
     std::atomic<uint64_t>& bytes = sampled ? sampled_bytes_ : gpu_bytes_;
     if (sign > 0) {
@@ -4206,17 +4209,41 @@ void TextureCache::InvalidateRange(uint64_t addr, uint64_t size, bool include_rt
     }
     TimedLock lk(mutex_);
     const uint64_t end = addr + size;
+    auto invalidate_sampled = [&](Entry* e) {
+        if (e->gpu_upload_epoch > write_epoch) return; // copied on the GPU after that write
+        e->dirty = true;
+        e->cpu_digest_valid = false;
+        e->cpu_unchanged_streak = 0;
+        e->readable_known = false;
+        stats.invalidations++;
+    };
+    if (!include_rts) {
+        if (sampled_ranges_dirty_) {
+            sampled_ranges_.clear();
+            for (auto& kv : entries_)
+                if (kv.second->kind == Entry::Sampled) sampled_ranges_.emplace_back(kv.second, 0);
+            std::sort(sampled_ranges_.begin(), sampled_ranges_.end(), [](const auto& a, const auto& b) {
+                return a.first->address < b.first->address;
+            });
+            uint64_t max_end = 0;
+            for (auto& [e, prefix_end] : sampled_ranges_)
+                prefix_end = max_end = std::max(max_end, e->address + e->size);
+            sampled_ranges_dirty_ = false;
+        }
+        auto it = std::lower_bound(sampled_ranges_.begin(), sampled_ranges_.end(), end,
+                                   [](const auto& range, uint64_t v) { return range.first->address < v; });
+        while (it != sampled_ranges_.begin() && (--it)->second > addr) {
+            Entry* e = it->first;
+            if (e->address + e->size > addr) invalidate_sampled(e);
+        }
+        return;
+    }
     for (auto& kv : entries_) {
         Entry* e = kv.second;
         if (e->address < end && addr < e->address + e->size) {
             if (e->kind == Entry::Sampled) {
-                if (e->gpu_upload_epoch > write_epoch) continue; // copied on the GPU after that write
-                e->dirty = true;
-                e->cpu_digest_valid = false;
-                e->cpu_unchanged_streak = 0;
-                e->readable_known = false;
-                stats.invalidations++;
-            } else if (include_rts && e->kind == Entry::Color) {
+                invalidate_sampled(e);
+            } else if (e->kind == Entry::Color) {
                 UploadLocked(e);
                 e->generation++;
                 // its texture now holds the guest bytes. Several targets over the same bytes are
@@ -4280,6 +4307,17 @@ id<MTLTexture> TextureCache::FindColorTarget(uint64_t address, uint32_t width, u
     const Entry* e = LastWrittenLocked(address, Entry::Color,
                                        [&](const Entry* c) { return c->tex.width == width && c->tex.height == height; });
     return e ? (TouchLocked(e), e->tex) : nil;
+}
+
+std::pair<uint64_t, uint64_t> TextureCache::ColorTargetVersion(uint64_t address, id<MTLTexture> tex) const {
+    TimedLock lk(mutex_);
+    const auto range = entries_.equal_range(address);
+    for (auto it = range.first; it != range.second; ++it) {
+        const Entry* e = it->second;
+        if (e->kind == Entry::Color && e->tex == tex && !e->newer_epoch && e->write_order)
+            return {e->write_order, e->generation};
+    }
+    return {};
 }
 
 id<MTLTexture> TextureCache::FindDepthSibling(const DepthTarget& db, id<MTLTexture> self) const {

@@ -334,7 +334,14 @@ void Metal3Backend::DrawPatches(uint32_t num_control_points, uint32_t patch_star
            baseInstance:base_instance];
 }
 
-// MipChainFor (:5070), DrawEncode's grown depth array (:7131), ResolvePass (:6060)
+void Metal3Backend::CopyTextureSlices(id<MTLTexture> src, uint32_t src_slice, id<MTLTexture> dst,
+                           uint32_t dst_level, uint32_t slices) {
+    BeforeCommand();
+    [Cur().blit copyFromTexture:src sourceSlice:src_slice sourceLevel:0 toTexture:dst destinationSlice:0
+               destinationLevel:dst_level sliceCount:slices levelCount:1];
+}
+
+// DrawEncode's grown depth array and ResolvePass
 void Metal3Backend::CopyTextureRegion(id<MTLTexture> src, uint32_t src_slice, uint32_t src_level, MTLOrigin src_origin,
                                       MTLSize size, id<MTLTexture> dst, uint32_t dst_slice, uint32_t dst_level,
                                       MTLOrigin dst_origin) {
