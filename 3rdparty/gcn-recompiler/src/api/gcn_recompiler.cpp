@@ -990,6 +990,7 @@ GCN_API bool gcn_shader_get_buffer(const gcn_shader* s, uint32_t index, gcn_buff
                     (True(t & IR::Type::F32) ? GCN_USES_F32 : 0) |
                     (True(t & IR::Type::U64) ? GCN_USES_U64 : 0);
     o->is_written = b.is_written;
+    o->is_read = b.is_read;
     o->is_formatted = b.is_formatted;
     o->post_op = static_cast<u32>(b.post_op);
     o->post_op_dw1_mask = b.post_op_dw1_mask;

@@ -495,6 +495,7 @@ typedef struct gcn_buffer_binding {
     uint32_t type;          /* gcn_buffer_type */
     uint32_t used_types;    /* GCN_USES_* : the SPIR-V declares one aliased SSBO per type */
     bool is_written, is_formatted;
+    bool is_read; /* loaded or atomically updated (read-modify-write) by the shader */
     uint32_t post_op, post_op_dw1_mask, post_op_dw2_shift;
     gcn_sharp_fetch sharp;
     /* MSL slot(s). SPIRV-Cross merges the per-type aliases of one binding into a single

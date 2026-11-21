@@ -112,6 +112,7 @@ public:
         auto& buffer = buffer_resources[index];
         buffer.used_types |= desc.used_types;
         buffer.is_written |= desc.is_written;
+        buffer.is_read |= desc.is_read;
         buffer.is_formatted |= desc.is_formatted;
         return index;
     }
@@ -529,6 +530,7 @@ void PatchBufferSharp(const ResourceDiscovery& resource, Info& info, Descriptors
         .used_types = BufferDataType(inst, profile),
         .buffer_type = BufferType::Guest,
         .is_written = IsBufferStore(inst),
+        .is_read = !IsBufferStore(inst),
         .is_formatted = inst.GetOpcode() == IR::Opcode::LoadBufferFormatF32 ||
                         inst.GetOpcode() == IR::Opcode::StoreBufferFormatF32,
         .post_op = resource.sharps[0].post_op,

@@ -117,6 +117,7 @@ struct BufferResource {
     IR::Type used_types{};
     BufferType buffer_type{};
     bool is_written{};
+    bool is_read{}; // loaded or atomically updated (read-modify-write) by the shader
     bool is_formatted{};
     SharpFetchPostOp post_op{};
     u32 post_op_dw1_mask{};
