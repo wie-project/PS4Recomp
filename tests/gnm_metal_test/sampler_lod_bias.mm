@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // The S# LOD bias reaches the Metal sampler: a texture whose levels are red, green and blue is
 // drawn with point mip filtering at LOD 0 (4x4 target) and LOD 2 (1x1 target); the bias moves
-// the level that is read.
+// the level that is read. The biased LODs (1.25) lie inside a level: GPUs may round or truncate
+// a LOD that falls exactly on a level boundary when picking the nearest mip.
 #include "ps4_gnm_resources.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,10 +102,20 @@ fragment float4 fs(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler 
             [tex replaceRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:level withBytes:texels bytesPerRow:n * 4];
         }
         id<MTLCommandQueue> q = [dev newCommandQueue];
-        Check(LevelRead(dev, q, pso, tex, 0.f, 4) == 0, "LOD 0 without bias reads level 0");
-        Check(LevelRead(dev, q, pso, tex, 1.f, 4) == 1, "LOD 0 with bias +1 reads level 1");
-        Check(LevelRead(dev, q, pso, tex, 0.f, 1) == 2, "LOD 2 without bias reads level 2");
-        Check(LevelRead(dev, q, pso, tex, -1.f, 1) == 1, "LOD 2 with bias -1 reads level 1");
+        const struct {
+            float bias;
+            uint32_t size;
+            int level;
+            const char* name;
+        } cases[] = {{0.f, 4, 0, "LOD 0 without bias reads level 0"},
+                     {1.25f, 4, 1, "LOD 0 with bias +1.25 reads level 1"},
+                     {0.f, 1, 2, "LOD 2 without bias reads level 2"},
+                     {-0.75f, 1, 1, "LOD 2 with bias -0.75 reads level 1"}};
+        for (const auto& c : cases) {
+            const int got = LevelRead(dev, q, pso, tex, c.bias, c.size);
+            if (got != c.level) fprintf(stderr, "read level %d\n", got);
+            Check(got == c.level, c.name);
+        }
         printf("sampler LOD bias: levels move with the S# bias\n");
     }
     return 0;
