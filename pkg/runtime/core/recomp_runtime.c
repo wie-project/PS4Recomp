@@ -430,10 +430,19 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
     guest_mem_sz = image_size + 0x20000ULL;
   }
 
-  uint8_t *mem = (uint8_t *)mmap(NULL, guest_mem_sz, PROT_READ | PROT_WRITE,
+  // HLE modules tell host pointers from guest addresses by range ([mem_base, mem_base + size)
+  // vs. [0, size)), so the host mapping must lie above every guest address.
+  uint8_t *mem = (uint8_t *)mmap((void *)(uintptr_t)guest_mem_sz, guest_mem_sz, PROT_READ | PROT_WRITE,
                                  MAP_ANON | MAP_PRIVATE, -1, 0);
   if (mem == MAP_FAILED) {
     perror("mmap guest memory");
+    free(ctx);
+    return NULL;
+  }
+  if ((uintptr_t)mem < guest_mem_sz) {
+    fprintf(stderr, "[ps4-recomp] guest memory at host %p overlaps guest addresses below 0x%llx\n",
+            (void *)mem, (unsigned long long)guest_mem_sz);
+    munmap(mem, guest_mem_sz);
     free(ctx);
     return NULL;
   }

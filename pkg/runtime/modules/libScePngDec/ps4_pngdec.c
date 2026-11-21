@@ -287,7 +287,7 @@ void shim_scePngDecDecode(GuestContext *ctx) {
 
 static inline void *guest_to_host(const GuestContext *ctx, uint64_t addr) {
     if (!addr) return NULL;
-    if (ctx && ctx->mem_base && addr < (1ULL << 39)) {
+    if (ctx && ctx->mem_base && addr < ctx->mem_size) {
         return (void *)(ctx->mem_base + addr);
     }
     return (void *)addr;
