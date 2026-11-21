@@ -1887,6 +1887,9 @@ MTLSamplerDescriptor* MakeSamplerDescriptor(const SamplerDesc& s, bool compare) 
     d.lodMaxClamp = std::max(s.min_lod, s.max_lod);
     d.normalizedCoordinates = YES;
     if (compare) d.compareFunction = (MTLCompareFunction)s.mtl_compare;
+    // The S# LOD bias (games bias detail textures down and blurred reflections up). Earlier macOS
+    // has no sampler LOD bias, and the sampler there samples without it.
+    if (@available(macOS 26.0, *)) d.lodBias = s.lod_bias;
     d.supportArgumentBuffers = YES;
     return d;
 }

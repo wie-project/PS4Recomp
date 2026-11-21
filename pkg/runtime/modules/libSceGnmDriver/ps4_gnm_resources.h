@@ -452,7 +452,7 @@ struct SamplerDesc {
     BorderColor border_color_type = BorderColor::TransparentBlack;
     uint32_t border_color_ptr = 0;  // index into TA_BC_BASE_ADDR table (float4 entries)
     // derived (Metal enum values)
-    float min_lod = 0.f, max_lod = 0.f, lod_bias = 0.f; // Metal samplers have no LOD bias: apply in shader
+    float min_lod = 0.f, max_lod = 0.f, lod_bias = 0.f; // lod_bias: MTLSamplerDescriptor.lodBias (macOS 26+)
     float max_anisotropy = 1.f;
     uint32_t mtl_min_filter = 0, mtl_mag_filter = 0;   // MTLSamplerMinMagFilter
     uint32_t mtl_mip_filter = 0;                       // MTLSamplerMipFilter
