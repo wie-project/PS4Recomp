@@ -21,5 +21,6 @@ func TestMetalSamplerLodBias(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build native Metal regression: %v\n%s", err, out)
 	}
-	runMetalTestBinary(t, bin)
+	t.Run("descriptor", func(t *testing.T) { runMetalTestBinary(t, bin, "--descriptor-only") })
+	t.Run("render", func(t *testing.T) { runMetalTestBinary(t, bin) })
 }

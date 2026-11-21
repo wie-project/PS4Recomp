@@ -32,14 +32,14 @@ func metalTestSource(t *testing.T, name string) string {
 	}
 }
 
-func runMetalTestBinary(t *testing.T, path string) {
+func runMetalTestBinary(t *testing.T, path string, args ...string) {
 	t.Helper()
-	out, err := exec.Command(path).CombinedOutput()
+	out, err := exec.Command(path, args...).CombinedOutput()
 	if err == nil {
 		return
 	}
 	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 77 {
-		t.Skipf("Metal device is unavailable: %s", out)
+		t.Skipf("native Metal test unavailable: %s", out)
 	}
 	t.Fatalf("native Metal regression: %v\n%s", err, out)
 }

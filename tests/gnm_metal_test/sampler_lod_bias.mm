@@ -6,6 +6,7 @@
 #include "ps4_gnm_resources.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static void Check(bool condition, const char* name) {
     if (!condition) {
@@ -23,15 +24,22 @@ static void Sharp(float bias, uint32_t ss[4]) {
     ss[3] = 0;                         // transparent black border
 }
 
-// Returns the level (0 red, 1 green, 2 blue, -1 other) read at the center of a size x size target.
-static int LevelRead(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTLRenderPipelineState> pso, id<MTLTexture> tex,
-                     float bias, uint32_t size) {
+static MTLSamplerDescriptor* SamplerWithBias(float bias) {
     uint32_t ss[4];
     Sharp(bias, ss);
     ps4gnm::SamplerDesc sd;
     Check(ps4gnm::DecodeSampler(ss, &sd), "decode the S#");
     Check(sd.lod_bias == bias, "decoded LOD bias");
-    id<MTLSamplerState> smp = [dev newSamplerStateWithDescriptor:ps4gnm::MakeSamplerDescriptor(sd, false)];
+    MTLSamplerDescriptor* sampler = ps4gnm::MakeSamplerDescriptor(sd, false);
+    if (@available(macOS 26.0, *)) Check(sampler.lodBias == bias, "Metal descriptor LOD bias");
+    return sampler;
+}
+
+// Returns the level (0 red, 1 green, 2 blue, -1 other) read at the center of a size x size target.
+static int LevelRead(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTLRenderPipelineState> pso, id<MTLTexture> tex,
+                     MTLSamplerDescriptor* sampler, uint32_t size) {
+    id<MTLSamplerState> smp = [dev newSamplerStateWithDescriptor:sampler];
+    Check(smp != nil, "create Metal sampler");
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                   width:size height:size mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget;
@@ -50,6 +58,7 @@ static int LevelRead(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTLRenderPipel
     [re endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
+    Check(cb.status == MTLCommandBufferStatusCompleted, "render completed");
     uint8_t px[4];
     [rt getBytes:px bytesPerRow:size * 4 fromRegion:MTLRegionMake2D(size / 2, size / 2, 1, 1) mipmapLevel:0];
     if (px[0] == 255 && px[1] == 0 && px[2] == 0) return 0;
@@ -58,16 +67,29 @@ static int LevelRead(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTLRenderPipel
     return -1;
 }
 
-int main() {
+int main(int argc, char** argv) {
     @autoreleasepool {
-        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
-        if (!dev) {
-            fprintf(stderr, "no Metal device\n");
-            return 77;
-        }
         if (@available(macOS 26.0, *)) {
         } else {
             fprintf(stderr, "Metal samplers have no LOD bias before macOS 26\n");
+            return 77;
+        }
+        const struct {
+            float bias;
+            uint32_t lod;
+            int level;
+            const char* name;
+        } cases[] = {{0.f, 0, 0, "LOD 0 without bias reads level 0"},
+                     {1.25f, 0, 1, "LOD 0 with bias +1.25 reads level 1"},
+                     {0.f, 2, 2, "LOD 2 without bias reads level 2"},
+                     {-0.75f, 2, 1, "LOD 2 with bias -0.75 reads level 1"}};
+        if (argc == 2 && strcmp(argv[1], "--descriptor-only") == 0) {
+            for (const auto& c : cases) SamplerWithBias(c.bias);
+            return 0;
+        }
+        id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+        if (!dev) {
+            fprintf(stderr, "no Metal device\n");
             return 77;
         }
         NSError* error = nil;
@@ -102,19 +124,30 @@ fragment float4 fs(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler 
             [tex replaceRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:level withBytes:texels bytesPerRow:n * 4];
         }
         id<MTLCommandQueue> q = [dev newCommandQueue];
-        const struct {
-            float bias;
-            uint32_t size;
-            int level;
-            const char* name;
-        } cases[] = {{0.f, 4, 0, "LOD 0 without bias reads level 0"},
-                     {1.25f, 4, 1, "LOD 0 with bias +1.25 reads level 1"},
-                     {0.f, 1, 2, "LOD 2 without bias reads level 2"},
-                     {-0.75f, 1, 1, "LOD 2 with bias -0.75 reads level 1"}};
+        bool biasIgnored = false;
         for (const auto& c : cases) {
-            const int got = LevelRead(dev, q, pso, tex, c.bias, c.size);
-            if (got != c.level) fprintf(stderr, "read level %d\n", got);
-            Check(got == c.level, c.name);
+            const uint32_t size = 4u >> c.lod;
+            const int got = LevelRead(dev, q, pso, tex, SamplerWithBias(c.bias), size);
+            if (got == c.level) continue;
+
+            // Skip only when the hosted virtual GPU also ignores a directly configured Metal sampler.
+            if (c.bias != 0.f && got == (int)c.lod && [dev.name isEqualToString:@"Apple Paravirtual device"]) {
+                MTLSamplerDescriptor* control = [MTLSamplerDescriptor new];
+                control.mipFilter = MTLSamplerMipFilterNearest;
+                control.lodMaxClamp = 2.f;
+                control.supportArgumentBuffers = YES;
+                if (@available(macOS 26.0, *)) control.lodBias = c.bias;
+                if (LevelRead(dev, q, pso, tex, control, size) == got) {
+                    biasIgnored = true;
+                    continue;
+                }
+            }
+            fprintf(stderr, "read level %d\n", got);
+            Check(false, c.name);
+        }
+        if (biasIgnored) {
+            fprintf(stderr, "Apple Paravirtual device ignores lodBias even on a directly configured Metal sampler\n");
+            return 77;
         }
         printf("sampler LOD bias: levels move with the S# bias\n");
     }
