@@ -94,6 +94,7 @@ public:
                            uint32_t dst_level, uint32_t slices) override;
     void CopyTextureRegion(id<MTLTexture> src, uint32_t src_slice, uint32_t src_level, MTLOrigin src_origin, MTLSize size,
                            id<MTLTexture> dst, uint32_t dst_slice, uint32_t dst_level, MTLOrigin dst_origin) override;
+    void CopyTextureToBuffer(id<MTLTexture> src, MTLSize size, id<MTLBuffer> dst, uint64_t row_bytes) override;
     void CopyBufferToTexture(id<MTLBuffer> src, uint64_t src_off, uint64_t row_bytes, uint64_t image_bytes, MTLSize size,
                              id<MTLTexture> dst, uint32_t slice, uint32_t level, MTLOrigin origin) override;
 

@@ -332,9 +332,17 @@ public:
     virtual void CopyTextureRegion(id<MTLTexture> src, uint32_t src_slice, uint32_t src_level, MTLOrigin src_origin,
                                    MTLSize size, id<MTLTexture> dst, uint32_t dst_slice, uint32_t dst_level,
                                    MTLOrigin dst_origin) = 0;
+    virtual void CopyTextureToBuffer(id<MTLTexture> src, MTLSize size, id<MTLBuffer> dst, uint64_t row_bytes) = 0;
     virtual void CopyBufferToTexture(id<MTLBuffer> src, uint64_t src_off, uint64_t row_bytes, uint64_t image_bytes,
                                      MTLSize size, id<MTLTexture> dst, uint32_t slice, uint32_t level,
                                      MTLOrigin origin) = 0;
+    // One RGBA32Uint texel holds one 16-byte BC block; Metal cannot blit between their formats.
+    void CopyPackedMipLevel(id<MTLTexture> blocks, id<MTLBuffer> staging, id<MTLTexture> dst,
+                            uint32_t level, MTLSize size) {
+        const uint64_t row = blocks.width * 16;
+        CopyTextureToBuffer(blocks, MTLSizeMake(blocks.width, blocks.height, 1), staging, row);
+        CopyBufferToTexture(staging, 0, row, 0, size, dst, 0, level, MTLOriginMake(0, 0, 0));
+    }
 
     // ---- residency (thread-safe). Metal 3: bound resources are resident by themselves, these do
     // nothing and IsResident is true. Metal 4: GnmResidency.

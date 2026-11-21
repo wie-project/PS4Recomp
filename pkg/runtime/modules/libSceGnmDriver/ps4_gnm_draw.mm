@@ -4730,9 +4730,11 @@ void NoteImage(Stage st, uint32_t index, const ImageDesc& img, bool storage, boo
     }
     // a mip chain assembled from render targets (MipChainFor) also reads the targets of its levels
     id<MTLTexture> mips[kMaxMips];
-    const uint32_t nmips = !storage && !depth_image && !ids.empty() && !S.tex->FindDepthTarget(img.address)
-                               ? MipChainSources(img, ColorTargetFor(img.address, img.width, img.height), mips)
-                               : 0;
+    uint32_t nmips = 0;
+    if (!storage && !depth_image && !ids.empty() && !S.tex->FindDepthTarget(img.address)) {
+        id<MTLTexture> base = img.pixel.compressed ? nil : ColorTargetFor(img.address, img.width, img.height);
+        nmips = MipChainSources(img, base, mips);
+    }
     for (uint32_t m = 1; m < nmips; ++m) {
         GpuTextureId gid;
         if (mips[m] && S.tex->DescribeGpuTexture(mips[m], &gid))
@@ -5908,6 +5910,7 @@ bool BindStage(const Shader* s, const uint32_t ud[16], const std::vector<uint32_
                         img.address += layout.mips[img.base_level].offset;
                         img.width = std::max(1u, img.width >> img.base_level);
                         img.height = std::max(1u, img.height >> img.base_level);
+                        img.pitch = layout.mips[img.base_level].pitch;
                         img.base_level = 0;
                         img.last_level = 0;
                         img.num_levels = 1;
@@ -6312,10 +6315,12 @@ static uint32_t TextureTotalSlices(id<MTLTexture> t) {
 }
 
 uint64_t MipChainKey(const ImageDesc& img, uint32_t first_slice, uint32_t slices) {
-    uint64_t k[6] = {img.address, ((uint64_t)img.width << 32) | img.height,
-                     ((uint64_t)img.pixel.mtl_format << 32) | img.num_levels,
-                     ((uint64_t)img.tile_mode << 32) | img.mtl_texture_type,
-                     img.num_layers, ((uint64_t)first_slice << 32) | slices};
+    const uint64_t layout = ((uint64_t)img.pitch << 32) | ((uint64_t)img.bank_swizzle << 2) |
+                            ((uint64_t)img.alt_tile_mode << 1) | img.pow2pad;
+    uint64_t k[] = {img.address, ((uint64_t)img.width << 32) | img.height,
+                    ((uint64_t)img.pixel.mtl_format << 32) | img.num_levels,
+                    ((uint64_t)img.tile_mode << 32) | img.mtl_texture_type,
+                    img.num_layers, ((uint64_t)first_slice << 32) | slices, layout};
     return Fnv(k, sizeof(k));
 }
 
@@ -6336,13 +6341,13 @@ id<MTLTexture> ColorTargetFor(uint64_t address, uint32_t w, uint32_t h) {
     return t ? t : S.tex->FindColorTarget(address);
 }
 
-// The render targets a mip chain of `img` is assembled from (MipChainFor), given `base`, the
-// color target at img.address (FindColorTarget): srcs[m] is the one at level m's address (nil:
-// none; srcs[0] = base). Returns the number of levels, 0 if `img` is not a mipmapped texture
-// whose base level is a GPU render target of its size. addrs (optional, kMaxMips): level m's address.
+// The render targets a mip chain of `img` is assembled from (MipChainFor). For uncompressed
+// images, `base` is level 0 and a smaller level's source can be nil. Packed chains require a
+// target at every level. Returns the number of levels, or zero if not assembled from targets.
 uint32_t MipChainSources(const ImageDesc& img, id<MTLTexture> base, __strong id<MTLTexture> (&srcs)[kMaxMips],
                          uint64_t* addrs) {
-    if (!IsMipChainType(img.mtl_texture_type) || img.num_levels < 2 || img.pixel.compressed) return 0;
+    if (img.pixel.compressed) return S.tex->FindPackedMipTargets(img, srcs, addrs);
+    if (!IsMipChainType(img.mtl_texture_type) || img.num_levels < 2) return 0;
     const uint32_t want_slices = (img.mtl_texture_type == MTLTextureType2D) ? 1u : std::max(1u, img.num_layers);
     if (!base || base.sampleCount > 1 || base.width != img.width || base.height != img.height ||
         TextureTotalSlices(base) < want_slices)
@@ -6376,6 +6381,21 @@ uint32_t MipChainSources(const ImageDesc& img, id<MTLTexture> base, __strong id<
     return levels;
 }
 
+id<MTLBuffer> TextureStaging(uint64_t bytes, GnmCmdTarget target) {
+    uint32_t cls = 16; // 64 KiB minimum
+    while (cls < 40 && (1ull << cls) < bytes) ++cls;
+    if ((1ull << cls) < bytes) return nil;
+    // Main and Upload share a queue; the async compute queue needs its own scratch buffers.
+    const uint32_t key = cls + (target == GnmCmdTarget::AsyncCompute ? 64 : 0);
+    const auto it = S.detile_staging.find(key);
+    if (it != S.detile_staging.end()) return it->second;
+    id<MTLBuffer> staging = [S.dev newBufferWithLength:(NSUInteger)(1ull << cls) options:MTLResourceStorageModePrivate];
+    if (!staging) return nil;
+    S.be->MakeResident(staging, GnmResidencyClass::Builtin);
+    S.detile_staging.emplace(key, staging);
+    return staging;
+}
+
 // Formats whose texels a float read and write in a shader reproduce bit for bit (NaN payloads
 // aside): no sRGB or snorm conversion, no integer formats.
 bool FloatCopyExact(MTLPixelFormat f) {
@@ -6396,12 +6416,19 @@ bool FloatCopyExact(MTLPixelFormat f) {
 // mipmapped copy from the render targets found at the mip addresses (blits encoded into the
 // current command buffer).
 id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
-    if (!IsMipChainType(img.mtl_texture_type) || img.num_levels < 2 || img.pixel.compressed) return nil;
-    const uint32_t total_slices = (img.mtl_texture_type == MTLTextureType2D) ? 1u : std::max(1u, img.num_layers);
-    id<MTLTexture> base = ColorTargetFor(img.address, img.width, img.height);
-    if (!base || base.sampleCount > 1 || base.width != img.width || base.height != img.height ||
-        TextureTotalSlices(base) < total_slices)
+    const bool packed = img.pixel.compressed;
+    if (!IsMipChainType(img.mtl_texture_type) || (!packed && img.num_levels < 2)) return nil;
+    if (packed && (img.mtl_texture_type != MTLTextureType2D || img.pixel.bytes_per_block != 16 ||
+                   img.tile_mode != TileMode::Thin1DThin))
         return nil;
+    const uint32_t total_slices = (img.mtl_texture_type == MTLTextureType2D) ? 1u : std::max(1u, img.num_layers);
+    id<MTLTexture> base = nil;
+    if (!packed) {
+        base = ColorTargetFor(img.address, img.width, img.height);
+        if (!base || base.sampleCount > 1 || base.width != img.width || base.height != img.height ||
+            TextureTotalSlices(base) < total_slices)
+            return nil;
+    }
     // Cube shaders use 2D face arrays; assemble only the faces (or array layers) the T# can see.
     const uint32_t first_slice = std::min(img.base_array, total_slices - 1);
     const uint32_t last_slice = std::min(std::max(img.last_array, first_slice), total_slices - 1);
@@ -6417,6 +6444,7 @@ id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
             img.last_array = want_slices - 1;
         }
         State::MipChain& mc = it->second;
+        if (packed && mc.built_submit == ~0ull) return nil;
         if (!mc.sample_view || !(mc.sample_swizzle == img.view_swizzle)) {
             mc.sample_view = [mc.tex newTextureViewWithPixelFormat:(MTLPixelFormat)img.pixel.mtl_format
                                                        textureType:mc.tex.textureType
@@ -6428,22 +6456,26 @@ id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
         return mc.sample_view ? mc.sample_view : mc.tex;
     }
     if (!BackendHas(kGnmCapCopies, "mip chain of render targets")) return nil;
-    State::MipChain& mc = S.mip_chains[key];
     const uint64_t stamp = S.submit_idx + (S.n_draws << 20) + (S.n_dispatches << 40);
-    if (mc.tex && mc.built_submit == stamp) return mc.tex;
+    if (it != S.mip_chains.end() && it->second.tex && it->second.built_submit == stamp) return it->second.tex;
     id<MTLTexture> srcs[kMaxMips];
     uint64_t addrs[kMaxMips] = {};
     const uint32_t levels = MipChainSources(img, base, srcs, addrs);
-    if (!levels) return nil;
+    if (!levels) {
+        if (packed && it != S.mip_chains.end()) it->second.built_submit = ~0ull;
+        return nil;
+    }
+    State::MipChain& mc = S.mip_chains[key];
     // the targets of the other levels are read by the blits below (level 0: ResolveTextureHazards)
     for (uint32_t m = 1; m < levels; ++m)
         if (srcs[m]) RefreshGuestNewer(addrs[m], srcs[m], false);
+    const MTLPixelFormat fmt = packed ? (MTLPixelFormat)img.pixel.mtl_format : base.pixelFormat;
     // Probe filtering alternates dispatches that store one level with dispatches that sample the
     // chain: between compute dispatches the levels are copied by a dispatch in the open encoder,
     // without the blit encoder's encoder switches and per-copy texture views.
     const bool compute_copy = S.mip_copy_pso && !g_async_compute && S.be->OpenEncoder() == GnmEncoder::Compute &&
-                              type != MTLTextureType3D && FloatCopyExact(base.pixelFormat);
-    const bool allocate = !mc.tex || mc.tex.mipmapLevelCount != levels || mc.tex.pixelFormat != base.pixelFormat ||
+                              type != MTLTextureType3D && FloatCopyExact(fmt);
+    const bool allocate = !mc.tex || mc.tex.mipmapLevelCount != levels || mc.tex.pixelFormat != fmt ||
                           mc.tex.textureType != type || TextureTotalSlices(mc.tex) != want_slices ||
                           (compute_copy && !(mc.tex.usage & MTLTextureUsageShaderWrite));
     std::array<std::pair<uint64_t, uint64_t>, kMaxMips> versions{};
@@ -6464,7 +6496,7 @@ id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
     if (allocate) {
         MTLTextureDescriptor* td = [MTLTextureDescriptor new];
         td.textureType = type;
-        td.pixelFormat = base.pixelFormat;
+        td.pixelFormat = fmt;
         td.width = img.width;
         td.height = img.height;
         td.mipmapLevelCount = levels;
@@ -6472,7 +6504,7 @@ id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
         else if (type == MTLTextureTypeCubeArray) td.arrayLength = want_slices / 6;
         else td.arrayLength = want_slices;
         td.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
-        if (FloatCopyExact(base.pixelFormat)) td.usage |= MTLTextureUsageShaderWrite; // the compute copy
+        if (FloatCopyExact(fmt)) td.usage |= MTLTextureUsageShaderWrite; // the compute copy
         td.storageMode = MTLStorageModePrivate;
         mc.sample_view = nil;
         for (auto& v : mc.dst_views) v = nil;
@@ -6520,6 +6552,14 @@ id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
         LogWork("mip chain assembly (compute)");
         return mc.tex;
     }
+    id<MTLBuffer> staging = nil;
+    if (packed) {
+        staging = TextureStaging(srcs[0].width * srcs[0].height * img.pixel.bytes_per_block, S.be->Target());
+        if (!staging) {
+            mc.built_submit = ~0ull;
+            return nil;
+        }
+    }
     EndEncoders();
     EnsureCmd();
     S.be->BeginCopies();
@@ -6527,7 +6567,11 @@ id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
         if (!(dirty & (1u << m))) continue;
         const uint32_t w = std::max(1u, img.width >> m), h = std::max(1u, img.height >> m);
         id<MTLTexture> src = srcs[m];
-        if (!src || src.pixelFormat != base.pixelFormat || src.sampleCount > 1 || src.width < w || src.height < h) continue;
+        if (packed) {
+            S.be->CopyPackedMipLevel(src, staging, mc.tex, m, MTLSizeMake(w, h, 1));
+            continue;
+        }
+        if (!src || src.pixelFormat != fmt || src.sampleCount > 1 || src.width < w || src.height < h) continue;
         const uint32_t available = TextureTotalSlices(src);
         if (available <= first_slice) continue;
         const uint32_t copy_slices = std::min(want_slices, available - first_slice);
@@ -6723,19 +6767,9 @@ bool EncodeGpuUploadAt(uint64_t address, const SurfaceDesc& sd, const TextureCac
         // one private staging buffer per power-of-two size class, shared by all surfaces of that
         // class: every use (detile write, blit read) is ordered by Metal's hazard tracking (same
         // tracked buffer, same queue), also between the upload command buffer and the current command buffer
-        uint32_t cls = 16; // 64 KiB minimum
-        while (cls < 40 && (1ull << cls) < up.layout.total_size) ++cls;
-        if ((1ull << cls) < up.layout.total_size) return false;
-        id<MTLBuffer> staging = nil;
-        auto sit = S.detile_staging.find(cls);
-        if (sit != S.detile_staging.end()) {
-            staging = sit->second;
-        } else {
-            staging = [S.dev newBufferWithLength:(NSUInteger)(1ull << cls) options:MTLResourceStorageModePrivate];
-            if (!staging) return false;
-            S.be->MakeResident(staging, GnmResidencyClass::Builtin);
-            S.detile_staging[cls] = staging;
-        }
+        id<MTLBuffer> staging = TextureStaging(up.layout.total_size,
+                                               upload_target ? GnmCmdTarget::Upload : S.be->Target());
+        if (!staging) return false;
         const uint32_t count = (uint32_t)(map.length / 4);
         const uint32_t params[4] = {bpe, count, (uint32_t)avail, 0};
         std::optional<UploadTargetScope> on_upload;

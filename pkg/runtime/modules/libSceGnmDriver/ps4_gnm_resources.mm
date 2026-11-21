@@ -4309,6 +4309,43 @@ id<MTLTexture> TextureCache::FindColorTarget(uint64_t address, uint32_t width, u
     return e ? (TouchLocked(e), e->tex) : nil;
 }
 
+uint32_t TextureCache::FindPackedMipTargets(const ImageDesc& img, __strong id<MTLTexture> (&srcs)[kMaxMips],
+                                            uint64_t* addrs) const {
+    if (!img.pixel.compressed || img.pixel.bytes_per_block != 16 || img.mtl_texture_type != MTLTextureType2D ||
+        img.num_samples != 1 || img.tile_mode != TileMode::Thin1DThin || !HintNear(img.address, 1))
+        return 0;
+    TimedLock lk(mutex_);
+    const auto latest = [&](uint64_t address) {
+        return LastWrittenLocked(address, Entry::Color, [](const Entry*) { return true; });
+    };
+    const Entry* base = latest(img.address);
+    if (!base || base->mtl_format != MTLPixelFormatRGBA32Uint || !base->write_order) return 0;
+    // The Neo alternate layout and bank swizzle affect macro tiles, not Thin1DThin.
+    const SurfaceDesc sd = img.ToSurfaceDesc();
+    SurfaceLayout layout{};
+    if (sd.layers != 1 || !ComputeSurfaceLayout(sd, &layout) ||
+        layout.num_mips > MaxMips(img.width, img.height, 1))
+        return 0;
+    // shortcut: only a complete GPU chain, until GPU/guest composition is supported per mip.
+    for (uint32_t m = 0; m < layout.num_mips; ++m) {
+        const uint64_t addr = img.address + layout.mips[m].offset;
+        const Entry* e = m == 0 ? base : latest(addr);
+        const MipLayout& level = layout.mips[m];
+        if (!e || !e->write_order || e->mtl_format != MTLPixelFormatRGBA32Uint ||
+            e->tex_type != MTLTextureType2D || e->samples != 1 || e->levels != 1 ||
+            e->width != (std::max(1u, img.width >> m) + 3) / 4 ||
+            e->height != (std::max(1u, img.height >> m) + 3) / 4 ||
+            e->surf.tile_mode != sd.tile_mode || !(e->cb_swizzle == CompMapping{}) ||
+            e->layout.mips[0].pitch != level.pitch ||
+            e->layout.mips[0].height != level.height || e->size != level.size)
+            return 0;
+        TouchLocked(e);
+        srcs[m] = e->tex;
+        if (addrs) addrs[m] = addr;
+    }
+    return layout.num_mips;
+}
+
 std::pair<uint64_t, uint64_t> TextureCache::ColorTargetVersion(uint64_t address, id<MTLTexture> tex) const {
     TimedLock lk(mutex_);
     const auto range = entries_.equal_range(address);

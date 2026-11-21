@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+package recompruntime
+
+import (
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
+
+func TestMetalPackedMipChain(t *testing.T) {
+	clang, err := exec.LookPath("clang++")
+	if err != nil {
+		t.Skip("clang++ is required for the native Metal regression")
+	}
+	bin := filepath.Join(t.TempDir(), "packed-mip")
+	cmd := exec.Command(clang, "-std=c++17", "-fobjc-arc", "-O2", "-Wl,-dead_strip",
+		"-Imodules/libSceGnmDriver", "-Icore", metalTestSource(t, "packed_mip.mm"),
+		"modules/libSceGnmDriver/ps4_gnm_resources.mm", "modules/libSceGnmDriver/ps4_gnm_backend.mm",
+		"modules/libSceGnmDriver/ps4_gnm_backend_metal3.mm",
+		"-framework", "Metal", "-framework", "Foundation", "-o", bin)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build native Metal regression: %v\n%s", err, out)
+	}
+	runMetalTestBinary(t, bin)
+}
