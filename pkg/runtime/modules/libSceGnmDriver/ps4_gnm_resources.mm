@@ -2389,8 +2389,21 @@ void DecodeRenderState(const uint32_t* regs, RenderState* rs) {
     };
     int16_t sx0 = tl(S16(stl), (int16_t)Bits(wtl, 0, 15), (int16_t)Bits(gtl, 0, 15), wox);
     int16_t sy0 = tl(S16(stl >> 16), (int16_t)Bits(wtl, 16, 15), (int16_t)Bits(gtl, 16, 15), woy);
-    int16_t sx1 = br(S16(sbr), (int16_t)Bits(wbr, 0, 15), (int16_t)Bits(gbr, 0, 15), wox);
-    int16_t sy1 = br(S16(sbr >> 16), (int16_t)Bits(wbr, 16, 15), (int16_t)Bits(gbr, 16, 15), woy);
+
+    int16_t sbr_x = S16(sbr);
+    int16_t sbr_y = S16(sbr >> 16);
+    if (sbr_x == 0 && sbr_y == 0) { sbr_x = 16384; sbr_y = 16384; }
+
+    int16_t wbr_x = (int16_t)Bits(wbr, 0, 15);
+    int16_t wbr_y = (int16_t)Bits(wbr, 16, 15);
+    if (wbr_x == 0 && wbr_y == 0) { wbr_x = 16384; wbr_y = 16384; }
+
+    int16_t gbr_x = (int16_t)Bits(gbr, 0, 15);
+    int16_t gbr_y = (int16_t)Bits(gbr, 16, 15);
+    if (gbr_x == 0 && gbr_y == 0) { gbr_x = 16384; gbr_y = 16384; }
+
+    int16_t sx1 = br(sbr_x, wbr_x, gbr_x, wox);
+    int16_t sy1 = br(sbr_y, wbr_y, gbr_y, woy);
     auto mk = [](int16_t x0, int16_t y0, int16_t x1, int16_t y1) {
         ScissorRect s;
         const int cx0 = std::max<int>(0, x0), cy0 = std::max<int>(0, y0);

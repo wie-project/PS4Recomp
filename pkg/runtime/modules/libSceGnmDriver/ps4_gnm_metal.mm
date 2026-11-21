@@ -644,6 +644,13 @@ static uint32_t g_db_extent;
 static int g_gnm_stats = -1;
 static std::atomic<uint64_t> g_gnm_hist[256];
 
+static void EnsureRegDefaults() {
+    static std::once_flag s_regs_init;
+    std::call_once(s_regs_init, []() {
+        ps4draw::SetRegDefaults(g_liverpool_regs);
+    });
+}
+
 // Per compute queue COMPUTE_* register blocks (shadPS4 mapped_queues[].cs_state).
 static const uint32_t kMaxComputeQueues = 64;
 static uint32_t g_cs_regs[kMaxComputeQueues][CS_REG_BLOCK_SIZE];
@@ -1628,6 +1635,7 @@ int ps4_gnm_metal_init(GuestContext *ctx) {
         const char *e = getenv("PS4_TEST_HOOKS");
         g_test_hooks.store(e && strcmp(e, "1") == 0, std::memory_order_relaxed);
     });
+    EnsureRegDefaults();
     return ps4draw::Init(ctx) ? 0 : -1;
 }
 
@@ -1635,6 +1643,7 @@ int32_t ps4_gnm_metal_process_compute_packets(GuestContext *ctx, const uint32_t 
                                               uint32_t pipe_id, uint32_t queue_slot, uint32_t *read_ptr,
                                               uint32_t ring_size_dw, uint32_t read_base_dw) {
     if (!ctx || !words || size_dw == 0) return 0;
+    EnsureRegDefaults();
     {
         static std::atomic<int> logged{0};
         if (logged.fetch_add(1) < 3) {
@@ -1682,6 +1691,7 @@ int32_t ps4_gnm_metal_process_command_buffers(GuestContext *ctx, uint32_t count,
                                              const uint64_t *dcb_gpu_addrs, const uint32_t *dcb_sizes_in_bytes,
                                              const uint64_t *ccb_gpu_addrs, const uint32_t *ccb_sizes_in_bytes) {
     if (!ctx || count == 0) return 0;
+    EnsureRegDefaults();
     std::scoped_lock lock(g_state.mutex);
     CpTimer cp_timer;
     if (g_gnm_stats < 0) g_gnm_stats = getenv("PS4_GNM_STATS") != NULL;

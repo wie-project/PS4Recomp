@@ -132,6 +132,21 @@ void Compiler::Run(Queued q) {
         if (!fn) {
             err = e ? e.localizedDescription.UTF8String : lib ? "no main0" : "unknown error";
             failed_[q.pri].fetch_add(1, std::memory_order_relaxed);
+            fprintf(stderr, "[gnm-msl] Metal compile failed: %s\n", err.c_str());
+            if (q.msl) {
+                // Print MSL with line numbers
+                const char *p = q.msl->c_str();
+                int line = 1;
+                const char *start = p;
+                while (*p) {
+                    if (*p == '\n') {
+                        fprintf(stderr, "%4d: %.*s\n", line++, (int)(p - start), start);
+                        start = p + 1;
+                    }
+                    p++;
+                }
+                if (p > start) fprintf(stderr, "%4d: %.*s\n", line, (int)(p - start), start);
+            }
         }
         compile_us_[q.pri].fetch_add((uint64_t)(ms * 1000.0), std::memory_order_relaxed);
         in_flight_.fetch_sub(1, std::memory_order_relaxed);
