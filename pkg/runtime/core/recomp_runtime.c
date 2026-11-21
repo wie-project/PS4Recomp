@@ -417,11 +417,13 @@ GuestContext *recomp_init_runtime(size_t guest_mem_sz, const uint8_t *elf_image,
     // System managed / flexible memory covers 0 - 32GB (0x800000000ULL).
     // User memory pools (sceKernelMemoryPoolReserve) are located in the user
     // area at 0x1000000000 (64 GB), 0x2000000000 (128 GB), 0x3000000000 (192
-    // GB) up to 0x7000000000. Allocate a 512 GB (0x8000000000ULL) virtual
-    // address space. On modern 64-bit OS (macOS/Linux), demand paging ensures
-    // uncommitted address space consumes zero physical RAM until pages are
-    // touched.
-    guest_mem_sz = 0x8000000000ULL; // 512 GB virtual address space
+    // GB) up to 0x7000000000. PRT aperture and higher virtual mappings (such as
+    // PRT aperture at 0x1000000000 spanning up to 0x8600000000, and direct
+    // mappings up to 0xfaaaa00000 ~1002 GB) require 2 TB of virtual address space.
+    // Allocate a 2048 GB (2 TB = 0x20000000000ULL) virtual address space.
+    // On modern 64-bit OS (macOS/Linux), demand paging ensures uncommitted
+    // address space consumes zero physical RAM until pages are touched.
+    guest_mem_sz = 0x20000000000ULL; // 2 TB virtual address space (2048 GB)
   }
 
   if (image_size > 0 && guest_mem_sz < image_size + 0x20000ULL) {

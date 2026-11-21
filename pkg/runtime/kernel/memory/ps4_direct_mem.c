@@ -424,8 +424,8 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
         vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_len, prot, flags, "direct_mem");
     }
 
-    // If no fixed address requested or fixed mapping failed, allocate dynamically with alignment
-    if (vaddr == (uint64_t)-1) {
+    // If no fixed address requested or fixed mapping failed, allocate dynamically with alignment (unless MAP_FIXED was required)
+    if (vaddr == (uint64_t)-1 && !(flags & 0x10)) {
         vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_len, alignment, prot, flags, "direct_mem");
     }
 
@@ -503,7 +503,7 @@ int sceKernelMapNamedFlexibleMemory(GuestContext *ctx, void **addrInOut, size_t 
         vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_len, prot, flags, tag);
     }
 
-    if (vaddr == (uint64_t)-1) {
+    if (vaddr == (uint64_t)-1 && !(flags & 0x10)) {
         vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_len, alignment, prot, flags, tag);
     }
 
@@ -538,7 +538,7 @@ int sceKernelReserveVirtualRange(GuestContext *ctx, void **addrInOut, size_t len
         vaddr = recomp_vm_alloc_fixed(ctx, req_vaddr, aligned_len, PROT_NONE, flags, "reserved");
     }
 
-    if (vaddr == (uint64_t)-1) {
+    if (vaddr == (uint64_t)-1 && !(flags & 0x10)) {
         vaddr = recomp_vm_alloc_named_aligned(ctx, aligned_len, alignment, PROT_NONE, flags, "reserved");
     }
 
