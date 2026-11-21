@@ -13,6 +13,7 @@
 #include "ps4_pad_motion.h"
 
 #define MAX_PAD_HANDLES 4
+#define ORBIS_PAD_PORT_TYPE_SPECIAL 2
 
 // Motion sensors: see ps4_pad_motion.h.
 
@@ -20,6 +21,7 @@ typedef struct {
   int in_use;
   int32_t handle;
   int32_t userId;
+  int32_t port_type;
   PadMotionState motion;
   unsigned motion_calls_seen; // bit per PadMotionSetting: the game has called it on this handle
 } PadHandleSlot;
@@ -168,7 +170,6 @@ int32_t scePadInit(void) {
 }
 
 int32_t scePadOpen(int32_t userID, int32_t type, int32_t index, void *param) {
-  (void)type;
   (void)index;
   (void)param;
 
@@ -193,6 +194,7 @@ int32_t scePadOpen(int32_t userID, int32_t type, int32_t index, void *param) {
 
   slot->handle = g_next_pad_handle++;
   slot->userId = userID;
+  slot->port_type = type;
   slot->in_use = 1;
   // A new handle starts with the motion sensor on, and tilt correction and deadband off. The
   // orientation starts at the identity (as after scePadResetOrientation).
@@ -592,6 +594,12 @@ int32_t scePadReadState(int32_t handle, OrbisPadData *data) {
   }
 
   memset(data, 0, sizeof(OrbisPadData));
+  // Opening a special port must not mirror the standard controller into that port.
+  if (slot->port_type == ORBIS_PAD_PORT_TYPE_SPECIAL) {
+    data->quat = (vec_float4){0, 0, 0, 1};
+    pthread_mutex_unlock(&g_pad_mutex);
+    return 0;
+  }
 
   uint32_t buttons = g_key_buttons;
   // Debug clock for AUTOPRESS/SCRIPT: wall time since the first pad read, or with
@@ -1068,20 +1076,16 @@ void shim_scePadSetVibration(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-// One connected local DualShock 4 per opened handle. The touch pad values are those of
+// A standard port has a local DualShock 4. The touch pad values are those of
 // ps4_pad_touch.h; the dead zones the ones shadPS4 reports (src/core/libraries/pad/pad.cpp,
 // GPL-2.0-or-later).
 int32_t scePadGetControllerInformation(int32_t handle, OrbisPadControllerInformation *info) {
   if (!info)
     return ORBIS_PAD_ERROR_INVALID_ARG;
   pthread_mutex_lock(&g_pad_mutex);
-  int found = 0;
-  for (int i = 0; i < MAX_PAD_HANDLES; i++) {
-    if (g_pad_slots[i].in_use && g_pad_slots[i].handle == handle) {
-      found = 1;
-      break;
-    }
-  }
+  const PadHandleSlot *slot = find_slot(handle);
+  const int found = slot != NULL;
+  const int connected = found && slot->port_type != ORBIS_PAD_PORT_TYPE_SPECIAL;
   pthread_mutex_unlock(&g_pad_mutex);
   if (!found)
     return ORBIS_PAD_ERROR_INVALID_HANDLE;
@@ -1092,8 +1096,8 @@ int32_t scePadGetControllerInformation(int32_t handle, OrbisPadControllerInforma
   info->deadZoneLeft = 1;
   info->deadZoneRight = 1;
   info->connectionType = ORBIS_PAD_CONNECTION_TYPE_LOCAL;
-  info->connectedCount = 1; // matches OrbisPadData.count
-  info->connected = 1;
+  info->connectedCount = connected; // matches OrbisPadData.count
+  info->connected = connected;
   info->deviceClass = ORBIS_PAD_DEVICE_CLASS_STANDARD;
   return 0;
 }

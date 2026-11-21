@@ -655,7 +655,10 @@ void EmitContext::DefineVertexBlock() {
         cull_distances = DefineVariable(type, spv::BuiltIn::CullDistance, spv::StorageClass::Output,
                                         initializer);
     }
-    if (info.stores.GetAny(IR::Attribute::PointSize)) {
+    // A rasterizing VS that writes no point size gets PA_SU_POINT_SIZE from the push data (Metal
+    // leaves [[point_size]] undefined otherwise); see EmitPrologue.
+    if (info.stores.GetAny(IR::Attribute::PointSize) ||
+        (sw_stage == SwStage::Vertex && hw_stage == HwStage::Vertex)) {
         output_point_size =
             DefineVariable(F32[1], spv::BuiltIn::PointSize, spv::StorageClass::Output);
     }
@@ -820,7 +823,7 @@ void EmitContext::DefinePushDataBlock() {
     const Id buf_sizes_type{TypeArray(U32[1], ConstU32(static_cast<u32>(NUM_BUFFERS)))};
     Decorate(buf_sizes_type, spv::Decoration::ArrayStride, 4U);
     const Id struct_type{Name(
-        TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[2], buf_sizes_type),
+        TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[2], buf_sizes_type, F32[1]),
         "AuxData")};
     Decorate(struct_type, spv::Decoration::Block);
     MemberName(struct_type, PushData::XOffsetIndex, "xoffset");
@@ -839,6 +842,9 @@ void EmitContext::DefinePushDataBlock() {
     MemberDecorate(struct_type, PushData::BufOffsetIndex + 2, spv::Decoration::Offset, 48U);
     MemberName(struct_type, PushData::BufSizeIndex, "buf_sizes");
     MemberDecorate(struct_type, PushData::BufSizeIndex, spv::Decoration::Offset, 56U);
+    MemberName(struct_type, PushData::PointSizeIndex, "point_size");
+    MemberDecorate(struct_type, PushData::PointSizeIndex, spv::Decoration::Offset,
+                   56U + 4U * static_cast<u32>(NUM_BUFFERS));
     push_data_block = DefineVar(struct_type, spv::StorageClass::PushConstant);
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);

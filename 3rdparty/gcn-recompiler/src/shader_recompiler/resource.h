@@ -315,6 +315,8 @@ struct PushData {
     // PS4Recomp: member 7 = u32 buf_sizes[NUM_BUFFERS] (bytes, at offset 56), used for buffer
     // bounds checks when profile.needs_buffer_bounds_checks.
     static constexpr u32 BufSizeIndex = 7;
+    // PS4Recomp: member 8 = float point_size (pixels) after buf_sizes, for a VS that writes none.
+    static constexpr u32 PointSizeIndex = 8;
 
     float xoffset;
     float yoffset;
