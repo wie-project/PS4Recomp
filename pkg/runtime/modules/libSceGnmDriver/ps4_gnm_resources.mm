@@ -3594,6 +3594,14 @@ static MTLPixelFormat SrgbTwinFormat(MTLPixelFormat f) {
     }
 }
 
+id<MTLTexture> MipCopySourceView(id<MTLTexture> src, MTLPixelFormat format, uint32_t array_slices) {
+    if (!src || (src.pixelFormat != format && SrgbTwinFormat(src.pixelFormat) != format)) return nil;
+    if (array_slices)
+        return [src newTextureViewWithPixelFormat:format textureType:MTLTextureType2DArray
+                                           levels:NSMakeRange(0, 1) slices:NSMakeRange(0, array_slices)];
+    return src.pixelFormat == format ? src : [src newTextureViewWithPixelFormat:format];
+}
+
 static bool ViewNeedsPixelFormatUsage(MTLPixelFormat base_fmt, MTLPixelFormat view_fmt) {
     if (view_fmt == MTLPixelFormatInvalid || view_fmt == base_fmt) return false;
     return view_fmt != SrgbTwinFormat(base_fmt);

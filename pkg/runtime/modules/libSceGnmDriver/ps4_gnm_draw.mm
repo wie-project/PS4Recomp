@@ -6522,16 +6522,13 @@ id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
             if (!(dirty & (1u << m))) continue;
             const uint32_t w = std::max(1u, img.width >> m), h = std::max(1u, img.height >> m);
             id<MTLTexture> src = srcs[m];
-            if (!src || src.pixelFormat != base.pixelFormat || src.sampleCount > 1 || src.width < w || src.height < h ||
-                src.textureType == MTLTextureType3D)
+            if (!src || src.sampleCount > 1 || src.width < w || src.height < h || src.textureType == MTLTextureType3D)
                 continue;
             const uint32_t available = TextureTotalSlices(src);
             if (available <= first_slice) continue;
             const uint32_t copy_slices = std::min(want_slices, available - first_slice);
-            if (!mc.src_views[m] || mc.src_views[m].parentTexture != src)
-                mc.src_views[m] = [src newTextureViewWithPixelFormat:src.pixelFormat textureType:MTLTextureType2DArray
-                                                              levels:NSMakeRange(0, 1)
-                                                              slices:NSMakeRange(0, available)];
+            if (!mc.src_views[m] || mc.src_views[m].parentTexture != src || mc.src_views[m].pixelFormat != fmt)
+                mc.src_views[m] = MipCopySourceView(src, fmt, available);
             if (!mc.dst_views[m])
                 mc.dst_views[m] = [mc.tex newTextureViewWithPixelFormat:mc.tex.pixelFormat
                                                             textureType:MTLTextureType2DArray
@@ -6571,7 +6568,13 @@ id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
             S.be->CopyPackedMipLevel(src, staging, mc.tex, m, MTLSizeMake(w, h, 1));
             continue;
         }
-        if (!src || src.pixelFormat != fmt || src.sampleCount > 1 || src.width < w || src.height < h) continue;
+        if (!src || src.sampleCount > 1 || src.width < w || src.height < h) continue;
+        // Storage writes through the UNORM view can feed an sRGB chain (or vice versa).
+        // Reinterpret the encoded bytes rather than applying a color conversion.
+        if (src.pixelFormat != fmt) {
+            src = MipCopySourceView(src, fmt);
+            if (!src) continue;
+        }
         const uint32_t available = TextureTotalSlices(src);
         if (available <= first_slice) continue;
         const uint32_t copy_slices = std::min(want_slices, available - first_slice);

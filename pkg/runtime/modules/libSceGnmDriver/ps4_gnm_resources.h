@@ -48,6 +48,9 @@ namespace ps4gnm {
 // 1. Formats
 // =====================================================================================
 
+// Keep encoded texels intact when copying a level between UNORM and sRGB views.
+id<MTLTexture> MipCopySourceView(id<MTLTexture> src, MTLPixelFormat format, uint32_t array_slices = 0);
+
 // Table 8.13 Data and Image Formats [Sea Islands Series Instruction Set Architecture]
 // (CB_COLORn_INFO.FORMAT uses the same numbering for the color formats.)
 enum class DataFormat : uint32_t {
