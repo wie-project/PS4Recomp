@@ -3743,6 +3743,14 @@ uint64_t CodeSignature(uint64_t code_addr) {
     return Fnv(prefix, sizeof(prefix));
 }
 
+// A PS Z export only reaches a bound depth surface (DB ignores it when depth/stencil testing is
+// off). Metal rejects a pipeline whose fragment function writes depth without a depth
+// attachment, and keeps rejecting it for that function afterwards, so the export is left out of
+// the translation when the draw binds no depth target.
+void DropUnboundZExport(gcn_runtime_info& rt, const RenderState& rs) {
+    if (!rs.ds.depth_test && !rs.ds.stencil_test) rt.fs.mrtz_mask &= ~1u;
+}
+
 Shader* GetShader(gcn_hw_stage hw, gcn_sw_stage sw, const gcn_runtime_info& rt, uint64_t code_addr,
                   const uint32_t ud[16], bool allow_async = false) {
     if (code_addr == 0 || code_addr >= S.ctx->mem_size) return nullptr;
@@ -10556,6 +10564,7 @@ bool PrepareTessDraw(const uint32_t* regs, const DrawArgs& args,
             const CompMapping& ex = rs.color[i].export_swizzle;
             for (int k = 0; k < 4; ++k) r.ps_rt.fs.color_buffers[i].swizzle[k] = (uint8_t)ex[k];
         }
+        DropUnboundZExport(r.ps_rt, rs);
         ps = GetShader(GCN_HW_PS, GCN_SW_FRAGMENT, r.ps_rt, r.ps_addr, r.ps_ud, false);
         if (ps && !ps->fn && ShaderCompiling(ps)) {
             NoteDrawPendingCompile();
@@ -10693,6 +10702,7 @@ bool PrepareGsDraw(const uint32_t* regs, const DrawArgs& args,
             const CompMapping& ex = rs.color[i].export_swizzle;
             for (int k = 0; k < 4; ++k) r.ps_rt.fs.color_buffers[i].swizzle[k] = (uint8_t)ex[k];
         }
+        DropUnboundZExport(r.ps_rt, rs);
         ps = GetShader(GCN_HW_PS, GCN_SW_FRAGMENT, r.ps_rt, r.ps_addr, r.ps_ud, false);
         if (ps && !ps->fn && ShaderCompiling(ps)) {
             NoteDrawPendingCompile();
@@ -10924,6 +10934,7 @@ bool Draw(GuestContext* ctx, const uint32_t* regs, const DrawArgs& args) {
                 const CompMapping& ex = rs.color[i].export_swizzle;
                 for (int k = 0; k < 4; ++k) ps_rt.fs.color_buffers[i].swizzle[k] = (uint8_t)ex[k];
             }
+            DropUnboundZExport(ps_rt, rs);
             ps = GetShader(GCN_HW_PS, GCN_SW_FRAGMENT, ps_rt, ps_addr, ps_ud, true);
             if (ps && !ps->fn && ShaderCompiling(ps)) { // still compiling in the background
                 NoteDrawPendingCompile();
