@@ -841,6 +841,7 @@ struct State {
     // quad_indices_pso: the indexed conversion, dispatched from that size; args_patch_pso: the
     // corrected offsets of an indirect triangle-list record (IndirectRecordOffsets)
     id<MTLComputePipelineState> quad_prep_pso = nil, quad_indices_pso = nil, args_patch_pso = nil;
+    id<MTLComputePipelineState> mip_copy_pso = nil; // MipChainFor's copies inside a compute encoder
     id<MTLBuffer> quad_pattern = nil, quad_need = nil;
     uint32_t quad_pattern_quads = 0;
     // the open seq's current pool of converted quad indices (QuadRegion): a region of each draw's
@@ -935,6 +936,10 @@ struct State {
         CompMapping sample_swizzle{};
         uint64_t built_submit = ~0ull;
         std::array<std::pair<uint64_t, uint64_t>, kMaxMips> versions{};
+        // the compute copy's views: level m of tex, and level 0 of the source of level m as a 2D
+        // array (its parentTexture; ForgetTexture drops it with the source)
+        id<MTLTexture> dst_views[kMaxMips];
+        id<MTLTexture> src_views[kMaxMips];
     };
     std::unordered_map<uint64_t, MipChain> mip_chains; // key: hash of T# identity
     uint32_t cb_extent[8] = {};
@@ -1747,6 +1752,9 @@ void OwnTextureDropped(id<MTLTexture> t) {
 }
 
 void ForgetTexture(void* key) {
+    for (auto& [k, mc] : S.mip_chains)
+        for (auto& v : mc.src_views)
+            if (v && (__bridge void*)v.parentTexture == key) v = nil;
     if (auto dc = S.depth_comp.find(key); dc != S.depth_comp.end()) OwnTextureDropped(dc->second.tex);
     S.depth_comp.erase(key);
     S.depth_version.erase(key);
@@ -6368,6 +6376,21 @@ uint32_t MipChainSources(const ImageDesc& img, id<MTLTexture> base, __strong id<
     return levels;
 }
 
+// Formats whose texels a float read and write in a shader reproduce bit for bit (NaN payloads
+// aside): no sRGB or snorm conversion, no integer formats.
+bool FloatCopyExact(MTLPixelFormat f) {
+    switch (f) {
+    case MTLPixelFormatR8Unorm: case MTLPixelFormatRG8Unorm: case MTLPixelFormatRGBA8Unorm:
+    case MTLPixelFormatBGRA8Unorm: case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatR16Unorm:
+    case MTLPixelFormatRG16Unorm: case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatR16Float:
+    case MTLPixelFormatRG16Float: case MTLPixelFormatRGBA16Float: case MTLPixelFormatR32Float:
+    case MTLPixelFormatRG32Float: case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG11B10Float:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // A sampled 2D / array / cube texture with several mip levels whose base level is a GPU render
 // target: the game rendered each level separately (bloom/downsample/IBL chains). Assemble a
 // mipmapped copy from the render targets found at the mip addresses (blits encoded into the
@@ -6415,8 +6438,14 @@ id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
     // the targets of the other levels are read by the blits below (level 0: ResolveTextureHazards)
     for (uint32_t m = 1; m < levels; ++m)
         if (srcs[m]) RefreshGuestNewer(addrs[m], srcs[m], false);
+    // Probe filtering alternates dispatches that store one level with dispatches that sample the
+    // chain: between compute dispatches the levels are copied by a dispatch in the open encoder,
+    // without the blit encoder's encoder switches and per-copy texture views.
+    const bool compute_copy = S.mip_copy_pso && !g_async_compute && S.be->OpenEncoder() == GnmEncoder::Compute &&
+                              type != MTLTextureType3D && FloatCopyExact(base.pixelFormat);
     const bool allocate = !mc.tex || mc.tex.mipmapLevelCount != levels || mc.tex.pixelFormat != base.pixelFormat ||
-                          mc.tex.textureType != type || TextureTotalSlices(mc.tex) != want_slices;
+                          mc.tex.textureType != type || TextureTotalSlices(mc.tex) != want_slices ||
+                          (compute_copy && !(mc.tex.usage & MTLTextureUsageShaderWrite));
     std::array<std::pair<uint64_t, uint64_t>, kMaxMips> versions{};
     // Probe generation often updates one mip at a time. Refresh only the changed subresources.
     const bool track_versions = !g_async_compute;
@@ -6443,12 +6472,53 @@ id<MTLTexture> MipChainFor(ImageDesc& img, bool encode) {
         else if (type == MTLTextureTypeCubeArray) td.arrayLength = want_slices / 6;
         else td.arrayLength = want_slices;
         td.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+        if (FloatCopyExact(base.pixelFormat)) td.usage |= MTLTextureUsageShaderWrite; // the compute copy
         td.storageMode = MTLStorageModePrivate;
         mc.sample_view = nil;
+        for (auto& v : mc.dst_views) v = nil;
         OwnTextureDropped(mc.tex); // the chain with another level count
         mc.tex = [S.dev newTextureWithDescriptor:td];
         if (!mc.tex) return nil;
         OwnTextureMade(mc.tex);
+    }
+    if (compute_copy) {
+        const uint32_t chain_slices = TextureTotalSlices(mc.tex);
+        ComputeEncoder(); // the open one; closes an open guest memory chain, as other work does
+        S.be->Barrier(kGnmStageDispatch, kGnmStageDispatch, kGnmScopeTextures); // after the stores before it
+        S.be->SetComputePipeline(S.mip_copy_pso);
+        for (uint32_t m = 0; m < levels; ++m) {
+            if (!(dirty & (1u << m))) continue;
+            const uint32_t w = std::max(1u, img.width >> m), h = std::max(1u, img.height >> m);
+            id<MTLTexture> src = srcs[m];
+            if (!src || src.pixelFormat != base.pixelFormat || src.sampleCount > 1 || src.width < w || src.height < h ||
+                src.textureType == MTLTextureType3D)
+                continue;
+            const uint32_t available = TextureTotalSlices(src);
+            if (available <= first_slice) continue;
+            const uint32_t copy_slices = std::min(want_slices, available - first_slice);
+            if (!mc.src_views[m] || mc.src_views[m].parentTexture != src)
+                mc.src_views[m] = [src newTextureViewWithPixelFormat:src.pixelFormat textureType:MTLTextureType2DArray
+                                                              levels:NSMakeRange(0, 1)
+                                                              slices:NSMakeRange(0, available)];
+            if (!mc.dst_views[m])
+                mc.dst_views[m] = [mc.tex newTextureViewWithPixelFormat:mc.tex.pixelFormat
+                                                            textureType:MTLTextureType2DArray
+                                                                 levels:NSMakeRange(m, 1)
+                                                                 slices:NSMakeRange(0, chain_slices)];
+            if (!mc.src_views[m] || !mc.dst_views[m]) continue;
+            const uint32_t p[4] = {w, h, first_slice, copy_slices};
+            S.be->BindTexture(GnmStage::Compute, 0, mc.src_views[m]);
+            S.be->BindTexture(GnmStage::Compute, 1, mc.dst_views[m]);
+            S.be->BindBytes(GnmStage::Compute, 0, p, sizeof(p));
+            S.be->DispatchThreads(MTLSizeMake(w, h, copy_slices), MTLSizeMake(8, 8, 1));
+        }
+        S.be->Barrier(kGnmStageDispatch, kGnmStageDispatch, kGnmScopeTextures); // the dispatch sampling the chain
+        g_cstate.Reset(S.be->EncoderSerial());
+        S.pending = true;
+        mc.built_submit = stamp;
+        mc.versions = versions;
+        LogWork("mip chain assembly (compute)");
+        return mc.tex;
     }
     EndEncoders();
     EnsureCmd();
@@ -9490,6 +9560,7 @@ bool Init(GuestContext* ctx) {
             S.quad_prep_pso = util.quad_prep;
             S.quad_indices_pso = util.quad_indices;
             S.args_patch_pso = util.args_patch;
+            S.mip_copy_pso = util.mip_copy;
         }
         if (!S.present_pso) fprintf(stderr, "[gnm-draw] present pipeline failed: %s\n", uwhy.c_str());
     }

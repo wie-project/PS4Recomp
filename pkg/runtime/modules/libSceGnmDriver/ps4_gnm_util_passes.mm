@@ -192,6 +192,14 @@ kernel void indirect_args_patch(device const uint* rec [[buffer(0)]], device uin
     for (uint k = 0; k < 2; ++k)
         if ((p.mask >> k) & 1) out[p.index[k]] = p.value[k];
 }
+// MipChainFor: slices [p.z, p.z + p.w) of level 0 of src into the slices of the dst level view,
+// p.x x p.y texels each (formats a float read and write reproduce exactly).
+kernel void mip_level_copy(texture2d_array<float, access::read> src [[texture(0)]],
+                           texture2d_array<float, access::write> dst [[texture(1)]],
+                           constant uint4& p [[buffer(0)]], uint3 id [[thread_position_in_grid]]) {
+    if (id.x >= p.x || id.y >= p.y || id.z >= p.w) return;
+    dst.write(src.read(id.xy, id.z + p.z), id.xy, id.z);
+}
 fragment float4 present_fs(VOut in [[stage_in]], texture2d<float> src [[texture(0)]]) {
     uint2 p = uint2(in.pos.xy);
     p = min(p, uint2(src.get_width() - 1, src.get_height() - 1));
@@ -230,7 +238,7 @@ bool MakeGnmUtil(id<MTLDevice> dev, GnmUtil* out, std::string* why) {
         const char* name;
         __strong id<MTLComputePipelineState>* pso;
     } kernels[] = {{"quad_list_prep", &out->quad_prep}, {"quad_list_indices", &out->quad_indices},
-                   {"indirect_args_patch", &out->args_patch}};
+                   {"indirect_args_patch", &out->args_patch}, {"mip_level_copy", &out->mip_copy}};
     for (const auto& k : kernels) {
         id<MTLFunction> f = [out->lib newFunctionWithName:[NSString stringWithUTF8String:k.name]];
         if (!f) continue;
