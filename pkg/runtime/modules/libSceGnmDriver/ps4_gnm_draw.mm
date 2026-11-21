@@ -3758,6 +3758,14 @@ uint64_t CodeSignature(uint64_t code_addr) {
     return Fnv(prefix, sizeof(prefix));
 }
 
+// A PS Z export only reaches a bound depth surface (DB ignores it when depth/stencil testing is
+// off). Metal rejects a pipeline whose fragment function writes depth without a depth
+// attachment, and keeps rejecting it for that function afterwards, so the export is left out of
+// the translation when the draw binds no depth target.
+void DropUnboundZExport(gcn_runtime_info& rt, const RenderState& rs) {
+    if (!rs.ds.depth_test && !rs.ds.stencil_test) rt.fs.mrtz_mask &= ~1u;
+}
+
 Shader* GetShader(gcn_hw_stage hw, gcn_sw_stage sw, const gcn_runtime_info& rt, uint64_t code_addr,
                   const uint32_t ud[16], bool allow_async = false) {
     if (code_addr == 0 || code_addr >= S.ctx->mem_size) return nullptr;
@@ -10667,6 +10675,7 @@ bool PrepareTessDraw(const uint32_t* regs, const DrawArgs& args,
             const CompMapping& ex = rs.color[i].export_swizzle;
             for (int k = 0; k < 4; ++k) r.ps_rt.fs.color_buffers[i].swizzle[k] = (uint8_t)ex[k];
         }
+        DropUnboundZExport(r.ps_rt, rs);
         ps = GetShader(GCN_HW_PS, GCN_SW_FRAGMENT, r.ps_rt, r.ps_addr, r.ps_ud, false);
         if (ps && !ps->fn && ShaderCompiling(ps)) {
             NoteDrawPendingCompile();
@@ -10804,6 +10813,7 @@ bool PrepareGsDraw(const uint32_t* regs, const DrawArgs& args,
             const CompMapping& ex = rs.color[i].export_swizzle;
             for (int k = 0; k < 4; ++k) r.ps_rt.fs.color_buffers[i].swizzle[k] = (uint8_t)ex[k];
         }
+        DropUnboundZExport(r.ps_rt, rs);
         ps = GetShader(GCN_HW_PS, GCN_SW_FRAGMENT, r.ps_rt, r.ps_addr, r.ps_ud, false);
         if (ps && !ps->fn && ShaderCompiling(ps)) {
             NoteDrawPendingCompile();
@@ -11035,6 +11045,7 @@ bool Draw(GuestContext* ctx, const uint32_t* regs, const DrawArgs& args) {
                 const CompMapping& ex = rs.color[i].export_swizzle;
                 for (int k = 0; k < 4; ++k) ps_rt.fs.color_buffers[i].swizzle[k] = (uint8_t)ex[k];
             }
+            DropUnboundZExport(ps_rt, rs);
             ps = GetShader(GCN_HW_PS, GCN_SW_FRAGMENT, ps_rt, ps_addr, ps_ud, true);
             if (ps && !ps->fn && ShaderCompiling(ps)) { // still compiling in the background
                 NoteDrawPendingCompile();
@@ -13203,11 +13214,16 @@ void DrawEncode(DrawRec& r) {
         }
         const uint32_t inst = std::max(1u, args.num_instances);
         ps4gnm_rect::Buffers rect_bufs{};
+        uint32_t rect_vertices = 0; // the vertices of the complete rectangles
         if (rect) {
             // capture index of every vertex, and room for every captured vertex
-            const uint32_t n = args.count;
-            if (n % 3) {
-                RLog("rect-count", "%s: RectList with %u vertices (not 3 per rectangle); skipped", args.name, n);
+            // The VGT assembles a rectangle from every 3 vertices and drops an incomplete last one
+            // (Driveclub draws its fullscreen rectangle with 4).
+            rect_vertices = args.count - args.count % 3;
+            const uint32_t n = rect_vertices;
+            if (!n) {
+                RLog("rect-count", "%s: RectList with %u vertices (no complete rectangle); skipped", args.name,
+                     args.count);
                 NoteSkip(SkipReason::RectCount);
                 return;
             }
@@ -13423,7 +13439,7 @@ void DrawEncode(DrawRec& r) {
             S.be->Draw(d);
         } else if (rect) {
             ps4gnm_rect::Geometry g;
-            g.count = args.count;
+            g.count = rect_vertices;
             g.instances = inst;
             g.base_instance = instance_offset;
             g.vertex_start = vertex_offset;

@@ -23,7 +23,9 @@
 #include "minimp3.h"
 
 #define MAX_AJM_CONTEXTS 16
-#define MAX_AJM_INSTANCES 128
+// Instance ids 1..0x2fff, as the PS4 library (shadPS4 AjmContext::MaxInstances). DRIVECLUB's FMOD
+// creates 128 instances at startup and drops its audio output when one fails.
+#define MAX_AJM_INSTANCES 0x3000
 #define MAX_AJM_BATCHES 256
 #define INSTANCE_ID_MASK 0x3FFF
 
@@ -207,7 +209,9 @@ typedef struct {
 
 static pthread_mutex_t g_ajm_lock = PTHREAD_MUTEX_INITIALIZER;
 static AjmContext g_ajm_contexts[MAX_AJM_CONTEXTS];
-static AjmInstance g_ajm_instances[MAX_AJM_INSTANCES];
+// Allocated on first use and kept for reuse: a destroyed instance is only marked free, as a
+// worker may still hold it.
+static AjmInstance *g_ajm_instances[MAX_AJM_INSTANCES];
 static AjmBatch g_ajm_batches[MAX_AJM_BATCHES];
 static uint32_t g_next_batch_id = 1;
 
@@ -261,8 +265,8 @@ static void ajm_log_maybe(void) {
     }
     g_ajm_last_log_us = now;
     for (int i = 1; i < MAX_AJM_INSTANCES; i++) {
-        const AjmInstance *inst = &g_ajm_instances[i];
-        if (!inst->in_use) continue;
+        const AjmInstance *inst = g_ajm_instances[i];
+        if (!inst || !inst->in_use) continue;
         fprintf(stderr, "[AJM] instance 0x%x: jobs %llu, frames %llu, samples %llu, errors %llu (last 0x%x)\n",
                 ajm_instance_full_id(inst), (unsigned long long)inst->stats.jobs,
                 (unsigned long long)inst->stats.frames_decoded,
@@ -283,8 +287,8 @@ static inline void *guest_to_host(GuestContext *ctx, uint64_t gaddr) {
 static AjmInstance *get_instance_locked(uint32_t instance_id) {
     uint32_t idx = instance_id & INSTANCE_ID_MASK;
     if (idx >= MAX_AJM_INSTANCES) return NULL;
-    if (!g_ajm_instances[idx].in_use) return NULL;
-    return &g_ajm_instances[idx];
+    AjmInstance *inst = g_ajm_instances[idx];
+    return inst && inst->in_use ? inst : NULL;
 }
 
 static inline size_t ajm_sample_size(OrbisAjmFormatEncoding fmt) {
@@ -1012,7 +1016,7 @@ void shim_sceAjmInstanceCreate(GuestContext *ctx) {
 
     int slot = -1;
     for (int i = 1; i < MAX_AJM_INSTANCES; i++) {
-        if (!g_ajm_instances[i].in_use) {
+        if (!g_ajm_instances[i] || !g_ajm_instances[i]->in_use) {
             slot = i;
             break;
         }
@@ -1023,8 +1027,13 @@ void shim_sceAjmInstanceCreate(GuestContext *ctx) {
         ctx->rax = ORBIS_AJM_ERROR_OUT_OF_RESOURCES;
         SHIM_RETURN();
     }
+    if (!g_ajm_instances[slot] && !(g_ajm_instances[slot] = malloc(sizeof(AjmInstance)))) {
+        pthread_mutex_unlock(&g_ajm_lock);
+        ctx->rax = ORBIS_AJM_ERROR_OUT_OF_MEMORY;
+        SHIM_RETURN();
+    }
 
-    AjmInstance *inst = &g_ajm_instances[slot];
+    AjmInstance *inst = g_ajm_instances[slot];
     memset(inst, 0, sizeof(*inst));
     inst->in_use = true;
     inst->id = (uint32_t)slot;
@@ -1783,17 +1792,18 @@ void ps4_ajm_destroy(void) {
         }
     }
     for (int i = 1; i < MAX_AJM_INSTANCES; i++) {
-        if (g_ajm_instances[i].in_use) {
-            ajm_log_destroyed(&g_ajm_instances[i]);
-            if (g_ajm_instances[i].at9_handle) {
-                Atrac9ReleaseHandle(g_ajm_instances[i].at9_handle);
-                g_ajm_instances[i].at9_handle = NULL;
+        AjmInstance *inst = g_ajm_instances[i];
+        if (inst && inst->in_use) {
+            ajm_log_destroyed(inst);
+            if (inst->at9_handle) {
+                Atrac9ReleaseHandle(inst->at9_handle);
+                inst->at9_handle = NULL;
             }
-            if (g_ajm_instances[i].pcm_buffer) {
-                free(g_ajm_instances[i].pcm_buffer);
-                g_ajm_instances[i].pcm_buffer = NULL;
+            if (inst->pcm_buffer) {
+                free(inst->pcm_buffer);
+                inst->pcm_buffer = NULL;
             }
-            g_ajm_instances[i].in_use = false;
+            inst->in_use = false;
         }
     }
     for (int i = 1; i < MAX_AJM_BATCHES; i++) {
