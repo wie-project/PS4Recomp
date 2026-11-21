@@ -16,6 +16,7 @@ typedef struct DirectMemBlock {
     off_t phys_offset;
     size_t size;
     int is_free;
+    int memory_type;
     uint64_t mapped_guest_vaddr;
     struct DirectMemBlock *next;
     struct DirectMemBlock *prev;
@@ -379,6 +380,7 @@ int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t len
     }
 
     best->is_free = 0;
+    best->memory_type = type;
     *physAddrOut = best->phys_offset;
     pthread_mutex_unlock(&g_direct_mutex);
 
@@ -761,6 +763,59 @@ void shim_sceKernelAllocateMainDirectMemory(GuestContext *ctx) {
         *(off_t *)(ctx->mem_base + physAddrOutGuest) = physAddr;
     }
     ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
+}
+
+int sceKernelGetDirectMemoryType(off_t addr, int32_t *directMemoryTypeOut, void **directMemoryStartOut, void **directMemoryEndOut) {
+    if (addr < 0 || (size_t)addr >= get_total_direct_mem_size()) {
+        return 0x80020002; // ORBIS_KERNEL_ERROR_ENOENT
+    }
+
+    ps4_direct_mem_init();
+
+    pthread_mutex_lock(&g_direct_mutex);
+    DirectMemBlock *curr = g_direct_blocks;
+    DirectMemBlock *found = NULL;
+    while (curr) {
+        if (!curr->is_free && addr >= curr->phys_offset &&
+            (size_t)addr < (size_t)curr->phys_offset + curr->size) {
+            found = curr;
+            break;
+        }
+        curr = curr->next;
+    }
+
+    if (!found) {
+        pthread_mutex_unlock(&g_direct_mutex);
+        return 0x80020002; // ORBIS_KERNEL_ERROR_ENOENT
+    }
+
+    off_t start = found->phys_offset;
+    off_t end = found->phys_offset + (off_t)found->size;
+    int mem_type = found->memory_type;
+
+    for (DirectMemBlock *b = found->prev; b && !b->is_free && b->memory_type == mem_type; b = b->prev) {
+        start = b->phys_offset;
+    }
+    for (DirectMemBlock *b = found->next; b && !b->is_free && b->memory_type == mem_type; b = b->next) {
+        end = b->phys_offset + (off_t)b->size;
+    }
+
+    pthread_mutex_unlock(&g_direct_mutex);
+
+    if (directMemoryStartOut) *directMemoryStartOut = (void *)(uintptr_t)start;
+    if (directMemoryEndOut) *directMemoryEndOut = (void *)(uintptr_t)end;
+    if (directMemoryTypeOut) *directMemoryTypeOut = mem_type;
+
+    return 0; // ORBIS_OK
+}
+
+void shim_sceKernelGetDirectMemoryType(GuestContext *ctx) {
+    off_t addr = (off_t)ctx->rdi;
+    int32_t *typeOut = ctx->rsi ? (int32_t *)(ctx->mem_base + ctx->rsi) : NULL;
+    void **startOut = ctx->rdx ? (void **)(ctx->mem_base + ctx->rdx) : NULL;
+    void **endOut = ctx->rcx ? (void **)(ctx->mem_base + ctx->rcx) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceKernelGetDirectMemoryType(addr, typeOut, startOut, endOut);
     SHIM_RETURN();
 }
 

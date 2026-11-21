@@ -499,6 +499,26 @@ void shim_sceKernelGetGPI(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+int32_t sceKernelGetPageTableStats(void *stats) {
+    if (!stats) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    uint64_t size = *(uint64_t *)stats;
+    if (size >= sizeof(uint64_t) && size <= 4096) {
+        memset((char *)stats + sizeof(uint64_t), 0, size - sizeof(uint64_t));
+    }
+    return 0; // ORBIS_OK
+}
+
+void shim_sceKernelGetPageTableStats(GuestContext *ctx) {
+    uint64_t stats_addr = ctx->rdi;
+    if (!stats_addr) {
+        ctx->rax = 0x80020016ULL;
+        SHIM_RETURN();
+    }
+    void *stats = (void *)(ctx->mem_base + stats_addr);
+    ctx->rax = (uint64_t)(int64_t)sceKernelGetPageTableStats(stats);
+    SHIM_RETURN();
+}
+
 void shim_sceKernelSetPrtAperture(GuestContext *ctx) {
     int32_t id = (int32_t)ctx->rdi;
     uint64_t address = ctx->rsi;

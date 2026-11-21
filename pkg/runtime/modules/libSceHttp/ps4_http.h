@@ -128,6 +128,7 @@ int32_t sceCompanionHttpdRegisterRequestCallback2(void *cb, void *userData);
 int32_t sceCompanionHttpdUnregisterRequestCallback(void);
 
 int32_t sceHttpSetResolveTimeOut(int32_t id, uint32_t timeout);
+int32_t sceHttpSetResolveRetry(int32_t id, int32_t retry);
 int32_t sceHttpSetCookieEnabled(int32_t id, int32_t enabled);
 int32_t sceHttpsGetCaList(int32_t id, OrbisHttpsCaList *list);
 
@@ -183,6 +184,7 @@ void shim_sceCompanionHttpdRegisterRequestCallback2(GuestContext *ctx);
 void shim_sceCompanionHttpdUnregisterRequestCallback(GuestContext *ctx);
 
 void shim_sceHttpSetResolveTimeOut(GuestContext *ctx);
+void shim_sceHttpSetResolveRetry(GuestContext *ctx);
 void shim_sceHttpSetCookieEnabled(GuestContext *ctx);
 void shim_sceHttpsGetCaList(GuestContext *ctx);
 

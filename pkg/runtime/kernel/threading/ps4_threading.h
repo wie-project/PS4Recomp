@@ -138,6 +138,7 @@ void shim_pthread_cancel(GuestContext *ctx);
 void shim_scePthreadCreate(GuestContext *ctx);
 void shim_scePthreadJoin(GuestContext *ctx);
 void shim_scePthreadDetach(GuestContext *ctx);
+void shim_scePthreadCancel(GuestContext *ctx);
 void shim_scePthreadExit(GuestContext *ctx);
 void shim_scePthreadSelf(GuestContext *ctx);
 void shim_scePthreadEqual(GuestContext *ctx);

@@ -82,6 +82,7 @@ void ps4_direct_mem_destroy(void);
 // Direct Memory
 int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t length, size_t alignment, int type, off_t *physAddrOut);
 int sceKernelAllocateMainDirectMemory(size_t length, size_t alignment, int type, off_t *physAddrOut);
+int sceKernelGetDirectMemoryType(off_t addr, int32_t *directMemoryTypeOut, void **directMemoryStartOut, void **directMemoryEndOut);
 size_t sceKernelGetDirectMemorySize(void);
 size_t sceKernelAvailableDirectMemorySize(void);
 int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, off_t physAddr, size_t alignment);
@@ -111,6 +112,7 @@ int sceKernelMemoryPoolDecommit(GuestContext *ctx, void *addr, size_t len, int f
 // Guest execution shims
 void shim_sceKernelAllocateDirectMemory(GuestContext *ctx);
 void shim_sceKernelAllocateMainDirectMemory(GuestContext *ctx);
+void shim_sceKernelGetDirectMemoryType(GuestContext *ctx);
 void shim_sceKernelReleaseDirectMemory(GuestContext *ctx);
 void shim_sceKernelCheckedReleaseDirectMemory(GuestContext *ctx);
 void shim_sceKernelDirectMemoryQuery(GuestContext *ctx);

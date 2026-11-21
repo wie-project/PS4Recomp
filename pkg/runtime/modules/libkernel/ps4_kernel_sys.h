@@ -63,6 +63,7 @@ int32_t sceKernelRemoveExceptionHandler(int32_t signum);
 int32_t sceKernelRaiseException(uint64_t thread, int32_t signum);
 
 int32_t sceKernelGetGPI(void);
+int32_t sceKernelGetPageTableStats(void *stats);
 int32_t sceKernelSetPrtAperture(int32_t id,uint64_t address, size_t size);
 int32_t sceKernelFutimes(const char *path, const struct timeval tv[2]);
 
@@ -126,6 +127,7 @@ void shim_sigreturn(GuestContext *ctx);
 void shim___Ux86_64_setcontext(GuestContext *ctx);
 
 void shim_sceKernelGetGPI(GuestContext *ctx);
+void shim_sceKernelGetPageTableStats(GuestContext *ctx);
 void shim_sceKernelSetPrtAperture(GuestContext *ctx);
 void shim_sceKernelFutimes(GuestContext *ctx);
 

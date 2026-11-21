@@ -235,6 +235,8 @@ int32_t sceNpScoreWaitAsync(int32_t reqId, int32_t* result);
 
 int32_t sceNpTusCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel, OrbisNpId* npId);
 int32_t sceNpTusCreateNpTitleCtxA(OrbisNpServiceLabel serviceLabel, int32_t userId);
+int32_t sceNpTssCreateNpTitleCtxA(OrbisNpServiceLabel serviceLabel, int32_t userId);
+int32_t sceNpTusSetThreadParam(void *param);
 int32_t sceNpTusDeleteNpTitleCtx(int32_t ctxId);
 int32_t sceNpTusCreateRequest(int32_t libCtxId);
 int32_t sceNpTusDeleteRequest(int32_t requestId);
@@ -366,6 +368,8 @@ void shim_sceNpMatching2RegisterRoomMessageCallback(GuestContext *ctx);
 
 void shim_sceNpTusCreateNpTitleCtx(GuestContext *ctx);
 void shim_sceNpTusCreateNpTitleCtxA(GuestContext *ctx);
+void shim_sceNpTssCreateNpTitleCtxA(GuestContext *ctx);
+void shim_sceNpTusSetThreadParam(GuestContext *ctx);
 void shim_sceNpTusDeleteNpTitleCtx(GuestContext *ctx);
 void shim_sceNpTusCreateRequest(GuestContext *ctx);
 void shim_sceNpTusDeleteRequest(GuestContext *ctx);

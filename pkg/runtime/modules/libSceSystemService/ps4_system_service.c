@@ -458,3 +458,16 @@ void shim_sceSystemServiceShowEyeToEyeDistanceSetting(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceSystemServiceShowEyeToEyeDistanceSetting();
     SHIM_RETURN();
 }
+
+int32_t sceSystemServiceGetPlatformPrivacySetting(void *setting) {
+    if (setting) {
+        memset(setting, 0, 16);
+    }
+    return 0;
+}
+
+void shim_sceSystemServiceGetPlatformPrivacySetting(GuestContext *ctx) {
+    void *setting = ctx->rdi ? (void *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceSystemServiceGetPlatformPrivacySetting(setting);
+    SHIM_RETURN();
+}

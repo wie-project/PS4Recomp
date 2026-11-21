@@ -29,6 +29,8 @@ NOOP_SHIM(sceCoredumpWriteUserData)
 //    inside the handler: class E, ORBIS_COREDUMP_ERROR_NOT_IN_COREDUMP_HANDLER (0x81180003,
 //    value from shadPS4's coredump_error.h), which is what the console answers outside a dump.
 NOOP_SHIM(sceCoredumpAttachMemoryRegionAsUserFile)
+NOOP_SHIM(sceCoredumpAttachMemoryRegion)
+NOOP_SHIM(sceCoredumpSetUserDataType)
 
 void shim_sceCoredumpGetStopInfoGpu(GuestContext *ctx) {
   ctx->rax = (uint64_t)(int64_t)(int32_t)0x81180003;

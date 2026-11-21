@@ -549,6 +549,22 @@ int32_t sceHttpSetResolveTimeOut(int32_t id, uint32_t timeout) {
     return 0;
 }
 
+int32_t sceHttpSetResolveRetry(int32_t id, int32_t retry) {
+    if (retry < 0) {
+        return (int32_t)ORBIS_HTTP_ERROR_INVALID_VALUE;
+    }
+    if (id <= 0) {
+        return (int32_t)ORBIS_HTTP_ERROR_INVALID_ID;
+    }
+    pthread_mutex_lock(&g_http_mutex);
+    if (id >= g_http_next_id) {
+        pthread_mutex_unlock(&g_http_mutex);
+        return (int32_t)ORBIS_HTTP_ERROR_INVALID_ID;
+    }
+    pthread_mutex_unlock(&g_http_mutex);
+    return 0;
+}
+
 int32_t sceHttpSetCookieEnabled(int32_t id, int32_t enabled) {
     if (id <= 0) {
         return (int32_t)ORBIS_HTTP_ERROR_INVALID_ID;
@@ -901,6 +917,11 @@ void shim_sceCompanionHttpdUnregisterRequestCallback(GuestContext *ctx) {
 
 void shim_sceHttpSetResolveTimeOut(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceHttpSetResolveTimeOut((int32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetResolveRetry(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceHttpSetResolveRetry((int32_t)ctx->rdi, (int32_t)ctx->rsi);
     SHIM_RETURN();
 }
 

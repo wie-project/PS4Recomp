@@ -132,9 +132,9 @@ var shimAliases = map[string]string{
 	"eV9wAD2riIA":            "shim_sceKernelStat",
 	"sceKernelStat":          "shim_sceKernelStat",
 	"kBwCPsYX-m4":            "shim_sceKernelFstat",
-	"4oXYe9Xmk0Q": 			  "shim_sceKernelGetGPI",
+	"4oXYe9Xmk0Q":            "shim_sceKernelGetGPI",
 	"BohYr-F7-is":            "shim_sceKernelSetPrtAperture",
-	"NLq2b1jOaN0": 			  "shim_sceKernelFutimes",
+	"NLq2b1jOaN0":            "shim_sceKernelFutimes",
 	"sceKernelFstat":         "shim_sceKernelFstat",
 	"sceKernelChmod":         "shim_chmod",
 	"sceKernelUtimes":        "shim_utimes",
@@ -145,7 +145,7 @@ var shimAliases = map[string]string{
 	"sceKernelPwrite":        "shim_sceKernelPwrite",
 	"sceKernelRmdir":         "shim_sceKernelRmdir",
 	"sceKernelSleep":         "shim_sceKernelSleep",
-	
+
 	// libScePosix BSD Sockets & System
 	"__sys_socketex":                  "shim_socket",
 	"scePthreadRwlockInit":            "shim_pthread_rwlock_init",
@@ -574,11 +574,11 @@ var shimAliases = map[string]string{
 	"+z4OJmFreZc": "shim_sceHmdSetupDialogTerminate",
 
 	"xtbb-2f703A": "shim_sceGameCustomDataDialogInitialize",
-  	"5TvttyRuU84": "shim_sceGameCustomDataDialogOpen",
-  	"PkdLsRA4ON0": "shim_sceGameCustomDataDialogUpdateStatus",
-  	"sJptZwvs1is": "shim_sceGameCustomDataDialogGetResult",
-  	"3vyRmRU3CL8": "shim_sceGameCustomDataDialogClose",
-  	"HwEtHFCpU5U": "shim_sceGameCustomDataDialogTerminate",
+	"5TvttyRuU84": "shim_sceGameCustomDataDialogOpen",
+	"PkdLsRA4ON0": "shim_sceGameCustomDataDialogUpdateStatus",
+	"sJptZwvs1is": "shim_sceGameCustomDataDialogGetResult",
+	"3vyRmRU3CL8": "shim_sceGameCustomDataDialogClose",
+	"HwEtHFCpU5U": "shim_sceGameCustomDataDialogTerminate",
 	// libSceCamera NIDs
 	"p6n3Npi3YY4": "shim_sceCameraIsAttached",
 	"BHn83xrF92E": "shim_sceCameraOpen",
@@ -766,12 +766,12 @@ var shimAliases = map[string]string{
 	"2qSZ0DgwTsc": "shim_sceNpWebApiGetErrorCode",
 
 	"OA6FbORefbo": "shim_sceCompanionHttpdInitialize2",
-  	"+-du9tWgE9s": "shim_sceCompanionHttpdTerminate",
-  	"k7F0FcDM-Xc": "shim_sceCompanionHttpdStart",
-  	"0SCgzfVQHpo": "shim_sceCompanionHttpdStop",
-  	"Vku4big+IYM": "shim_sceCompanionHttpdGetEvent",
-  	"-0c9TCTwnGs": "shim_sceCompanionHttpdRegisterRequestCallback2",
-  	"xweOi2QT-BE": "shim_sceCompanionHttpdUnregisterRequestCallback",
+	"+-du9tWgE9s": "shim_sceCompanionHttpdTerminate",
+	"k7F0FcDM-Xc": "shim_sceCompanionHttpdStart",
+	"0SCgzfVQHpo": "shim_sceCompanionHttpdStop",
+	"Vku4big+IYM": "shim_sceCompanionHttpdGetEvent",
+	"-0c9TCTwnGs": "shim_sceCompanionHttpdRegisterRequestCallback2",
+	"xweOi2QT-BE": "shim_sceCompanionHttpdUnregisterRequestCallback",
 
 	// libSceNpTrophy NIDs
 	"YYP3f2W09og": "shim_sceNpTrophyGetGameInfo",
@@ -1319,6 +1319,15 @@ var shimAliases = map[string]string{
 	"lvNClhNHzxI": "shim_sceVoiceQoSCreateLocalEndpoint",
 	"BaOKcng8g88": "shim_module_start",
 	"KpDMrPHvt3Q": "shim_module_stop",
+	"BC+OG5m9+bw": "shim_sceKernelGetDirectMemoryType",
+	"qBDmpCyGssE": "shim_scePthreadCancel",
+	"tZ2yplY8MBY": "shim_sceKernelGetPageTableStats",
+	"K1d1LqZRQHQ": "shim_sceHttpSetResolveRetry",
+	"hvoLYhc4cq0": "shim_sceSystemServiceGetPlatformPrivacySetting",
+	"6GKDdRCFx8c": "shim_sceNpTusSetThreadParam",
+	"lBtrk+7lk14": "shim_sceNpTssCreateNpTitleCtxA",
+	"+YX0z-GUSNw": "shim_sceCoredumpAttachMemoryRegion",
+	"Uxqkdta7wEg": "shim_sceCoredumpSetUserDataType",
 }
 
 // knownDirectShims contains symbol names whose host shim is "shim_" + name.
@@ -1333,6 +1342,15 @@ var knownDirectShims = []string{
 	"sceCoredumpRegisterCoredumpHandler",
 	"sceCoredumpWriteUserData",
 	"sceCoredumpAttachMemoryRegionAsUserFile",
+	"sceCoredumpAttachMemoryRegion",
+	"sceCoredumpSetUserDataType",
+	"sceKernelGetDirectMemoryType",
+	"scePthreadCancel",
+	"sceKernelGetPageTableStats",
+	"sceHttpSetResolveRetry",
+	"sceSystemServiceGetPlatformPrivacySetting",
+	"sceNpTusSetThreadParam",
+	"sceNpTssCreateNpTitleCtxA",
 	"sceCoredumpGetStopInfoGpu",
 	"sceKernelSync",
 	"sceRemoteplayTerminate",
@@ -1412,7 +1430,7 @@ var knownDirectShims = []string{
 	// libSceInvitationDialog / libSceNpProfileDialog legacy (non-A) variants
 	"sceInvitationDialogOpen",
 	"sceInvitationDialogGetResult",
-	"sceNpProfileDialogOpen",	
+	"sceNpProfileDialogOpen",
 	// libSceJpegDec (libSceJpegDec/ps4_jpegdec.c)
 	"sceJpegDecQueryMemorySize",
 	"sceJpegDecCreate",
@@ -1814,7 +1832,7 @@ var knownDirectShims = []string{
 	"scePthreadAttrSetstackaddr",
 	"scePthreadAttrSetguardsize",
 	"sceKernelAddHRTimerEvent",
-    "sceKernelDeleteHRTimerEvent",
+	"sceKernelDeleteHRTimerEvent",
 	"scePthreadAttrSetstack",
 	"scePthreadRename",
 	"scePthreadGetschedparam",
@@ -2299,11 +2317,11 @@ var knownDirectShims = []string{
 	"sceMsgDialogProgressBarSetValue",
 
 	"sceGameCustomDataDialogInitialize",
-  	"sceGameCustomDataDialogOpen",
-  	"sceGameCustomDataDialogUpdateStatus",
-  	"sceGameCustomDataDialogGetResult",
-  	"sceGameCustomDataDialogClose",
-  	"sceGameCustomDataDialogTerminate",
+	"sceGameCustomDataDialogOpen",
+	"sceGameCustomDataDialogUpdateStatus",
+	"sceGameCustomDataDialogGetResult",
+	"sceGameCustomDataDialogClose",
+	"sceGameCustomDataDialogTerminate",
 
 	// libSceImeDialog
 	"sceImeDialogInit",
@@ -2577,7 +2595,7 @@ var knownDirectShims = []string{
 	"sceVideoOutGetDeviceCapabilityInfo_",
 	"sceVideoOutModeSetAny_",
 	"sceVideoOutSubmitChangeBufferAttribute",
-    "sigreturn",
+	"sigreturn",
 	// libSceNet Shims
 	"sceNetInit",
 	"sceNetTerm",
@@ -2897,7 +2915,7 @@ var knownDirectShims = []string{
 	// Kernel File System (pread / preadv)
 	"sceKernelPread",
 	"sceKernelPreadv",
-	
+
 	"sceKernelGetGPI",
 	"sceKernelSetPrtAperture",
 	"sceKernelFutimes",

@@ -93,6 +93,7 @@ int32_t sceSystemServiceResumeLocalProcess(void);
 int32_t sceSystemServiceKillApp(void);
 int32_t sceSystemServiceShowDisplaySafeAreaSettings(void);
 int32_t sceSystemServiceShowEyeToEyeDistanceSetting(void);
+int32_t sceSystemServiceGetPlatformPrivacySetting(void *setting);
 
 // Shims
 void shim_sceSystemServiceParamGetInt(GuestContext *ctx);
@@ -130,6 +131,7 @@ void shim_sceSystemServiceResumeLocalProcess(GuestContext *ctx);
 void shim_sceSystemServiceKillApp(GuestContext *ctx);
 void shim_sceSystemServiceShowDisplaySafeAreaSettings(GuestContext *ctx);
 void shim_sceSystemServiceShowEyeToEyeDistanceSetting(GuestContext *ctx);
+void shim_sceSystemServiceGetPlatformPrivacySetting(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

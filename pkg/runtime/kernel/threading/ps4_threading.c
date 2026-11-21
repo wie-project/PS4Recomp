@@ -787,7 +787,20 @@ void shim_pthread_sigmask(GuestContext *ctx) {
 }
 
 void shim_pthread_cancel(GuestContext *ctx) {
-  ctx->rax = 0;
+  uint64_t handle = ctx->rdi;
+  RecompThread *t = find_thread(handle);
+  if (!t) {
+    set_guest_errno(ctx, ESRCH);
+    ctx->rax = (uint64_t)ESRCH;
+    SHIM_RETURN();
+  }
+  int rc = pthread_cancel(t->host_thread);
+  if (rc != 0) {
+    set_guest_errno(ctx, rc);
+    ctx->rax = (uint64_t)rc;
+  } else {
+    ctx->rax = 0;
+  }
   SHIM_RETURN();
 }
 
@@ -831,6 +844,11 @@ void shim_scePthreadJoin(GuestContext *ctx) {
 
 void shim_scePthreadDetach(GuestContext *ctx) {
   shim_pthread_detach(ctx);
+  SCE_PTHREAD_ERR(ctx);
+}
+
+void shim_scePthreadCancel(GuestContext *ctx) {
+  shim_pthread_cancel(ctx);
   SCE_PTHREAD_ERR(ctx);
 }
 

@@ -1126,6 +1126,15 @@ int32_t sceNpTusCreateNpTitleCtxA(OrbisNpServiceLabel serviceLabel, int32_t user
     return ORBIS_NP_ERROR_SIGNED_OUT;
 }
 
+int32_t sceNpTssCreateNpTitleCtxA(OrbisNpServiceLabel serviceLabel, int32_t userId) {
+    return sceNpTusCreateNpTitleCtxA(serviceLabel, userId);
+}
+
+int32_t sceNpTusSetThreadParam(void *param) {
+    (void)param;
+    return 0;
+}
+
 int32_t sceNpTusDeleteNpTitleCtx(int32_t ctxId) {
     NP_LOG("sceNpTusDeleteNpTitleCtx(ctxId=%d)", ctxId);
     return 0;
@@ -1164,6 +1173,17 @@ void shim_sceNpTusCreateNpTitleCtx(GuestContext *ctx) {
 
 void shim_sceNpTusCreateNpTitleCtxA(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceNpTusCreateNpTitleCtxA((OrbisNpServiceLabel)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceNpTssCreateNpTitleCtxA(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceNpTssCreateNpTitleCtxA((OrbisNpServiceLabel)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceNpTusSetThreadParam(GuestContext *ctx) {
+    void *param = ctx->rdi ? (void *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)sceNpTusSetThreadParam(param);
     SHIM_RETURN();
 }
 
