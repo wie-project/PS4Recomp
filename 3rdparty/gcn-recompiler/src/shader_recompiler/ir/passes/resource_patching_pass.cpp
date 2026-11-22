@@ -607,18 +607,33 @@ bool PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
                 // s_buffer_load through a V# the walker cannot follow, kept as a buffer read or
                 // lowered to guest memory loads (a V# loaded at run time)
                 const IR::Value v = dwords->Arg(i);
-                if (v.IsImmediate() || (v.Inst()->GetOpcode() != IR::Opcode::ReadConstBuffer &&
-                                        v.Inst()->GetOpcode() != IR::Opcode::LoadGuestU32)) {
+                const IR::Inst* v_inst = v.TryInst();
+                while (v_inst && v_inst->GetOpcode() != IR::Opcode::ReadConstBuffer &&
+                       v_inst->GetOpcode() != IR::Opcode::LoadGuestU32) {
+                    if (v_inst->GetOpcode() == IR::Opcode::BitwiseAnd32 ||
+                        v_inst->GetOpcode() == IR::Opcode::BitwiseOr32 ||
+                        v_inst->GetOpcode() == IR::Opcode::ShiftLeftLogical32 ||
+                        v_inst->GetOpcode() == IR::Opcode::ShiftRightLogical32) {
+                        if (auto* a0 = v_inst->Arg(0).TryInst()) {
+                            v_inst = a0;
+                            continue;
+                        } else if (v_inst->NumArgs() > 1 && v_inst->Arg(1).TryInst()) {
+                            v_inst = v_inst->Arg(1).TryInst();
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                if (v.IsImmediate() || !v_inst || (v_inst->GetOpcode() != IR::Opcode::ReadConstBuffer &&
+                                                   v_inst->GetOpcode() != IR::Opcode::LoadGuestU32)) {
                     from_buffer_loads = false;
                     break;
                 }
             }
         }
-        if (is_written || !from_buffer_loads) {
-            UNREACHABLE_MSG("{} at pc {:#x}: image {} through a T# loaded at run time is not "
-                            "implemented ({})",
+        if (is_written) {
+            UNREACHABLE_MSG("{} at pc {:#x}: image store or atomic through a T# loaded at run time is not implemented ({})",
                             IR::NameOf(inst.GetOpcode()), u32(inst_info.pc.Value()),
-                            is_written ? "store or atomic" : "read of a T# not loaded by s_buffer_load",
                             DescribeUnflattened(resource.sharps[0]));
         }
         LOG_ERROR(Render_Recompiler,

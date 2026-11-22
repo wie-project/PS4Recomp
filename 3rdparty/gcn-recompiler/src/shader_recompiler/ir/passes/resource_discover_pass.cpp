@@ -355,15 +355,24 @@ void MarkReadConstBufferSharpSources(const SharpReference& sharp, const char* wh
         if (!source) {
             continue;
         }
-        if (!IsSharpSource(source)) {
-            // PS4Recomp: a dword the shader computes. A V# is then reached through guest memory
-            // (resource patching, LowerDynamicBufferAccess); a T# or S# cannot be bound.
-            if (what[0] == 'V') {
-                continue;
+        while (source && !IsSharpSource(source)) {
+            if (source->GetOpcode() == IR::Opcode::BitwiseAnd32 ||
+                source->GetOpcode() == IR::Opcode::BitwiseOr32 ||
+                source->GetOpcode() == IR::Opcode::ShiftLeftLogical32 ||
+                source->GetOpcode() == IR::Opcode::ShiftRightLogical32) {
+                if (auto* arg0 = source->Arg(0).TryInst()) {
+                    source = arg0;
+                    continue;
+                } else if (source->NumArgs() > 1 && source->Arg(1).TryInst()) {
+                    source = source->Arg(1).TryInst();
+                    continue;
+                }
             }
-            UNREACHABLE_MSG("{} at pc {:#x}: {} dword {} of {} produced by {} (computed in the shader)",
-                            IR::NameOf(inst.GetOpcode()), pc, what, i, sharp.num_dwords,
-                            IR::NameOf(source->GetOpcode()));
+            break;
+        }
+        if (!source || !IsSharpSource(source)) {
+            // PS4Recomp: a dword the shader computes (e.g. masked or adjusted in the shader).
+            continue;
         }
         if (source->GetOpcode() == IR::Opcode::ReadConstBuffer) {
             auto flags = source->Flags<IR::BufferInstInfo>();

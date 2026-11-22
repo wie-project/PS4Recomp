@@ -366,7 +366,7 @@ func matchJumpTable(
 				}
 			}
 		}
-		if modifiesReg(inst, offReg) || modifiesReg(inst, baseReg) {
+		if modifiesReg(inst, offReg) {
 			break
 		}
 	}
@@ -389,10 +389,10 @@ func matchJumpTable(
 
 	var baseAddr uint64
 	switch {
-	case sameGPR(baseReg, tableReg):
-		baseAddr = tableAddr
 	case foundBase:
 		baseAddr = codeBase
+	case sameGPR(baseReg, tableReg):
+		baseAddr = tableAddr
 	default:
 		return none, false
 	}

@@ -139,6 +139,62 @@ func TestMatchPICSwitchInterleaved(t *testing.T) {
 	}
 }
 
+func TestMatchPICSwitchSeparateBaseLEA(t *testing.T) {
+	img := make([]byte, 0x400)
+	entry := uint64(0x100)
+	pc := entry
+	put := func(b ...byte) {
+		copy(img[pc:], b)
+		pc += uint64(len(b))
+	}
+
+	put(0x83, 0xfe, 0x09) // cmp esi, 9
+	put(0x77, 0x20)       // ja +0x20
+
+	tableLeaPC := pc
+	put(0x48, 0x8d, 0x3d, 0, 0, 0, 0) // lea rdi, [rip+table]
+	put(0x48, 0x63, 0x34, 0xb7)       // movsxd rsi, [rdi+rsi*4]
+	baseLeaPC := pc
+	put(0x48, 0x8d, 0x3d, 0, 0, 0, 0) // lea rdi, [rip+base]
+	put(0x48, 0x01, 0xfe)             // add rsi, rdi
+	put(0xff, 0xe6)                   // jmp rsi
+
+	table := uint64(0x200)
+	tableDisp := int32(int64(table) - int64(tableLeaPC+7))
+	binary.LittleEndian.PutUint32(img[tableLeaPC+3:], uint32(tableDisp))
+
+	base := uint64(0x200)
+	baseDisp := int32(int64(base) - int64(baseLeaPC+7))
+	binary.LittleEndian.PutUint32(img[baseLeaPC+3:], uint32(baseDisp))
+
+	var window []Instruction
+	pc = entry
+	for i := 0; i < 16; i++ {
+		inst, err := x86asm.Decode(img[pc:], 64)
+		if err != nil {
+			t.Fatalf("decode 0x%x: %v", pc, err)
+		}
+		window = append(window, Instruction{Address: pc, Inst: inst})
+		pc += uint64(inst.Len)
+		if inst.Op == x86asm.JMP {
+			break
+		}
+	}
+	sw, ok := matchPICSwitch(window, nil, nil)
+	if !ok {
+		t.Fatal("expected PIC switch match with separate base LEA")
+	}
+	if sw.tableAddr != table {
+		t.Fatalf("table=0x%x want 0x%x", sw.tableAddr, table)
+	}
+	if sw.baseAddr != base {
+		t.Fatalf("base=0x%x want 0x%x", sw.baseAddr, base)
+	}
+	if sw.count != 10 {
+		t.Fatalf("count=%d want 10", sw.count)
+	}
+}
+
 func TestJumpTableLeadersWithoutRodata(t *testing.T) {
 	img := make([]byte, 0x400)
 	entry, case0, case1, case2, def, _ := assembleClangSwitch(img)
