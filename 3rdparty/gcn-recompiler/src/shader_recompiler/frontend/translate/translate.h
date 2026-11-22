@@ -105,6 +105,7 @@ public:
     void S_LSHL_B32(const GcnInst& inst);
     void S_LSHL_B64(const GcnInst& inst);
     void S_LSHR_B32(const GcnInst& inst);
+    void S_LSHR_B64(const GcnInst& inst);
     void S_ASHR_I32(const GcnInst& inst);
     void S_ASHR_I64(const GcnInst& inst);
     void S_BFM_B32(const GcnInst& inst);
@@ -134,6 +135,7 @@ public:
     void S_FLBIT_I32_B64(const GcnInst& inst);
     void S_BITSET_B32(const GcnInst& inst, u32 bit_value);
     void S_BITSET_B64(const GcnInst& inst, u32 bit_value);
+    void S_GETREG_B32(const GcnInst& inst);
     void S_GETPC_B64(const GcnInst& inst);
     void S_SAVEEXEC_B64(NegateMode negate, bool is_or, const GcnInst& inst);
     void S_ABS_I32(const GcnInst& inst);
@@ -393,6 +395,10 @@ private:
 
     void ExportRenderTarget(const GcnInst& inst);
     void ExportDepth(const GcnInst& inst);
+    IR::U32 AlphaToMaskLevel(const IR::F32& alpha);
+    IR::U32 AlphaToMaskLevel(const IR::U32& packed, AmdGpu::ShaderExportFormat format);
+    void ExportAlphaToMask(const IR::U32& level);
+    IR::U32 ReplicateSampleMask(const IR::U32& mask, u32 log2_samples);
     void LogMissingOpcode(const GcnInst& inst);
 
     IR::VectorReg GetScratchVgpr(u32 offset);
@@ -409,6 +415,7 @@ private:
     std::array<IR::Attribute, MaxInterpVgpr> vgpr_to_interp{};
     FetchShaderData fetch_data{};
     bool opcode_missing = false;
+    bool valid_mask_exported = false;
     u32 pc{};
 };
 

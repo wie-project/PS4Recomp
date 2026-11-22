@@ -98,11 +98,14 @@ static void EmitBarrierAtBlockStart(IR::Block* block) {
     ir.Barrier();
 }
 
-static bool IsDivergent(const IR::U1& cond) {
-    return IR::BreadthFirstSearch(cond, [](IR::Inst* inst) -> std::optional<bool> {
+static bool IsDivergent(const IR::U1& cond, const RuntimeInfo& runtime_info) {
+    return IR::BreadthFirstSearch(cond, [&runtime_info](IR::Inst* inst) -> std::optional<bool> {
                if (inst->GetOpcode() == IR::Opcode::GetAttributeU32 &&
                    inst->Arg(0).Attribute() == IR::Attribute::LocalInvocationId) {
-                   return true;
+                   const u32 component = inst->Arg(1).U32();
+                   if (runtime_info.hw.cs.workgroup_size[component] > 1) {
+                       return true;
+                   }
                }
                return std::nullopt;
            }) == true;
@@ -112,13 +115,14 @@ static bool IsDivergent(const IR::U1& cond) {
 // behavior when some threads write and others read from shared memory.
 static void EmitBarrierInMergeBlock(const IR::Program& program,
                                     const IR::AbstractSyntaxNode::Data& data,
-                                    NodeSet& divergence_end, u32& divergence_depth) {
+                                    NodeSet& divergence_end, u32& divergence_depth,
+                                    const RuntimeInfo& runtime_info) {
     const IR::U1 cond = data.if_node.cond;
     // PS4Recomp: a predicated if runs in every invocation; a branch nested in predicated code
     // (predicate_wave64_pass.cpp) may be taken by one subgroup only (e.g. on an SGPR written in
     // earlier divergent code), whatever its condition looks like
     if (!program.predicated_merges.contains(data.if_node.merge) &&
-        (program.branch_merges.contains(data.if_node.merge) || IsDivergent(cond))) {
+        (program.branch_merges.contains(data.if_node.merge) || IsDivergent(cond, runtime_info))) {
         if (divergence_depth == 0) {
             EmitBarrierAtBlockStart(data.if_node.merge);
         }
@@ -129,7 +133,7 @@ static void EmitBarrierInMergeBlock(const IR::Program& program,
 
 // A barrier inside a loop is invalid when different invocations leave on different iterations.
 // Mark such loops so their shared-memory synchronization can be deferred to the merge block.
-static NodeSet FindDivergentLoops(const IR::Program& program) {
+static NodeSet FindDivergentLoops(const IR::Program& program, const RuntimeInfo& runtime_info) {
     NodeSet divergent_loops;
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         switch (node.type) {
@@ -138,13 +142,13 @@ static NodeSet FindDivergentLoops(const IR::Program& program) {
             if (program.predicated_merges.contains(node.data.repeat.merge)) {
                 break;
             }
-            if (IsDivergent(node.data.repeat.cond)) {
+            if (IsDivergent(node.data.repeat.cond, runtime_info)) {
                 divergent_loops.emplace(node.data.repeat.merge);
             }
             break;
         case IR::AbstractSyntaxNode::Type::Break:
             if (!program.predicated_merges.contains(node.data.break_node.merge) &&
-                IsDivergent(node.data.break_node.cond)) {
+                IsDivergent(node.data.break_node.cond, runtime_info)) {
                 divergent_loops.emplace(node.data.break_node.merge);
             }
             break;
@@ -189,7 +193,7 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
     using Type = IR::AbstractSyntaxNode::Type;
     u32 divergence_depth{};
     NodeSet divergence_end;
-    const NodeSet divergent_loops = FindDivergentLoops(program);
+    const NodeSet divergent_loops = FindDivergentLoops(program, runtime_info);
     for (const IR::AbstractSyntaxNode& node : program.syntax_list) {
         if (node.type == Type::EndIf) {
             if (divergence_end.contains(node.data.end_if.merge)) {
@@ -200,7 +204,7 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
         // Check if branch depth is zero, we don't want to insert barrier in potentially divergent
         // code.
         if (node.type == Type::If) {
-            EmitBarrierInMergeBlock(program, node.data, divergence_end, divergence_depth);
+            EmitBarrierInMergeBlock(program, node.data, divergence_end, divergence_depth, runtime_info);
             continue;
         }
         if (node.type == Type::Loop && divergent_loops.contains(node.data.loop.merge)) {

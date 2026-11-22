@@ -19,12 +19,17 @@ void Translator::EmitFlowControl(const GcnInst& inst) {
     case Opcode::S_TRAP:
         LOG_WARNING(Render_Vulkan, "S_TRAP instruction!");
         return;
+    case Opcode::S_SLEEP:
+        LOG_WARNING(Render_Vulkan,
+                    "S_SLEEP instruction ignored (wave scheduling delay is not emulated).");
+        return;
+    case Opcode::S_GETREG_B32:
+        return S_GETREG_B32(inst);
     case Opcode::S_GETPC_B64:
         return S_GETPC_B64(inst);
     case Opcode::S_SETPC_B64:
     case Opcode::S_WAITCNT:
     case Opcode::S_NOP:
-    case Opcode::S_ENDPGM:
     case Opcode::S_CBRANCH_EXECZ:
     case Opcode::S_CBRANCH_SCC0:
     case Opcode::S_CBRANCH_SCC1:
@@ -32,6 +37,11 @@ void Translator::EmitFlowControl(const GcnInst& inst) {
     case Opcode::S_CBRANCH_VCCZ:
     case Opcode::S_CBRANCH_EXECNZ:
     case Opcode::S_BRANCH:
+        return;
+    case Opcode::S_ENDPGM:
+        if (info.hw_stage == HwStage::Fragment && valid_mask_exported) {
+            ir.Discard(ir.LogicalNot(ir.GetExec()));
+        }
         return;
     case Opcode::S_SENDMSG:
         S_SENDMSG(inst);
@@ -43,6 +53,19 @@ void Translator::EmitFlowControl(const GcnInst& inst) {
 
 void Translator::S_BARRIER() {
     ir.Barrier();
+}
+
+void Translator::S_GETREG_B32(const GcnInst& inst) {
+    const u32 selector = static_cast<u16>(inst.control.sopk.simm);
+    const u32 register_id = selector & 0x3f;
+    const u32 offset = (selector >> 6) & 0x1f;
+    const u32 width = ((selector >> 11) & 0x1f) + 1;
+    if (register_id != 4 || offset < 13 || offset + width > 15) {
+        UNREACHABLE_MSG("Unsupported S_GETREG_B32 register={} offset={} width={}", register_id,
+                        offset, width);
+    }
+    // Vulkan exposes no shader-engine placement; use one virtual shader engine.
+    SetDst(inst.dst[0], ir.Imm32(0));
 }
 
 void Translator::S_GETPC_B64(const GcnInst& inst) {
@@ -63,6 +86,10 @@ void Translator::S_SENDMSG(const GcnInst& inst) {
             break;
         case SendMsgSimm::GsOp::Emit:
             ir.EmitVertex();
+            break;
+        case SendMsgSimm::GsOp::EmitCut:
+            ir.EmitVertex();
+            ir.EmitPrimitive();
             break;
         default:
             UNREACHABLE();

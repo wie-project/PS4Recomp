@@ -269,9 +269,9 @@ Id EmitFindILsb64(EmitContext& ctx, Id value) {
     const Id found_lo{ctx.OpINotEqual(ctx.U1[1], lo_lsb, ctx.ConstU32(u32(-1)))};
     // PS4Recomp: a bit of the high half is at 32 + its index there; -1 when no bit is set
     const Id found_hi{ctx.OpINotEqual(ctx.U1[1], hi_lsb, ctx.ConstU32(u32(-1)))};
-    const Id shifted_hi{ctx.OpSelect(ctx.U32[1], found_hi,
-                                     ctx.OpIAdd(ctx.U32[1], hi_lsb, ctx.ConstU32(32u)), hi_lsb)};
-    return ctx.OpSelect(ctx.U32[1], found_lo, lo_lsb, shifted_hi);
+    const Id shifted_hi{ctx.OpIAdd(ctx.U32[1], hi_lsb, ctx.ConstU32(32u))};
+    const Id high_result{ctx.OpSelect(ctx.U32[1], found_hi, shifted_hi, ctx.ConstU32(u32(-1)))};
+    return ctx.OpSelect(ctx.U32[1], found_lo, lo_lsb, high_result);
 }
 
 Id EmitSMin32(EmitContext& ctx, Id a, Id b) {

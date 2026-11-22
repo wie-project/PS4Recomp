@@ -30,8 +30,8 @@ namespace {
 
 constexpr u32 kMagic = 0x534E4347; // "GCNS"
 // Bump when the serialized layout below changes without a source change elsewhere.
-#define GCN_SHADER_CACHE_FORMAT "3"
-constexpr u32 kFormatVersion = 11; // 2: Info::uses_guest_memory, 3: Info::null_image_reads,
+#define GCN_SHADER_CACHE_FORMAT "4"
+constexpr u32 kFormatVersion = 12; // 2: Info::uses_guest_memory, 3: Info::null_image_reads,
                                    // 4: Info::zeroed_write_lanes,
                                    // 5: Info::unpredicated_wave_regions / per_subgroup_lane_ops,
                                    // 6: Info::per_lane_ends (u4-graphics) or Info::image_tables,
@@ -45,13 +45,14 @@ constexpr u32 kFormatVersion = 11; // 2: Info::uses_guest_memory, 3: Info::null_
                                    //    VertexAttribute::inst_offset 16 bits
                                    // 10: Info::fetch_inline_reason / fetch_inline_attrib
                                    // 11: BufferResource::is_read
+                                   // 12: HwFragmentRuntimeInfo alpha_to_mask / aa_mask
 constexpr char kCacheId[] = GCN_BUILD_ID "-f" GCN_SHADER_CACHE_FORMAT;
 
 // Tripwires: a new member in one of these types must be added to Write()/Read() below.
 static_assert(sizeof(InfoPersistent) == 8920, "update gcn_shader_cache.cpp for InfoPersistent");
 static_assert(sizeof(Info) == 9352, "update gcn_shader_cache.cpp for Info");
-static_assert(sizeof(StageSpecialization) == 1536, "update gcn_shader_cache.cpp for StageSpecialization");
-static_assert(sizeof(gcn_shader) == 11432, "update gcn_shader_cache.cpp for gcn_shader");
+static_assert(sizeof(StageSpecialization) == 1552, "update gcn_shader_cache.cpp for StageSpecialization");
+static_assert(sizeof(gcn_shader) == 11464, "update gcn_shader_cache.cpp for gcn_shader");
 static_assert(std::is_trivially_copyable_v<RuntimeInfo>);
 static_assert(std::is_trivially_copyable_v<Profile>);
 static_assert(StageSpecialization::MaxStageResources % 64 == 0);
