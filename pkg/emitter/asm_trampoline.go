@@ -337,19 +337,24 @@ Lvpcmpe_stri_host:
     ldp  x29, x30, [sp], #16
     ret
 
-// Guest PAUSE: the lifter calls this for every PAUSE in a spin loop. The counting half runs in the
-// general register set only, so the stub preserves just x8 (guest r8, caller-saved in AAPCS64) and
-// NZCV (the guest flags). Only when the throttle decides to sleep does it call into the C library,
-// which may clobber any vector register: that call is wrapped in SAVE_Q0_31/LOAD_Q0_31 because the
-// guest keeps xmm0-15 and the ymm upper halves in v0-v31.
+// Guest PAUSE: the lifter calls this for every PAUSE in a spin loop. The guest keeps r8-r15 in
+// x8-x15, which AAPCS64 treats as caller-saved: the compiled counting half
+// (recomp_spin_pause_impl) and, when the throttle fires, nanosleep may clobber any of them, and a
+// job worker's scan loop keeps r9-r15 live across PAUSE. The stub therefore preserves x8-x15 and
+// NZCV (the guest flags) on every call. Only when the throttle decides to sleep does it also wrap
+// the C library call in SAVE_Q0_31/LOAD_Q0_31, because the guest keeps xmm0-15 and the ymm upper
+// halves in v0-v31 and the counting half uses the general register set only.
 GUEST_SECTION
 .globl _recomp_spin_pause
 _recomp_spin_pause:
-    stp  x29, x30, [sp, #-32]!
+    stp  x29, x30, [sp, #-96]!
     mov  x29, sp
     mrs  x16, nzcv
     str  x16, [sp, #16]
-    str  x8, [sp, #24]
+    stp  x8,  x9,  [sp, #24]
+    stp  x10, x11, [sp, #40]
+    stp  x12, x13, [sp, #56]
+    stp  x14, x15, [sp, #72]
     b    Lspin_pause_host
 
 HOST_SECTION
@@ -362,10 +367,13 @@ Lspin_pause_host:
     bl   _recomp_spin_pause_sleep
     LOAD_Q0_31
 Lspin_pause_done:
-    ldr  x8, [sp, #24]
+    ldp  x8,  x9,  [sp, #24]
+    ldp  x10, x11, [sp, #40]
+    ldp  x12, x13, [sp, #56]
+    ldp  x14, x15, [sp, #72]
     ldr  x16, [sp, #16]
     msr  nzcv, x16
-    ldp  x29, x30, [sp], #32
+    ldp  x29, x30, [sp], #96
     ret
 
 // (V)AESKEYGENASSIST as the lifter calls it: v0 = source, w0 = round constant; result in v0.

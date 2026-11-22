@@ -105,6 +105,11 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 	hle := emitter.NewHLEReport(loaded, modules)
 	syscallShims := emitter.ImportShimMap(loaded, "shim_syscall")
 
+	// Support means the lifter lowers the instruction to real code: the same call the emitter
+	// makes. A separate opcode whitelist drifts from it.
+	l := lifter.NewArm64Lifter(nil)
+	var lifted []string
+
 	for head := 0; head < len(queue); head++ {
 		if head == 0 || head%10000 == 0 || head == len(queue)-1 {
 			fmt.Fprintf(os.Stderr, "[*] Progress: %d / %d functions analyzed (Queue capacity: %d)\n",
@@ -117,11 +122,15 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 		functionCount++
 		for _, b := range fn.Blocks {
 			hle.ObserveBlock(b.Insts, syscallShims)
+			l.ResetFlags()
 			for _, inst := range b.Insts {
 				op := inst.Inst.Op
 				opCounts[op]++
 				totalInsts++
-				if lifter.IsOpcodeSupported(op) {
+				before := l.UnsupportedCount()
+				var liftErr error
+				lifted, liftErr = l.LiftInstructionToBuf(inst, inst.Address+uint64(inst.Inst.Len), fn, lifted[:0])
+				if liftErr == nil && l.UnsupportedCount() == before {
 					supportedInsts++
 				} else {
 					unsupportedInsts++
@@ -160,11 +169,11 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 
 	var supportedFreqs []OpcodeFrequency
 	for op, count := range opCounts {
-		if lifter.IsOpcodeSupported(op) {
+		if missingCounts[op] < count {
 			supportedFreqs = append(supportedFreqs, OpcodeFrequency{
 				Op:    op,
 				Name:  op.String(),
-				Count: count,
+				Count: count - missingCounts[op],
 			})
 		}
 	}
