@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <limits>
 #include <map>
 #include <optional>
@@ -1020,6 +1021,62 @@ static std::optional<ImageTableBound> MatchLoopCounter(const IR::Inst* phi) {
     return bound;
 }
 
+// Bounded by FindILsb32 (bit scan): the index is a bit position, bounded by an immediate mask,
+// a mask from flattened user data, or at most MaxImageTableEntries.
+static std::optional<ImageTableBound> MatchBitScanBound(const IR::Inst* leaf) {
+    if (!leaf) {
+        return std::nullopt;
+    }
+    while (leaf && (leaf->GetOpcode() == IR::Opcode::BitCastU32F32 ||
+                    leaf->GetOpcode() == IR::Opcode::BitCastF32U32)) {
+        leaf = leaf->Arg(0).TryInst();
+    }
+    if (leaf->GetOpcode() != IR::Opcode::FindILsb32) {
+        return std::nullopt;
+    }
+    ImageTableBound bound{};
+    bound.kind = ImageTableKind::BitScan;
+    bound.count_dw = UNKNOWN_LOCATION;
+    bound.size_imm = MaxImageTableEntries;
+
+    const IR::Value arg = leaf->Arg(0);
+    // Immediate bitmask: e.g. BitwiseAnd32(x, imm)
+    if (const IR::Inst* inst = arg.TryInst()) {
+        if (inst->GetOpcode() == IR::Opcode::BitwiseAnd32) {
+            u32 imm_mask = 0;
+            if (inst->Arg(0).IsImmediate()) {
+                imm_mask = inst->Arg(0).U32();
+            } else if (inst->Arg(1).IsImmediate()) {
+                imm_mask = inst->Arg(1).U32();
+            }
+            if (imm_mask != 0) {
+                const u32 max_bit = 31 - std::countl_zero(imm_mask);
+                bound.size_imm = std::min(max_bit + 1, MaxImageTableEntries);
+            }
+        }
+    }
+    // Dynamic bitmask in flattened user data (e.g. constant buffer)
+    if (const auto flat_dw = FlattenedDword(arg)) {
+        bound.count_dw = *flat_dw;
+    } else if (const IR::Inst* inst = arg.TryInst()) {
+        if (inst->GetOpcode() == IR::Opcode::Phi) {
+            for (size_t i = 0; i < inst->NumArgs(); ++i) {
+                if (const auto flat_dw = FlattenedDword(inst->Arg(i))) {
+                    bound.count_dw = *flat_dw;
+                    break;
+                }
+            }
+        } else if (inst->GetOpcode() == IR::Opcode::BitwiseAnd32) {
+            if (const auto flat_dw = FlattenedDword(inst->Arg(0))) {
+                bound.count_dw = *flat_dw;
+            } else if (const auto flat_dw2 = FlattenedDword(inst->Arg(1))) {
+                bound.count_dw = *flat_dw2;
+            }
+        }
+    }
+    return bound;
+}
+
 // Tables already lowered in this shader, by their form.
 struct TableKey {
     u32 buffer, first, stride, num_dwords;
@@ -1134,10 +1191,11 @@ bool LowerDynamicImageTable(const ResourceDiscovery& resource, Info& info, Descr
         return chosen != ~0u;
     };
     bool fits = false;
-    if (table_src->size_imm == 0) {
+    {
         ImageTableBound b{};
         b.kind = ImageTableKind::Records;
         b.vs = table_src->vs;
+        b.size_imm = table_src->size_imm;
         b.first_dw = site->first;
         b.stride_dw = site->stride;
         fits = try_bound(b);
@@ -1178,6 +1236,11 @@ bool LowerDynamicImageTable(const ResourceDiscovery& resource, Info& info, Descr
             fits = try_bound(*loop);
         }
     }
+    if (!fits) {
+        if (const auto bitscan = MatchBitScanBound(site->leaf)) {
+            fits = try_bound(*bitscan);
+        }
+    }
     if (num_bounds == 0) {
         LOG_ERROR(Render_Recompiler,
                   "{} at pc {:#x}: T# table in buffer {} (dword {} + {} * index): no bound for its "
@@ -1201,6 +1264,9 @@ bool LowerDynamicImageTable(const ResourceDiscovery& resource, Info& info, Descr
     } else if (kind == ImageTableKind::Loop) {
         key.count_dw = bounds[chosen].count_dw;
         key.compare = static_cast<u32>(bounds[chosen].compare);
+    } else if (kind == ImageTableKind::BitScan) {
+        key.count_dw = bounds[chosen].count_dw;
+        key.compare = bounds[chosen].size_imm;
     }
 
     // The table: found (another site reads it) or added, its entries copied by the SRT program.
@@ -1356,6 +1422,7 @@ bool LowerDynamicImageTable(const ResourceDiscovery& resource, Info& info, Descr
              IR::NameOf(op), pc, table_index, site->buffer, site->first, site->stride, n,
              table.kind == ImageTableKind::Records   ? "records"
              : table.kind == ImageTableKind::Indexed ? "indexed"
+             : table.kind == ImageTableKind::BitScan ? "bitscan"
                                                      : "loop",
              table.reached);
     inst.ReplaceUsesWith(ir.CompositeConstruct(result[0], result[1], result[2], result[3]));

@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <bit>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -47,6 +48,7 @@ enum class ImageTableKind : u8 {
     Indexed, // the index is read from a record of a bounded buffer: one entry per distinct index
              // its records hold, and index 0 (what an index read past that buffer returns)
     Loop,    // the index is a loop counter 0, 1, ... N - 1, N read from the flattened user data
+    BitScan, // the index is a bit position from FindILsb32, bounded by a bitmask or at most MaxImageTableEntries
 };
 
 // Entries bound per table at most (the discrete form: one sample per entry, then a select)
@@ -74,6 +76,18 @@ struct ImageTableBound {
         }
         if (kind == ImageTableKind::Indexed) {
             return flat[count_dw];
+        }
+        if (kind == ImageTableKind::BitScan) {
+            if (count_dw != UNKNOWN_LOCATION) {
+                const u32 mask = flat[count_dw];
+                if (mask == 0) {
+                    return 0;
+                }
+                const u32 max_bit = 31 - std::countl_zero(mask);
+                const u32 limit = size_imm ? size_imm : MaxImageTableEntries;
+                return std::min(u64(max_bit + 1), u64(limit));
+            }
+            return size_imm ? size_imm : MaxImageTableEntries;
         }
         const u64 size = SrtBufferBytes(flat + vs, size_imm);
         const u64 first_end = (u64(first_dw) + 1) * 4;

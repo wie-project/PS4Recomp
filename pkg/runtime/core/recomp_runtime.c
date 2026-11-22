@@ -1288,11 +1288,6 @@ uint64_t recomp_vm_alloc_fixed(GuestContext *ctx, uint64_t desired_addr,
   uint64_t aligned_addr = desired_addr & ~4095ULL;
   size_t aligned_size = (size + 4095ULL) & ~4095ULL;
 
-  printf("[ps4-vm] recomp_vm_alloc_fixed (%s): desired=0x%llx size=%zu (%.2f "
-         "MB)\n",
-         name ? name : "null", (unsigned long long)desired_addr, size,
-         (double)size / (1024.0 * 1024.0));
-  fflush(stdout);
   if (aligned_addr + aligned_size > proc->mem_size ||
       aligned_addr + aligned_size < aligned_addr) {
     return (uint64_t)-1;

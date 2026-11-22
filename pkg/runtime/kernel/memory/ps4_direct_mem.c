@@ -388,10 +388,6 @@ int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t len
 }
 
 int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, off_t physAddr, size_t alignment) {
-    printf("[ps4-mem] sceKernelMapDirectMemory: in=%p len=%zu (%.2f MB) prot=0x%x flags=0x%x phys=0x%llx align=%zu\n",
-           addrInOut ? *addrInOut : NULL, length, (double)length / (1024.0 * 1024.0), prot, flags, (unsigned long long)physAddr, alignment);
-    fflush(stdout);
-
     if (!ctx || !addrInOut || length == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     if (alignment == 0) alignment = 4096;
     size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
@@ -441,9 +437,6 @@ int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length,
         fprintf(stderr, "[ps4-mem] WARNING: direct mapping 0x%llx (phys 0x%llx) is not physically aliased\n",
                 (unsigned long long)vaddr, (unsigned long long)physAddr);
     }
-
-    printf("[ps4-mem] sceKernelMapDirectMemory SUCCESS: out=%p\n", (void *)vaddr);
-    fflush(stdout);
 
     pthread_mutex_unlock(&g_direct_mutex);
     return 0;
