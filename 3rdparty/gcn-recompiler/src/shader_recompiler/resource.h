@@ -181,6 +181,11 @@ inline bool IsCreatableImage(const AmdGpu::Image& image) {
     if (cube && width != height) {
         return false;
     }
+    // PS4Recomp: Color1DArray with > 2048 layers (e.g. God of War 4096-layer LUT) is mapped to
+    // a 2D texture (height = layers), valid in Metal up to 16384 texels.
+    if (type == ImageType::Color1DArray && layers > 2048 && layers <= 16384) {
+        return true;
+    }
     return layers <= (cube ? 2046u : 2048u);
 }
 

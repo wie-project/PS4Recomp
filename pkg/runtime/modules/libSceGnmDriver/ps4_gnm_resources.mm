@@ -1638,20 +1638,31 @@ static bool DecodeImageUncached(const uint32_t* dwords, uint32_t num_dwords, Ima
     // for samples. Metal could not make a 1D texture with a block-compressed format or with mips
     // anyway. Uploads and detiling take the 2D path; a block row of a level shorter than a block
     // is padded, as for any level smaller than a block.
+    // For Color1DArray with >2048 layers (e.g. God of War 4096-layer material LUT), Metal rejects
+    // 2D array textures (max arrayLength is 2048). Such textures are represented as a standard
+    // 2D texture with height = num_layers (well within Metal's 16384 2D texture limit).
     const bool is1d = out->type == ImageType::Color1D || out->type == ImageType::Color1DArray;
-    if (is1d) out->height = 1;
-    switch (out->type) {
-    case ImageType::Color1D: out->mtl_texture_type = MTLTextureType2D; break;
-    case ImageType::Color1DArray: out->mtl_texture_type = MTLTextureType2DArray; break;
-    case ImageType::Color2D: out->mtl_texture_type = MTLTextureType2D; break;
-    case ImageType::Color2DArray: out->mtl_texture_type = MTLTextureType2DArray; break;
-    case ImageType::Color2DMsaa: out->mtl_texture_type = MTLTextureType2DMultisample; break;
-    case ImageType::Color2DMsaaArray: out->mtl_texture_type = MTLTextureType2DMultisampleArray; break;
-    case ImageType::Cube:
-        out->mtl_texture_type = out->num_layers > 6 ? MTLTextureTypeCubeArray : MTLTextureTypeCube;
-        break;
-    case ImageType::Color3D: out->mtl_texture_type = MTLTextureType3D; break;
-    default: out->mtl_texture_type = MTLTextureType2D; break;
+    const bool is_1d_array_as_2d = out->type == ImageType::Color1DArray && out->num_layers > 2048;
+    if (is_1d_array_as_2d) {
+        out->height = out->num_layers;
+        out->num_layers = 1;
+        out->layout_layers = 1;
+        out->mtl_texture_type = MTLTextureType2D;
+    } else if (is1d) {
+        out->height = 1;
+        out->mtl_texture_type = (out->type == ImageType::Color1D) ? MTLTextureType2D : MTLTextureType2DArray;
+    } else {
+        switch (out->type) {
+        case ImageType::Color2D: out->mtl_texture_type = MTLTextureType2D; break;
+        case ImageType::Color2DArray: out->mtl_texture_type = MTLTextureType2DArray; break;
+        case ImageType::Color2DMsaa: out->mtl_texture_type = MTLTextureType2DMultisample; break;
+        case ImageType::Color2DMsaaArray: out->mtl_texture_type = MTLTextureType2DMultisampleArray; break;
+        case ImageType::Cube:
+            out->mtl_texture_type = out->num_layers > 6 ? MTLTextureTypeCubeArray : MTLTextureTypeCube;
+            break;
+        case ImageType::Color3D: out->mtl_texture_type = MTLTextureType3D; break;
+        default: out->mtl_texture_type = MTLTextureType2D; break;
+        }
     }
     // A T# no Metal texture can be made of (MTLTextureDescriptor validation would abort the
     // process): multisampled with more than 8 samples, 3D past 2048 texels, a cube that is not
@@ -1666,7 +1677,9 @@ static bool DecodeImageUncached(const uint32_t* dwords, uint32_t num_dwords, Ima
         const bool is3d = out->type == ImageType::Color3D;
         if ((msaa && out->last_level > 3) ||
             (is3d && (out->width > 2048 || out->height > 2048 || out->depth > 2048)) ||
-            (cube && out->width != out->height) || out->num_layers > (cube ? 2046u : 2048u)) {
+            (cube && out->width != out->height) ||
+            (!is_1d_array_as_2d && out->num_layers > (cube ? 2046u : 2048u)) ||
+            (is_1d_array_as_2d && (out->width > 16384 || out->height > 16384))) {
             const uint64_t n = g_uncreatable_images.fetch_add(1, std::memory_order_relaxed) + 1;
             if (n == 1 || (n & (n - 1)) == 0)
                 fprintf(stderr,
@@ -3453,8 +3466,11 @@ bool TextureCache::UploadLockedImpl(Entry* e) {
         // bounds check: rows actually read by replaceRegion (in blocks for BCn)
         const uint32_t bh = pf.block_height ? pf.block_height : 1;
         const uint32_t bw = pf.block_width ? pf.block_width : 1;
-        const uint64_t rows = (uint64_t)(h + bh - 1) / bh;
-        const uint64_t rowbytes = (uint64_t)((w + bw - 1) / bw) * pf.bytes_per_block;
+        const uint32_t copy_w = ml.pitch ? std::min(w, ml.pitch) : w;
+        const uint32_t copy_h = (e->tex_type == MTLTextureType1D || e->tex_type == MTLTextureType1DArray)
+                                    ? 1 : (ml.height ? std::min(h, ml.height) : h);
+        const uint64_t rows = (uint64_t)(copy_h + bh - 1) / bh;
+        const uint64_t rowbytes = (uint64_t)((copy_w + bw - 1) / bw) * pf.bytes_per_block;
         const uint64_t slices_read = is3d ? std::max(1u, e->depth >> m) : std::min(e->layers, ml.slices);
         if (rowbytes > row || (slices_read ? (uint64_t)ml.offset + (slices_read - 1) * (uint64_t)img + rows * row : 0) > upload_size) {
             static int warned = 0;
@@ -3479,7 +3495,7 @@ bool TextureCache::UploadLockedImpl(Entry* e) {
                            sourceOffset:ml.offset
                       sourceBytesPerRow:row
                     sourceBytesPerImage:img
-                             sourceSize:MTLSizeMake(w, h, d)
+                             sourceSize:MTLSizeMake(copy_w, copy_h, d)
                               toTexture:e->tex
                        destinationSlice:0
                        destinationLevel:m
@@ -3491,14 +3507,12 @@ bool TextureCache::UploadLockedImpl(Entry* e) {
                         ? e->tex.arrayLength * 6
                         : e->tex.arrayLength;
                 layers = std::min<uint32_t>(layers, (uint32_t)tex_slices);
-                const uint32_t copy_h =
-                    (e->tex_type == MTLTextureType1D || e->tex_type == MTLTextureType1DArray) ? 1 : h;
                 for (uint32_t s = 0; s < layers; ++s) {
                     [priv_bl copyFromBuffer:priv_stg
                                sourceOffset:ml.offset + (size_t)s * img
                           sourceBytesPerRow:row
                         sourceBytesPerImage:0
-                                 sourceSize:MTLSizeMake(w, copy_h, 1)
+                                 sourceSize:MTLSizeMake(copy_w, copy_h, 1)
                                   toTexture:e->tex
                            destinationSlice:s
                            destinationLevel:m
@@ -3507,7 +3521,7 @@ bool TextureCache::UploadLockedImpl(Entry* e) {
             }
         } else if (is3d) {
             const uint32_t d = std::max(1u, e->depth >> m);
-            [e->tex replaceRegion:MTLRegionMake3D(0, 0, 0, w, h, d)
+            [e->tex replaceRegion:MTLRegionMake3D(0, 0, 0, copy_w, copy_h, d)
                       mipmapLevel:m
                             slice:0
                         withBytes:upload + ml.offset
@@ -3519,8 +3533,7 @@ bool TextureCache::UploadLockedImpl(Entry* e) {
                                               ? e->tex.arrayLength * 6 : e->tex.arrayLength;
             layers = std::min<uint32_t>(layers, (uint32_t)tex_slices);
             for (uint32_t s = 0; s < layers; ++s) {
-                [e->tex replaceRegion:MTLRegionMake2D(0, 0, w, e->tex_type == MTLTextureType1D ||
-                                                                e->tex_type == MTLTextureType1DArray ? 1 : h)
+                [e->tex replaceRegion:MTLRegionMake2D(0, 0, copy_w, copy_h)
                           mipmapLevel:m
                                 slice:s
                             withBytes:upload + ml.offset + (size_t)s * img
@@ -3734,9 +3747,11 @@ id<MTLTexture> TextureCache::GetTextureImpl(const ImageDesc& img, const uint64_t
     };
     TimedLock lk(mutex_);
 
+    const bool is_1d_array_as_2d = img.type == ImageType::Color1DArray && img.num_layers > 2048;
     const bool is3d = img.mtl_texture_type == MTLTextureType3D;
     const uint32_t width = img.width;
-    const uint32_t height = (img.mtl_texture_type == MTLTextureType1D || img.mtl_texture_type == MTLTextureType1DArray) ? 1 : img.height;
+    const uint32_t height = is_1d_array_as_2d ? img.num_layers :
+        ((img.mtl_texture_type == MTLTextureType1D || img.mtl_texture_type == MTLTextureType1DArray) ? 1 : img.height);
     const uint32_t depth = is3d ? img.depth : 1;
     const uint32_t levels = std::max(1u, std::min(sd.levels, MaxMips(width, height, depth)));
     const bool msaa = img.mtl_texture_type == MTLTextureType2DMultisample ||

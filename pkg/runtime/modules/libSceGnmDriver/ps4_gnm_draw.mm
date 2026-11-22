@@ -6738,8 +6738,10 @@ bool EncodeGpuUploadAt(uint64_t address, const SurfaceDesc& sd, const TextureCac
             const uint32_t w = std::max(1u, up.width >> m), h = is1d ? 1u : std::max(1u, up.height >> m);
             row = (uint64_t)ml.pitch * bpe;
             const uint64_t image = row * ml.height;
-            rowbytes = (uint64_t)((w + up.block_width - 1) / up.block_width) * up.bytes_per_block;
-            rows = (h + up.block_height - 1) / up.block_height;
+            const uint32_t copy_w = ml.pitch ? std::min(w, ml.pitch) : w;
+            const uint32_t copy_h = is1d ? 1u : (ml.height ? std::min(h, ml.height) : h);
+            rowbytes = (uint64_t)((copy_w + up.block_width - 1) / up.block_width) * up.bytes_per_block;
+            rows = (copy_h + up.block_height - 1) / up.block_height;
             const uint32_t d = is3d ? std::max(1u, up.depth >> m) : 1u;
             const uint32_t slices = is3d ? 1u : std::min<uint32_t>(std::min(up.layers, ml.slices), (uint32_t)tex_slices);
             need = slices ? ml.offset + (uint64_t)(slices - 1) * image + (uint64_t)(d - 1) * image + (rows - 1) * row + rowbytes
@@ -6823,14 +6825,16 @@ bool EncodeGpuUploadAt(uint64_t address, const SurfaceDesc& sd, const TextureCac
     for (uint32_t m = 0; m < up.levels; ++m) { // bounds validated above
         const MipLayout& ml = up.layout.mips[m];
         const uint32_t w = std::max(1u, up.width >> m), h = is1d ? 1u : std::max(1u, up.height >> m);
+        const uint32_t copy_w = ml.pitch ? std::min(w, ml.pitch) : w;
+        const uint32_t copy_h = is1d ? 1u : (ml.height ? std::min(h, ml.height) : h);
         const uint64_t row = (uint64_t)ml.pitch * bpe, image = row * ml.height;
-        const uint64_t rowbytes = (uint64_t)((w + up.block_width - 1) / up.block_width) * up.bytes_per_block;
-        const uint64_t rows = (h + up.block_height - 1) / up.block_height;
+        const uint64_t rowbytes = (uint64_t)((copy_w + up.block_width - 1) / up.block_width) * up.bytes_per_block;
+        const uint64_t rows = (copy_h + up.block_height - 1) / up.block_height;
         const uint32_t d = is3d ? std::max(1u, up.depth >> m) : 1u;
         const uint32_t slices = is3d ? 1u : std::min<uint32_t>(std::min(up.layers, ml.slices), (uint32_t)tex_slices);
         for (uint32_t sl = 0; sl < slices; ++sl) {
             const uint64_t off = src_base + ml.offset + (uint64_t)sl * image;
-            S.be->CopyBufferToTexture(src, off, row, is3d ? image : 0, MTLSizeMake(w, h, d), tex, sl, m,
+            S.be->CopyBufferToTexture(src, off, row, is3d ? image : 0, MTLSizeMake(copy_w, copy_h, d), tex, sl, m,
                                       MTLOriginMake(0, 0, 0));
         }
     }

@@ -309,13 +309,23 @@ struct Image {
     // make a 1D texture with a block-compressed format or with mips. GCN samples a 1D image along
     // x, so the same texels read the same way; resource_patching_pass builds the 2D coordinates
     // from the instruction's 1D ones.
+    // For Color1DArray with > 2048 layers (e.g. God of War 4096-layer material LUT), Apple Silicon
+    // Metal rejects 2D array textures (max arrayLength is 2048). Such textures are instead mapped
+    // to a standard 2D texture with height = layers.
     bool Is1DAs2D() const {
         const auto base_type = GetType();
         return base_type == ImageType::Color1D || base_type == ImageType::Color1DArray;
     }
 
+    bool Is1DArrayAs2D() const {
+        return GetType() == ImageType::Color1DArray && depth >= 2048;
+    }
+
     ImageType GetViewType(const bool is_array) const {
         const auto base_type = GetType();
+        if (Is1DArrayAs2D()) {
+            return ImageType::Color2D;
+        }
         if (Is1DAs2D()) {
             return base_type == ImageType::Color1DArray && is_array ? ImageType::Color2DArray
                                                                     : ImageType::Color2D;

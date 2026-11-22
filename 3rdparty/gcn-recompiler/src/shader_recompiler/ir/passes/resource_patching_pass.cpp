@@ -170,12 +170,29 @@ private:
 using SharpSources = boost::container::small_vector<const IR::Inst*, 4>;
 
 SharpLocation SharpLocationFromSource(const IR::Inst* inst) {
-    SharpLocation location{};
-    if (inst->GetOpcode() != IR::Opcode::GetUserData && inst->GetOpcode() != IR::Opcode::ReadConst &&
-        inst->GetOpcode() != IR::Opcode::ReadConstBuffer) {
+    while (inst && inst->GetOpcode() != IR::Opcode::GetUserData &&
+           inst->GetOpcode() != IR::Opcode::ReadConst &&
+           inst->GetOpcode() != IR::Opcode::ReadConstBuffer) {
+        if (inst->GetOpcode() == IR::Opcode::BitwiseAnd32 ||
+            inst->GetOpcode() == IR::Opcode::BitwiseOr32 ||
+            inst->GetOpcode() == IR::Opcode::ShiftLeftLogical32 ||
+            inst->GetOpcode() == IR::Opcode::ShiftRightLogical32) {
+            if (auto* a0 = inst->Arg(0).TryInst()) {
+                inst = a0;
+                continue;
+            } else if (inst->NumArgs() > 1 && inst->Arg(1).TryInst()) {
+                inst = inst->Arg(1).TryInst();
+                continue;
+            }
+        }
+        break;
+    }
+    if (!inst || (inst->GetOpcode() != IR::Opcode::GetUserData && inst->GetOpcode() != IR::Opcode::ReadConst &&
+                  inst->GetOpcode() != IR::Opcode::ReadConstBuffer)) {
         // PS4Recomp: a value the shader computes (its flags are not a flatbuf offset)
         return UNKNOWN_LOCATION;
     }
+    SharpLocation location{};
     if (inst->GetOpcode() == IR::Opcode::GetUserData) {
         return static_cast<SharpLocation>(inst->Arg(0).ScalarReg());
     } else if (inst->GetOpcode() == IR::Opcode::ReadConstBuffer) {
@@ -227,6 +244,26 @@ static bool IsFlattenedSharpDword(const IR::Value& dword) {
         return true;
     }
     const IR::Inst* inst = dword.Inst();
+    while (inst && inst->GetOpcode() != IR::Opcode::GetUserData &&
+           inst->GetOpcode() != IR::Opcode::ReadConst &&
+           inst->GetOpcode() != IR::Opcode::ReadConstBuffer) {
+        if (inst->GetOpcode() == IR::Opcode::BitwiseAnd32 ||
+            inst->GetOpcode() == IR::Opcode::BitwiseOr32 ||
+            inst->GetOpcode() == IR::Opcode::ShiftLeftLogical32 ||
+            inst->GetOpcode() == IR::Opcode::ShiftRightLogical32) {
+            if (auto* a0 = inst->Arg(0).TryInst()) {
+                inst = a0;
+                continue;
+            } else if (inst->NumArgs() > 1 && inst->Arg(1).TryInst()) {
+                inst = inst->Arg(1).TryInst();
+                continue;
+            }
+        }
+        break;
+    }
+    if (!inst) {
+        return false;
+    }
     switch (inst->GetOpcode()) {
     case IR::Opcode::GetUserData:
         return true;
@@ -548,6 +585,9 @@ void PatchBufferSharp(const ResourceDiscovery& resource, Info& info, Descriptors
 // except for an image read as 2D of height 1 (Image::Is1DAs2D): its instructions still carry 1D
 // addresses (x [, slice]), which the patching widens to the 2D view's (x, y [, slice]).
 AmdGpu::ImageType AddressType(const AmdGpu::Image& image, bool is_array) {
+    if (image.Is1DArrayAs2D()) {
+        return AmdGpu::ImageType::Color2D;
+    }
     if (image.Is1DAs2D()) {
         return image.GetType() == AmdGpu::ImageType::Color1DArray && is_array
                    ? AmdGpu::ImageType::Color1DArray
@@ -856,6 +896,21 @@ static std::optional<TableSite> MatchTableSite(const SharpReference& tsharp) {
     site.num_dwords = tsharp.num_dwords;
     for (u32 i = 0; i < tsharp.num_dwords; ++i) {
         const IR::Inst* rd = tsharp.dwords[i].TryInst();
+        while (rd && rd->GetOpcode() != IR::Opcode::ReadConstBuffer) {
+            if (rd->GetOpcode() == IR::Opcode::BitwiseAnd32 ||
+                rd->GetOpcode() == IR::Opcode::BitwiseOr32 ||
+                rd->GetOpcode() == IR::Opcode::ShiftLeftLogical32 ||
+                rd->GetOpcode() == IR::Opcode::ShiftRightLogical32) {
+                if (auto* a0 = rd->Arg(0).TryInst()) {
+                    rd = a0;
+                    continue;
+                } else if (rd->NumArgs() > 1 && rd->Arg(1).TryInst()) {
+                    rd = rd->Arg(1).TryInst();
+                    continue;
+                }
+            }
+            break;
+        }
         if (!rd || rd->GetOpcode() != IR::Opcode::ReadConstBuffer || !rd->Arg(0).IsImmediate()) {
             return std::nullopt;
         }
@@ -1862,6 +1917,12 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
                     ir.ConvertUToF(32, 32, IR::U32{ir.CompositeExtract(dimensions, dim_idx)});
                 return ir.ConvertFToU(32, ir.FPMul(coord, dim));
             }
+        }
+        if (image.Is1DArrayAs2D() && dim_idx == 1) {
+            // PS4Recomp: 1D array mapped to 2D height. Unnormalized slice index -> normalized Y coord.
+            const auto height = ir.Imm32(float(u32(image.depth) + 1));
+            const auto slice_center = ir.FPAdd(coord, ir.Imm32(0.5f));
+            return ir.FPDiv(slice_center, height);
         }
         if (unnormalized) {
             // Normalize the coordinate for sampling, dividing by its corresponding dimension.

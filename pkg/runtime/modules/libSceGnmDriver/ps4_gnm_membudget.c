@@ -37,11 +37,14 @@ void ps4_gpumem_policy_init(ps4_gpumem_policy *p, uint64_t mem_total, const char
         p->budget = mb << 20;
     } else {
         uint64_t pct = parse_u64(budget_pct);
-        if (!pct) pct = 40; // unset or not a number
+        if (!pct) pct = 65; // unset or not a number: 65% for PS4 unified memory
         if (pct < 5) pct = 5;
         if (pct > 90) pct = 90;
         // hw.memsize unknown: no budget rather than one of 0 that would always be exceeded
         p->budget = mem_total ? mem_total / 100 * pct : UINT64_MAX;
+        if (mem_total >= (8ull << 30) && p->budget < (5300ull << 20)) {
+            p->budget = 5300ull << 20; // Ensure 5.3 GB available for PS4 AAA titles on 8GB+ Mac
+        }
     }
     p->nocopy_warn = 1ull << 30;
     p->nocopy_max = 2ull << 30;
@@ -59,13 +62,21 @@ void ps4_texcache_policy_init(ps4_texcache_policy *p, const ps4_gpumem_policy *g
     const int mb_zero = tex_mb && tex_mb[0] == '0' && tex_mb[1] == 0;
     if (mb_zero) p->budget = UINT64_MAX;
     else if (mb && mb <= (UINT64_MAX >> 20)) p->budget = mb << 20;
-    else p->budget = gp->budget == UINT64_MAX ? UINT64_MAX : gp->budget / 12;
+    else {
+        // Default: 1/3 of the GPU budget, with a floor of 1024 MiB (if memory permits)
+        // to prevent thrashing in modern AAA titles that actively stream ~700-1000 MiB of textures.
+        uint64_t b = gp->budget == UINT64_MAX ? UINT64_MAX : gp->budget / 3;
+        if (b != UINT64_MAX && b < (1024ull << 20) && gp->mem_total >= (6ull << 30)) {
+            b = 1024ull << 20;
+        }
+        p->budget = b;
+    }
     p->low_water = p->budget == UINT64_MAX ? UINT64_MAX : p->budget / 10 * 9;
     uint64_t keep = keep_ms ? parse_u64(keep_ms) : 2000;
     if (!keep) keep = 2000;
     if (keep < 100) keep = 100;
     p->keep_ns = keep * 1000000ull;
-    p->press_ns = gp->press_ns < 100000000ull ? 100000000ull : gp->press_ns;
+    p->press_ns = gp->press_ns < 1000000000ull ? 1000000000ull : gp->press_ns;
 }
 
 int ps4_texcache_evict_due(const ps4_texcache_policy *p, uint64_t sampled_bytes, int gpu_over) {

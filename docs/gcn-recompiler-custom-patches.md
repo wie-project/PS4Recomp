@@ -198,3 +198,38 @@ Any future changes, opcode implementations, or pass modifications in `3rdparty/g
   - `spirv_emit_context.h` / `spirv_emit_context.cpp`: Buffer base misalignment compensation (`misalign`).
   - `emit_spirv_floating_point.cpp`: Integer bitcast IEEE-754 NaN and Inf protections (`EmitFPSaturate32`, `EmitFPIsNan32`, `EmitFPIsInf32`) immune to Metal `-ffast-math` optimization.
   - `spirv_emit_context.h` / `emit_spirv_context_get_set.cpp`: Dynamic guest memory access functions (`EmitLoadGuestU32`, `EmitStoreGuestU32`, `EmitGuestReportStatus`) and probe guarding.
+
+---
+
+## 6. Metal Hardware Constraint Workarounds
+
+### 6.1 Color1DArray with >2048 Layers Lowered to 2D Texture
+- **Files**:
+  - `3rdparty/gcn-recompiler/src/video_core/amdgpu/resource.h` (`Is1DArrayAs2D`, `GetViewType`)
+  - `3rdparty/gcn-recompiler/src/shader_recompiler/resource.h` (`IsCreatableImage`)
+  - `3rdparty/gcn-recompiler/src/shader_recompiler/ir/passes/resource_patching_pass.cpp` (`AddressType`, `get_coord`)
+  - `pkg/runtime/modules/libSceGnmDriver/ps4_gnm_resources.mm` (`DecodeImageUncached`, `GetTextureImpl`)
+- **Rationale**: Apple Silicon Metal strictly limits `MTLTextureType2DArray` `arrayLength` to 2048. Titles like God of War (2018) allocate a 4096-layer material LUT texture of type `Color1DArray` (256x1x1, 4096 layers, 1 level). When treated as a 2D array, Metal aborts with `arrayLength (4096) is greater than max allowed size (2048)`, which previously caused PS4Recomp to reject it and bind it as a dummy null texture (causing missing material/lighting parameters).
+- **Implementation**:
+  - `Is1DArrayAs2D()` detects `Color1DArray` with `depth >= 2048`.
+  - In `resource.h`, `IsCreatableImage` accepts `Color1DArray` with up to 16384 layers.
+  - `GetViewType` and `AddressType` return `ImageType::Color2D` for such textures, emitting `texture2d<float>` instead of `texture2d_array<float>`.
+  - In `resource_patching_pass.cpp`, sampling coordinate generation normalizes the slice index along dimension 1: `(slice + 0.5f) / float(height)`. For `ImageRead`, `(x, slice)` integer texel indexing is used directly.
+  - In `ps4_gnm_resources.mm`, `DecodeImageUncached` and `GetTextureImpl` create `MTLTextureType2D` with `width = 256` and `height = 4096`, setting `num_layers = 1` and `layout_layers = 1` so surface layout does not overflow 32-bit total_size, and detiled memory rows are uploaded directly into Metal's 2D texture.
+
+### 6.2 Dynamic Image Table Bitwise Mask Unwrapping
+- **Files**:
+  - `3rdparty/gcn-recompiler/src/shader_recompiler/ir/passes/resource_patching_pass.cpp` (`MatchTableSite`)
+- **Rationale**: Shaders in titles like God of War (2018) load T# texture descriptors dynamically from constant buffer tables (`s_buffer_load_dwordx8`), and apply bitwise masks or shifts to dword 1 (e.g. `BitwiseAnd32`) to adjust descriptor fields at runtime. `MatchTableSite` previously expected every dword of `tsharp` to be directly `ReadConstBuffer`, which caused table recognition to fail. The recompiler consequently dropped the table binding and fell back to patching the image instruction to read the dummy null image (25 shaders reading black textures).
+- **Implementation**:
+  - In `MatchTableSite`, unwrapped `BitwiseAnd32`, `BitwiseOr32`, `ShiftLeftLogical32`, and `ShiftRightLogical32` instructions recursively down to the underlying `ReadConstBuffer`, allowing dynamic T# descriptor tables with masked dwords to be matched and lowered properly.
+
+### 6.3 Static Sharp Descriptor Bitwise Unwrapping
+- **Files**:
+  - `3rdparty/gcn-recompiler/src/shader_recompiler/ir/passes/resource_patching_pass.cpp` (`SharpLocationFromSource`, `IsFlattenedSharpDword`)
+- **Rationale**: In complex shaders (e.g. God of War materials), static T# image descriptors passed via user data or constant buffers may also have bitwise mask or shift operations applied to individual dwords (such as dword 1 for LOD/format flags). `SharpLocationFromSource` and `IsFlattenedSharpDword` previously only inspected the root instruction opcode (`GetUserData`, `ReadConst`, `ReadConstBuffer`), rejecting masked dwords as `UNKNOWN_LOCATION` / non-flattened and causing `ConstructSharpFetch` to treat the fetch as `Invalid`, falling back to reading the null image.
+- **Implementation**:
+  - Unwrapped bitwise instructions (`BitwiseAnd32`, `BitwiseOr32`, `ShiftLeftLogical32`, `ShiftRightLogical32`) in both `SharpLocationFromSource` and `IsFlattenedSharpDword` down to the root constant or user-data instruction, preserving the flatbuf location so static descriptor fetches resolve correctly.
+
+
+
