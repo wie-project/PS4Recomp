@@ -86,9 +86,11 @@ inline bool ClearColorFor(MTLPixelFormat f, uint32_t w0, uint32_t w1, MTLClearCo
         r = g = b = AsFloat(w0); a = AsFloat(w1);
         break;
     case MTLPixelFormatR8Unorm:
+    case MTLPixelFormatR8Unorm_sRGB:
         r = (w0 & 255) / 255.0;
         break;
     case MTLPixelFormatRG8Unorm:
+    case MTLPixelFormatRG8Unorm_sRGB:
         r = (w0 & 255) / 255.0; g = ((w0 >> 8) & 255) / 255.0;
         break;
     case MTLPixelFormatR8Uint:
@@ -151,7 +153,9 @@ inline bool ClearColorFor(MTLPixelFormat f, uint32_t w0, uint32_t w1, MTLClearCo
     default:
         return false;
     }
-    if (f == MTLPixelFormatRGBA8Unorm_sRGB || f == MTLPixelFormatBGRA8Unorm_sRGB) {
+    // sRGB attachments encode the clear colour on store: hand Metal the linear value of the raw bits.
+    if (f == MTLPixelFormatRGBA8Unorm_sRGB || f == MTLPixelFormatBGRA8Unorm_sRGB || f == MTLPixelFormatR8Unorm_sRGB ||
+        f == MTLPixelFormatRG8Unorm_sRGB) {
         r = SrgbToLinear(r);
         g = SrgbToLinear(g);
         b = SrgbToLinear(b);
