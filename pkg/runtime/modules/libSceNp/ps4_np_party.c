@@ -126,6 +126,18 @@ int32_t sceNpPartyGetState(uint32_t *state) {
     return 0;
 }
 
+int32_t sceNpPartyGetMemberInfo(void) {
+    return NP_PARTY_ERROR_NOT_IN_PARTY;
+}
+
+int32_t sceNpPartyGetMembers(void) {
+    return NP_PARTY_ERROR_NOT_IN_PARTY;
+}
+
+int32_t sceNpPartySendBinaryMessage(void) {
+    return 0; // ORBIS_OK
+}
+
 // Test hooks: the recorded handler blocks (0 = none).
 uint64_t ps4_np_party_handler(bool private_handler) {
     pthread_mutex_lock(&g_party_mutex);
@@ -160,3 +172,6 @@ void shim_sceNpPartyGetState(GuestContext *ctx) {
     uint32_t *state = ctx->rdi ? (uint32_t *)(ctx->mem_base + ctx->rdi) : NULL; // rdi is a guest address
     PARTY_SHIM_RET(sceNpPartyGetState(state));
 }
+void shim_sceNpPartyGetMemberInfo(GuestContext *ctx) { PARTY_SHIM_RET(sceNpPartyGetMemberInfo()); }
+void shim_sceNpPartyGetMembers(GuestContext *ctx) { PARTY_SHIM_RET(sceNpPartyGetMembers()); }
+void shim_sceNpPartySendBinaryMessage(GuestContext *ctx) { PARTY_SHIM_RET(sceNpPartySendBinaryMessage()); }

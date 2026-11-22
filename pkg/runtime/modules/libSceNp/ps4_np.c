@@ -1291,6 +1291,31 @@ void shim_sceNpTusSetMultiSlotVariableVUser(GuestContext *ctx) {
     np_server_request_signed_out(ctx);
 }
 
+void shim_sceNpTusDeleteMultiSlotData(GuestContext *ctx) {
+    NP_LOG("sceNpTusDeleteMultiSlotData -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTusDeleteMultiSlotDataVUser(GuestContext *ctx) {
+    NP_LOG("sceNpTusDeleteMultiSlotDataVUser -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTusAddAndGetVariable(GuestContext *ctx) {
+    NP_LOG("sceNpTusAddAndGetVariable -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpTusAddAndGetVariableVUser(GuestContext *ctx) {
+    NP_LOG("sceNpTusAddAndGetVariableVUser -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
+void shim_sceNpScoreGetGameDataAsync(GuestContext *ctx) {
+    NP_LOG("sceNpScoreGetGameDataAsync -> SIGNED_OUT");
+    np_server_request_signed_out(ctx);
+}
+
 void shim_sceNpTssGetData(GuestContext *ctx) {
     NP_LOG("sceNpTssGetData -> SIGNED_OUT");
     np_server_request_signed_out(ctx);

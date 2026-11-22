@@ -128,6 +128,120 @@ int32_t sceHttpDeleteConnection(int32_t connId) {
     return 0;
 }
 
+int32_t sceHttpCreateRequest(int32_t connId, int32_t method, const char *path, uint64_t contentLength) {
+    (void)connId;
+    (void)method;
+    (void)path;
+    (void)contentLength;
+    return alloc_http_id();
+}
+
+int32_t sceHttpSetAutoRedirect(int32_t id, int32_t isEnable) {
+    (void)id;
+    (void)isEnable;
+    return 0;
+}
+
+static inline bool is_ascii_digit_char(char c) {
+    unsigned char uc = (unsigned char)c;
+    return uc >= '0' && uc <= '9';
+}
+
+int32_t sceHttpParseStatusLine(const char *statusLine, uint64_t lineLen, int32_t *httpMajorVer,
+                               int32_t *httpMinorVer, int32_t *responseCode,
+                               const char **reasonPhrase, uint64_t *phraseLen) {
+    if (!statusLine) {
+        return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+    }
+    if (!httpMajorVer || !httpMinorVer || !responseCode || !reasonPhrase || !phraseLen) {
+        return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_VALUE;
+    }
+
+    *httpMajorVer = 0;
+    *httpMinorVer = 0;
+
+    if (lineLen < 8) {
+        return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+    }
+    if (memcmp(statusLine, "HTTP/", 5) != 0) {
+        return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+    }
+
+    if (!is_ascii_digit_char(statusLine[5])) {
+        return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+    }
+
+    uint64_t index = 7;
+    {
+        unsigned char ch = (unsigned char)statusLine[5];
+        while (ch < 0x80 && (ch >= '0' && ch <= '9')) {
+            *httpMajorVer = *httpMajorVer * 10 + (statusLine[index - 2] - '0');
+            char next = (index - 1 < lineLen) ? statusLine[index - 1] : 0;
+            index++;
+            if ((unsigned char)next >= 0x80) {
+                return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+            }
+            ch = (unsigned char)next;
+        }
+    }
+
+    if (index - 2 >= lineLen || statusLine[index - 2] != '.') {
+        return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+    }
+
+    if (index - 1 >= lineLen || !is_ascii_digit_char(statusLine[index - 1])) {
+        return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+    }
+
+    {
+        unsigned char ch = (unsigned char)statusLine[index - 1];
+        while (ch < 0x80 && (ch >= '0' && ch <= '9')) {
+            *httpMinorVer = *httpMinorVer * 10 + (statusLine[index - 1] - '0');
+            char next = (index < lineLen) ? statusLine[index] : 0;
+            index++;
+            if ((unsigned char)next >= 0x80) {
+                return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+            }
+            ch = (unsigned char)next;
+        }
+    }
+
+    if (index - 1 >= lineLen || statusLine[index - 1] != ' ') {
+        return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+    }
+
+    if (lineLen < index || (lineLen - index) < 3) {
+        return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        if (!is_ascii_digit_char(statusLine[index + i])) {
+            return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+        }
+    }
+    *responseCode = (statusLine[index] - '0') * 100 + (statusLine[index + 1] - '0') * 10 +
+                    (statusLine[index + 2] - '0');
+
+    const char *phraseStart = statusLine + index + 3;
+    uint64_t remaining = lineLen - index;
+    uint64_t maxScan = remaining - 3;
+    for (uint64_t scanLen = 0; scanLen <= maxScan; ++scanLen) {
+        if (phraseStart[scanLen] != '\n') {
+            continue;
+        }
+        *reasonPhrase = phraseStart;
+        if (scanLen == 0) {
+            *phraseLen = 0;
+        } else {
+            *phraseLen = scanLen - (phraseStart[scanLen - 1] == '\r' ? 1 : 0);
+        }
+        uint64_t bytesConsumed = (uint64_t)(phraseStart - statusLine) + scanLen + 1;
+        return (int32_t)bytesConsumed;
+    }
+
+    return ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE;
+}
+
 int32_t sceHttpCreateRequestWithURL(int32_t connId, int32_t method, const char *url, uint64_t contentLength) {
     (void)connId;
     (void)method;
@@ -634,6 +748,36 @@ void shim_sceHttpCreateConnectionWithURL(GuestContext *ctx) {
 
 void shim_sceHttpDeleteConnection(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpDeleteConnection((int32_t)ctx->rdi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpCreateRequest(GuestContext *ctx) {
+    const char *path = ctx->rdx ? (const char *)(ctx->mem_base + ctx->rdx) : NULL;
+    ctx->rax = (uint64_t)sceHttpCreateRequest(
+        (int32_t)ctx->rdi, (int32_t)ctx->rsi, path, (uint64_t)ctx->rcx);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetAutoRedirect(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpSetAutoRedirect((int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpParseStatusLine(GuestContext *ctx) {
+    const char *statusLine = (const char *)guest_to_host(ctx, ctx->rdi);
+    uint64_t lineLen = ctx->rsi;
+    int32_t *httpMajorVer = (int32_t *)guest_to_host(ctx, ctx->rdx);
+    int32_t *httpMinorVer = (int32_t *)guest_to_host(ctx, ctx->rcx);
+    int32_t *responseCode = (int32_t *)guest_to_host(ctx, ctx->r8);
+    const char **reasonPhrase = (const char **)guest_to_host(ctx, ctx->r9);
+    uint64_t *phraseLen = NULL;
+    if (ctx->rsp && ctx->mem_base && (ctx->rsp + 8) < ctx->mem_size) {
+        uint64_t stack_val = *(uint64_t *)(ctx->mem_base + ctx->rsp + 8);
+        phraseLen = (uint64_t *)guest_to_host(ctx, stack_val);
+    }
+    ctx->rax = (uint64_t)(int64_t)sceHttpParseStatusLine(statusLine, lineLen, httpMajorVer,
+                                                         httpMinorVer, responseCode,
+                                                         reasonPhrase, phraseLen);
     SHIM_RETURN();
 }
 

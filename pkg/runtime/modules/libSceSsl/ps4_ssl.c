@@ -78,6 +78,22 @@ int32_t sceSslGetSerialNumber(void *cert, void *serialNumber) {
     return 0;
 }
 
+int32_t sceSslGetNotBefore(void *cert, void *time) {
+    (void)cert;
+    if (time) {
+        memset(time, 0, 8);
+    }
+    return 0;
+}
+
+int32_t sceSslGetNotAfter(void *cert, void *time) {
+    (void)cert;
+    if (time) {
+        memset(time, 0, 8);
+    }
+    return 0;
+}
+
 int32_t sceSslGetPem(void *cert, char *pemBuf, size_t *pemLen) {
     (void)cert;
     (void)pemBuf;
@@ -151,6 +167,20 @@ void shim_sceSslGetSerialNumber(GuestContext *ctx) {
     void *cert = guest_to_host(ctx, ctx->rdi);
     void *serialNumber = guest_to_host(ctx, ctx->rsi);
     ctx->rax = (uint64_t)sceSslGetSerialNumber(cert, serialNumber);
+    SHIM_RETURN();
+}
+
+void shim_sceSslGetNotBefore(GuestContext *ctx) {
+    void *cert = guest_to_host(ctx, ctx->rdi);
+    void *time = guest_to_host(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)sceSslGetNotBefore(cert, time);
+    SHIM_RETURN();
+}
+
+void shim_sceSslGetNotAfter(GuestContext *ctx) {
+    void *cert = guest_to_host(ctx, ctx->rdi);
+    void *time = guest_to_host(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)sceSslGetNotAfter(cert, time);
     SHIM_RETURN();
 }
 

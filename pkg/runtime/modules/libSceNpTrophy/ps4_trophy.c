@@ -481,6 +481,43 @@ void shim_sceNpTrophyGetGameInfo(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
+int32_t sceNpTrophyCaptureScreenshot(void) {
+    return 0;
+}
+
+int32_t sceNpTrophyGetGroupInfo(int32_t context, int32_t handle, int32_t groupId, void *details, void *data) {
+    (void)context;
+    (void)handle;
+    (void)groupId;
+    (void)details;
+    (void)data;
+    return 0;
+}
+
+void shim_sceNpTrophyCaptureScreenshot(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_sceNpTrophyGetGroupInfo(GuestContext *ctx) {
+    uint64_t details_addr = ctx->rcx;
+    uint64_t data_addr = ctx->r8;
+    if (details_addr && ctx->mem_base && details_addr < ctx->mem_size) {
+        size_t sz = *(size_t *)(ctx->mem_base + details_addr);
+        if (sz > sizeof(size_t) && details_addr + sz <= ctx->mem_size) {
+            memset(ctx->mem_base + details_addr + sizeof(size_t), 0, sz - sizeof(size_t));
+        }
+    }
+    if (data_addr && ctx->mem_base && data_addr < ctx->mem_size) {
+        size_t sz = *(size_t *)(ctx->mem_base + data_addr);
+        if (sz > sizeof(size_t) && data_addr + sz <= ctx->mem_size) {
+            memset(ctx->mem_base + data_addr + sizeof(size_t), 0, sz - sizeof(size_t));
+        }
+    }
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
 void shim_sceNpTrophyGetTrophyInfo(GuestContext *ctx) {
     int32_t trophy_id = (int32_t)ctx->rdx;
     uint64_t details_addr = ctx->rcx;

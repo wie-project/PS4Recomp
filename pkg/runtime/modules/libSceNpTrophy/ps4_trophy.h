@@ -38,6 +38,8 @@ int32_t sceNpTrophyGetGroupIcon(int32_t context, int32_t handle, int32_t group_i
                                 uint64_t *size);
 int32_t sceNpTrophyGetTrophyIcon(int32_t context, int32_t handle, int32_t trophy_id, void *buffer,
                                  uint64_t *size);
+int32_t sceNpTrophyCaptureScreenshot(void);
+int32_t sceNpTrophyGetGroupInfo(int32_t context, int32_t handle, int32_t groupId, void *details, void *data);
 
 // Guest ABI Shims
 void shim_sceNpTrophyInit(GuestContext *ctx);
@@ -50,7 +52,9 @@ void shim_sceNpTrophyRegisterContext(GuestContext *ctx);
 void shim_sceNpTrophyUnlockTrophy(GuestContext *ctx);
 void shim_sceNpTrophyShowTrophyList(GuestContext *ctx);
 void shim_sceNpTrophyGetGameInfo(GuestContext *ctx);
+void shim_sceNpTrophyGetGroupInfo(GuestContext *ctx);
 void shim_sceNpTrophyGetTrophyInfo(GuestContext *ctx);
+void shim_sceNpTrophyCaptureScreenshot(GuestContext *ctx);
 void shim_sceNpTrophyGetGameIcon(GuestContext *ctx);
 void shim_sceNpTrophyGetGroupIcon(GuestContext *ctx);
 void shim_sceNpTrophyGetTrophyIcon(GuestContext *ctx);

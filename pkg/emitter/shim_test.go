@@ -633,3 +633,57 @@ func TestCatherineFullBodyShimsByNID(t *testing.T) {
 		}
 	}
 }
+
+func TestWatchDogs2Symbols(t *testing.T) {
+	cases := []struct {
+		dynsym string
+		plain  string
+		shim   string
+	}{
+		// libSceUlt (10)
+		{"1+8t9aHLiz8#O#P", "_sceUltMutexOptParamInitialize", "shim__sceUltMutexOptParamInitialize"},
+		{"8hEGkR1pfr8#O#P", "sceUltMutexLock", "shim_sceUltMutexLock"},
+		{"WIWV1Qd7PFU#O#P", "sceUltWaitingQueueResourcePoolGetWorkAreaSize", "shim_sceUltWaitingQueueResourcePoolGetWorkAreaSize"},
+		{"YiHujOG9vXY#O#P", "_sceUltWaitingQueueResourcePoolCreate", "shim__sceUltWaitingQueueResourcePoolCreate"},
+		{"d-kSG2fLrvI#O#P", "sceUltFinalize", "shim_sceUltFinalize"},
+		{"h0XebKiMBtk#O#P", "sceUltMutexUnlock", "shim_sceUltMutexUnlock"},
+		{"hZIg1EWGsHM#O#P", "sceUltInitialize", "shim_sceUltInitialize"},
+		{"jW+HnafeS3Y#O#P", "sceUltMutexDestroy", "shim_sceUltMutexDestroy"},
+		{"mmt8Sa6tL6c#O#P", "_sceUltMutexCreate", "shim__sceUltMutexCreate"},
+		{"or55417wcDk#O#P", "sceUltWaitingQueueResourcePoolDestroy", "shim_sceUltWaitingQueueResourcePoolDestroy"},
+
+		// libSceHttp (7)
+		{"0DT5bP6YzBo#Q#R", "sceNpTusDeleteMultiSlotData", "shim_sceNpTusDeleteMultiSlotData"},
+		{"Qq8SfuJJJqE#Q#R", "sceHttpParseStatusLine", "shim_sceHttpParseStatusLine"},
+		{"T-mGo9f3Pu4#Q#R", "sceHttpSetAutoRedirect", "shim_sceHttpSetAutoRedirect"},
+		{"cRVmNrJDbG8#Q#R", "sceNpTusAddAndGetVariable", "shim_sceNpTusAddAndGetVariable"},
+		{"tsGVru3hCe8#Q#R", "sceHttpCreateRequest", "shim_sceHttpCreateRequest"},
+		{"ukr6FBSrkJw#Q#R", "sceNpTusAddAndGetVariableVUser", "shim_sceNpTusAddAndGetVariableVUser"},
+		{"xutwCvsydkk#Q#R", "sceNpTusDeleteMultiSlotDataVUser", "shim_sceNpTusDeleteMultiSlotDataVUser"},
+
+		// libSceNpParty (3)
+		{"F1P+-wpxQow#u#u", "sceNpPartyGetMemberInfo", "shim_sceNpPartyGetMemberInfo"},
+		{"T2UOKf00ZN0#u#u", "sceNpPartyGetMembers", "shim_sceNpPartyGetMembers"},
+		{"U6VdUe-PNAY#u#u", "sceNpPartySendBinaryMessage", "shim_sceNpPartySendBinaryMessage"},
+
+		// libSceNetCtl / libSceNpTrophy (2)
+		{"cqGkYAN-gRw#C#D", "sceNpTrophyCaptureScreenshot", "shim_sceNpTrophyCaptureScreenshot"},
+		{"wTUwGfspKic#C#D", "sceNpTrophyGetGroupInfo", "shim_sceNpTrophyGetGroupInfo"},
+
+		// libSceSsl (2)
+		{"Eo0S65Jy28Q#P#Q", "sceSslGetNotBefore", "shim_sceSslGetNotBefore"},
+		{"xHpt6+2pGYk#P#Q", "sceSslGetNotAfter", "shim_sceSslGetNotAfter"},
+
+		// libSceNpToolkit / libSceNpScore (1)
+		{"JjOFRVPdQWc#S#T", "sceNpScoreGetGameDataAsync", "shim_sceNpScoreGetGameDataAsync"},
+	}
+
+	for _, tc := range cases {
+		if shim, ok := LookupShim(tc.plain); !ok || shim != tc.shim {
+			t.Errorf("LookupShim(%q) = %q (ok=%v), want %q", tc.plain, shim, ok, tc.shim)
+		}
+		if shim, ok := LookupShim(tc.dynsym); !ok || shim != tc.shim {
+			t.Errorf("LookupShim(%q) = %q (ok=%v), want %q", tc.dynsym, shim, ok, tc.shim)
+		}
+	}
+}

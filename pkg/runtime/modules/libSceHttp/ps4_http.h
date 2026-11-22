@@ -16,6 +16,8 @@ extern "C" {
 #define ORBIS_HTTP_ERROR_TIMEOUT     0x80431068
 #define ORBIS_HTTP_ERROR_INVALID_ID  0x80431100
 #define ORBIS_HTTP_ERROR_INVALID_VALUE 0x804311FE
+#define ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_RESPONSE ((int32_t)0x80432060)
+#define ORBIS_HTTP_ERROR_PARSE_HTTP_INVALID_VALUE    ((int32_t)0x804321FE)
 
 // Companion HTTPD event codes
 #define ORBIS_COMPANION_HTTPD_EVENT_CONNECT    0x10000001
@@ -99,7 +101,12 @@ int32_t sceHttpDestroyEpoll(int32_t libhttpCtxId, OrbisHttpEpollHandle eh);
 
 int32_t sceHttpUriEscape(char *out, uint64_t *require, uint64_t prepare, const char *in);
 int32_t sceHttpCreateConnection(int32_t tmplId, const char *serverName, const char *scheme, uint16_t port, int32_t isEnableKeepalive);
+int32_t sceHttpCreateRequest(int32_t connId, int32_t method, const char *path, uint64_t contentLength);
 int32_t sceHttpCreateRequest2(int32_t connId, const char *method, const char *path, uint64_t contentLength);
+int32_t sceHttpSetAutoRedirect(int32_t id, int32_t isEnable);
+int32_t sceHttpParseStatusLine(const char *statusLine, uint64_t lineLen, int32_t *httpMajorVer,
+                               int32_t *httpMinorVer, int32_t *responseCode,
+                               const char **reasonPhrase, uint64_t *phraseLen);
 int32_t sceHttpSetConnectTimeOut(int32_t id, uint32_t usec);
 int32_t sceHttpSetSendTimeOut(int32_t id, uint32_t usec);
 int32_t sceHttpSetRecvTimeOut(int32_t id, uint32_t usec);
@@ -140,6 +147,7 @@ void shim_sceHttpDeleteTemplate(GuestContext *ctx);
 void shim_sceHttpCreateConnection(GuestContext *ctx);
 void shim_sceHttpCreateConnectionWithURL(GuestContext *ctx);
 void shim_sceHttpDeleteConnection(GuestContext *ctx);
+void shim_sceHttpCreateRequest(GuestContext *ctx);
 void shim_sceHttpCreateRequest2(GuestContext *ctx);
 void shim_sceHttpCreateRequestWithURL(GuestContext *ctx);
 void shim_sceHttpCreateRequestWithURL2(GuestContext *ctx);
@@ -153,6 +161,8 @@ void shim_sceHttpGetResponseContentLength(GuestContext *ctx);
 void shim_sceHttpGetAllResponseHeaders(GuestContext *ctx);
 void shim_sceHttpAddRequestHeader(GuestContext *ctx);
 void shim_sceHttpSetNonblock(GuestContext *ctx);
+void shim_sceHttpSetAutoRedirect(GuestContext *ctx);
+void shim_sceHttpParseStatusLine(GuestContext *ctx);
 void shim_sceHttpGetLastErrno(GuestContext *ctx);
 void shim_sceHttpUriEscape(GuestContext *ctx);
 void shim_sceHttpUriParse(GuestContext *ctx);

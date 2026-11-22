@@ -1349,6 +1349,45 @@ var shimAliases = map[string]string{
 	"VTKezfYu-v4": "shim__ZN3sce3Job10JobManager24setPersistentThreadCountEj",
 	"W-yXgQmaozU": "shim__ZN3sce3Job10JobManager27getSequenceFactoryInterfaceENS1_8PriorityE",
 	"chxnvsxxfBY": "shim__ZN3sce3Job10JobManager8shutdownEv",
+
+	// libSceUlt NIDs
+	"1+8t9aHLiz8": "shim__sceUltMutexOptParamInitialize",
+	"8hEGkR1pfr8": "shim_sceUltMutexLock",
+	"WIWV1Qd7PFU": "shim_sceUltWaitingQueueResourcePoolGetWorkAreaSize",
+	"YiHujOG9vXY": "shim__sceUltWaitingQueueResourcePoolCreate",
+	"d-kSG2fLrvI": "shim_sceUltFinalize",
+	"h0XebKiMBtk": "shim_sceUltMutexUnlock",
+	"hZIg1EWGsHM": "shim_sceUltInitialize",
+	"jW+HnafeS3Y": "shim_sceUltMutexDestroy",
+	"mmt8Sa6tL6c": "shim__sceUltMutexCreate",
+	"or55417wcDk": "shim_sceUltWaitingQueueResourcePoolDestroy",
+
+	// libSceHttp NIDs
+	"Qq8SfuJJJqE": "shim_sceHttpParseStatusLine",
+	"T-mGo9f3Pu4": "shim_sceHttpSetAutoRedirect",
+	"tsGVru3hCe8": "shim_sceHttpCreateRequest",
+
+	// libSceNpParty NIDs
+	"F1P+-wpxQow": "shim_sceNpPartyGetMemberInfo",
+	"T2UOKf00ZN0": "shim_sceNpPartyGetMembers",
+	"U6VdUe-PNAY": "shim_sceNpPartySendBinaryMessage",
+
+	// libSceSsl NIDs
+	"Eo0S65Jy28Q": "shim_sceSslGetNotBefore",
+	"xHpt6+2pGYk": "shim_sceSslGetNotAfter",
+
+	// libSceNpTrophy NIDs
+	"cqGkYAN-gRw": "shim_sceNpTrophyCaptureScreenshot",
+	"wTUwGfspKic": "shim_sceNpTrophyGetGroupInfo",
+
+	// libSceNpTus NIDs
+	"0DT5bP6YzBo": "shim_sceNpTusDeleteMultiSlotData",
+	"cRVmNrJDbG8": "shim_sceNpTusAddAndGetVariable",
+	"ukr6FBSrkJw": "shim_sceNpTusAddAndGetVariableVUser",
+	"xutwCvsydkk": "shim_sceNpTusDeleteMultiSlotDataVUser",
+
+	// libSceNpScore NIDs
+	"JjOFRVPdQWc": "shim_sceNpScoreGetGameDataAsync",
 }
 
 // knownDirectShims contains symbol names whose host shim is "shim_" + name.
@@ -1525,6 +1564,9 @@ var knownDirectShims = []string{
 	"sceNpPartyCheckCallback",
 	"sceNpPartyGetVoiceChatPriority",
 	"sceNpPartySetVoiceChatPriority",
+	"sceNpPartyGetMemberInfo",
+	"sceNpPartyGetMembers",
+	"sceNpPartySendBinaryMessage",
 	// libSceNpSignaling extras (libSceNp/ps4_np_extras.c)
 	"sceNpSignalingActivateConnection",
 	"sceNpSignalingDeleteContext",
@@ -1615,6 +1657,8 @@ var knownDirectShims = []string{
 	"sceNpTrophyGetGameIcon",
 	"sceNpTrophyGetGroupIcon",
 	"sceNpTrophyGetTrophyIcon",
+	"sceNpTrophyCaptureScreenshot",
+	"sceNpTrophyGetGroupInfo",
 	// libSceNpMatching2
 	"sceNpMatching2SetDefaultRequestOptParam",
 	"sceNpMatching2ContextStop",
@@ -2700,6 +2744,7 @@ var knownDirectShims = []string{
 	"sceHttpCreateConnection",
 	"sceHttpCreateConnectionWithURL",
 	"sceHttpDeleteConnection",
+	"sceHttpCreateRequest",
 	"sceHttpCreateRequest2",
 	"sceHttpCreateRequestWithURL",
 	"sceHttpCreateRequestWithURL2",
@@ -2713,6 +2758,8 @@ var knownDirectShims = []string{
 	"sceHttpGetAllResponseHeaders",
 	"sceHttpAddRequestHeader",
 	"sceHttpSetNonblock",
+	"sceHttpSetAutoRedirect",
+	"sceHttpParseStatusLine",
 	"sceHttpGetLastErrno",
 	"sceHttpUriEscape",
 	"sceHttpUriParse",
@@ -2754,6 +2801,8 @@ var knownDirectShims = []string{
 	"sceSslGetIssuerName",
 	"sceSslGetSubjectName",
 	"sceSslGetSerialNumber",
+	"sceSslGetNotBefore",
+	"sceSslGetNotAfter",
 	"sceSslGetPem",
 	"sceSslFreeSslCertName",
 	"sceSslFreeCaCerts",
@@ -2891,7 +2940,12 @@ var knownDirectShims = []string{
 	"sceNpTusGetMultiSlotVariableVUser",
 	"sceNpTusSetMultiSlotVariable",
 	"sceNpTusSetMultiSlotVariableVUser",
+	"sceNpTusDeleteMultiSlotData",
+	"sceNpTusDeleteMultiSlotDataVUser",
+	"sceNpTusAddAndGetVariable",
+	"sceNpTusAddAndGetVariableVUser",
 	"sceNpTssGetData",
+	"sceNpScoreGetGameDataAsync",
 	"sceNpScoreGetRankingByNpIdAsync",
 	"sceNpScoreGetRankingByRangeAsync",
 	"sceNpScoreGetFriendsRankingAsync",
@@ -3286,6 +3340,17 @@ var knownDirectShims = []string{
 	"sceVoiceQoSGetConnectionAttribute",
 	"sceVoiceQoSReadPacket",
 	"sceVoiceQoSWritePacket",
+	// libSceUlt (libSceUlt/ps4_ult.c)
+	"_sceUltMutexOptParamInitialize",
+	"_sceUltMutexCreate",
+	"sceUltMutexLock",
+	"sceUltMutexUnlock",
+	"sceUltMutexDestroy",
+	"sceUltInitialize",
+	"sceUltFinalize",
+	"sceUltWaitingQueueResourcePoolGetWorkAreaSize",
+	"_sceUltWaitingQueueResourcePoolCreate",
+	"sceUltWaitingQueueResourcePoolDestroy",
 }
 
 var (
