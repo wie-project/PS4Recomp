@@ -921,65 +921,144 @@ void shim_pthread_cond_destroy(GuestContext *ctx) {
 #define RWLOCK_MAP_SIZE 1024
 typedef struct RwlockNode {
   uint64_t guest_addr;
-  pthread_rwlock_t host_rwlock;
+  pthread_mutex_t mutex;
+  pthread_cond_t available;
+  unsigned readers;
+  unsigned waiting_writers;
+  pthread_t writer;
   struct RwlockNode *next;
 } RwlockNode;
 
 static RwlockNode *g_rwlock_map[RWLOCK_MAP_SIZE] = {0};
 static pthread_mutex_t g_rwlock_map_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Thread_local unsigned g_rwlock_read_depth;
 
-static pthread_rwlock_t *get_host_rwlock(uint64_t guest_addr) {
+static RwlockNode *get_guest_rwlock(uint64_t guest_addr) {
   uint64_t bucket = sync_obj_hash(guest_addr) % RWLOCK_MAP_SIZE;
   pthread_mutex_lock(&g_rwlock_map_lock);
   RwlockNode *curr = g_rwlock_map[bucket];
   while (curr) {
     if (curr->guest_addr == guest_addr) {
       pthread_mutex_unlock(&g_rwlock_map_lock);
-      return &curr->host_rwlock;
+      return curr;
     }
     curr = curr->next;
   }
   RwlockNode *node = (RwlockNode *)calloc(1, sizeof(RwlockNode));
   node->guest_addr = guest_addr;
-  pthread_rwlock_init(&node->host_rwlock, NULL);
+  pthread_mutex_init(&node->mutex, NULL);
+  pthread_cond_init(&node->available, NULL);
   node->next = g_rwlock_map[bucket];
   g_rwlock_map[bucket] = node;
   pthread_mutex_unlock(&g_rwlock_map_lock);
-  return &node->host_rwlock;
+  return node;
+}
+
+// FreeBSD lets threads with read locks bypass queued writers to avoid
+// blocking a recursive reader behind a writer that needs it to unlock.
+static int guest_rwlock_read_blocked(const RwlockNode *rw) {
+  return rw->writer || (rw->waiting_writers && !g_rwlock_read_depth);
+}
+
+static int guest_rwlock_read(RwlockNode *rw, int try_only) {
+  int cancel_state = PTHREAD_CANCEL_DISABLE;
+  pthread_mutex_lock(&rw->mutex);
+  if (guest_rwlock_read_blocked(rw)) {
+    if (try_only || (rw->writer && pthread_equal(rw->writer, pthread_self()))) {
+      pthread_mutex_unlock(&rw->mutex);
+      return try_only ? EBUSY : EDEADLK;
+    }
+    // Acquiring a rwlock is not a deferred cancellation point.
+    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
+    do {
+      pthread_cond_wait(&rw->available, &rw->mutex);
+    } while (guest_rwlock_read_blocked(rw));
+  }
+  ++rw->readers;
+  ++g_rwlock_read_depth;
+  pthread_mutex_unlock(&rw->mutex);
+  if (cancel_state == PTHREAD_CANCEL_ENABLE)
+    pthread_setcancelstate(cancel_state, NULL);
+  return 0;
+}
+
+static int guest_rwlock_write(RwlockNode *rw, int try_only) {
+  pthread_t self = pthread_self();
+  int cancel_state = PTHREAD_CANCEL_DISABLE;
+  pthread_mutex_lock(&rw->mutex);
+  if (rw->writer || rw->readers) {
+    if (try_only || (rw->writer && pthread_equal(rw->writer, self))) {
+      pthread_mutex_unlock(&rw->mutex);
+      return try_only ? EBUSY : EDEADLK;
+    }
+    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
+    ++rw->waiting_writers;
+    while (rw->writer || rw->readers)
+      pthread_cond_wait(&rw->available, &rw->mutex);
+    --rw->waiting_writers;
+  }
+  rw->writer = self;
+  pthread_mutex_unlock(&rw->mutex);
+  if (cancel_state == PTHREAD_CANCEL_ENABLE)
+    pthread_setcancelstate(cancel_state, NULL);
+  return 0;
+}
+
+static int guest_rwlock_unlock(RwlockNode *rw) {
+  pthread_mutex_lock(&rw->mutex);
+  if (rw->writer && pthread_equal(rw->writer, pthread_self())) {
+    rw->writer = NULL;
+  } else if (rw->readers && g_rwlock_read_depth) {
+    --rw->readers;
+    --g_rwlock_read_depth;
+  } else {
+    pthread_mutex_unlock(&rw->mutex);
+    return EPERM;
+  }
+  if (!rw->readers)
+    pthread_cond_broadcast(&rw->available);
+  pthread_mutex_unlock(&rw->mutex);
+  return 0;
+}
+
+static void free_guest_rwlock(RwlockNode *rw) {
+  pthread_cond_destroy(&rw->available);
+  pthread_mutex_destroy(&rw->mutex);
+  free(rw);
 }
 
 void shim_pthread_rwlock_rdlock(GuestContext *ctx) {
   uint64_t rw_addr = ctx->rdi;
-  pthread_rwlock_t *rw = get_host_rwlock(sync_handle(ctx, rw_addr, 0));
-  ctx->rax = (uint64_t)pthread_rwlock_rdlock(rw);
+  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
+  ctx->rax = (uint64_t)guest_rwlock_read(rw, 0);
   SHIM_RETURN();
 }
 
 void shim_pthread_rwlock_wrlock(GuestContext *ctx) {
   uint64_t rw_addr = ctx->rdi;
-  pthread_rwlock_t *rw = get_host_rwlock(sync_handle(ctx, rw_addr, 0));
-  ctx->rax = (uint64_t)pthread_rwlock_wrlock(rw);
+  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
+  ctx->rax = (uint64_t)guest_rwlock_write(rw, 0);
   SHIM_RETURN();
 }
 
 void shim_pthread_rwlock_tryrdlock(GuestContext *ctx) {
   uint64_t rw_addr = ctx->rdi;
-  pthread_rwlock_t *rw = get_host_rwlock(sync_handle(ctx, rw_addr, 0));
-  ctx->rax = (uint64_t)pthread_rwlock_tryrdlock(rw);
+  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
+  ctx->rax = (uint64_t)guest_rwlock_read(rw, 1);
   SHIM_RETURN();
 }
 
 void shim_pthread_rwlock_trywrlock(GuestContext *ctx) {
   uint64_t rw_addr = ctx->rdi;
-  pthread_rwlock_t *rw = get_host_rwlock(sync_handle(ctx, rw_addr, 0));
-  ctx->rax = (uint64_t)pthread_rwlock_trywrlock(rw);
+  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
+  ctx->rax = (uint64_t)guest_rwlock_write(rw, 1);
   SHIM_RETURN();
 }
 
 void shim_scePthreadRwlockTryrdlock(GuestContext *ctx) {
   uint64_t rw_addr = ctx->rdi;
-  pthread_rwlock_t *rw = get_host_rwlock(sync_handle(ctx, rw_addr, 0));
-  int ret = pthread_rwlock_tryrdlock(rw);
+  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
+  int ret = guest_rwlock_read(rw, 1);
   if (ret != 0) {
     ctx->rax = (ret == EBUSY) ? 0x80020010 : (0x80020000 | (uint32_t)ret);
   } else {
@@ -990,8 +1069,8 @@ void shim_scePthreadRwlockTryrdlock(GuestContext *ctx) {
 
 void shim_scePthreadRwlockTrywrlock(GuestContext *ctx) {
   uint64_t rw_addr = ctx->rdi;
-  pthread_rwlock_t *rw = get_host_rwlock(sync_handle(ctx, rw_addr, 0));
-  int ret = pthread_rwlock_trywrlock(rw);
+  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
+  int ret = guest_rwlock_write(rw, 1);
   if (ret != 0) {
     ctx->rax = (ret == EBUSY) ? 0x80020010 : (0x80020000 | (uint32_t)ret);
   } else {
@@ -1002,14 +1081,14 @@ void shim_scePthreadRwlockTrywrlock(GuestContext *ctx) {
 
 void shim_pthread_rwlock_unlock(GuestContext *ctx) {
   uint64_t rw_addr = ctx->rdi;
-  pthread_rwlock_t *rw = get_host_rwlock(sync_handle(ctx, rw_addr, 0));
-  ctx->rax = (uint64_t)pthread_rwlock_unlock(rw);
+  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
+  ctx->rax = (uint64_t)guest_rwlock_unlock(rw);
   SHIM_RETURN();
 }
 
 void shim_pthread_rwlock_init(GuestContext *ctx) {
   uint64_t rw_addr = ctx->rdi;
-  (void)get_host_rwlock(sync_handle(ctx, rw_addr, 1));
+  (void)get_guest_rwlock(sync_handle(ctx, rw_addr, 1));
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -1023,8 +1102,7 @@ void shim_pthread_rwlock_destroy(GuestContext *ctx) {
     if ((*curr)->guest_addr == rw_addr) {
       RwlockNode *to_free = *curr;
       *curr = (*curr)->next;
-      pthread_rwlock_destroy(&to_free->host_rwlock);
-      free(to_free);
+      free_guest_rwlock(to_free);
       break;
     }
     curr = &(*curr)->next;
@@ -1198,7 +1276,7 @@ void shim_pthread_rwlockattr_getpshared(GuestContext *ctx) {
 
 void shim_scePthreadRwlockInit(GuestContext *ctx) {
   uint64_t rw_addr = ctx->rdi;
-  (void)get_host_rwlock(sync_handle(ctx, rw_addr, 1));
+  (void)get_guest_rwlock(sync_handle(ctx, rw_addr, 1));
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -1295,8 +1373,7 @@ void ps4_sync_destroy(void) {
     RwlockNode *curr = g_rwlock_map[i];
     while (curr) {
       RwlockNode *next = curr->next;
-      pthread_rwlock_destroy(&curr->host_rwlock);
-      free(curr);
+      free_guest_rwlock(curr);
       curr = next;
     }
     g_rwlock_map[i] = NULL;
