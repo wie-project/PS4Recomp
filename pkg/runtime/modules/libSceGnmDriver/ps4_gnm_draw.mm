@@ -6205,44 +6205,50 @@ void SyncStorageToStencil(uint64_t z_addr, id<MTLTexture> src) {
     LogWork("storage -> stencil copy");
 }
 
+// R32F values written to depth surface memory at addr through a color texture: move them into the
+// 1x depth target there (the surface the next depth bind or depth sample uses).
+void SyncR32fToDepth(uint64_t addr, id<MTLTexture> src) {
+    if (src.pixelFormat != MTLPixelFormatR32Float || src.sampleCount > 1) return;
+    id<MTLTexture> dt = S.tex->FindDepthTarget(addr, 1); // the 1x surface, as above
+    if (!dt || dt.textureType != MTLTextureType2D) return;
+    __strong id<MTLRenderPipelineState>& pso = S.depth_from_color_psos[(uint32_t)dt.pixelFormat];
+    if (!pso && S.util_lib) {
+        MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [S.util_lib newFunctionWithName:@"present_vs"];
+        pd.fragmentFunction = [S.util_lib newFunctionWithName:@"depth_from_color_fs"];
+        pd.depthAttachmentPixelFormat = dt.pixelFormat;
+        if (HasStencil(dt.pixelFormat)) pd.stencilAttachmentPixelFormat = dt.pixelFormat;
+        NSError* err = nil;
+        pso = [S.dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        if (!pso) RLog("depth-from-color", "pipeline failed: %s", err.localizedDescription.UTF8String);
+    }
+    if (!pso) return;
+    if (!S.depth_copy_dss) {
+        MTLDepthStencilDescriptor* dd = [MTLDepthStencilDescriptor new];
+        dd.depthCompareFunction = MTLCompareFunctionAlways;
+        dd.depthWriteEnabled = YES;
+        S.depth_copy_dss = [S.dev newDepthStencilStateWithDescriptor:dd];
+    }
+    EndEncoders();
+    EnsureCmd();
+    GnmPassDesc pd;
+    pd.depth = {dt, nil, 0, GnmLoad::Load, GnmStore::Store};
+    if (HasStencil(dt.pixelFormat)) pd.stencil = {dt, nil, 0, GnmLoad::Load, GnmStore::Store};
+    pd.width = (uint32_t)std::min(dt.width, src.width);
+    pd.height = (uint32_t)std::min(dt.height, src.height);
+    FullscreenPass(*S.be, pd, pso, S.depth_copy_dss, src);
+    S.pending = true;
+    BumpDepthVersion(dt);
+    LogWork("storage -> depth copy");
+}
+
 void SyncStorageToDepth() {
     for (auto& [addr, src] : S.storage_bound) {
         if (src.pixelFormat == MTLPixelFormatR8Uint && src.sampleCount == 1) {
             if (auto sz = S.stencil_to_z.find(addr); sz != S.stencil_to_z.end()) SyncStorageToStencil(sz->second, src);
             continue;
         }
-        if (src.pixelFormat != MTLPixelFormatR32Float || src.sampleCount > 1) continue;
-        id<MTLTexture> dt = S.tex->FindDepthTarget(addr, 1); // the 1x surface, as above
-        if (!dt || dt.textureType != MTLTextureType2D) continue;
-        __strong id<MTLRenderPipelineState>& pso = S.depth_from_color_psos[(uint32_t)dt.pixelFormat];
-        if (!pso && S.util_lib) {
-            MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
-            pd.vertexFunction = [S.util_lib newFunctionWithName:@"present_vs"];
-            pd.fragmentFunction = [S.util_lib newFunctionWithName:@"depth_from_color_fs"];
-            pd.depthAttachmentPixelFormat = dt.pixelFormat;
-            if (HasStencil(dt.pixelFormat)) pd.stencilAttachmentPixelFormat = dt.pixelFormat;
-            NSError* err = nil;
-            pso = [S.dev newRenderPipelineStateWithDescriptor:pd error:&err];
-            if (!pso) RLog("depth-from-color", "pipeline failed: %s", err.localizedDescription.UTF8String);
-        }
-        if (!pso) continue;
-        if (!S.depth_copy_dss) {
-            MTLDepthStencilDescriptor* dd = [MTLDepthStencilDescriptor new];
-            dd.depthCompareFunction = MTLCompareFunctionAlways;
-            dd.depthWriteEnabled = YES;
-            S.depth_copy_dss = [S.dev newDepthStencilStateWithDescriptor:dd];
-        }
-        EndEncoders();
-        EnsureCmd();
-        GnmPassDesc pd;
-        pd.depth = {dt, nil, 0, GnmLoad::Load, GnmStore::Store};
-        if (HasStencil(dt.pixelFormat)) pd.stencil = {dt, nil, 0, GnmLoad::Load, GnmStore::Store};
-        pd.width = (uint32_t)std::min(dt.width, src.width);
-        pd.height = (uint32_t)std::min(dt.height, src.height);
-        FullscreenPass(*S.be, pd, pso, S.depth_copy_dss, src);
-        S.pending = true;
-        BumpDepthVersion(dt);
-        LogWork("storage -> depth copy");
+        SyncR32fToDepth(addr, src);
     }
     S.storage_bound.clear();
 }
@@ -14741,6 +14747,9 @@ void DispatchEncode(DispatchRec*& rp) {
                         S.be->EndEncoder();
                         S.pending = true;
                         if (kind == 2) BumpDepthVersion(dst);
+                        // A copied R32F surface (e.g. the Pro's resolved checkerboard depth, written by a
+                        // compute shader) lands on depth memory: the 1x depth target there needs it too.
+                        else SyncR32fToDepth(wr.base_address, dst);
                         LogWork("surface copy (compute copy shader)");
                         cap::SetSkipped("surface copy (compute copy shader): a blit, not a shader pass");
                         if (ShouldTrace())
