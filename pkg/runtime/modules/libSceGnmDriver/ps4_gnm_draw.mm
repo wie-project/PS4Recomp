@@ -2809,6 +2809,13 @@ void FlushComputeImpl() {
     g_hold.cv.notify_one();
 }
 
+// Draws and dispatches encoded (S.n_draws + S.n_dispatches) when the main command buffer was last
+// committed (encoder thread).
+uint64_t g_works_at_commit = 0;
+// BeginPass commits the main command buffer once this much work is encoded since the last commit.
+// Measured on Driveclub: 100 was faster than one commit per frame; 50 was not measurably better.
+constexpr uint64_t kCommitWorks = 100;
+
 void Commit() {
     FlushPendingTess();
     FlushDeferredHleCopies();
@@ -2881,6 +2888,7 @@ void Commit() {
     if (g_async_compute) S.be->QueueSignal(S.async.main_ev, gen);
     // the upload command buffer (texture copies used by this work) is committed first: same queue
     S.be->Commit(seq, CommitDoneFn, done); // done is deleted by CommitDoneFn
+    g_works_at_commit = S.n_draws + S.n_dispatches;
     g_gms.committed = g_gms.encoded;
     S.n_commits++;
     if (hang_ms > 0) {
@@ -7312,6 +7320,10 @@ bool BeginPass(const PassKey& key, const ClearReq& clr, id<MTLTexture> const* ho
         FlushDeferredHleCopies();
         if (S.be->OpenEncoder() != GnmEncoder::None) S.be->EndEncoder();
     }
+    // Between passes (no pass is split): once kCommitWorks draws and dispatches are encoded since
+    // the last commit, commit them, so the GPU starts on them while the encoder goes on with the
+    // frame. Otherwise the GPU waits for the frame's last commit.
+    if (MainCmdOpen() && S.n_draws + S.n_dispatches - g_works_at_commit >= kCommitWorks) Commit();
     // EQAA stand-ins start with the contents of their targets (unless cleared by this pass)
     for (int i = 0; i < 9; ++i) {
         id<MTLTexture> t = i < 8 ? key.color[i] : key.depth;
