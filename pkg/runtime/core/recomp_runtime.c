@@ -1136,8 +1136,13 @@ uint64_t recomp_vm_alloc_named_aligned(GuestContext *ctx, size_t size,
                                        const char *name) {
   if (!ctx || size == 0)
     return (uint64_t)-1;
+#if defined(__APPLE__)
+  if (alignment < 16384)
+    alignment = 16384;
+#else
   if (alignment < 4096)
     alignment = 4096;
+#endif
   GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
   size_t aligned_size = (size + alignment - 1) & ~(alignment - 1);
 

@@ -320,7 +320,11 @@ int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t len
     fflush(stdout);
 
     if (!physAddrOut || length == 0 || searchStart < 0 || searchEnd < 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+#if defined(__APPLE__)
+    if (alignment < 16384) alignment = 16384;
+#else
     if (alignment == 0) alignment = 4096;
+#endif
     const size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
     if (searchEnd <= searchStart || (size_t)(searchEnd - searchStart) < aligned_len)
         return 0x80020023; // ORBIS_KERNEL_ERROR_EAGAIN
@@ -389,7 +393,11 @@ int sceKernelAllocateDirectMemory(off_t searchStart, off_t searchEnd, size_t len
 
 int sceKernelMapDirectMemory(GuestContext *ctx, void **addrInOut, size_t length, int prot, int flags, off_t physAddr, size_t alignment) {
     if (!ctx || !addrInOut || length == 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+#if defined(__APPLE__)
+    if (alignment < 16384) alignment = 16384;
+#else
     if (alignment == 0) alignment = 4096;
+#endif
     size_t aligned_len = (length + alignment - 1) & ~(alignment - 1);
 
     ps4_direct_mem_init();
