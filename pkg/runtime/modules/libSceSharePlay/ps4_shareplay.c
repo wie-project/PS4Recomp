@@ -46,6 +46,8 @@ void shim_sceSharePlaySetProhibition(GuestContext *ctx) {
 }
 
 void shim_sceSharePlayGetCurrentConnectionInfo(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceSharePlayGetCurrentConnectionInfo((OrbisSharePlayConnectionInfo *)ctx->rdi);
+    // rdi is a guest address: translate it, a raw cast faults on the host
+    OrbisSharePlayConnectionInfo *info = ctx->rdi ? (OrbisSharePlayConnectionInfo *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceSharePlayGetCurrentConnectionInfo(info);
     SHIM_RETURN();
 }
