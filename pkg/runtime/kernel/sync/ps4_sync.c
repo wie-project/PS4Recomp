@@ -33,12 +33,18 @@ static uint64_t sync_handle(GuestContext *ctx, uint64_t addr, int fresh) {
   pthread_mutex_lock(&g_sync_handle_lock);
   v = *p;
   if (fresh || sync_obj_slot(v) < 0) {
+    uint64_t prev = v;
     v = sync_obj_alloc(ctx);
     if (!v) {
       fprintf(stderr, "FATAL: no guest memory for sync objects (%llu in use at most)\n",
               (unsigned long long)SYNC_OBJ_SLOTS);
       abort();
     }
+    int init_type = 0;
+    if (prev == 1) {
+      init_type = 4; // PTHREAD_ADAPTIVE_MUTEX_INITIALIZER_NP -> ADAPTIVE_NP
+    }
+    *(uint32_t *)(ctx->mem_base + v + SYNC_OBJ_MUTEX_FLAGS) = (uint32_t)init_type & 0xff;
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
   }
   pthread_mutex_unlock(&g_sync_handle_lock);
@@ -282,7 +288,11 @@ static GuestMutex *get_host_mutex(uint64_t handle) {
 
 // Mutex named by the guest handle variable at addr.
 static GuestMutex *gm_lookup(GuestContext *ctx, uint64_t addr) {
-  GuestMutex *m = get_host_mutex(sync_handle(ctx, addr, 0));
+  uint64_t h = sync_handle(ctx, addr, 0);
+  if (!h) return NULL;
+  uint32_t flags = *(uint32_t *)(ctx->mem_base + h + SYNC_OBJ_MUTEX_FLAGS);
+  int type = (int)(flags & 0xff);
+  GuestMutex *m = get_host_mutex_with_type(h, type);
   if (__atomic_load_n(&m->var, __ATOMIC_RELAXED) != addr) __atomic_store_n(&m->var, addr, __ATOMIC_RELAXED);
   return m;
 }
@@ -597,6 +607,25 @@ void shim_pthread_mutex_unlock(GuestContext *ctx) {
   GmCall c;
   GuestMutex *m = gm_call_begin(ctx, &c);
   ctx->rax = (uint64_t)gm_unlock(m, guest_owner_id(ctx), c.s, c.t1);
+  gm_call_end(&c);
+  SHIM_RETURN();
+}
+
+void shim_pthread_mutex_isowned_np(GuestContext *ctx) {
+  uint64_t mtx_addr = ctx->rdi;
+  if (!mtx_addr) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+  uint64_t *p = (uint64_t *)(ctx->mem_base + mtx_addr);
+  uint64_t v = __atomic_load_n(p, __ATOMIC_ACQUIRE);
+  if (sync_obj_slot(v) < 0) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+  }
+  GmCall c;
+  GuestMutex *m = gm_call_begin(ctx, &c);
+  ctx->rax = (m && GM_OWNER(m) == guest_owner_id(ctx)) ? 1 : 0;
   gm_call_end(&c);
   SHIM_RETURN();
 }
@@ -1418,6 +1447,10 @@ void shim_scePthreadMutexTimedlock(GuestContext *ctx) {
 void shim_scePthreadMutexUnlock(GuestContext *ctx) {
   shim_pthread_mutex_unlock(ctx);
   SCE_PTHREAD_ERR(ctx);
+}
+
+void shim_scePthreadMutexIsownedNp(GuestContext *ctx) {
+  shim_pthread_mutex_isowned_np(ctx);
 }
 
 void shim_scePthreadMutexDestroy(GuestContext *ctx) {
