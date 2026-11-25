@@ -335,6 +335,13 @@ func TestPack1AudioAndUlobjmgrShims(t *testing.T) {
 		{"sceAudioInClose", "Jh6WbHhnI68", "shim_sceAudioInClose"},
 		{"sceAudioInInput", "LozEOU8+anM", "shim_sceAudioInInput"},
 		{"sceAudioInGetSilentState", "BohEAQ7DlUE", "shim_sceAudioInGetSilentState"},
+		{"sceAudioInHqOpen", "nya-R5gDYhM", "shim_sceAudioInHqOpen"},
+		{"sceGameCustomDataDialogOpenA", "QHFJB2F0p3k", "shim_sceGameCustomDataDialogOpenA"},
+		{"sceGameCustomDataDialogGetResultA", "TWi-wZVp5Pc", "shim_sceGameCustomDataDialogGetResultA"},
+		{"sceGameCustomDataDialogGetStatus", "tcm8nRXZwNU", "shim_sceGameCustomDataDialogGetStatus"},
+		{"sceJpegDecDecodeWithInputControl", "919MhccOiII", "shim_sceJpegDecDecodeWithInputControl"},
+		{"sceFiberGetThreadFramePointerAddress", "0dy4JtMUcMQ", "shim_sceFiberGetThreadFramePointerAddress"},
+		{"sceSharePlayGetCurrentConnectionInfoA", "+MCXJlWdi+s", "shim_sceSharePlayGetCurrentConnectionInfoA"},
 		{"_sceUlobjmgrRegisterObject", "BG26hBGiNlw", "shim__sceUlobjmgrRegisterObject"},
 		{"_sceUlobjmgrUnregisterObject", "Smf+fUNblPc", "shim__sceUlobjmgrUnregisterObject"},
 	}

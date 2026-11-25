@@ -36,10 +36,11 @@ func TestPackageAppBundleWithGameMode(t *testing.T) {
 		t.Fatalf("Info.plist does not parse: %v: %s", err, o)
 	}
 	for key, want := range map[string]string{
-		"LSSupportsGameMode":        "true",
-		"LSApplicationCategoryType": "public.app-category.games",
-		"CFBundleExecutable":        "eboot",
-		"CFBundleIdentifier":        "org.ps4recomp.eboot",
+		"LSSupportsGameMode":           "true",
+		"LSApplicationCategoryType":    "public.app-category.games",
+		"CFBundleExecutable":           "eboot",
+		"CFBundleIdentifier":           "org.ps4recomp.eboot",
+		"NSMicrophoneUsageDescription": "The game records audio from the microphone (voice chat and voice input).",
 	} {
 		o, err := exec.Command("plutil", "-extract", key, "raw", plist).Output()
 		if err != nil || strings.TrimSpace(string(o)) != want {

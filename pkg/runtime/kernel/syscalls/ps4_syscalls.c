@@ -1,4 +1,5 @@
 #include "ps4_syscalls.h"
+#include "ps4_kernel_sys.h"
 #include "ps4_hitch.h"
 #include "ps4_vfs.h"
 #include "recomp_runtime.h"
@@ -1793,10 +1794,7 @@ void shim_gettimeofday(GuestContext *ctx) {
   uint64_t tz_addr = ctx->rsi;
 
   struct timeval host_tv;
-  struct timezone host_tz;
-  struct timezone *tz_ptr = tz_addr ? &host_tz : NULL;
-
-  int ret = gettimeofday(&host_tv, tz_ptr);
+  int ret = gettimeofday(&host_tv, NULL);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
     ctx->rax = (uint64_t)-1;
@@ -1812,8 +1810,10 @@ void shim_gettimeofday(GuestContext *ctx) {
       g_tv->tv_usec = (int64_t)host_tv.tv_usec;
     }
     if (tz_addr) {
-      struct timezone *g_tz = (struct timezone *)(ctx->mem_base + tz_addr);
-      *g_tz = host_tz;
+      // The console fills the zone like sceKernelGettimezone (shadPS4 posix_gettimeofday);
+      // the host's struct timezone is obsolete and holds no zone on macOS.
+      OrbisKernelTimezone *g_tz = (OrbisKernelTimezone *)(ctx->mem_base + tz_addr);
+      sceKernelGettimezone(g_tz);
     }
     ctx->rax = 0;
   }

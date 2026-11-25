@@ -930,6 +930,22 @@ void shim_sceFiberGetSelf(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+// sceFiberGetThreadFramePointerAddress(addrFramePointer*): the frame pointer (rbp) of the guest
+// thread at the sceFiberRun that started the running fibers. The thread's own context keeps its
+// registers from that call while fibers run, as the TCB fiber context does in shadPS4.
+void shim_sceFiberGetThreadFramePointerAddress(GuestContext *ctx) {
+  uint64_t out = ctx->rdi;
+  if (!out) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_FIBER_ERROR_NULL;
+  } else if (!tl_fiber_self) {
+    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_FIBER_ERROR_PERMISSION;
+  } else {
+    write_u64(ctx, out, tl_fiber_self->worker->ctx->rbp);
+    ctx->rax = 0;
+  }
+  SHIM_RETURN();
+}
+
 // sceFiberGetInfo(fiber, info*)
 void shim_sceFiberGetInfo(GuestContext *ctx) {
   uint64_t addr = ctx->rdi;

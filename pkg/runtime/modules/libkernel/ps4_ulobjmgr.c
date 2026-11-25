@@ -69,3 +69,15 @@ void shim__sceUlobjmgrUnregisterObject(GuestContext *ctx) {
     ctx->rax = 0;
     SHIM_RETURN();
 }
+
+// Unnamed ulobjmgr exports, as in shadPS4: NID HZ9Q2c+4BU4 takes no checked arguments and
+// succeeds; NID SweJO7t3pkk rejects a zero argument with EINVAL.
+void shim_Func_1D9F50D9CFB8054E(GuestContext *ctx) {
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+void shim_Func_4B07893BBB77A649(GuestContext *ctx) {
+    ctx->rax = ctx->rdi == 0 ? POSIX_EINVAL : 0;
+    SHIM_RETURN();
+}

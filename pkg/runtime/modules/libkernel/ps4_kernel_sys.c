@@ -63,6 +63,10 @@ int32_t sceKernelGettimeofday(OrbisKernelTimeval *tv) {
     return ret;
 }
 
+// The console's time zone, as shadPS4 reports it (kernel/time.cpp posix_gettimeofday): despite
+// its name, tz_minuteswest holds the standard offset EAST of UTC in minutes, and tz_dsttime the
+// minutes daylight saving time adds now, so local time = UTC + tz_minuteswest + tz_dsttime.
+// libSceRtc and other system libraries add the two to UTC ticks.
 int32_t sceKernelGettimezone(OrbisKernelTimezone *tz) {
     if (!tz) return -EINVAL;
     time_t t = time(NULL);
@@ -70,7 +74,7 @@ int32_t sceKernelGettimezone(OrbisKernelTimezone *tz) {
     localtime_r(&t, &tm_loc);
     int32_t dst_sec = tm_loc.tm_isdst > 0 ? 3600 : 0;
     int32_t standard_offset_sec = (int32_t)tm_loc.tm_gmtoff - dst_sec;
-    tz->tz_minuteswest = -standard_offset_sec / 60;
+    tz->tz_minuteswest = standard_offset_sec / 60;
     tz->tz_dsttime = dst_sec / 60;
     return 0;
 }

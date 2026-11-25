@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ps4_metal_screen.h"
+#include "ps4_mouse.h"
 #include "ps4_output_gamma.h"
 #include "ps4_present_queue.h"
 #include "ps4_present_stats.h"
@@ -1732,13 +1733,79 @@ void ps4_metal_screen_pump_events(void) {
     });
 }
 
+// Hides the cursor and stops it from following the mouse, so motion arrives only as relative
+// deltas inside the game window (shadPS4 enables SDL relative mouse mode in sceMouseInit).
+static void metal_screen_capture_pointer(void) {
+    if (!g_window) return;
+    const NSRect frame = [g_window frame];
+    const CGFloat primary_height = NSMaxY([[NSScreen screens][0] frame]);
+    CGWarpMouseCursorPosition(CGPointMake(NSMidX(frame), primary_height - NSMidY(frame)));
+    CGAssociateMouseAndMouseCursorPosition(false);
+    [NSCursor hide];
+}
+
+// Converts window mouse events into libSceMouse reports. Wheel deltas are fractional on
+// precise devices, so the remainder carries over until it makes a whole wheel step.
+static void metal_screen_forward_mouse_event(NSEvent *event) {
+    static double wheel_rem, tilt_rem;
+    switch (event.type) {
+    case NSEventTypeMouseMoved:
+    case NSEventTypeLeftMouseDragged:
+    case NSEventTypeRightMouseDragged:
+    case NSEventTypeOtherMouseDragged:
+        ps4_mouse_host_motion((int32_t)lround(event.deltaX), (int32_t)lround(event.deltaY));
+        break;
+    case NSEventTypeLeftMouseDown:
+    case NSEventTypeLeftMouseUp:
+        ps4_mouse_host_button(ORBIS_MOUSE_BUTTON_PRIMARY, event.type == NSEventTypeLeftMouseDown);
+        break;
+    case NSEventTypeRightMouseDown:
+    case NSEventTypeRightMouseUp:
+        ps4_mouse_host_button(ORBIS_MOUSE_BUTTON_SECONDARY, event.type == NSEventTypeRightMouseDown);
+        break;
+    case NSEventTypeOtherMouseDown:
+    case NSEventTypeOtherMouseUp: {
+        uint32_t button = 0;
+        switch (event.buttonNumber) {
+        case 2: button = ORBIS_MOUSE_BUTTON_OPTIONAL; break;
+        case 3: button = ORBIS_MOUSE_BUTTON_OPTIONAL2; break;
+        case 4: button = ORBIS_MOUSE_BUTTON_OPTIONAL3; break;
+        default: break;
+        }
+        if (button) ps4_mouse_host_button(button, event.type == NSEventTypeOtherMouseDown);
+        break;
+    }
+    case NSEventTypeScrollWheel: {
+        wheel_rem += event.deltaY;
+        tilt_rem += event.deltaX;
+        const double wheel = trunc(wheel_rem);
+        const double tilt = trunc(tilt_rem);
+        wheel_rem -= wheel;
+        tilt_rem -= tilt;
+        if (wheel != 0 || tilt != 0) ps4_mouse_host_wheel((int32_t)wheel, (int32_t)tilt);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 static void metal_screen_pump_events_main(void) {
     @autoreleasepool {
+        if (ps4_mouse_take_capture_request()) metal_screen_capture_pointer();
         NSEvent *event;
         while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                            untilDate:[NSDate distantPast]
                                               inMode:NSDefaultRunLoopMode
                                              dequeue:YES])) {
+            // A runtime window that has the focus (a system dialog panel) gets the keyboard;
+            // the pad and the PS4 keyboard read keys only while the game window has it.
+            const bool key_event = event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp ||
+                                   event.type == NSEventTypeFlagsChanged;
+            if (key_event && g_window && NSApp.keyWindow && NSApp.keyWindow != g_window) {
+                [NSApp sendEvent:event];
+                continue;
+            }
             if (event.type == NSEventTypeKeyDown) {
                 // Cmd+Q quits; Escape is the pad's Options button (pause menu).
                 if ((event.modifierFlags & NSEventModifierFlagCommand) && event.keyCode == 12) {
@@ -1766,6 +1833,8 @@ static void metal_screen_pump_events_main(void) {
             } else if (event.type == NSEventTypeFlagsChanged) {
                 extern void ps4_keyboard_handle_flags(NSUInteger modifierFlags);
                 ps4_keyboard_handle_flags(event.modifierFlags);
+            } else if (ps4_mouse_host_enabled()) {
+                metal_screen_forward_mouse_event(event);
             }
             [NSApp sendEvent:event];
         }

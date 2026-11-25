@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #include "ps4_dialog.h"
+#include "ps4_common_dialog.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,7 +8,6 @@
 #include <unistd.h>
 
 static pthread_mutex_t g_dialog_mutex = PTHREAD_MUTEX_INITIALIZER;
-static bool g_dialog_inited = false;
 static OrbisCommonDialogStatus g_dialog_status = ORBIS_COMMON_DIALOG_STATUS_NONE;
 static OrbisMsgDialogMode g_dialog_mode = ORBIS_MSG_DIALOG_MODE_USER_MSG;
 static OrbisMsgDialogButtonType g_dialog_button_type = ORBIS_MSG_DIALOG_BUTTON_TYPE_OK;
@@ -16,24 +16,15 @@ static char g_dialog_btn1[128] = {0};
 static char g_dialog_btn2[128] = {0};
 static OrbisMsgDialogResult g_dialog_result = {0};
 
-int32_t sceCommonDialogInitialize(void) {
-  pthread_mutex_lock(&g_dialog_mutex);
-  g_dialog_inited = true;
-  g_dialog_status = ORBIS_COMMON_DIALOG_STATUS_INITIALIZED;
-  pthread_mutex_unlock(&g_dialog_mutex);
-  return 0;
-}
-
-bool sceCommonDialogIsUsed(void) {
-  pthread_mutex_lock(&g_dialog_mutex);
-  bool used = (g_dialog_status == ORBIS_COMMON_DIALOG_STATUS_RUNNING);
-  pthread_mutex_unlock(&g_dialog_mutex);
-  return used;
-}
+// The message dialog holds the common dialog system between Initialize and Terminate, so that
+// sceCommonDialogIsUsed and other dialog libraries see it in use (shadPS4 msgdialog.cpp).
+// MsgDialog does not yet refuse to initialize while another library holds the system (shadPS4
+// returns BUSY); it only takes the system when it is free and releases only what it took.
+static bool g_dialog_holds_system = false;
 
 int32_t sceMsgDialogInitialize(void) {
   pthread_mutex_lock(&g_dialog_mutex);
-  g_dialog_inited = true;
+  if (!g_dialog_holds_system) g_dialog_holds_system = ps4_common_dialog_acquire();
   g_dialog_status = ORBIS_COMMON_DIALOG_STATUS_INITIALIZED;
   memset(&g_dialog_result, 0, sizeof(g_dialog_result));
   pthread_mutex_unlock(&g_dialog_mutex);
@@ -168,7 +159,10 @@ int32_t sceMsgDialogGetResult(OrbisMsgDialogResult *result) {
 int32_t sceMsgDialogTerminate(void) {
   pthread_mutex_lock(&g_dialog_mutex);
   g_dialog_status = ORBIS_COMMON_DIALOG_STATUS_NONE;
-  g_dialog_inited = false;
+  if (g_dialog_holds_system) {
+    g_dialog_holds_system = false;
+    ps4_common_dialog_release();
+  }
   pthread_mutex_unlock(&g_dialog_mutex);
   return 0;
 }
@@ -176,16 +170,6 @@ int32_t sceMsgDialogTerminate(void) {
 // ---------------------------------------------------------------------------
 // Shims for Guest ABI
 // ---------------------------------------------------------------------------
-
-void shim_sceCommonDialogInitialize(GuestContext *ctx) {
-  ctx->rax = (uint64_t)sceCommonDialogInitialize();
-  SHIM_RETURN();
-}
-
-void shim_sceCommonDialogIsUsed(GuestContext *ctx) {
-  ctx->rax = (uint64_t)(sceCommonDialogIsUsed() ? 1 : 0);
-  SHIM_RETURN();
-}
 
 void shim_sceMsgDialogInitialize(GuestContext *ctx) {
   ctx->rax = (uint64_t)sceMsgDialogInitialize();
@@ -285,31 +269,4 @@ void shim_sceMsgDialogProgressBarSetMsg(GuestContext *ctx) {
 void shim_sceMsgDialogProgressBarSetValue(GuestContext *ctx) {
   ctx->rax = 0;
   SHIM_RETURN();
-}
-
-void shim_sceGameCustomDataDialogInitialize(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogInitialize();
-    SHIM_RETURN();
-}
-void shim_sceGameCustomDataDialogOpen(GuestContext *ctx) {
-    const void *param = ctx->rdi ? (const void *)(ctx->mem_base + ctx->rdi) : NULL;
-    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogOpen(param);
-    SHIM_RETURN();
-}
-void shim_sceGameCustomDataDialogUpdateStatus(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogUpdateStatus();
-    SHIM_RETURN();
-}
-void shim_sceGameCustomDataDialogGetResult(GuestContext *ctx) {
-    void *result = ctx->rdi ? (void *)(ctx->mem_base + ctx->rdi) : NULL;
-    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogGetResult(result);
-    SHIM_RETURN();
-}
-void shim_sceGameCustomDataDialogClose(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogClose();
-    SHIM_RETURN();
-}
-void shim_sceGameCustomDataDialogTerminate(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceGameCustomDataDialogTerminate();
-    SHIM_RETURN();
 }

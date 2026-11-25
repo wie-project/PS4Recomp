@@ -42,6 +42,7 @@ void shim_sceFiberFinalize(GuestContext *ctx);
 void shim_sceFiberRun(GuestContext *ctx);
 void shim_sceFiberSwitch(GuestContext *ctx);
 void shim_sceFiberGetSelf(GuestContext *ctx);
+void shim_sceFiberGetThreadFramePointerAddress(GuestContext *ctx);
 void shim_sceFiberReturnToThread(GuestContext *ctx);
 void shim_sceFiberGetInfo(GuestContext *ctx);
 void shim_sceFiberRename(GuestContext *ctx);

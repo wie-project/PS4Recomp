@@ -1,4 +1,5 @@
 #include "ps4_screenshot.h"
+#include "ps4_hle_stub.h"
 #include <stdbool.h>
 #include <string.h>
 
@@ -78,3 +79,14 @@ void shim_sceScreenShotSetParam(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceScreenShotSetParam(param);
     SHIM_RETURN();
 }
+
+// Functions that shadPS4 stubs as well (src/core/libraries, libSceScreenShot).
+PS4_HLE_STUB(_Z5dummyv)
+PS4_HLE_STUB(sceScreenShotCapture)
+PS4_HLE_STUB(sceScreenShotDisableNotification)
+PS4_HLE_STUB(sceScreenShotEnableNotification)
+PS4_HLE_STUB(sceScreenShotGetAppInfo)
+PS4_HLE_STUB(sceScreenShotGetDrcParam)
+PS4_HLE_STUB(sceScreenShotIsDisabled)
+PS4_HLE_STUB(sceScreenShotIsVshScreenCaptureDisabled)
+PS4_HLE_STUB(sceScreenShotSetDrcParam)

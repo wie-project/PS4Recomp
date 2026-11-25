@@ -1593,7 +1593,8 @@ func xmlEscape(s string) string {
 
 // appInfoPlist is the Contents/Info.plist of a generated game bundle. LSSupportsGameMode and the
 // games category let macOS run it in Game Mode (CPU and GPU priority, lower Bluetooth latency for
-// controllers) when it is full screen.
+// controllers) when it is full screen. NSMicrophoneUsageDescription is required for libSceAudioIn
+// capture: macOS terminates a bundle that opens an input device without it.
 func appInfoPlist(appName string, hasIcon bool, meta bundleMeta) string {
 	iconXML := ""
 	if hasIcon {
@@ -1627,6 +1628,8 @@ func appInfoPlist(appName string, hasIcon bool, meta bundleMeta) string {
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>The game records audio from the microphone (voice chat and voice input).</string>
 %s</dict>
 </plist>
 `, xmlEscape(appName), xmlEscape(meta.BundleID), xmlEscape(meta.DisplayName), xmlEscape(meta.DisplayName),

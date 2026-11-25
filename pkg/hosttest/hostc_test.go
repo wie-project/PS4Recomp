@@ -17,6 +17,13 @@ import (
 // directory on the include path.
 func buildHostC(t *testing.T, name string, sources ...string) string {
 	t.Helper()
+	return buildHostCFlags(t, name, nil, sources...)
+}
+
+// buildHostCFlags is buildHostC with extra compiler and linker flags (include directories of
+// headers a source uses, frameworks it links).
+func buildHostCFlags(t *testing.T, name string, flags []string, sources ...string) string {
+	t.Helper()
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found")
 	}
@@ -33,6 +40,7 @@ func buildHostC(t *testing.T, name string, sources ...string) string {
 			args = append(args, "-I"+d)
 		}
 	}
+	args = append(args, flags...)
 	args = append(args, "-o", bin)
 	if out, err := exec.Command("clang", args...).CombinedOutput(); err != nil {
 		t.Fatalf("building %s: %v\n%s", name, err, out)

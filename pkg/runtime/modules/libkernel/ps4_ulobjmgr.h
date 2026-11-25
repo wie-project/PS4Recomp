@@ -11,6 +11,8 @@ extern "C" {
 
 void shim__sceUlobjmgrRegisterObject(GuestContext *ctx);
 void shim__sceUlobjmgrUnregisterObject(GuestContext *ctx);
+void shim_Func_1D9F50D9CFB8054E(GuestContext *ctx);
+void shim_Func_4B07893BBB77A649(GuestContext *ctx);
 
 #ifdef __cplusplus
 }
