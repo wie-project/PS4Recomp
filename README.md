@@ -5,7 +5,7 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 |                                                                   |                                                                          |
 | :---------------------------------------------------------------: | :----------------------------------------------------------------------: |
 |               ![Blood 1](images/blood_test_01.jpg)                |                   ![Blood 2](images/blood_test_02.jpg)                   |
-|              ![Yakuza 1](images/yakuza_test_01.jpg)               |                  ![Yakuza 2](images/yakuza_test_02.jpg)                  |
+|              ![Last Of Us Remastered](images/last_test_01.jpg)               |                  ![Yakuza 2](images/yakuza_test_02.jpg)                  |
 | ![Drake’s Fortune — seaplane cabin](images/uncharted_test_01.jpg) | ![Drake’s Fortune — island shore and boat](images/uncharted_test_02.jpg) |
 
 ---
