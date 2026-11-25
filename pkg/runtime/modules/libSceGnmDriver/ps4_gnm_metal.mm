@@ -370,6 +370,29 @@ static void HandleEventWriteEos(GuestContext *ctx, const uint32_t *p, uint32_t p
     }
 }
 
+// Performs the memory write of a WRITE_DATA: `data` is ndw dwords for dst_addr (wr_one_addr: all to one dword).
+static void StoreWriteData(GuestContext *ctx, uint64_t dst_addr, const uint32_t *data, uint32_t ndw, bool wr_one_addr) {
+    uint32_t *dst = (uint32_t *)GuestMemPtr(ctx, dst_addr & ~3ULL, wr_one_addr ? 4 : (size_t)ndw * 4);
+    if (!dst) return;
+    ps4draw::NotifyGuestWrite(dst_addr & ~3ULL, wr_one_addr ? 4 : (uint64_t)ndw * 4, false, 0);
+    if (wr_one_addr) {
+        for (uint32_t w = 0; w < ndw; w++) {
+            __atomic_store_n(dst, data[w], __ATOMIC_RELEASE);
+        }
+        return;
+    }
+    uint32_t w = 0;
+    if (((uintptr_t)dst & 7u) == 0) {
+        for (; w + 2 <= ndw; w += 2) {
+            const uint64_t val = (uint64_t)data[w] | ((uint64_t)data[w + 1] << 32);
+            __atomic_store_n((uint64_t *)(dst + w), val, __ATOMIC_RELEASE);
+        }
+    }
+    for (; w < ndw; w++) {
+        __atomic_store_n(dst + w, data[w], __ATOMIC_RELEASE);
+    }
+}
+
 // WRITE_DATA (0x37):
 //   p[0] control: dst_sel[11:8] (0 reg, 1 mem sync, 2 TC/L2, 3 GDS, 5 mem async),
 //                 wr_one_addr[16], wr_confirm[20], engine_sel[31:30]
@@ -384,25 +407,26 @@ static void HandleWriteData(GuestContext *ctx, const uint32_t *p, uint32_t paylo
     const uint64_t dst_addr = (uint64_t)p[1] | ((uint64_t)p[2] << 32);
     const uint32_t ndw = payload_dw - 3;
     if (ndw == 0) return;
-    uint32_t *dst = (uint32_t *)GuestMemPtr(ctx, dst_addr & ~3ULL, wr_one_addr ? 4 : (size_t)ndw * 4);
-    if (!dst) return;
-    ps4draw::NotifyGuestWrite(dst_addr & ~3ULL, wr_one_addr ? 4 : (uint64_t)ndw * 4, false, 0);
-    if (wr_one_addr) {
-        for (uint32_t w = 0; w < ndw; w++) {
-            __atomic_store_n(dst, p[3 + w], __ATOMIC_RELEASE);
-        }
-    } else {
-        uint32_t w = 0;
-        if (((uintptr_t)dst & 7u) == 0) {
-            for (; w + 2 <= ndw; w += 2) {
-                const uint64_t val = (uint64_t)p[3 + w] | ((uint64_t)p[3 + w + 1] << 32);
-                __atomic_store_n((uint64_t *)(dst + w), val, __ATOMIC_RELEASE);
-            }
-        }
-        for (; w < ndw; w++) {
-            __atomic_store_n(dst + w, p[3 + w], __ATOMIC_RELEASE);
-        }
+    // A label (EOP / RELEASE_MEM / EOS) of this queue that is still pending writes its value when the
+    // GPU work before it completes. A WRITE_DATA that follows it in the ring (the guest signals a
+    // second state through the same dword after waiting for the first) must land after it, or the
+    // late label write would overwrite the newer value.
+    const int queue = CpQueue();
+    const uint64_t first = dst_addr & ~3ULL;
+    const uint32_t ndst = wr_one_addr ? 1u : ndw;
+    bool behind_label = false;
+    for (uint32_t w = 0; w < ndst && !behind_label; w++) {
+        uint32_t pv;
+        behind_label = PendingLabelValue(first + (uint64_t)w * 4, queue, &pv);
     }
+    if (!behind_label) {
+        StoreWriteData(ctx, dst_addr, &p[3], ndw, wr_one_addr);
+        return;
+    }
+    std::vector<uint32_t> data(p + 3, p + 3 + ndw); // the ring may be reused before the action runs
+    ps4draw::AfterGpu([ctx, dst_addr, wr_one_addr, data = std::move(data)]() {
+        StoreWriteData(ctx, dst_addr, data.data(), (uint32_t)data.size(), wr_one_addr);
+    }, queue);
 }
 
 // WAIT_REG_MEM (0x3C), 6 payload dwords:

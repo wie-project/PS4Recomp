@@ -164,11 +164,14 @@ void ps4_gnmdriver_init(GuestContext *ctx) {
     }
 
     if (g_tessellation_ring_addr == 0 && ctx) {
+        // Only the address is ours: the title maps its own direct memory at the address
+        // sceGnmGetTheTessellationFactorRingBufferBaseAddress returns and checks that the
+        // mapping landed there. A "reserved" extent can be overlaid by that fixed mapping.
         GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
         g_tessellation_ring_addr = recomp_vm_alloc_named_aligned(
-            proc, GNM_TESSELLATION_RING_SIZE, 0x10000, PROT_READ | PROT_WRITE, 0, "gnm_tess_ring"
+            proc, GNM_TESSELLATION_RING_SIZE, 0x10000, PROT_READ | PROT_WRITE, 0, "gnm_tess_ring_reserved"
         );
-        printf("[ps4-gnm] Allocated tessellation factor ring buffer at guest VAddr 0x%llx (size: %u MB)\n",
+        printf("[ps4-gnm] Reserved tessellation factor ring buffer address 0x%llx (size: %u MB)\n",
                (unsigned long long)g_tessellation_ring_addr, GNM_TESSELLATION_RING_SIZE / (1024 * 1024));
     }
     pthread_mutex_unlock(&g_gnm_mutex);
