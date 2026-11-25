@@ -58,6 +58,25 @@ void shim_sceKeyboardReadState(GuestContext *ctx);
 void shim_sceKeyboardGetKey2Char(GuestContext *ctx);
 void shim_sceKeyboardGetHandle(GuestContext *ctx);
 
+void shim_sceKeyboardConnectPort(GuestContext *ctx);
+void shim_sceKeyboardDebugGetDeviceId(GuestContext *ctx);
+void shim_sceKeyboardDeviceOpen(GuestContext *ctx);
+void shim_sceKeyboardDisconnectDevice(GuestContext *ctx);
+void shim_sceKeyboardDisconnectPort(GuestContext *ctx);
+void shim_sceKeyboardGetConnection(GuestContext *ctx);
+void shim_sceKeyboardGetDeviceInfo(GuestContext *ctx);
+void shim_sceKeyboardMbusInit(GuestContext *ctx);
+void shim_sceKeyboardRead(GuestContext *ctx);
+void shim_sceKeyboardSetProcessFocus(GuestContext *ctx);
+void shim_sceKeyboardSetProcessPrivilege(GuestContext *ctx);
+void shim_Func_97BEA3A6D1DF8B33(GuestContext *ctx);
+void shim_sceDbgKeyboardClose(GuestContext *ctx);
+void shim_sceDbgKeyboardGetKey2Char(GuestContext *ctx);
+void shim_sceDbgKeyboardInit(GuestContext *ctx);
+void shim_sceDbgKeyboardOpen(GuestContext *ctx);
+void shim_sceDbgKeyboardRead(GuestContext *ctx);
+void shim_sceDbgKeyboardReadState(GuestContext *ctx);
+
 #ifdef __cplusplus
 }
 #endif

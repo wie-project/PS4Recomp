@@ -113,6 +113,29 @@ int32_t sceKernelIsAuthenticNeo(void) {
     return ps4_neo_mode();
 }
 
+uint32_t ps4_compiled_sdk_version(const GuestContext *ctx) {
+    const GuestContext *proc = ctx && ctx->process_ctx ? ctx->process_ctx : ctx;
+    if (!proc || !proc->mem_base || !proc->proc_param_addr || proc->proc_param_addr + 0x18 > proc->mem_size) {
+        return 0;
+    }
+    // SceProcParam: u64 size; u32 magic; u32 entry_count; u32 sdk_version at +0x10.
+    const uint8_t *pp = proc->mem_base + proc->proc_param_addr;
+    if (*(const uint64_t *)pp < 0x14) return 0;
+    return *(const uint32_t *)(pp + 0x10);
+}
+
+int32_t sceKernelGetCompiledSdkVersion(const GuestContext *ctx, int32_t *ver) {
+    if (!ver) return (int32_t)0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    *ver = (int32_t)ps4_compiled_sdk_version(ctx);
+    return 0;
+}
+
+void shim_sceKernelGetCompiledSdkVersion(GuestContext *ctx) {
+    int32_t *ver = ctx->rdi && ctx->mem_base ? (int32_t *)(ctx->mem_base + ctx->rdi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceKernelGetCompiledSdkVersion(ctx, ver);
+    SHIM_RETURN();
+}
+
 int32_t sceKernelGetSystemSwVersion(OrbisKernelSwVersion *version) {
     if (!version) return -EINVAL;
     version->Size = sizeof(OrbisKernelSwVersion);
@@ -922,16 +945,6 @@ typedef struct OrbisKernelModuleInfoEx {
     uint32_t segment_count;
 } OrbisKernelModuleInfoEx;
 
-typedef struct OrbisModuleInfoForUnwind {
-    uint64_t st_size;
-    char name[256];
-    uint64_t eh_frame_hdr_addr;
-    uint64_t eh_frame_addr;
-    uint64_t eh_frame_size;
-    uint64_t seg0_addr;
-    uint64_t seg0_size;
-} OrbisModuleInfoForUnwind;
-
 // Copies the segments of m (recomp_module_snapshot_segments: the ones the emitter registered)
 // into the console's segment-info layout; returns their number.
 static uint32_t snapshot_segments_out(const RecompModuleSnapshot *m, OrbisKernelModuleSegmentInfo segs[4]) {
@@ -1022,30 +1035,22 @@ void shim_sceKernelGetModuleInfoInternal(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-void shim_sceKernelGetModuleInfoForUnwind(GuestContext *ctx) {
-    uint64_t addr = ctx->rdi;
-    int32_t flags = (int32_t)ctx->rsi;
-    uint64_t info_addr = ctx->rdx;
-
+int32_t sceKernelGetModuleInfoForUnwind(uint64_t addr, int32_t flags, OrbisModuleInfoForUnwind *info) {
     if (flags >= 3) {
-        if (info_addr && ctx->mem_base) {
-            memset(ctx->mem_base + info_addr, 0, sizeof(OrbisModuleInfoForUnwind));
+        if (info) {
+            memset(info, 0, sizeof(*info));
         }
-        ctx->rax = (uint64_t)(int64_t)0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-        SHIM_RETURN();
+        return (int32_t)0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
     }
-    if (!info_addr || !ctx->mem_base) {
-        ctx->rax = (uint64_t)(int64_t)0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
-        SHIM_RETURN();
+    if (!info) {
+        return (int32_t)0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
     }
 
     const RecompModuleUnwindInfo *mod = recomp_module_find_by_addr(addr);
     if (!mod) {
-        ctx->rax = (uint64_t)(int64_t)0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
-        SHIM_RETURN();
+        return (int32_t)0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
     }
 
-    OrbisModuleInfoForUnwind *info = (OrbisModuleInfoForUnwind *)(ctx->mem_base + info_addr);
     memset(info, 0, sizeof(*info));
     info->st_size = sizeof(OrbisModuleInfoForUnwind);
     if (mod->name) {
@@ -1061,8 +1066,13 @@ void shim_sceKernelGetModuleInfoForUnwind(GuestContext *ctx) {
             (unsigned long long)info->eh_frame_hdr_addr,
             (unsigned long long)info->eh_frame_addr,
             (unsigned long long)info->eh_frame_size);
+    return 0; // ORBIS_OK
+}
 
-    ctx->rax = 0; // ORBIS_OK
+void shim_sceKernelGetModuleInfoForUnwind(GuestContext *ctx) {
+    OrbisModuleInfoForUnwind *info =
+        ctx->rdx && ctx->mem_base ? (OrbisModuleInfoForUnwind *)(ctx->mem_base + ctx->rdx) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceKernelGetModuleInfoForUnwind(ctx->rdi, (int32_t)ctx->rsi, info);
     SHIM_RETURN();
 }
 

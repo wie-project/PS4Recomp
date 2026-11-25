@@ -14,6 +14,19 @@ typedef struct OrbisKernelTimeval {
     int64_t tv_usec;
 } OrbisKernelTimeval;
 
+typedef struct OrbisModuleInfoForUnwind {
+    uint64_t st_size;
+    char name[256];
+    uint64_t eh_frame_hdr_addr;
+    uint64_t eh_frame_addr;
+    uint64_t eh_frame_size;
+    uint64_t seg0_addr;
+    uint64_t seg0_size;
+} OrbisModuleInfoForUnwind;
+
+// The unwind information of the module containing addr (info is a host pointer).
+int32_t sceKernelGetModuleInfoForUnwind(uint64_t addr, int32_t flags, OrbisModuleInfoForUnwind *info);
+
 typedef struct OrbisKernelTimezone {
     int32_t tz_minuteswest;
     int32_t tz_dsttime;
@@ -49,6 +62,11 @@ int32_t sceKernelGettimezone(OrbisKernelTimezone *tz);
 // CPU & System Configuration
 int32_t sceKernelGetCurrentCpu(void);
 int32_t sceKernelGetCpumode(void);
+// The SDK version the game was built with (SceProcParam.sdk_version; 0 when the process has
+// no process parameters).
+uint32_t ps4_compiled_sdk_version(const GuestContext *ctx);
+int32_t sceKernelGetCompiledSdkVersion(const GuestContext *ctx, int32_t *ver);
+void shim_sceKernelGetCompiledSdkVersion(GuestContext *ctx);
 int32_t sceKernelIsNeoMode(void);
 int32_t sceKernelHasNeoMode(void);
 int32_t sceKernelIsAuthenticNeo(void);

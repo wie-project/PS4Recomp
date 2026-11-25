@@ -4,14 +4,17 @@ package hosttest
 
 import "testing"
 
-// TestPlayGo runs testdata/playgo/main.c: verifies libScePlayGo ToDoList handling
-// and PlayGoDialog common dialog lifecycle.
+// TestPlayGo runs testdata/playgo/main.c: libScePlayGo over a playgo-chunk.dat in the
+// console's layout (chunk sizes, loci, language mask, install speed), without PlayGo data,
+// ToDoList handling and the PlayGoDialog common dialog lifecycle.
 func TestPlayGo(t *testing.T) {
-	bin := buildHostC(t, "playgo",
+	bin := buildHostCFlags(t, "playgo", []string{"-I../runtime/modules/libSceSystemService"},
 		"../runtime/modules/libScePlayGo/ps4_playgo.c",
 	)
 	runHostCases(t, bin, []string{
 		"todo-list",
 		"dialog-lifecycle",
+		"chunk-file",
+		"no-playgo",
 	})
 }

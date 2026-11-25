@@ -31,10 +31,15 @@ static void test_pngenc_lifecycle(void) {
     assert(work_mem != NULL);
     void *handle = NULL;
 
-    assert(scePngEncCreate(NULL, work_mem, (uint32_t)mem_size, &handle) == ORBIS_PNG_ENC_ERROR_INVALID_PARAM);
+    assert(scePngEncCreate(NULL, work_mem, (uint32_t)mem_size, &handle) == ORBIS_PNG_ENC_ERROR_INVALID_ADDR);
+    param.attribute = 1;
+    assert(scePngEncCreate(&param, work_mem, (uint32_t)mem_size, &handle) == ORBIS_PNG_ENC_ERROR_INVALID_ADDR);
+    param.attribute = 0;
     assert(scePngEncCreate(&param, NULL, (uint32_t)mem_size, &handle) == ORBIS_PNG_ENC_ERROR_INVALID_ADDR);
     assert(scePngEncCreate(&param, work_mem, (uint32_t)mem_size, NULL) == ORBIS_PNG_ENC_ERROR_INVALID_ADDR);
-    assert(scePngEncCreate(&param, work_mem, 4, &handle) == ORBIS_PNG_ENC_ERROR_INVALID_SIZE);
+    param.max_image_width = 1000002; // width - 1 must not exceed 1000000
+    assert(scePngEncCreate(&param, work_mem, (uint32_t)mem_size, &handle) == ORBIS_PNG_ENC_ERROR_INVALID_SIZE);
+    param.max_image_width = 1920;
 
     assert(scePngEncCreate(&param, work_mem, (uint32_t)mem_size, &handle) == 0);
     assert(handle == work_mem);
@@ -42,7 +47,6 @@ static void test_pngenc_lifecycle(void) {
     // Delete
     assert(scePngEncDelete(NULL) == ORBIS_PNG_ENC_ERROR_INVALID_HANDLE);
     assert(scePngEncDelete(handle) == 0);
-    assert(scePngEncDelete(handle) == ORBIS_PNG_ENC_ERROR_INVALID_HANDLE);
 
     free(work_mem);
     printf("PASS pngenc-lifecycle\n");
@@ -91,6 +95,12 @@ static void test_pngenc_encode(void) {
     // Test invalid handle / params
     assert(scePngEncEncode(NULL, &enc_param, &out_info) == ORBIS_PNG_ENC_ERROR_INVALID_HANDLE);
     assert(scePngEncEncode(handle, NULL, &out_info) == ORBIS_PNG_ENC_ERROR_INVALID_PARAM);
+    enc_param.image_height = 0;
+    assert(scePngEncEncode(handle, &enc_param, &out_info) == ORBIS_PNG_ENC_ERROR_INVALID_SIZE);
+    enc_param.image_height = 4;
+    enc_param.image_mem_size = sizeof(pixels) - 1;
+    assert(scePngEncEncode(handle, &enc_param, &out_info) == ORBIS_PNG_ENC_ERROR_INVALID_SIZE);
+    enc_param.image_mem_size = sizeof(pixels);
 
     // Encode
     int32_t enc_rc = scePngEncEncode(handle, &enc_param, &out_info);

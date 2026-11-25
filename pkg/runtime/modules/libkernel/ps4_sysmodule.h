@@ -2,6 +2,7 @@
 #define PS4_SYSMODULE_H
 
 #include "recomp_runtime.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -13,11 +14,27 @@
 extern "C" {
 #endif
 
-int32_t sceSysmoduleLoadModule(uint16_t moduleId);
-int32_t sceSysmoduleIsLoaded(uint16_t moduleId);
-int32_t sceSysmoduleUnloadModule(uint16_t moduleId);
-uint32_t sceSysmoduleLoadModuleInternal(uint32_t moduleId);
-int32_t sceSysmoduleUnloadModuleInternal(uint32_t moduleId);
+#define ORBIS_SYSMODULE_INVALID_ID ((int32_t)0x805A1000)
+#define ORBIS_SYSMODULE_NOT_LOADED ((int32_t)0x805A1001)
+#define ORBIS_SYSMODULE_LOCK_FAILED ((int32_t)0x805A10FF)
+
+// libSceSysmodule (ps4_sysmodule_lib.c), ported from shadPS4. `ctx` starts the initializers of
+// a game module (/app0/sce_module) that a load brings in; it may be NULL when no guest code is
+// to run. `sdk_ver` is the game's compiled SDK version (sceKernelGetCompiledSdkVersion).
+int32_t sceSysmoduleGetModuleHandleInternal(uint32_t id, int32_t *handle);
+int32_t sceSysmoduleIsLoaded(uint16_t id);
+int32_t sceSysmoduleIsLoadedInternal(uint32_t id);
+int32_t sceSysmoduleLoadModule(GuestContext *ctx, uint16_t id, uint32_t sdk_ver);
+int32_t sceSysmoduleLoadModuleInternal(GuestContext *ctx, uint32_t id, uint32_t sdk_ver);
+int32_t sceSysmoduleLoadModuleInternalWithArg(GuestContext *ctx, uint32_t id, int32_t argc, const void *argv,
+                                              uint64_t unk, int32_t *res_out, uint32_t sdk_ver);
+int32_t sceSysmoduleUnloadModule(uint16_t id);
+int32_t sceSysmoduleUnloadModuleInternal(uint32_t id);
+int32_t sceSysmodulePreloadModuleForLibkernel(GuestContext *ctx, uint32_t sdk_ver);
+// True when sceSysmoduleGetModuleInfoForUnwind hides the name of this module file.
+bool ps4_sysmodule_hides_name(const char *module_name);
+// The preload of process start, with the game's SDK version.
+void ps4_sysmodule_preload(GuestContext *ctx);
 
 // Module Loading & Dynamic Symbol Resolution
 typedef struct RecompModuleExport {
@@ -98,15 +115,23 @@ int32_t sceKernelLoadStartModule(const char *name, size_t argc,
                                  int *res);
 int32_t sceKernelDlsym(int32_t handle, const char *symbol, void **addr);
 
-int32_t sceSysmoduleLoadModuleInternalWithArg(uint32_t moduleId, int32_t argc, const void *argv, uint64_t unk, int32_t *res_out);
-
 // Guest ABI shims
-void shim_sceSysmoduleLoadModule(GuestContext *ctx);
+void shim_sceSysmoduleGetModuleHandleInternal(GuestContext *ctx);
+void shim_sceSysmoduleGetModuleInfoForUnwind(GuestContext *ctx);
+void shim_sceSysmoduleIsCalledFromSysModule(GuestContext *ctx);
+void shim_sceSysmoduleIsCameraPreloaded(GuestContext *ctx);
 void shim_sceSysmoduleIsLoaded(GuestContext *ctx);
-void shim_sceSysmoduleUnloadModule(GuestContext *ctx);
+void shim_sceSysmoduleIsLoadedInternal(GuestContext *ctx);
+void shim_sceSysmoduleLoadModule(GuestContext *ctx);
+void shim_sceSysmoduleLoadModuleByNameInternal(GuestContext *ctx);
 void shim_sceSysmoduleLoadModuleInternal(GuestContext *ctx);
-void shim_sceSysmoduleUnloadModuleInternal(GuestContext *ctx);
 void shim_sceSysmoduleLoadModuleInternalWithArg(GuestContext *ctx);
+void shim_sceSysmoduleMapLibcForLibkernel(GuestContext *ctx);
+void shim_sceSysmodulePreloadModuleForLibkernel(GuestContext *ctx);
+void shim_sceSysmoduleUnloadModule(GuestContext *ctx);
+void shim_sceSysmoduleUnloadModuleByNameInternal(GuestContext *ctx);
+void shim_sceSysmoduleUnloadModuleInternal(GuestContext *ctx);
+void shim_sceSysmoduleUnloadModuleInternalWithArg(GuestContext *ctx);
 void shim_sceKernelLoadStartModule(GuestContext *ctx);
 void shim_sceKernelDlsym(GuestContext *ctx);
 

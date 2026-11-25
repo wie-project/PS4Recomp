@@ -92,3 +92,64 @@ func TestGameCustomDataDialog(t *testing.T) {
 		"headless",
 	})
 }
+
+// TestSysmodule runs testdata/sysmodule/main.c: libSceSysmodule over the real module loader —
+// ID checks, dependencies and load counts, game modules started with their initializers, the
+// libkernel preload and the module names hidden from unwinding.
+func TestSysmodule(t *testing.T) {
+	bin := buildHostCFlags(t, "sysmodule", []string{"-I../runtime/modules/libkernel"},
+		"../runtime/modules/libkernel/ps4_sysmodule_lib.c",
+		"../runtime/modules/libkernel/ps4_sysmodule.c",
+	)
+	runHostCases(t, bin, []string{
+		"ids",
+		"deps",
+		"game",
+		"preload",
+		"hidden-names",
+	})
+}
+
+// TestPngDec runs testdata/pngdec/main.c: libScePngDec on PNGs of every color type and bit
+// depth, plain and Adam7-interlaced (pixel-exact against the written samples, the writer
+// checked against ImageIO), output layout and the error cases; and libScePngEnc output read back
+// by ImageIO and the decoder, with the row filters each filter mask allows.
+func TestPngDec(t *testing.T) {
+	bin := buildHostCFlags(t, "pngdec",
+		[]string{"-lz", "-framework", "ImageIO", "-framework", "CoreGraphics", "-framework", "CoreFoundation"},
+		"../runtime/modules/libScePngDec/ps4_pngdec.c",
+	)
+	runHostCases(t, bin, []string{
+		"create",
+		"header",
+		"writer",
+		"formats",
+		"layout",
+		"encode-round-trip",
+	})
+}
+
+// TestVoice runs testdata/voice/main.c: libSceVoice initialization, the 64-port table, port
+// settings and attributes, and the data calls of a library without voice chat.
+func TestVoice(t *testing.T) {
+	bin := buildHostCFlags(t, "voice", []string{"-I../runtime/modules/libSceAudioIn"},
+		"../runtime/modules/libSceVoice/ps4_voice.c",
+	)
+	runHostCases(t, bin, []string{
+		"init",
+		"ports",
+		"settings",
+		"attrs",
+		"data",
+	})
+}
+
+// TestWebBrowserDialog runs testdata/webbrowserdialog/main.c: the libSceWebBrowserDialog
+// lifecycle on the CommonDialog system and the dialog result.
+func TestWebBrowserDialog(t *testing.T) {
+	bin := buildHostC(t, "webbrowserdialog",
+		"../runtime/modules/libSceWebBrowserDialog/ps4_web_browser_dialog.c",
+		"../runtime/modules/libSceMsgDialog/ps4_common_dialog.c",
+	)
+	runHostCases(t, bin, []string{"lifecycle", "busy"})
+}

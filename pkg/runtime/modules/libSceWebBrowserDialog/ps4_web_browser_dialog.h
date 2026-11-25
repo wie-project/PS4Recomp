@@ -62,6 +62,13 @@ void shim_sceWebBrowserDialogUpdateStatus(GuestContext *ctx);
 void shim_sceWebBrowserDialogGetResult(GuestContext *ctx);
 void shim_sceWebBrowserDialogClose(GuestContext *ctx);
 void shim_sceWebBrowserDialogTerminate(GuestContext *ctx);
+void shim_sceWebBrowserDialogGetEvent(GuestContext *ctx);
+void shim_sceWebBrowserDialogNavigate(GuestContext *ctx);
+void shim_sceWebBrowserDialogOpenForPredeterminedContent(GuestContext *ctx);
+void shim_sceWebBrowserDialogResetCookie(GuestContext *ctx);
+void shim_sceWebBrowserDialogSetCookie(GuestContext *ctx);
+void shim_sceWebBrowserDialogSetZoom(GuestContext *ctx);
+void shim_Func_F2BE042771625F8C(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

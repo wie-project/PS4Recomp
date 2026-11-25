@@ -73,8 +73,10 @@ int32_t scePlayGoGetInstallSpeed(OrbisPlayGoHandle handle, int32_t *outSpeed);
 int32_t scePlayGoSetInstallSpeed(OrbisPlayGoHandle handle, int32_t speed);
 int32_t scePlayGoGetToDoList(OrbisPlayGoHandle handle, OrbisPlayGoToDo *outToDoList, uint32_t maxEntries, uint32_t *outNumEntries);
 int32_t scePlayGoSetToDoList(OrbisPlayGoHandle handle, const OrbisPlayGoToDo *toDoList, uint32_t numEntries);
+// One estimate (*outEta) for all the chunks.
 int32_t scePlayGoGetEta(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count, OrbisPlayGoEta *outEta);
-int32_t scePlayGoPrefetch(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count);
+int32_t scePlayGoPrefetch(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count,
+                          int32_t minimumLocus);
 int32_t scePlayGoGetChunkId(OrbisPlayGoHandle handle, OrbisPlayGoChunkId *outChunkIdList, uint32_t numberOfEntries, uint32_t *outEntries);
 
 int32_t scePlayGoDialogInitialize(void);
@@ -109,6 +111,8 @@ void shim_scePlayGoDialogGetStatus(GuestContext *ctx);
 void shim_scePlayGoDialogGetResult(GuestContext *ctx);
 void shim_scePlayGoDialogClose(GuestContext *ctx);
 void shim_scePlayGoDialogTerminate(GuestContext *ctx);
+void shim_sceDbgPlayGoRequestNextChunk(GuestContext *ctx);
+void shim_sceDbgPlayGoSnapshot(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

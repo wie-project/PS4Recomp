@@ -1,4 +1,5 @@
 #include "ps4_http.h"
+#include "ps4_hle_stub.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1058,6 +1059,65 @@ void shim_sceCompanionHttpdUnregisterRequestCallback(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdUnregisterRequestCallback();
     SHIM_RETURN();
 }
+
+// No second-screen client ever connects (there is no companion app server), so the request
+// callbacks never run; they are kept as registered.
+static uint64_t g_companion_body_cb, g_companion_body_param;
+
+int32_t sceCompanionHttpdInitialize(void) {
+    return sceCompanionHttpdInitialize2(NULL);
+}
+
+int32_t sceCompanionHttpdRegisterRequestCallback(void *cb, void *userData) {
+    return sceCompanionHttpdRegisterRequestCallback2(cb, userData);
+}
+
+int32_t sceCompanionHttpdRegisterRequestBodyReceptionCallback(uint64_t cb, uint64_t param) {
+    pthread_mutex_lock(&g_companion_mutex);
+    int32_t r = 0;
+    if (!g_companion_inited) {
+        r = ORBIS_COMPANION_HTTPD_ERROR_NOT_INITIALIZED;
+    } else {
+        g_companion_body_cb = cb;
+        g_companion_body_param = param;
+    }
+    pthread_mutex_unlock(&g_companion_mutex);
+    return r;
+}
+
+int32_t sceCompanionHttpdUnregisterRequestBodyReceptionCallback(void) {
+    return sceCompanionHttpdRegisterRequestBodyReceptionCallback(0, 0);
+}
+
+void shim_sceCompanionHttpdInitialize(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdInitialize();
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdRegisterRequestCallback(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdRegisterRequestCallback((void *)(uintptr_t)ctx->rdi,
+                                                                           (void *)(uintptr_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdRegisterRequestBodyReceptionCallback(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdRegisterRequestBodyReceptionCallback(ctx->rdi, ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceCompanionHttpdUnregisterRequestBodyReceptionCallback(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceCompanionHttpdUnregisterRequestBodyReceptionCallback();
+    SHIM_RETURN();
+}
+
+// Responses are only built inside request callbacks, and the second-screen status and user
+// queries have no client to report: stubs in shadPS4 as well.
+PS4_HLE_STUB(sceCompanionHttpdAddHeader)
+PS4_HLE_STUB(sceCompanionHttpdSetBody)
+PS4_HLE_STUB(sceCompanionHttpdSetStatus)
+PS4_HLE_STUB(sceCompanionHttpdGet2ndScreenStatus)
+PS4_HLE_STUB(sceCompanionHttpdGetUserId)
+PS4_HLE_STUB(sceCompanionHttpdOptParamInitialize)
 
 void shim_sceHttpSetResolveTimeOut(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceHttpSetResolveTimeOut((int32_t)ctx->rdi, (uint32_t)ctx->rsi);

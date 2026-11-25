@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #include "ps4_keyboard.h"
+#include "ps4_hle_stub.h"
 #include <pthread.h>
 #include <sys/time.h>
 #include <string.h>
@@ -436,3 +437,23 @@ void shim_sceKeyboardGetHandle(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceKeyboardGetHandle((int32_t)ctx->rdi, (int32_t)ctx->rsi, (int32_t)ctx->rdx);
     SHIM_RETURN();
 }
+
+// Device management, raw reads and the debug keyboard: stubs in shadPS4 as well.
+PS4_HLE_STUB(sceKeyboardConnectPort)
+PS4_HLE_STUB(sceKeyboardDebugGetDeviceId)
+PS4_HLE_STUB(sceKeyboardDeviceOpen)
+PS4_HLE_STUB(sceKeyboardDisconnectDevice)
+PS4_HLE_STUB(sceKeyboardDisconnectPort)
+PS4_HLE_STUB(sceKeyboardGetConnection)
+PS4_HLE_STUB(sceKeyboardGetDeviceInfo)
+PS4_HLE_STUB(sceKeyboardMbusInit)
+PS4_HLE_STUB(sceKeyboardRead)
+PS4_HLE_STUB(sceKeyboardSetProcessFocus)
+PS4_HLE_STUB(sceKeyboardSetProcessPrivilege)
+PS4_HLE_STUB(Func_97BEA3A6D1DF8B33)
+PS4_HLE_STUB(sceDbgKeyboardClose)
+PS4_HLE_STUB(sceDbgKeyboardGetKey2Char)
+PS4_HLE_STUB(sceDbgKeyboardInit)
+PS4_HLE_STUB(sceDbgKeyboardOpen)
+PS4_HLE_STUB(sceDbgKeyboardRead)
+PS4_HLE_STUB(sceDbgKeyboardReadState)

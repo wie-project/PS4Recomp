@@ -65,6 +65,7 @@ var boundaryRuntimeSources = []string{
 	"modules/libkernel/ps4_kernel_sys.c",
 	"modules/libkernel/ps4_kernel_modules.c",
 	"modules/libkernel/ps4_sysmodule.c",
+	"modules/libkernel/ps4_sysmodule_lib.c",
 }
 
 // liftedHelperFns are guest functions around one instruction the lifter lowers to a runtime

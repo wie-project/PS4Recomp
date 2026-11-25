@@ -452,15 +452,23 @@ func Execute(args []string) (err error) {
 	}
 
 	runtimeOutDir := filepath.Join(cfg.OutDir, "runtime")
+	var runtimeSrc fs.FS
 	if runtimeDir, err := findRuntimeDir(); err == nil {
 		if err := copyDir(runtimeDir, runtimeOutDir); err != nil {
 			return fmt.Errorf("failed to copy runtime files: %w", err)
 		}
+		runtimeSrc = os.DirFS(runtimeDir)
 	} else {
 		fmt.Fprintf(logw, "             Using embedded runtime files (standalone mode)...\n")
 		if err := recompruntime.Extract(runtimeOutDir); err != nil {
 			return fmt.Errorf("failed to extract embedded runtime: %w", err)
 		}
+		runtimeSrc = recompruntime.FS
+	}
+	// An earlier build of this output directory may hold runtime sources that have since been
+	// removed; every source found there is compiled, so they must go.
+	if err := pruneStaleRuntime(runtimeOutDir, runtimeSrc); err != nil {
+		return fmt.Errorf("failed to remove stale runtime files: %w", err)
 	}
 
 	var runtimeCFiles []string
@@ -1304,6 +1312,60 @@ func copyDir(src, dst string) error {
 		}
 		return copyFile(path, target)
 	})
+}
+
+// runtimeSourceExts are the extensions of runtime sources and headers; the build compiles
+// every source under the runtime directory and includes headers from it.
+var runtimeSourceExts = map[string]bool{
+	".c": true, ".m": true, ".mm": true, ".cpp": true, ".cc": true, ".s": true, ".S": true,
+	".h": true, ".hpp": true, ".inc": true,
+}
+
+// pruneStaleRuntime removes from dst (a runtime tree copied from src earlier) the sources and
+// headers that src no longer has, and the objects (.o, .o.d) of sources that are gone. Objects
+// of current sources stay, so the build remains incremental; other files are left alone.
+func pruneStaleRuntime(dst string, src fs.FS) error {
+	return filepath.WalkDir(dst, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) && path == dst {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(dst, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		name := d.Name()
+		var stale bool
+		switch {
+		case strings.HasSuffix(name, ".o.d"):
+			stale = !hasRuntimeSource(src, strings.TrimSuffix(rel, ".o.d"))
+		case strings.HasSuffix(name, ".o"):
+			stale = !hasRuntimeSource(src, strings.TrimSuffix(rel, ".o"))
+		case runtimeSourceExts[filepath.Ext(name)]:
+			_, statErr := fs.Stat(src, rel)
+			stale = errors.Is(statErr, fs.ErrNotExist)
+		}
+		if !stale {
+			return nil
+		}
+		return os.Remove(path)
+	})
+}
+
+// hasRuntimeSource reports whether src has a compilable source for the object stem.
+func hasRuntimeSource(src fs.FS, stem string) bool {
+	for _, ext := range []string{".c", ".m", ".mm", ".cpp", ".cc", ".s", ".S"} {
+		if _, err := fs.Stat(src, stem+ext); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func copyDirFiltered(src, dst string) error {

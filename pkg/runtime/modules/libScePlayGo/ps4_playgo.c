@@ -1,17 +1,31 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+// libScePlayGo, ported from shadPS4 (src/core/libraries/playgo, file_format/playgo_chunk).
+// An installed game has every chunk locally, so PlayGo reports all chunks as fully downloaded;
+// the chunk table and sizes come from /app0/sce_sys/playgo-chunk.dat. The PlayGo dialog is a
+// common-dialog state machine that finishes as soon as it is updated, with the result that lets
+// the game proceed.
+
 #include "ps4_playgo.h"
+#include "ps4_hle_stub.h"
+#include "ps4_system_service.h"
 #include "ps4_vfs.h"
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
+#include <time.h>
 
 #define PLAYGO_MAGIC 0x6F676C70U // 'plgo'
 
+// ---- playgo-chunk.dat ----
+
 #pragma pack(push, 1)
-typedef struct chunk_t {
+typedef struct PlaygoSection {
     uint32_t offset;
     uint32_t length;
-} chunk_t;
+} PlaygoSection;
 
 typedef struct PlaygoHeader {
     uint32_t magic;
@@ -27,50 +41,138 @@ typedef struct PlaygoHeader {
     uint32_t sdk_version;
     uint16_t disc_count;
     uint16_t layer_bmp;
-    uint8_t  reserved[32];
-    char     content_id[128];
-    chunk_t  chunk_attrs;
-    chunk_t  chunk_mchunks;
-    chunk_t  chunk_labels;
-    chunk_t  mchunk_attrs;
-    chunk_t  scenario_attrs;
-    chunk_t  scenario_chunks;
-    chunk_t  scenario_labels;
-    chunk_t  inner_mchunk_attrs;
+    uint8_t reserved[32];
+    char content_id[128];
+    PlaygoSection chunk_attrs;
+    PlaygoSection chunk_mchunks;
+    PlaygoSection chunk_labels;
+    PlaygoSection mchunk_attrs;
+    PlaygoSection scenario_attrs;
+    PlaygoSection scenario_chunks;
+    PlaygoSection scenario_labels;
+    PlaygoSection inner_mchunk_attrs;
 } PlaygoHeader;
 
-typedef struct playgo_chunk_attr_entry_t {
-    uint8_t  req_locus;
-    uint8_t  reserved;
+typedef struct PlaygoChunkAttr {
+    uint8_t flag;
+    uint8_t image_disc_layer_no;
+    uint8_t req_locus;
+    uint8_t unk[11];
     uint16_t mchunk_count;
-    uint32_t mchunks_offset;
-    uint32_t label_offset;
     uint64_t language_mask;
-} playgo_chunk_attr_entry_t;
+    uint32_t mchunks_offset; // into chunk_mchunks
+    uint32_t label_offset;   // into chunk_labels
+} PlaygoChunkAttr;
 
-typedef struct playgo_mchunk_attr_entry_t {
-    uint8_t  image_disc_layer_no;
-    uint8_t  flags;
-    uint16_t reserved;
-    uint32_t offset;
-    uint64_t size;
-} playgo_mchunk_attr_entry_t;
+typedef struct PlaygoMchunkAttr {
+    uint64_t loc;  // offset:48, image_no at bits 56..59
+    uint64_t size; // size:48
+} PlaygoMchunkAttr;
 #pragma pack(pop)
 
-typedef struct PlaygoChunkInfo {
+_Static_assert(sizeof(PlaygoHeader) == 0x100, "PlaygoHeader layout");
+_Static_assert(sizeof(PlaygoChunkAttr) == 32, "playgo_chunk_attr_entry_t layout");
+_Static_assert(sizeof(PlaygoMchunkAttr) == 16, "playgo_mchunk_attr_entry_t layout");
+
+typedef struct PlaygoChunk {
     uint8_t req_locus;
     uint64_t language_mask;
     uint64_t total_size;
-} PlaygoChunkInfo;
+} PlaygoChunk;
 
-static const OrbisPlayGoHandle kValidPlayGoHandle = 1;
+static const OrbisPlayGoHandle kPlayGoHandle = 1;
 
-static bool g_playgo_initialized = false;
-static uint32_t g_playgo_file_size = 0;
-static uint16_t g_playgo_chunk_count = 0;
-static PlaygoChunkInfo *g_playgo_chunks = NULL;
-static OrbisPlayGoInstallSpeed g_playgo_speed = ORBIS_PLAYGO_INSTALL_SPEED_FULL;
-static OrbisPlayGoLanguageMask g_playgo_lang_mask = 0xFFFFFFFFFFFFFFFFULL;
+static pthread_mutex_t g_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool g_initialized;
+static uint32_t g_file_size; // header file_size: 0 when the game has no PlayGo data
+static uint16_t g_chunk_count;
+static PlaygoChunk *g_chunks;
+static OrbisPlayGoInstallSpeed g_speed = ORBIS_PLAYGO_INSTALL_SPEED_FULL;
+static int64_t g_speed_tick; // ms of the last SetInstallSpeed
+static OrbisPlayGoLanguageMask g_lang_mask;
+
+static int64_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static bool section_ok(const PlaygoSection *s, size_t size) {
+    return (uint64_t)s->offset + s->length <= size;
+}
+
+// PlaygoFile::Open. The header counts as read once its magic matches; the chunk list needs the
+// chunk sections to be inside the file.
+static void parse_playgo(const uint8_t *data, size_t size) {
+    if (size < sizeof(PlaygoHeader)) {
+        return;
+    }
+    PlaygoHeader hdr;
+    memcpy(&hdr, data, sizeof(hdr));
+    if (hdr.magic != PLAYGO_MAGIC) {
+        return;
+    }
+    g_file_size = hdr.file_size;
+    if (!section_ok(&hdr.chunk_attrs, size) || !section_ok(&hdr.chunk_mchunks, size) ||
+        !section_ok(&hdr.chunk_labels, size) || !section_ok(&hdr.mchunk_attrs, size) ||
+        (uint64_t)hdr.chunk_count * sizeof(PlaygoChunkAttr) > hdr.chunk_attrs.length) {
+        fprintf(stderr, "[ps4-playgo] Could not parse PlayGo file\n");
+        return;
+    }
+    g_chunks = calloc(hdr.chunk_count ? hdr.chunk_count : 1, sizeof(PlaygoChunk));
+    if (!g_chunks) {
+        return;
+    }
+    g_chunk_count = hdr.chunk_count;
+    const uint32_t mchunk_attr_count = hdr.mchunk_attrs.length / sizeof(PlaygoMchunkAttr);
+    for (uint16_t i = 0; i < hdr.chunk_count; i++) {
+        PlaygoChunkAttr a;
+        memcpy(&a, data + hdr.chunk_attrs.offset + (size_t)i * sizeof(a), sizeof(a));
+        g_chunks[i].req_locus = a.req_locus;
+        g_chunks[i].language_mask = a.language_mask;
+        uint64_t total = 0;
+        if ((uint64_t)a.mchunks_offset + (uint64_t)a.mchunk_count * 2 <= hdr.chunk_mchunks.length) {
+            for (uint16_t j = 0; j < a.mchunk_count; j++) {
+                uint16_t id;
+                memcpy(&id, data + hdr.chunk_mchunks.offset + a.mchunks_offset + (size_t)j * 2, 2);
+                if (id < mchunk_attr_count) {
+                    PlaygoMchunkAttr m;
+                    memcpy(&m, data + hdr.mchunk_attrs.offset + (size_t)id * sizeof(m), sizeof(m));
+                    total += m.size & 0xFFFFFFFFFFFFull;
+                }
+            }
+        }
+        g_chunks[i].total_size = total;
+    }
+}
+
+static void load_playgo_file(void) {
+    char path[1024];
+    if (ps4_vfs_resolve("/app0/sce_sys/playgo-chunk.dat", path, sizeof(path)) != 0) {
+        fprintf(stderr, "[ps4-playgo] Could not open PlayGo file\n");
+        return;
+    }
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "[ps4-playgo] Could not open PlayGo file\n");
+        return;
+    }
+    uint8_t *data = NULL;
+    long size = -1;
+    if (fseek(f, 0, SEEK_END) == 0 && (size = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0) {
+        data = malloc((size_t)size);
+        if (data && fread(data, 1, (size_t)size, f) == (size_t)size) {
+            parse_playgo(data, (size_t)size);
+        }
+    }
+    free(data);
+    fclose(f);
+}
+
+// scePlayGoConvertLanguage: system language n is bit 63 - n.
+static OrbisPlayGoLanguageMask convert_language(int32_t system_lang) {
+    return system_lang >= 0 && system_lang < 48 ? 1ull << (63 - system_lang) : 0;
+}
 
 int32_t scePlayGoInitialize(const OrbisPlayGoInitParams *params) {
     if (!params || !params->bufAddr) {
@@ -79,102 +181,38 @@ int32_t scePlayGoInitialize(const OrbisPlayGoInitParams *params) {
     if (params->bufSize < 0x200000) {
         return ORBIS_PLAYGO_ERROR_BAD_SIZE;
     }
-    if (g_playgo_initialized) {
+    pthread_mutex_lock(&g_mutex);
+    if (g_initialized) {
+        pthread_mutex_unlock(&g_mutex);
         return ORBIS_PLAYGO_ERROR_ALREADY_INITIALIZED;
     }
-
-    g_playgo_file_size = 0;
-    g_playgo_chunk_count = 0;
-    if (g_playgo_chunks) {
-        free(g_playgo_chunks);
-        g_playgo_chunks = NULL;
-    }
-
-    // Attempt to locate and parse /app0/sce_sys/playgo-chunk.dat
-    char resolved[1024];
-    const char *playgo_path = "/app0/sce_sys/playgo-chunk.dat";
-    if (ps4_vfs_resolve(playgo_path, resolved, sizeof(resolved)) == 0) {
-        playgo_path = resolved;
-    }
-
-    FILE *f = fopen(playgo_path, "rb");
-    if (!f) {
-        // Try fallback to nested sce_sys path if present
-        if (ps4_vfs_resolve("/app0/sce_sys/sce_sys/playgo-chunk.dat", resolved, sizeof(resolved)) == 0) {
-            f = fopen(resolved, "rb");
-        }
-    }
-
-    if (f) {
-        fseek(f, 0, SEEK_END);
-        long sz = ftell(f);
-        fseek(f, 0, SEEK_SET);
-
-        if (sz >= (long)sizeof(PlaygoHeader)) {
-            uint8_t *data = (uint8_t *)malloc(sz);
-            if (data && fread(data, 1, sz, f) == (size_t)sz) {
-                const PlaygoHeader *hdr = (const PlaygoHeader *)data;
-                if (hdr->magic == PLAYGO_MAGIC && hdr->chunk_count > 0) {
-                    g_playgo_file_size = hdr->file_size;
-                    g_playgo_chunk_count = hdr->chunk_count;
-                    g_playgo_chunks = (PlaygoChunkInfo *)calloc(hdr->chunk_count, sizeof(PlaygoChunkInfo));
-
-                    if (hdr->chunk_attrs.offset + hdr->chunk_attrs.length <= (uint32_t)sz &&
-                        hdr->mchunk_attrs.offset + hdr->mchunk_attrs.length <= (uint32_t)sz &&
-                        hdr->chunk_mchunks.offset + hdr->chunk_mchunks.length <= (uint32_t)sz) {
-                        const playgo_chunk_attr_entry_t *attrs =
-                            (const playgo_chunk_attr_entry_t *)(data + hdr->chunk_attrs.offset);
-                        const uint16_t *mchunks_table =
-                            (const uint16_t *)(data + hdr->chunk_mchunks.offset);
-                        const playgo_mchunk_attr_entry_t *mchunk_attrs =
-                            (const playgo_mchunk_attr_entry_t *)(data + hdr->mchunk_attrs.offset);
-
-                        for (uint16_t i = 0; i < hdr->chunk_count; i++) {
-                            g_playgo_chunks[i].req_locus = attrs[i].req_locus;
-                            g_playgo_chunks[i].language_mask = attrs[i].language_mask;
-                            uint64_t total_size = 0;
-                            uint16_t mc = attrs[i].mchunk_count;
-                            if (mc != 0 && (attrs[i].mchunks_offset + mc * sizeof(uint16_t) <= hdr->chunk_mchunks.length)) {
-                                const uint16_t *mc_list = (const uint16_t *)((const uint8_t *)mchunks_table + attrs[i].mchunks_offset);
-                                for (uint16_t j = 0; j < mc; j++) {
-                                    uint16_t mchunk_id = mc_list[j];
-                                    if (mchunk_id < hdr->mchunk_count) {
-                                        total_size += mchunk_attrs[mchunk_id].size;
-                                    }
-                                }
-                            }
-                            g_playgo_chunks[i].total_size = total_size;
-                        }
-                    }
-                }
-            }
-            if (data) free(data);
-        }
-        fclose(f);
-    }
-
-    g_playgo_initialized = true;
-    g_playgo_speed = ORBIS_PLAYGO_INSTALL_SPEED_FULL;
-    g_playgo_lang_mask = 0xFFFFFFFFFFFFFFFFULL;
-
-    printf("[ps4-playgo] scePlayGoInitialize: parsed %u chunks (file_size=%u)\n",
-           g_playgo_chunk_count, g_playgo_file_size);
-    fflush(stdout);
-
+    g_initialized = true;
+    g_file_size = 0;
+    g_chunk_count = 0;
+    g_chunks = NULL;
+    g_speed = ORBIS_PLAYGO_INSTALL_SPEED_FULL;
+    g_speed_tick = 0;
+    load_playgo_file();
+    int32_t lang = 0;
+    sceSystemServiceParamGetInt(ORBIS_SYSTEM_SERVICE_PARAM_ID_LANG, &lang);
+    g_lang_mask = convert_language(lang);
+    fprintf(stderr, "[ps4-playgo] scePlayGoInitialize: %u chunks (file_size=%u)\n", g_chunk_count, g_file_size);
+    pthread_mutex_unlock(&g_mutex);
     return 0;
 }
 
 int32_t scePlayGoTerminate(void) {
-    if (!g_playgo_initialized) {
+    pthread_mutex_lock(&g_mutex);
+    if (!g_initialized) {
+        pthread_mutex_unlock(&g_mutex);
         return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
     }
-    g_playgo_initialized = false;
-    if (g_playgo_chunks) {
-        free(g_playgo_chunks);
-        g_playgo_chunks = NULL;
-    }
-    g_playgo_chunk_count = 0;
-    g_playgo_file_size = 0;
+    g_initialized = false;
+    free(g_chunks);
+    g_chunks = NULL;
+    g_chunk_count = 0;
+    g_file_size = 0;
+    pthread_mutex_unlock(&g_mutex);
     return 0;
 }
 
@@ -185,241 +223,29 @@ int32_t scePlayGoOpen(OrbisPlayGoHandle *handle, const void *params) {
     if (params) {
         return ORBIS_PLAYGO_ERROR_INVALID_ARGUMENT;
     }
-    if (!g_playgo_initialized) {
+    if (!g_initialized) {
         return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
     }
-    if (g_playgo_file_size == 0) {
+    if (g_file_size == 0) {
         return ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO;
     }
-
-    *handle = kValidPlayGoHandle;
+    *handle = kPlayGoHandle;
     return 0;
 }
 
 int32_t scePlayGoClose(OrbisPlayGoHandle handle) {
-    if (handle != kValidPlayGoHandle) {
+    if (handle != kPlayGoHandle) {
         return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
     }
-    if (!g_playgo_initialized) {
+    if (!g_initialized) {
         return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
     }
     return 0;
 }
 
-int32_t scePlayGoGetProgress(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count, OrbisPlayGoProgress *outProgress) {
-    if (handle != kValidPlayGoHandle) {
-        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
-    }
-    if (!chunkIds || !outProgress) {
-        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
-    }
-    if (count == 0) {
-        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
-    }
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-    if (g_playgo_file_size == 0) {
-        return ORBIS_PLAYGO_ERROR_BAD_CHUNK_ID;
-    }
-
-    uint64_t total = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        uint32_t cid = chunkIds[i];
-        if (cid < g_playgo_chunk_count) {
-            total += g_playgo_chunks ? g_playgo_chunks[cid].total_size : 100000000ULL;
-        } else {
-            return ORBIS_PLAYGO_ERROR_BAD_CHUNK_ID;
-        }
-    }
-
-    outProgress->progressSize = total;
-    outProgress->totalSize = total;
-    return 0;
-}
-
-int32_t scePlayGoGetLocus(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count, int8_t *outLocus) {
-    if (handle != kValidPlayGoHandle) {
-        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
-    }
-    if (!chunkIds || !outLocus) {
-        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
-    }
-    if (count == 0) {
-        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
-    }
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-    if (g_playgo_file_size == 0) {
-        return ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO;
-    }
-
-    for (uint32_t i = 0; i < count; i++) {
-        if (chunkIds[i] < g_playgo_chunk_count) {
-            outLocus[i] = (int8_t)ORBIS_PLAYGO_LOCUS_LOCAL_FAST;
-        } else {
-            outLocus[i] = (int8_t)ORBIS_PLAYGO_LOCUS_NOT_DOWNLOADED;
-            return ORBIS_PLAYGO_ERROR_BAD_CHUNK_ID;
-        }
-    }
-    return 0;
-}
-
-int32_t scePlayGoGetLanguageMask(OrbisPlayGoHandle handle, OrbisPlayGoLanguageMask *outMask) {
-    if (handle != kValidPlayGoHandle) {
-        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
-    }
-    if (!outMask) {
-        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
-    }
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-
-    *outMask = g_playgo_lang_mask;
-    return 0;
-}
-
-int32_t scePlayGoSetLanguageMask(OrbisPlayGoHandle handle, OrbisPlayGoLanguageMask mask) {
-    if (handle != kValidPlayGoHandle) {
-        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
-    }
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-
-    g_playgo_lang_mask = mask;
-    return 0;
-}
-
-int32_t scePlayGoGetInstallSpeed(OrbisPlayGoHandle handle, int32_t *outSpeed) {
-    if (handle != kValidPlayGoHandle) {
-        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
-    }
-    if (!outSpeed) {
-        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
-    }
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-
-    *outSpeed = (int32_t)g_playgo_speed;
-    return 0;
-}
-
-int32_t scePlayGoSetInstallSpeed(OrbisPlayGoHandle handle, int32_t speed) {
-    if (handle != kValidPlayGoHandle) {
-        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
-    }
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-    if (speed < 0 || speed > 2) {
-        return ORBIS_PLAYGO_ERROR_INVALID_ARGUMENT;
-    }
-
-    g_playgo_speed = (OrbisPlayGoInstallSpeed)speed;
-    return 0;
-}
-
-int32_t scePlayGoGetToDoList(OrbisPlayGoHandle handle, OrbisPlayGoToDo *outToDoList, uint32_t maxEntries, uint32_t *outNumEntries) {
-    if (handle != kValidPlayGoHandle) {
-        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
-    }
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-    if (!outNumEntries || (maxEntries != 0 && !outToDoList)) {
-        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
-    }
-    if (g_playgo_file_size == 0) {
-        return ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO;
-    }
-
-    *outNumEntries = 0;
-    return 0;
-}
-
-int32_t scePlayGoSetToDoList(OrbisPlayGoHandle handle, const OrbisPlayGoToDo *toDoList, uint32_t numEntries) {
-    if (handle != kValidPlayGoHandle) {
-        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
-    }
-    if (!toDoList) {
-        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
-    }
-    if (numEntries == 0) {
-        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
-    }
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-    if (g_playgo_file_size == 0) {
-        return ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO;
-    }
-    if (numEntries > g_playgo_chunk_count) {
-        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
-    }
-
-    for (uint32_t i = 0; i < numEntries; i++) {
-        if (toDoList[i].chunkId >= g_playgo_chunk_count) {
-            return ORBIS_PLAYGO_ERROR_BAD_CHUNK_ID;
-        }
-        switch (toDoList[i].locus) {
-        case ORBIS_PLAYGO_LOCUS_NOT_DOWNLOADED:
-        case ORBIS_PLAYGO_LOCUS_LOCAL_SLOW:
-        case ORBIS_PLAYGO_LOCUS_LOCAL_FAST:
-            break;
-        default:
-            return ORBIS_PLAYGO_ERROR_BAD_LOCUS;
-        }
-    }
-
-    // The local runtime has no download queue; all installed chunks are already available.
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-    return 0;
-}
-
-int32_t scePlayGoGetEta(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count, OrbisPlayGoEta *outEta) {
-    if (handle != kValidPlayGoHandle) {
-        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
-    }
-    if (!chunkIds || !outEta) {
-        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
-    }
-    if (count == 0) {
-        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
-    }
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-
-    for (uint32_t i = 0; i < count; i++) {
-        outEta[i] = 0; // all is loaded
-    }
-    return 0;
-}
-
-int32_t scePlayGoPrefetch(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count) {
-    if (handle != kValidPlayGoHandle) {
-        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
-    }
-    if (!chunkIds) {
-        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
-    }
-    if (count == 0) {
-        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
-    }
-    if (!g_playgo_initialized) {
-        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
-    }
-    return 0;
-}
-
-int32_t scePlayGoGetChunkId(OrbisPlayGoHandle handle, OrbisPlayGoChunkId *outChunkIdList, uint32_t numberOfEntries, uint32_t *outEntries) {
-    if (handle != kValidPlayGoHandle) {
+int32_t scePlayGoGetChunkId(OrbisPlayGoHandle handle, OrbisPlayGoChunkId *outChunkIdList, uint32_t numberOfEntries,
+                            uint32_t *outEntries) {
+    if (handle != kPlayGoHandle) {
         return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
     }
     if (!outEntries) {
@@ -428,30 +254,221 @@ int32_t scePlayGoGetChunkId(OrbisPlayGoHandle handle, OrbisPlayGoChunkId *outChu
     if (outChunkIdList && numberOfEntries == 0) {
         return ORBIS_PLAYGO_ERROR_BAD_SIZE;
     }
-    if (!g_playgo_initialized) {
+    if (!g_initialized) {
         return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
     }
-
-    if (g_playgo_file_size == 0) {
+    if (g_file_size == 0) {
         *outEntries = 0;
         return 0;
     }
-
     if (!outChunkIdList) {
-        *outEntries = g_playgo_chunk_count;
+        *outEntries = g_chunk_count;
         return 0;
     }
-
-    if (numberOfEntries > g_playgo_chunk_count) {
-        numberOfEntries = g_playgo_chunk_count;
+    if (numberOfEntries > g_chunk_count) {
+        numberOfEntries = g_chunk_count;
     }
-
     for (uint32_t i = 0; i < numberOfEntries; i++) {
         outChunkIdList[i] = (OrbisPlayGoChunkId)i;
     }
     *outEntries = numberOfEntries;
     return 0;
 }
+
+int32_t scePlayGoGetEta(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count,
+                        OrbisPlayGoEta *outEta) {
+    if (handle != kPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!chunkIds || !outEta) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (count == 0) {
+        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
+    }
+    *outEta = 0; // one estimate for all the chunks: everything is installed
+    return 0;
+}
+
+int32_t scePlayGoGetInstallSpeed(OrbisPlayGoHandle handle, int32_t *outSpeed) {
+    if (handle != kPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!outSpeed) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (!g_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    pthread_mutex_lock(&g_mutex);
+    // A suspended installation resumes at trickle speed after 30 seconds.
+    if (g_speed == ORBIS_PLAYGO_INSTALL_SPEED_SUSPENDED && now_ms() - g_speed_tick > 30 * 1000) {
+        g_speed = ORBIS_PLAYGO_INSTALL_SPEED_TRICKLE;
+    }
+    *outSpeed = (int32_t)g_speed;
+    pthread_mutex_unlock(&g_mutex);
+    return 0;
+}
+
+int32_t scePlayGoSetInstallSpeed(OrbisPlayGoHandle handle, int32_t speed) {
+    if (handle != kPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!g_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    if (speed < ORBIS_PLAYGO_INSTALL_SPEED_SUSPENDED || speed > ORBIS_PLAYGO_INSTALL_SPEED_FULL) {
+        return ORBIS_PLAYGO_ERROR_INVALID_ARGUMENT;
+    }
+    pthread_mutex_lock(&g_mutex);
+    g_speed = (OrbisPlayGoInstallSpeed)speed;
+    g_speed_tick = now_ms();
+    pthread_mutex_unlock(&g_mutex);
+    return 0;
+}
+
+int32_t scePlayGoGetLanguageMask(OrbisPlayGoHandle handle, OrbisPlayGoLanguageMask *outMask) {
+    if (handle != kPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!outMask) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (!g_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    *outMask = g_lang_mask;
+    return 0;
+}
+
+int32_t scePlayGoSetLanguageMask(OrbisPlayGoHandle handle, OrbisPlayGoLanguageMask mask) {
+    if (handle != kPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!g_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    g_lang_mask = mask;
+    return 0;
+}
+
+int32_t scePlayGoGetLocus(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count,
+                          int8_t *outLocus) {
+    if (handle != kPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!chunkIds || !outLocus) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (count == 0) {
+        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
+    }
+    if (!g_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    if (g_file_size == 0) {
+        return ORBIS_PLAYGO_ERROR_NOT_SUPPORT_PLAYGO;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        if (chunkIds[i] >= g_chunk_count) {
+            outLocus[i] = ORBIS_PLAYGO_LOCUS_NOT_DOWNLOADED;
+            return ORBIS_PLAYGO_ERROR_BAD_CHUNK_ID;
+        }
+        outLocus[i] = ORBIS_PLAYGO_LOCUS_LOCAL_FAST;
+    }
+    return 0;
+}
+
+int32_t scePlayGoGetProgress(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count,
+                             OrbisPlayGoProgress *outProgress) {
+    if (handle != kPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!chunkIds || !outProgress) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (count == 0) {
+        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
+    }
+    if (!g_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    if (g_file_size == 0) {
+        return ORBIS_PLAYGO_ERROR_BAD_CHUNK_ID;
+    }
+    outProgress->progressSize = 0;
+    outProgress->totalSize = 0;
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (chunkIds[i] >= g_chunk_count) {
+            return ORBIS_PLAYGO_ERROR_BAD_CHUNK_ID;
+        }
+        total += g_chunks[chunkIds[i]].total_size;
+    }
+    outProgress->progressSize = total;
+    outProgress->totalSize = total;
+    return 0;
+}
+
+int32_t scePlayGoGetToDoList(OrbisPlayGoHandle handle, OrbisPlayGoToDo *outToDoList, uint32_t numberOfEntries,
+                             uint32_t *outEntries) {
+    if (handle != kPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!outToDoList || !outEntries) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (numberOfEntries == 0) {
+        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
+    }
+    if (!g_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    *outEntries = 0; // nothing left to download
+    return 0;
+}
+
+int32_t scePlayGoSetToDoList(OrbisPlayGoHandle handle, const OrbisPlayGoToDo *todoList, uint32_t numberOfEntries) {
+    if (handle != kPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!todoList) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (numberOfEntries == 0) {
+        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
+    }
+    if (!g_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    return 0; // every chunk is installed already
+}
+
+int32_t scePlayGoPrefetch(OrbisPlayGoHandle handle, const OrbisPlayGoChunkId *chunkIds, uint32_t count,
+                          int32_t minimumLocus) {
+    if (handle != kPlayGoHandle) {
+        return ORBIS_PLAYGO_ERROR_BAD_HANDLE;
+    }
+    if (!chunkIds) {
+        return ORBIS_PLAYGO_ERROR_BAD_POINTER;
+    }
+    if (count == 0) {
+        return ORBIS_PLAYGO_ERROR_BAD_SIZE;
+    }
+    if (!g_initialized) {
+        return ORBIS_PLAYGO_ERROR_NOT_INITIALIZED;
+    }
+    switch (minimumLocus) {
+    case ORBIS_PLAYGO_LOCUS_NOT_DOWNLOADED:
+    case ORBIS_PLAYGO_LOCUS_LOCAL_SLOW:
+    case ORBIS_PLAYGO_LOCUS_LOCAL_FAST:
+        return 0;
+    default:
+        return ORBIS_PLAYGO_ERROR_BAD_LOCUS;
+    }
+}
+
+// ---- PlayGo dialog ----
 
 static pthread_mutex_t g_playgo_dialog_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int32_t g_playgo_dialog_status = 0; // COMMON_DIALOG_STATUS_NONE
@@ -547,171 +564,86 @@ int32_t scePlayGoDialogGetResult(const void *result) {
     return 0;
 }
 
-// Guest ABI shims
+
+// ---- Guest ABI ----
+
+#define GPTR(type, addr) ((addr) ? (type)(ctx->mem_base + (addr)) : (type)NULL)
+#define RET(v)                                      \
+    do {                                            \
+        ctx->rax = (uint64_t)(int64_t)(int32_t)(v); \
+        SHIM_RETURN();                              \
+    } while (0)
+
 void shim_scePlayGoInitialize(GuestContext *ctx) {
-    uint64_t paramsGuest = ctx->rdi;
-    const OrbisPlayGoInitParams *params = paramsGuest ? (const OrbisPlayGoInitParams *)(ctx->mem_base + paramsGuest) : NULL;
-    int32_t ret = scePlayGoInitialize(params);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
+    RET(scePlayGoInitialize(GPTR(const OrbisPlayGoInitParams *, ctx->rdi)));
 }
 
 void shim_scePlayGoTerminate(GuestContext *ctx) {
-    int32_t ret = scePlayGoTerminate();
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
+    RET(scePlayGoTerminate());
 }
 
 void shim_scePlayGoOpen(GuestContext *ctx) {
-    uint64_t handleGuest = ctx->rdi;
-    uint64_t paramsGuest = ctx->rsi;
-    OrbisPlayGoHandle *handle = handleGuest ? (OrbisPlayGoHandle *)(ctx->mem_base + handleGuest) : NULL;
-    const void *params = paramsGuest ? (const void *)(ctx->mem_base + paramsGuest) : NULL;
-
-    int32_t ret = scePlayGoOpen(handle, params);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
+    RET(scePlayGoOpen(GPTR(OrbisPlayGoHandle *, ctx->rdi), GPTR(const void *, ctx->rsi)));
 }
 
 void shim_scePlayGoClose(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    int32_t ret = scePlayGoClose(handle);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_scePlayGoGetProgress(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    uint64_t chunkIdsGuest = ctx->rsi;
-    uint32_t count = (uint32_t)ctx->rdx;
-    uint64_t outProgressGuest = ctx->rcx;
-
-    const OrbisPlayGoChunkId *chunkIds = chunkIdsGuest ? (const OrbisPlayGoChunkId *)(ctx->mem_base + chunkIdsGuest) : NULL;
-    OrbisPlayGoProgress *outProgress = outProgressGuest ? (OrbisPlayGoProgress *)(ctx->mem_base + outProgressGuest) : NULL;
-
-    int32_t ret = scePlayGoGetProgress(handle, chunkIds, count, outProgress);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_scePlayGoGetLocus(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    uint64_t chunkIdsGuest = ctx->rsi;
-    uint32_t count = (uint32_t)ctx->rdx;
-    uint64_t outLocusGuest = ctx->rcx;
-
-    const OrbisPlayGoChunkId *chunkIds = chunkIdsGuest ? (const OrbisPlayGoChunkId *)(ctx->mem_base + chunkIdsGuest) : NULL;
-    int8_t *outLocus = outLocusGuest ? (int8_t *)(ctx->mem_base + outLocusGuest) : NULL;
-
-    int32_t ret = scePlayGoGetLocus(handle, chunkIds, count, outLocus);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_scePlayGoGetLanguageMask(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    uint64_t outMaskGuest = ctx->rsi;
-    OrbisPlayGoLanguageMask *outMask = outMaskGuest ? (OrbisPlayGoLanguageMask *)(ctx->mem_base + outMaskGuest) : NULL;
-
-    int32_t ret = scePlayGoGetLanguageMask(handle, outMask);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_scePlayGoSetLanguageMask(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    OrbisPlayGoLanguageMask mask = (OrbisPlayGoLanguageMask)ctx->rsi;
-
-    int32_t ret = scePlayGoSetLanguageMask(handle, mask);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_scePlayGoGetInstallSpeed(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    uint64_t outSpeedGuest = ctx->rsi;
-    int32_t *outSpeed = outSpeedGuest ? (int32_t *)(ctx->mem_base + outSpeedGuest) : NULL;
-
-    int32_t ret = scePlayGoGetInstallSpeed(handle, outSpeed);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_scePlayGoSetInstallSpeed(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    int32_t speed = (int32_t)ctx->rsi;
-
-    int32_t ret = scePlayGoSetInstallSpeed(handle, speed);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_scePlayGoGetToDoList(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    uint64_t outToDoGuest = ctx->rsi;
-    uint32_t maxEntries = (uint32_t)ctx->rdx;
-    uint64_t outNumGuest = ctx->rcx;
-
-    OrbisPlayGoToDo *outToDo = outToDoGuest ? (OrbisPlayGoToDo *)(ctx->mem_base + outToDoGuest) : NULL;
-    uint32_t *outNum = outNumGuest ? (uint32_t *)(ctx->mem_base + outNumGuest) : NULL;
-
-    int32_t ret = scePlayGoGetToDoList(handle, outToDo, maxEntries, outNum);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_scePlayGoSetToDoList(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    uint64_t toDoGuest = ctx->rsi;
-    uint32_t numEntries = (uint32_t)ctx->rdx;
-
-    const OrbisPlayGoToDo *toDo =
-        toDoGuest ? (const OrbisPlayGoToDo *)(ctx->mem_base + toDoGuest) : NULL;
-
-    int32_t ret = scePlayGoSetToDoList(handle, toDo, numEntries);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_scePlayGoGetEta(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    uint64_t chunkIdsGuest = ctx->rsi;
-    uint32_t count = (uint32_t)ctx->rdx;
-    uint64_t outEtaGuest = ctx->rcx;
-
-    const OrbisPlayGoChunkId *chunkIds = chunkIdsGuest ? (const OrbisPlayGoChunkId *)(ctx->mem_base + chunkIdsGuest) : NULL;
-    OrbisPlayGoEta *outEta = outEtaGuest ? (OrbisPlayGoEta *)(ctx->mem_base + outEtaGuest) : NULL;
-
-    int32_t ret = scePlayGoGetEta(handle, chunkIds, count, outEta);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_scePlayGoPrefetch(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    uint64_t chunkIdsGuest = ctx->rsi;
-    uint32_t count = (uint32_t)ctx->rdx;
-
-    const OrbisPlayGoChunkId *chunkIds = chunkIdsGuest ? (const OrbisPlayGoChunkId *)(ctx->mem_base + chunkIdsGuest) : NULL;
-
-    int32_t ret = scePlayGoPrefetch(handle, chunkIds, count);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
+    RET(scePlayGoClose((OrbisPlayGoHandle)ctx->rdi));
 }
 
 void shim_scePlayGoGetChunkId(GuestContext *ctx) {
-    OrbisPlayGoHandle handle = (OrbisPlayGoHandle)ctx->rdi;
-    uint64_t outChunkIdListGuest = ctx->rsi;
-    uint32_t numberOfEntries = (uint32_t)ctx->rdx;
-    uint64_t outEntriesGuest = ctx->rcx;
-
-    OrbisPlayGoChunkId *outChunkIdList = outChunkIdListGuest ? (OrbisPlayGoChunkId *)(ctx->mem_base + outChunkIdListGuest) : NULL;
-    uint32_t *outEntries = outEntriesGuest ? (uint32_t *)(ctx->mem_base + outEntriesGuest) : NULL;
-
-    int32_t ret = scePlayGoGetChunkId(handle, outChunkIdList, numberOfEntries, outEntries);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
+    RET(scePlayGoGetChunkId((OrbisPlayGoHandle)ctx->rdi, GPTR(OrbisPlayGoChunkId *, ctx->rsi), (uint32_t)ctx->rdx,
+                            GPTR(uint32_t *, ctx->rcx)));
 }
+
+void shim_scePlayGoGetEta(GuestContext *ctx) {
+    RET(scePlayGoGetEta((OrbisPlayGoHandle)ctx->rdi, GPTR(const OrbisPlayGoChunkId *, ctx->rsi), (uint32_t)ctx->rdx,
+                        GPTR(OrbisPlayGoEta *, ctx->rcx)));
+}
+
+void shim_scePlayGoGetInstallSpeed(GuestContext *ctx) {
+    RET(scePlayGoGetInstallSpeed((OrbisPlayGoHandle)ctx->rdi, GPTR(int32_t *, ctx->rsi)));
+}
+
+void shim_scePlayGoSetInstallSpeed(GuestContext *ctx) {
+    RET(scePlayGoSetInstallSpeed((OrbisPlayGoHandle)ctx->rdi, (int32_t)ctx->rsi));
+}
+
+void shim_scePlayGoGetLanguageMask(GuestContext *ctx) {
+    RET(scePlayGoGetLanguageMask((OrbisPlayGoHandle)ctx->rdi, GPTR(OrbisPlayGoLanguageMask *, ctx->rsi)));
+}
+
+void shim_scePlayGoSetLanguageMask(GuestContext *ctx) {
+    RET(scePlayGoSetLanguageMask((OrbisPlayGoHandle)ctx->rdi, (OrbisPlayGoLanguageMask)ctx->rsi));
+}
+
+void shim_scePlayGoGetLocus(GuestContext *ctx) {
+    RET(scePlayGoGetLocus((OrbisPlayGoHandle)ctx->rdi, GPTR(const OrbisPlayGoChunkId *, ctx->rsi), (uint32_t)ctx->rdx,
+                          GPTR(int8_t *, ctx->rcx)));
+}
+
+void shim_scePlayGoGetProgress(GuestContext *ctx) {
+    RET(scePlayGoGetProgress((OrbisPlayGoHandle)ctx->rdi, GPTR(const OrbisPlayGoChunkId *, ctx->rsi),
+                             (uint32_t)ctx->rdx, GPTR(OrbisPlayGoProgress *, ctx->rcx)));
+}
+
+void shim_scePlayGoGetToDoList(GuestContext *ctx) {
+    RET(scePlayGoGetToDoList((OrbisPlayGoHandle)ctx->rdi, GPTR(OrbisPlayGoToDo *, ctx->rsi), (uint32_t)ctx->rdx,
+                             GPTR(uint32_t *, ctx->rcx)));
+}
+
+void shim_scePlayGoSetToDoList(GuestContext *ctx) {
+    RET(scePlayGoSetToDoList((OrbisPlayGoHandle)ctx->rdi, GPTR(const OrbisPlayGoToDo *, ctx->rsi),
+                             (uint32_t)ctx->rdx));
+}
+
+void shim_scePlayGoPrefetch(GuestContext *ctx) {
+    RET(scePlayGoPrefetch((OrbisPlayGoHandle)ctx->rdi, GPTR(const OrbisPlayGoChunkId *, ctx->rsi), (uint32_t)ctx->rdx,
+                          (int32_t)(int8_t)ctx->rcx));
+}
+
+// libSceDbgPlayGo: stubs in shadPS4 as well.
+PS4_HLE_STUB(sceDbgPlayGoRequestNextChunk)
+PS4_HLE_STUB(sceDbgPlayGoSnapshot)
 
 void shim_scePlayGoDialogInitialize(GuestContext *ctx) {
     int32_t ret = scePlayGoDialogInitialize();

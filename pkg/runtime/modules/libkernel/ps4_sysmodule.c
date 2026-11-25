@@ -9,12 +9,9 @@
 #include <unistd.h>
 #include <CommonCrypto/CommonDigest.h>
 
-#define MAX_LOADED_MODULES 64
 #define MAX_PRX_MODULES 64
 #define MAX_MODULE_INIT 64
 
-static uint32_t g_loaded_modules[MAX_LOADED_MODULES];
-static int g_loaded_modules_count = 0;
 static pthread_mutex_t g_sysmodule_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
@@ -303,6 +300,8 @@ void recomp_modules_start_preloaded(GuestContext *ctx) {
             }
         }
     }
+    // Then libkernel has libSceSysmodule preload the libraries every process gets.
+    ps4_sysmodule_preload(ctx);
 }
 
 bool recomp_module_has_preloaded_inits(const char *filename) {
@@ -317,120 +316,6 @@ bool recomp_module_has_preloaded_inits(const char *filename) {
     }
     pthread_mutex_unlock(&g_sysmodule_mutex);
     return false;
-}
-
-int32_t sceSysmoduleLoadModule(uint16_t moduleId) {
-    pthread_mutex_lock(&g_sysmodule_mutex);
-    for (int i = 0; i < g_loaded_modules_count; i++) {
-        if (g_loaded_modules[i] == (uint32_t)moduleId) {
-            pthread_mutex_unlock(&g_sysmodule_mutex);
-            return 0;
-        }
-    }
-    if (g_loaded_modules_count < MAX_LOADED_MODULES) {
-        g_loaded_modules[g_loaded_modules_count++] = (uint32_t)moduleId;
-    }
-    pthread_mutex_unlock(&g_sysmodule_mutex);
-    return 0;
-}
-
-int32_t sceSysmoduleIsLoaded(uint16_t moduleId) {
-    pthread_mutex_lock(&g_sysmodule_mutex);
-    for (int i = 0; i < g_loaded_modules_count; i++) {
-        if (g_loaded_modules[i] == (uint32_t)moduleId) {
-            pthread_mutex_unlock(&g_sysmodule_mutex);
-            return 1;
-        }
-    }
-    pthread_mutex_unlock(&g_sysmodule_mutex);
-    return 0;
-}
-
-int32_t sceSysmoduleUnloadModule(uint16_t moduleId) {
-    pthread_mutex_lock(&g_sysmodule_mutex);
-    for (int i = 0; i < g_loaded_modules_count; i++) {
-        if (g_loaded_modules[i] == (uint32_t)moduleId) {
-            g_loaded_modules[i] = g_loaded_modules[--g_loaded_modules_count];
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_sysmodule_mutex);
-    return 0;
-}
-
-uint32_t sceSysmoduleLoadModuleInternal(uint32_t moduleId) {
-    pthread_mutex_lock(&g_sysmodule_mutex);
-    for (int i = 0; i < g_loaded_modules_count; i++) {
-        if (g_loaded_modules[i] == moduleId) {
-            pthread_mutex_unlock(&g_sysmodule_mutex);
-            return 0;
-        }
-    }
-    if (g_loaded_modules_count < MAX_LOADED_MODULES) {
-        g_loaded_modules[g_loaded_modules_count++] = moduleId;
-    }
-    pthread_mutex_unlock(&g_sysmodule_mutex);
-    return 0;
-}
-
-int32_t sceSysmoduleUnloadModuleInternal(uint32_t moduleId) {
-    return sceSysmoduleUnloadModule((uint16_t)moduleId);
-}
-
-void shim_sceSysmoduleLoadModule(GuestContext *ctx) {
-    uint16_t moduleId = (uint16_t)ctx->rdi;
-    int32_t ret = sceSysmoduleLoadModule(moduleId);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_sceSysmoduleIsLoaded(GuestContext *ctx) {
-    uint16_t moduleId = (uint16_t)ctx->rdi;
-    int32_t ret = sceSysmoduleIsLoaded(moduleId);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_sceSysmoduleUnloadModule(GuestContext *ctx) {
-    uint16_t moduleId = (uint16_t)ctx->rdi;
-    int32_t ret = sceSysmoduleUnloadModule(moduleId);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_sceSysmoduleLoadModuleInternal(GuestContext *ctx) {
-    uint32_t moduleId = (uint32_t)ctx->rdi;
-    uint32_t ret = sceSysmoduleLoadModuleInternal(moduleId);
-    ctx->rax = (uint64_t)ret;
-    SHIM_RETURN();
-}
-
-void shim_sceSysmoduleUnloadModuleInternal(GuestContext *ctx) {
-    uint32_t moduleId = (uint32_t)ctx->rdi;
-    int32_t ret = sceSysmoduleUnloadModuleInternal(moduleId);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
-}
-
-int32_t sceSysmoduleLoadModuleInternalWithArg(uint32_t moduleId, int32_t argc, const void *argv, uint64_t unk, int32_t *res_out) {
-    (void)argc;
-    (void)argv;
-    (void)unk;
-    if (res_out) {
-        *res_out = 0;
-    }
-    return (int32_t)sceSysmoduleLoadModuleInternal(moduleId);
-}
-
-void shim_sceSysmoduleLoadModuleInternalWithArg(GuestContext *ctx) {
-    uint32_t moduleId = (uint32_t)ctx->rdi;
-    int32_t argc = (int32_t)ctx->rsi;
-    const void *argv = ctx->rdx ? (const void *)(ctx->mem_base + ctx->rdx) : NULL;
-    uint64_t unk = ctx->rcx;
-    int32_t *res_out = ctx->r8 ? (int32_t *)(ctx->mem_base + ctx->r8) : NULL;
-    int32_t ret = sceSysmoduleLoadModuleInternalWithArg(moduleId, argc, argv, unk, res_out);
-    ctx->rax = (uint64_t)(int64_t)ret;
-    SHIM_RETURN();
 }
 
 int32_t sceKernelLoadStartModule(const char *name, size_t argc, const void *argv, uint32_t flags, void *opt, int *res) {
