@@ -112,7 +112,7 @@ static uint64_t pad_script_clock_us(void) {
     const char *c = getenv("PS4_PAD_CLOCK");
     g_pad_clock_frames = (c && strcmp(c, "frames") == 0) ? 1 : 0;
   }
-  if (g_pad_clock_frames) return g_ps4_videoout_flip_count * 1000000ULL / 30;
+  if (g_pad_clock_frames) return __atomic_load_n(&g_ps4_videoout_flip_count, __ATOMIC_RELAXED) * 1000000ULL / 30;
   if (!g_pad_clock_started) return 0;
   const uint64_t now = get_time_micros();
   const uint64_t t0 = g_pad_clock_t0;
@@ -448,6 +448,8 @@ void ps4_pad_handle_key(unsigned short keyCode, int isDown) {
 // order (a "shot" after a "w" is taken when the wait has ended):
 //   p <hexmask> <dur_ms> [<lx> <ly> [<rx> <ry>]]  hold buttons/sticks for dur_ms
 //   w <ms>                                       wait (neutral pad)
+//   pf <hexmask> <flips> [<lx> <ly> [<rx> <ry>]]  hold buttons/sticks for submitted video flips
+//   wf <flips>                                    wait for submitted video flips (neutral pad)
 //   shot                                         save a screenshot of the next frame
 //                                                (needs PS4_SCREENSHOT_DIR)
 //   dumprt / dumpdraws                           write the GPU render targets of the next
@@ -468,7 +470,7 @@ typedef enum {
   PAD_CTL_HOLD, PAD_CTL_SHOT, PAD_CTL_DUMPRT, PAD_CTL_DUMPDRAWS, PAD_CTL_TRACE, PAD_CTL_GPUCAPTURE, PAD_CTL_CLOSE,
   PAD_CTL_TERMINATE
 } PadCtlKind;
-typedef struct { PadCtlKind kind; long dur; uint32_t mask; int lx, ly, rx, ry; } PadCtlCmd;
+typedef struct { PadCtlKind kind; long dur; uint32_t mask; int lx, ly, rx, ry, in_flips; } PadCtlCmd;
 
 static void ps4_pad_control_action(PadCtlKind kind) {
   switch (kind) {
@@ -500,7 +502,7 @@ static void ps4_pad_control_file(uint32_t *buttons, uint8_t *lx, uint8_t *ly, ui
   static int q_head, q_tail;
   static int active;
   static PadCtlCmd cur;
-  static uint64_t cur_end_us;
+  static uint64_t cur_end;
   if (!init) {
     init = 1;
     const char *path = getenv("PS4_PAD_CTL");
@@ -520,7 +522,8 @@ static void ps4_pad_control_file(uint32_t *buttons, uint8_t *lx, uint8_t *ly, ui
     }
     line[line_len] = 0;
     line_len = 0;
-    PadCtlCmd cmd = {PAD_CTL_HOLD, 0, 0, -1, -1, -1, -1};
+    const int in_flips = line[1] == 'f' && (line[2] == ' ' || line[2] == '\t');
+    PadCtlCmd cmd = {PAD_CTL_HOLD, 0, 0, -1, -1, -1, -1, in_flips};
     if (strncmp(line, "shot", 4) == 0) {
       cmd.kind = PAD_CTL_SHOT;
     } else if (strncmp(line, "dumprt", 6) == 0) {
@@ -536,9 +539,9 @@ static void ps4_pad_control_file(uint32_t *buttons, uint8_t *lx, uint8_t *ly, ui
     } else if (strncmp(line, "terminate", 9) == 0) {
       cmd.kind = PAD_CTL_TERMINATE;
     } else if (line[0] == 'w') {
-      cmd.dur = strtol(line + 1, NULL, 10);
+      cmd.dur = strtol(line + 1 + in_flips, NULL, 10);
     } else if (line[0] == 'p') {
-      char *e = line + 1;
+      char *e = line + 1 + in_flips;
       cmd.mask = (uint32_t)strtoul(e, &e, 16);
       cmd.dur = strtol(e, &e, 10);
       int v[4] = {-1, -1, -1, -1};
@@ -561,7 +564,8 @@ static void ps4_pad_control_file(uint32_t *buttons, uint8_t *lx, uint8_t *ly, ui
     }
   }
   const uint64_t now = get_time_micros();
-  if (active && now >= cur_end_us) active = 0;
+  const uint64_t flips = __atomic_load_n(&g_ps4_videoout_flip_count, __ATOMIC_RELAXED);
+  if (active && (cur.in_flips ? flips : now) >= cur_end) active = 0;
   // Actions take no time: run every action that is due, up to the next hold or wait.
   while (!active && q_head != q_tail) {
     cur = queue[q_head];
@@ -570,7 +574,8 @@ static void ps4_pad_control_file(uint32_t *buttons, uint8_t *lx, uint8_t *ly, ui
       ps4_pad_control_action(cur.kind);
       continue;
     }
-    cur_end_us = now + (uint64_t)(cur.dur > 0 ? cur.dur : 0) * 1000;
+    const uint64_t duration = (uint64_t)(cur.dur > 0 ? cur.dur : 0);
+    cur_end = cur.in_flips ? flips + duration : now + duration * 1000;
     active = 1;
   }
   if (!active) return;
