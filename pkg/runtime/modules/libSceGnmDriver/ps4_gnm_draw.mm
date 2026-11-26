@@ -2812,8 +2812,8 @@ void FlushComputeImpl() {
 // Draws and dispatches encoded (S.n_draws + S.n_dispatches) when the main command buffer was last
 // committed (encoder thread).
 uint64_t g_works_at_commit = 0;
-// BeginPass commits the main command buffer once this much work is encoded since the last commit.
-// Measured on Driveclub: 100 was faster than one commit per frame; 50 was not measurably better.
+// CommitAtJobStart commits the main command buffer once this much work is encoded since the last
+// commit. Measured on Driveclub: 100 was faster than one commit per frame; 50 was not measurably better.
 constexpr uint64_t kCommitWorks = 100;
 
 void Commit() {
@@ -7322,10 +7322,6 @@ bool BeginPass(const PassKey& key, const ClearReq& clr, id<MTLTexture> const* ho
         FlushDeferredHleCopies();
         if (S.be->OpenEncoder() != GnmEncoder::None) S.be->EndEncoder();
     }
-    // Between passes (no pass is split): once kCommitWorks draws and dispatches are encoded since
-    // the last commit, commit them, so the GPU starts on them while the encoder goes on with the
-    // frame. Otherwise the GPU waits for the frame's last commit.
-    if (MainCmdOpen() && S.n_draws + S.n_dispatches - g_works_at_commit >= kCommitWorks) Commit();
     // EQAA stand-ins start with the contents of their targets (unless cleared by this pass)
     for (int i = 0; i < 9; ++i) {
         id<MTLTexture> t = i < 8 ? key.color[i] : key.depth;
@@ -11093,11 +11089,21 @@ bool Draw(GuestContext* ctx, const uint32_t* regs, const DrawArgs& args) {
     return true;
 }
 
-// PS4_GNM_COMMIT_EACH=1 (debug): one command buffer per draw or dispatch, so a failing or
-// hanging command buffer (PS4_GNM_HANG_REPORT_MS, PS4_GNM_ENCODER_STATUS) names one shader.
-void CommitEachForDebug() {
+// At the start of a draw or dispatch job, before its preparation: once kCommitWorks draws and
+// dispatches are encoded since the last commit and no render pass is open (none is split), commit
+// them, so the GPU starts on them while the encoder goes on with the frame (otherwise the GPU waits
+// for the frame's last commit). Never later in a job: what a job prepares before its commands (arena
+// memory, texture uses, guest windows) belongs to the command buffer being recorded, and a commit in
+// between gives it to that one while the commands go to the next (its arena chunks were recycled
+// once that one completed, under a draw still reading them: DRIVECLUB's black wedges on Metal 3).
+// PS4_GNM_COMMIT_EACH=1 (debug): one command buffer per draw or dispatch, so a failing or hanging
+// command buffer (PS4_GNM_HANG_REPORT_MS, PS4_GNM_ENCODER_STATUS) names one shader.
+void CommitAtJobStart() {
     static const bool each = getenv("PS4_GNM_COMMIT_EACH") != nullptr;
-    if (each && MainCmdOpen()) Commit();
+    if (!MainCmdOpen()) return;
+    if (each || (S.be->OpenEncoder() != GnmEncoder::Render &&
+                 S.n_draws + S.n_dispatches - g_works_at_commit >= kCommitWorks))
+        Commit();
 }
 
 namespace {
@@ -12612,7 +12618,7 @@ void ApplyPassLookahead(const DrawRec& cur, PassKey& key, __strong id<MTLTexture
 void DrawEncode(DrawRec& r) {
     const AliasJob alias_job;
     const TableReadEncoded table_read(r.table_snap);
-    CommitEachForDebug();
+    CommitAtJobStart();
     if (S.hung) return;
     cap::EncodeScope cap_scope;
     DrainAsyncPsos();
@@ -14284,7 +14290,7 @@ void DispatchEncode(DispatchRec*& rp) {
     const AliasJob alias_job;
     DispatchRec& r = *rp;
     const TableReadEncoded table_read(r.table_snap);
-    CommitEachForDebug();
+    CommitAtJobStart();
     if (S.hung) return;
     cap::EncodeScope cap_scope;
     if (!BackendHas(kGnmCapCompute)) {
