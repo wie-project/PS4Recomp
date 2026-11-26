@@ -169,8 +169,6 @@ int32_t sceNpTusPollAsync(int32_t reqId, int32_t* result);
 int32_t sceNpTusWaitAsync(int32_t reqId, int32_t* result);
 
 
-int32_t sceNpUtilityInit(void);
-int32_t sceNpUtilityTerm(void);
 int32_t sceNpGameIntentInitialize(void);
 int32_t sceNpGameIntentTerminate(void);
 
@@ -277,8 +275,6 @@ void shim_sceNpScoreGetFriendsRankingAsync(GuestContext *ctx);
 void shim_sceNpTusGetDataAAsync(GuestContext *ctx);
 
 
-void shim_sceNpUtilityInit(GuestContext *ctx);
-void shim_sceNpUtilityTerm(GuestContext *ctx);
 void shim_sceNpGameIntentInitialize(GuestContext *ctx);
 void shim_sceNpGameIntentTerminate(GuestContext *ctx);
 

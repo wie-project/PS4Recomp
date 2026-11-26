@@ -801,16 +801,6 @@ void shim_sceNpScoreGetFriendsRankingAsync(GuestContext *ctx) {
 // libSceNpUtility & libSceNpGameIntent
 //=============================================================================
 
-int32_t sceNpUtilityInit(void) {
-    NP_LOG("sceNpUtilityInit");
-    return 0;
-}
-
-int32_t sceNpUtilityTerm(void) {
-    NP_LOG("sceNpUtilityTerm");
-    return 0;
-}
-
 int32_t sceNpGameIntentInitialize(void) {
     NP_LOG("sceNpGameIntentInitialize");
     return 0;
@@ -819,16 +809,6 @@ int32_t sceNpGameIntentInitialize(void) {
 int32_t sceNpGameIntentTerminate(void) {
     NP_LOG("sceNpGameIntentTerminate");
     return 0;
-}
-
-void shim_sceNpUtilityInit(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpUtilityInit();
-    SHIM_RETURN();
-}
-
-void shim_sceNpUtilityTerm(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpUtilityTerm();
-    SHIM_RETURN();
 }
 
 void shim_sceNpGameIntentInitialize(GuestContext *ctx) {

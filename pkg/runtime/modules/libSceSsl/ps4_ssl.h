@@ -1,51 +1,40 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 #ifndef PS4_SSL_H
 #define PS4_SSL_H
 
 #include <stdint.h>
-#include <stddef.h>
-#include <stdbool.h>
 #include "recomp_runtime.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#define ORBIS_SSL_ERROR_INVALID_ARGUMENT ((int32_t)0x8095F007)
+
+// OrbisSslData as the guest sees it: a guest pointer to the bytes and their length.
+typedef struct OrbisSslData {
+    uint64_t ptr;
+    uint64_t size;
+} OrbisSslData;
+
+// OrbisSslCaCerts: a guest pointer to an array of num OrbisSslData, and the pool pointer.
 typedef struct OrbisSslCaCerts {
-    void *certs;
-    int32_t num;
-    void *pool;
+    uint64_t certs;
+    uint64_t num;
+    uint64_t pool;
 } OrbisSslCaCerts;
 
-// C API
-int32_t sceSslInit(size_t poolSize);
-int32_t sceSslTerm(int32_t sslCtxId);
-int32_t sceSslGetCaCerts(int32_t sslCtxId, OrbisSslCaCerts *certs);
-int32_t sceSslGetMemoryPoolStats(void *currentStat);
-int32_t sceSslGetNameEntryCount(void *certName, uint32_t *count);
-int32_t sceSslGetNameEntryInfo(void *certName, uint32_t index, void *entryInfo);
-int32_t sceSslGetIssuerName(void *cert, void **issuerName);
-int32_t sceSslGetSubjectName(void *cert, void **subjectName);
-int32_t sceSslGetSerialNumber(void *cert, void *serialNumber);
-int32_t sceSslGetNotBefore(void *cert, void *time);
-int32_t sceSslGetNotAfter(void *cert, void *time);
-int32_t sceSslGetPem(void *cert, char *pemBuf, size_t *pemLen);
-int32_t sceSslFreeSslCertName(void *certName);
-int32_t sceSslFreeCaCerts(void *caCerts);
+// The one certificate sceSslGetCaCerts reports, as in shadPS4 (ssl2.cpp): a dummy entry whose
+// data is this string with its terminator.
+#define PS4_SSL_DUMMY_CERT "dummy"
 
-// Shims
+int32_t ps4_ssl_init(void);
+int32_t ps4_ssl_get_ca_certs(GuestContext *ctx, OrbisSslCaCerts *certs);
+int32_t ps4_ssl_free_ca_certs(GuestContext *ctx, OrbisSslCaCerts *certs);
+
 void shim_sceSslInit(GuestContext *ctx);
-void shim_sceSslTerm(GuestContext *ctx);
 void shim_sceSslGetCaCerts(GuestContext *ctx);
-void shim_sceSslGetMemoryPoolStats(GuestContext *ctx);
-void shim_sceSslGetNameEntryCount(GuestContext *ctx);
-void shim_sceSslGetNameEntryInfo(GuestContext *ctx);
-void shim_sceSslGetIssuerName(GuestContext *ctx);
-void shim_sceSslGetSubjectName(GuestContext *ctx);
-void shim_sceSslGetSerialNumber(GuestContext *ctx);
-void shim_sceSslGetNotBefore(GuestContext *ctx);
-void shim_sceSslGetNotAfter(GuestContext *ctx);
-void shim_sceSslGetPem(GuestContext *ctx);
-void shim_sceSslFreeSslCertName(GuestContext *ctx);
 void shim_sceSslFreeCaCerts(GuestContext *ctx);
 
 #ifdef __cplusplus

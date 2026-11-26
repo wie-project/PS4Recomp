@@ -5,10 +5,9 @@
 
 #include "modules/libSceNet/ps4_net.h"
 #include "modules/libSceHttp/ps4_http.h"
-#include "modules/libSceSsl/ps4_ssl.h"
 
 int main(void) {
-    printf("[TEST] Starting Pack 4 (Net, Http, Ssl) verification...\n");
+    printf("[TEST] Starting Pack 4 (Net, Http) verification...\n");
 
     // libSceNetCtl is covered by pkg/hosttest (TestNetCtl).
 
@@ -68,25 +67,6 @@ int main(void) {
     assert(strstr(escaped_buf, "%25foo") != NULL);
     assert(strstr(escaped_buf, "%2Fbar") != NULL);
     assert(strstr(escaped_buf, "_1.0~test") != NULL);
-
-    // 4. SSL Test
-    int32_t sslCtxId = sceSslInit(65536);
-    assert(sslCtxId > 0);
-
-    assert(sceSslGetMemoryPoolStats(NULL) == ORBIS_OK);
-    uint32_t cert_count = 999;
-    assert(sceSslGetNameEntryCount(NULL, &cert_count) == ORBIS_OK);
-    assert(cert_count == 0);
-    assert(sceSslGetNameEntryInfo(NULL, 0, NULL) == ORBIS_OK);
-    assert(sceSslGetIssuerName(NULL, NULL) == ORBIS_OK);
-    assert(sceSslGetSubjectName(NULL, NULL) == ORBIS_OK);
-    assert(sceSslGetSerialNumber(NULL, NULL) == ORBIS_OK);
-    size_t pem_len = 999;
-    assert(sceSslGetPem(NULL, NULL, &pem_len) == ORBIS_OK);
-    assert(pem_len == 0);
-    assert(sceSslFreeSslCertName(NULL) == ORBIS_OK);
-    assert(sceSslFreeCaCerts(NULL) == ORBIS_OK);
-    assert(sceSslTerm(sslCtxId) == ORBIS_OK);
 
     printf("[TEST] Pack 4 verification successfully PASSED!\n");
     return 0;

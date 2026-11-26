@@ -18,12 +18,16 @@ const shadps4Libraries = "../../tools/shadps4/src/core/libraries"
 // function by function: every function shadPS4 registers has a shim.
 var auditedShadPS4Libraries = []string{
 	"app_content",
+	"camera",
 	"companion",
 	"content_export",
 	"disc_map",
 	"fiber", //nolint:goconst // a shadPS4 directory name, as every entry here
 	"game_custom_data_dialog",
 	"game_live_streaming",
+	"hmd/hmd.cpp",
+	"hmd/hmd_distortion.cpp",
+	"hmd/hmd_reprojection.cpp",
 	"hmd/hmd_setup_dialog.cpp",
 	"hmd/vrservicedialog.cpp",
 	"ime/error_dialog.cpp",
@@ -32,6 +36,9 @@ var auditedShadPS4Libraries = []string{
 	"keyboard",
 	"libpng",
 	"mouse",
+	"network/netctl.cpp",
+	// shadPS4 loads libSceSsl from ssl2.cpp; its ssl.cpp is not registered (libs.cpp).
+	"network/ssl2.cpp",
 	"move",
 	"np/np_auth",
 	"np/np_commerce",
@@ -41,6 +48,7 @@ var auditedShadPS4Libraries = []string{
 	"np/np_partner.cpp",
 	"np/np_profile_dialog",
 	"np/np_sns_facebook_dialog.cpp",
+	"np/np_utility",
 	"playgo",
 	"random",
 	"razor_cpu",
@@ -52,6 +60,7 @@ var auditedShadPS4Libraries = []string{
 	"signin_dialog",
 	"sysmodule",
 	"system/commondialog.cpp",
+	"system/msgdialog.cpp",
 	"system/userservice.cpp",
 	"system_gesture",
 	"ulobjmgr",
