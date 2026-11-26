@@ -381,8 +381,8 @@ static void case_guest_waits_for_flip(void) {
 }
 
 // A real-time thread (ps4_vblank_thread_realtime) gets the time-constraint policy and its sleep
-// until a deadline wakes on time. Bound: median lateness 2 ms (measured 0.02 ms; an ordinary
-// thread on the same host: 40-65 ms).
+// until a deadline wakes on time. Bound: median lateness 10 ms (measured 0.02 ms locally, up to
+// 2.5 ms on GitHub's shared macOS VMs; an ordinary thread on the same host: 40-65 ms).
 static void *realtime_thread(void *arg) {
     int *ok = (int *)arg;
     ok[0] = ps4_vblank_thread_realtime();
@@ -416,7 +416,7 @@ static void case_realtime_wait(void) {
     pthread_join(th, NULL);
     CHECK(ok[0], "ps4_vblank_thread_realtime refused");
     CHECK(ok[1], "the thread has no time-constraint policy");
-    CHECK(ok[2] < 2000, "a real-time sleep woke %.3f ms late (median)", ok[2] / 1000.0);
+    CHECK(ok[2] < 10000, "a real-time sleep woke %.3f ms late (median)", ok[2] / 1000.0);
 }
 
 // The real clock: the wait sleeps at least until the deadline (a lower bound only: not flaky).
