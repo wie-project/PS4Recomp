@@ -190,6 +190,65 @@ private:
     }
 };
 
+// A TessVertex kernel (SPIRV-Cross vertex_for_tessellation) reads its vertex range from the
+// compute stage-in region ([[grid_origin]] / [[grid_size]]), which only Metal 3's setStageInRegion
+// sets: Metal 4 has no compute stage-in. Replaces those entry point arguments with the six words at
+// GCN_TESS_STAGE_IN_REGION_SLOT (origin x, y, z, size x, y, z, the MTLStageInRegionIndirectArguments
+// layout), read into locals of the same names at the top of the entry point. The kernel must have
+// no [[stage_in]] input (its fetch shader is translated inline, Translator::EmitFetch).
+static void TakeStageInRegionFromBuffer(std::string& msl) {
+    using spirv_cross::CompilerError;
+    if (msl.find("[[stage_in]]") != std::string::npos) {
+        throw CompilerError("TessVertex kernel with stage-in vertex attributes");
+    }
+    const size_t entry = msl.find("kernel void main0(");
+    if (entry == std::string::npos) {
+        throw CompilerError("TessVertex kernel entry point missing");
+    }
+    const size_t args_begin = entry + std::strlen("kernel void main0(");
+    const size_t args_end = msl.find(")\n{\n", args_begin);
+    if (args_end == std::string::npos) {
+        throw CompilerError("TessVertex kernel entry point arguments not found");
+    }
+    std::string args = msl.substr(args_begin, args_end - args_begin);
+    std::string locals;
+    const std::pair<const char*, uint32_t> builtins[] = {{" [[grid_origin]]", 0}, {" [[grid_size]]", 3}};
+    for (const auto& [attr, word] : builtins) {
+        const size_t at = args.find(attr);
+        if (at == std::string::npos) {
+            continue;
+        }
+        const size_t sep = args.rfind(", ", at);
+        const size_t decl = sep == std::string::npos ? 0 : sep + 2;
+        const std::string declaration = args.substr(decl, at - decl); // "uint3 name"
+        if (declaration.rfind("uint3 ", 0) != 0) {
+            throw CompilerError("unexpected stage-in region argument: " + declaration);
+        }
+        const std::string name = declaration.substr(6);
+        locals += "    const uint3 " + name + " = uint3(spvStageInRegion[" + std::to_string(word) +
+                  "], spvStageInRegion[" + std::to_string(word + 1) + "], spvStageInRegion[" +
+                  std::to_string(word + 2) + "]);\n";
+        // the argument and one separator next to it
+        size_t from = decl, to = at + std::strlen(attr);
+        if (sep != std::string::npos) {
+            from = sep;
+        } else if (args.compare(to, 2, ", ") == 0) {
+            to += 2;
+        }
+        args.erase(from, to - from);
+    }
+    if (locals.empty()) {
+        return;
+    }
+    if (args.find("[[grid_origin]]") != std::string::npos || args.find("[[grid_size]]") != std::string::npos) {
+        throw CompilerError("TessVertex kernel: stage-in region argument left");
+    }
+    args += std::string(args.empty() ? "" : ", ") + "const device uint* spvStageInRegion [[buffer(" +
+            std::to_string(GCN_TESS_STAGE_IN_REGION_SLOT) + ")]]";
+    msl.replace(args_begin, args_end - args_begin, args);
+    msl.insert(args_begin + args.size() + std::strlen(")\n{\n"), locals);
+}
+
 // One SPIRV-Cross run. arg_ids: SPIR-V binding -> [[id(n)]] of the storage buffers to place in
 // the descriptor set 0 argument buffer (empty: every resource gets a discrete slot).
 // capture: non-null for a vertex shader whose outputs go to a buffer instead of the rasterizer
@@ -351,6 +410,9 @@ bool ConvertOnce(const std::vector<uint32_t>& spirv, const gcn_msl_options& opt,
         msl.add_msl_resource_binding(ab);
     }
     out = msl.compile();
+    if (role == StageRole::TessVertex) {
+        TakeStageInRegionFromBuffer(out);
+    }
 
     if (use_arg_buffer) {
         // The runtime writes entry n at byte offset 8*n: make sure the emitted struct holds

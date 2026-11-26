@@ -61,8 +61,6 @@ public:
     void SetComputePipeline(id<MTLComputePipelineState> p) override { [Cur().cenc setComputePipelineState:p]; }
 
     void Draw(const GnmDraw& d) override;
-    void SetStageInRegion(MTLRegion region) override;
-    void SetStageInRegionIndirect(id<MTLBuffer> buf, uint64_t offset) override;
     void SetTessellationFactorBuffer(id<MTLBuffer> buf, uint64_t offset, uint64_t instance_stride) override;
     void DrawPatches(uint32_t num_control_points, uint32_t patch_start, uint32_t patch_count,
                      id<MTLBuffer> patch_index_buffer, uint64_t patch_index_buffer_offset,
