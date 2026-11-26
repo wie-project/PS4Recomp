@@ -1,11 +1,9 @@
 package emitter
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -78,11 +76,10 @@ type AsmEmitter struct {
 	Modules   []GuestModule
 	ChunkSize int
 	// Workers bounds the goroutines that emit chunks in parallel. Zero uses NumCPU.
-	Workers      int
-	Funcs        []disasm.ReachableFunc
-	HLE          *HLEReport
-	knownFuncSet map[uint64]bool
-	bb60fps      bool
+	Workers int
+	Funcs   []disasm.ReachableFunc
+	HLE     *HLEReport
+	bb60fps bool
 	// unresolved describes every import slot (PLT stub and GOT slot address) that no host
 	// shim and no loaded module satisfies. Each one is bound to shim_unresolved_stub.
 	unresolved map[uint64]unresolvedImport
@@ -461,7 +458,7 @@ func (e *AsmEmitter) emitSingleAsmChunk(d *disasm.Disassembler, path string, chu
 	if instBudget > 0 {
 		buf.Grow(instBudget * 192)
 	}
-	w := bufio.NewWriter(&buf)
+	w := &buf
 	// Chunk workers share the emitter, so lifting state is per call.
 	l := e.lifter.Clone()
 	var linesBuf []string
@@ -568,9 +565,6 @@ func (e *AsmEmitter) emitSingleAsmChunk(d *disasm.Disassembler, path string, chu
 		return err
 	}
 
-	if err := w.Flush(); err != nil {
-		return err
-	}
 	return writeFileIfChanged(path, buf.Bytes())
 }
 
@@ -582,9 +576,9 @@ const guestTextSection = ".section __TEXT,__recomp_guest,regular,pure_instructio
 // writeShimStub emits the guest-callable symbol of a host shim for guest address addr:
 // guest code calls it like any recompiled function (`_fn_0x<addr>`), and it hands the shim and
 // addr (stored to ctx->rip, so diagnostics name the shim a thread is in) to _recomp_call_shim.
-func writeShimStub(w io.Writer, sym, shim string, addr uint64) {
+func writeShimStub(w *bytes.Buffer, sym, shim string, addr uint64) {
 	var num [20]byte
-	write := func(s string) { io.WriteString(w, s) }
+	write := func(s string) { w.WriteString(s) }
 	write(".globl ")
 	write(sym)
 	write("\n")
@@ -616,7 +610,7 @@ func fnSymbol(addr uint64) string {
 
 func (e *AsmEmitter) emitChunkRegistration(path string, chunkIdx int, chunkAddrs []uint64) error {
 	var buf bytes.Buffer
-	w := bufio.NewWriter(&buf)
+	w := &buf
 
 	w.WriteString("#include \"recomp_runtime.h\"\n\n")
 
@@ -641,9 +635,6 @@ func (e *AsmEmitter) emitChunkRegistration(path string, chunkIdx int, chunkAddrs
 	}
 	w.WriteString("}\n")
 
-	if err := w.Flush(); err != nil {
-		return err
-	}
 	return writeFileIfChanged(path, buf.Bytes())
 }
 
@@ -656,7 +647,7 @@ func (e *AsmEmitter) EmitTrampoline(path string) error {
 // EmitDispatch ties all chunk registrations together.
 func (e *AsmEmitter) EmitDispatch(path string, numChunks int) error {
 	var buf bytes.Buffer
-	w := bufio.NewWriter(&buf)
+	w := &buf
 
 	fmt.Fprintf(w, "#include \"recomp_runtime.h\"\n\nvoid recomp_register_guest_modules(void);\n\n")
 
@@ -670,9 +661,6 @@ func (e *AsmEmitter) EmitDispatch(path string, numChunks int) error {
 	}
 	fmt.Fprintf(w, "    recomp_register_guest_modules();\n}\n")
 
-	if err := w.Flush(); err != nil {
-		return err
-	}
 	return writeFileIfChanged(path, buf.Bytes())
 }
 
@@ -803,7 +791,7 @@ func ownSegments(elf *elfloader.LoadedELF) []*elfloader.Segment {
 // EmitGuestModules writes the runtime export tables, synthetic shims, and unwind registrations.
 func (e *AsmEmitter) EmitGuestModules(path string) error {
 	var buf bytes.Buffer
-	w := bufio.NewWriter(&buf)
+	w := &buf
 
 	fmt.Fprintf(w, "#include \"recomp_runtime.h\"\n#include \"ps4_sysmodule.h\"\n\n")
 
@@ -1030,9 +1018,6 @@ func (e *AsmEmitter) EmitGuestModules(path string) error {
 	}
 
 	w.WriteString("}\n")
-	if err := w.Flush(); err != nil {
-		return err
-	}
 	if err := writeFileIfChanged(path, buf.Bytes()); err != nil {
 		return err
 	}
@@ -1040,16 +1025,13 @@ func (e *AsmEmitter) EmitGuestModules(path string) error {
 	// 2. Write synth_shims.s
 	synthPath := strings.TrimSuffix(path, ".c") + "_synth.s"
 	var sBuf bytes.Buffer
-	sw := bufio.NewWriter(&sBuf)
+	sw := &sBuf
 	sw.WriteString("// Synthetic shims ARM64 bridge\n" + guestTextSection + "\n.p2align 2\n\n")
 	for _, entry := range synthList {
 		writeShimStub(sw, fnSymbol(entry.addr), entry.shim, entry.addr)
 	}
 	for _, addr := range unresolvedSynth {
 		writeShimStub(sw, fnSymbol(addr), unresolvedStubShim, addr)
-	}
-	if err := sw.Flush(); err != nil {
-		return err
 	}
 	return writeFileIfChanged(synthPath, sBuf.Bytes())
 }

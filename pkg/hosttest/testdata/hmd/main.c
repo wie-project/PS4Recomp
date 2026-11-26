@@ -16,7 +16,7 @@
         }                                                                         \
     } while (0)
 
-#define A(p) ((uint64_t)(uintptr_t)(p))
+#include "../host_guest_mem.h"
 #define E(code) ((int32_t)(code))
 
 void shim_sceHmdInitialize(GuestContext *ctx);
@@ -74,6 +74,7 @@ static int test_lifecycle(void) {
     CHECK(sceHmdGetAssyError(NULL) == E(ORBIS_HMD_ERROR_PARAMETER_NULL));
 
     OrbisHmdOpenParam op;
+    memset(&op, 0, sizeof(op)); // a non-NULL parameter is rejected whatever it holds
     CHECK(sceHmdOpen(1, 1, 0, NULL) == E(ORBIS_HMD_ERROR_PARAMETER_INVALID));
     CHECK(sceHmdOpen(1, 0, 1, NULL) == E(ORBIS_HMD_ERROR_PARAMETER_INVALID));
     CHECK(sceHmdOpen(1, 0, 0, &op) == E(ORBIS_HMD_ERROR_PARAMETER_INVALID));
@@ -155,6 +156,7 @@ static int test_queries(void) {
 static int test_shims(void) {
     GuestContext ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.mem_base = GUEST_MEM;
     OrbisHmdInitializeParam init;
     memset(&init, 0, sizeof(init));
     ctx.rdi = A(&init);

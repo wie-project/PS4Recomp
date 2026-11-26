@@ -1142,11 +1142,12 @@ func (l *Arm64Lifter) liftInstructionInternal(inst disasm.Instruction, nextPC ui
 			return lines, nil
 		}
 		lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
-		if desc.Size == 4 {
+		switch desc.Size {
+		case 4:
 			lines = append(lines, fmt.Sprintf("    mov %s, w16", desc.W))
-		} else if desc.Size == 2 {
+		case 2:
 			lines = append(lines, fmt.Sprintf("    bfi %s, x16, #0, #16", desc.X))
-		} else {
+		default:
 			lines = append(lines, fmt.Sprintf("    mov %s, x16", desc.X))
 		}
 		return lines, nil

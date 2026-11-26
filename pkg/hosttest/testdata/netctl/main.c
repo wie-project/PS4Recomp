@@ -25,7 +25,7 @@ GuestContext *recomp_get_current_ctx(void) { return &g_thread_ctx; }
         }                                                                         \
     } while (0)
 
-#define A(p) ((uint64_t)(uintptr_t)(p))
+#include "../host_guest_mem.h"
 #define E(x) ((int32_t)ORBIS_NET_CTL_ERROR_##x)
 
 void shim_sceNetCtlInit(GuestContext *ctx);
@@ -41,6 +41,7 @@ static uint8_t g_stack[0x4000] __attribute__((aligned(16)));
 static int32_t call(void (*shim)(GuestContext *), uint64_t a0, uint64_t a1, uint64_t a2) {
     GuestContext ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.mem_base = GUEST_MEM;
     ctx.mem_size = ~0ull;
     ctx.rsp = A(g_stack + sizeof(g_stack) - 8);
     ctx.rdi = a0;

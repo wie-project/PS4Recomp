@@ -296,7 +296,8 @@ func (l *Arm64Lifter) liftShuf(inst disasm.Instruction, nextPC uint64, lines []s
 		}
 
 		immVal := uint8(imm)
-		if immVal == 0x00 {
+		switch immVal {
+		case 0x00:
 			lines = append(lines, fmt.Sprintf("    dup %s.4s, %s.s[0]", dLowV, sLowV))
 			if isYmm {
 				lines = append(lines, fmt.Sprintf("    dup %s.4s, %s.s[0]", dHighV, sHighV))
@@ -304,7 +305,7 @@ func (l *Arm64Lifter) liftShuf(inst disasm.Instruction, nextPC uint64, lines []s
 				lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
 			}
 			return lines, nil
-		} else if immVal == 0x55 {
+		case 0x55:
 			lines = append(lines, fmt.Sprintf("    dup %s.4s, %s.s[1]", dLowV, sLowV))
 			if isYmm {
 				lines = append(lines, fmt.Sprintf("    dup %s.4s, %s.s[1]", dHighV, sHighV))
@@ -312,7 +313,7 @@ func (l *Arm64Lifter) liftShuf(inst disasm.Instruction, nextPC uint64, lines []s
 				lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
 			}
 			return lines, nil
-		} else if immVal == 0xaa {
+		case 0xaa:
 			lines = append(lines, fmt.Sprintf("    dup %s.4s, %s.s[2]", dLowV, sLowV))
 			if isYmm {
 				lines = append(lines, fmt.Sprintf("    dup %s.4s, %s.s[2]", dHighV, sHighV))
@@ -320,7 +321,7 @@ func (l *Arm64Lifter) liftShuf(inst disasm.Instruction, nextPC uint64, lines []s
 				lines = append(lines, fmt.Sprintf("    movi %s.16b, #0", dHighV))
 			}
 			return lines, nil
-		} else if immVal == 0xff {
+		case 0xff:
 			lines = append(lines, fmt.Sprintf("    dup %s.4s, %s.s[3]", dLowV, sLowV))
 			if isYmm {
 				lines = append(lines, fmt.Sprintf("    dup %s.4s, %s.s[3]", dHighV, sHighV))
@@ -857,9 +858,10 @@ func (l *Arm64Lifter) liftVectorShift(inst disasm.Instruction, nextPC uint64, li
 
 	op := inst.Inst.Op
 	limit := 64
-	if op == x86asm.PSLLW || op == x86asm.PSRLW || op == x86asm.PSRAW {
+	switch op {
+	case x86asm.PSLLW, x86asm.PSRLW, x86asm.PSRAW:
 		limit = 16
-	} else if op == x86asm.PSLLD || op == x86asm.PSRLD || op == x86asm.PSRAD {
+	case x86asm.PSLLD, x86asm.PSRLD, x86asm.PSRAD:
 		limit = 32
 	}
 
@@ -1232,28 +1234,29 @@ func (l *Arm64Lifter) liftMovlpsMovhps(inst disasm.Instruction, nextPC uint64, l
 
 		// 2-operand SSE form
 		src := inst.Inst.Args[1]
-		if op == x86asm.MOVLPS || op == x86asm.MOVLPD {
+		switch op {
+		case x86asm.MOVLPS, x86asm.MOVLPD:
 			if mem, okMem := src.(x86asm.Mem); okMem {
 				lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
 				lines = append(lines, "    ldr d31, [x28, x16]")
 				lines = append(lines, fmt.Sprintf("    mov %s.d[0], v31.d[0]", dLowV))
 				return lines, nil
 			}
-		} else if op == x86asm.MOVHPS || op == x86asm.MOVHPD {
+		case x86asm.MOVHPS, x86asm.MOVHPD:
 			if mem, okMem := src.(x86asm.Mem); okMem {
 				lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
 				lines = append(lines, "    ldr d31, [x28, x16]")
 				lines = append(lines, fmt.Sprintf("    mov %s.d[1], v31.d[0]", dLowV))
 				return lines, nil
 			}
-		} else if op == x86asm.MOVLHPS {
+		case x86asm.MOVLHPS:
 			if sReg, okS := src.(x86asm.Reg); okS {
 				if _, _, _, sLowV, _, _, _, okDesc := getVectorDesc(sReg); okDesc {
 					lines = append(lines, fmt.Sprintf("    mov %s.d[1], %s.d[0]", dLowV, sLowV))
 					return lines, nil
 				}
 			}
-		} else if op == x86asm.MOVHLPS {
+		case x86asm.MOVHLPS:
 			if sReg, okS := src.(x86asm.Reg); okS {
 				if _, _, _, sLowV, _, _, _, okDesc := getVectorDesc(sReg); okDesc {
 					lines = append(lines, fmt.Sprintf("    mov %s.d[0], %s.d[1]", dLowV, sLowV))
@@ -2291,9 +2294,10 @@ func (l *Arm64Lifter) liftAvxShift(inst disasm.Instruction, nextPC uint64, lines
 	zeroLabel := fmt.Sprintf("L_vshift_zero_%d", l.labelCounter)
 
 	limit := 64
-	if op == x86asm.VPSLLW || op == x86asm.VPSRLW || op == x86asm.VPSRAW {
+	switch op {
+	case x86asm.VPSLLW, x86asm.VPSRLW, x86asm.VPSRAW:
 		limit = 16
-	} else if op == x86asm.VPSLLD || op == x86asm.VPSRLD || op == x86asm.VPSRAD {
+	case x86asm.VPSLLD, x86asm.VPSRLD, x86asm.VPSRAD:
 		limit = 32
 	}
 
@@ -3895,9 +3899,10 @@ func (l *Arm64Lifter) liftPabs(inst disasm.Instruction, nextPC uint64, lines []s
 	}
 
 	lane := ".16b"
-	if op == x86asm.PABSW || op == x86asm.VPABSW {
+	switch op {
+	case x86asm.PABSW, x86asm.VPABSW:
 		lane = ".8h"
-	} else if op == x86asm.PABSD || op == x86asm.VPABSD {
+	case x86asm.PABSD, x86asm.VPABSD:
 		lane = ".4s"
 	}
 

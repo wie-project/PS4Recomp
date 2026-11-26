@@ -233,19 +233,20 @@ func (l *Arm64Lifter) liftMovsx(inst disasm.Instruction, nextPC uint64, lines []
 	if srcReg, okSrc := src.(x86asm.Reg); okSrc {
 		descSrc, okDescSrc := arm64RegMap[srcReg]
 		if okDescSrc {
-			if descSrc.Size == 1 {
+			switch descSrc.Size {
+			case 1:
 				if descDst.Size == 8 {
 					lines = append(lines, fmt.Sprintf("    sxtb %s, %s", descDst.X, descSrc.W))
 				} else {
 					lines = append(lines, fmt.Sprintf("    sxtb %s, %s", descDst.W, descSrc.W))
 				}
-			} else if descSrc.Size == 2 {
+			case 2:
 				if descDst.Size == 8 {
 					lines = append(lines, fmt.Sprintf("    sxth %s, %s", descDst.X, descSrc.W))
 				} else {
 					lines = append(lines, fmt.Sprintf("    sxth %s, %s", descDst.W, descSrc.W))
 				}
-			} else if descSrc.Size == 4 {
+			case 4:
 				lines = append(lines, fmt.Sprintf("    sxtw %s, %s", descDst.X, descSrc.W))
 			}
 			return lines, nil
@@ -685,7 +686,7 @@ func (l *Arm64Lifter) liftShift(inst disasm.Instruction, nextPC uint64, lines []
 				cnt = val[:1] + "5"
 			}
 		}
-		if !(rotate && immCount > 0 && cnt == "#0") {
+		if !rotate || immCount <= 0 || cnt != "#0" {
 			lines = append(lines, fmt.Sprintf("    %s %s, %s, %s", arm, val, val, cnt))
 		}
 		if flags {

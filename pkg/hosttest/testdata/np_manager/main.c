@@ -31,7 +31,7 @@ uint32_t ps4_compiled_sdk_version(const GuestContext *ctx) {
         }                                                                         \
     } while (0)
 
-#define A(p) ((uint64_t)(uintptr_t)(p))
+#include "../host_guest_mem.h"
 #define USER ORBIS_USER_SERVICE_INITIAL_USER_ID
 #define BAD_USER ((uint64_t)(int64_t)-1)
 #define FIRST ((uint64_t)(ORBIS_NP_MANAGER_REQUEST_ID_OFFSET + 1))
@@ -43,6 +43,7 @@ static int32_t call(void (*shim)(GuestContext *), uint64_t a0, uint64_t a1, uint
                     uint64_t a5) {
     GuestContext ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.mem_base = GUEST_MEM;
     ctx.mem_size = ~0ull;
     ctx.rsp = A(g_stack + sizeof(g_stack) - 8);
     ctx.rdi = a0;

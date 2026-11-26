@@ -53,7 +53,7 @@ func assertGone(t *testing.T, pid int) {
 			return
 		}
 	}
-	syscall.Kill(pid, syscall.SIGKILL)
+	_ = syscall.Kill(pid, syscall.SIGKILL) // clean up the stray process; the test fails either way
 	t.Errorf("grandchild %d still runs after the cancel", pid)
 }
 
@@ -131,5 +131,3 @@ func TestBuildSignalContext(t *testing.T) {
 		t.Fatal("SIGTERM did not cancel the build context")
 	}
 }
-
-

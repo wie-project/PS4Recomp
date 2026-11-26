@@ -25,6 +25,9 @@ extern "C" {
 #define ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING ((int32_t)0x80B8000B)
 #define ORBIS_COMMON_DIALOG_ERROR_ALREADY_CLOSE ((int32_t)0x80B8000C)
 #define ORBIS_COMMON_DIALOG_ERROR_ARG_NULL ((int32_t)0x80B8000D)
+#define ORBIS_COMMON_DIALOG_ERROR_UNEXPECTED_FATAL ((int32_t)0x80B8000E)
+#define ORBIS_COMMON_DIALOG_ERROR_NOT_SUPPORTED ((int32_t)0x80B8000F)
+#define ORBIS_COMMON_DIALOG_ERROR_INHIBIT_SHAREPLAY_CLIENT ((int32_t)0x80B80010)
 
 // The common dialog system: sceCommonDialogInitialize must precede any dialog's Initialize,
 // and one dialog library at a time holds the system between its Initialize and Terminate

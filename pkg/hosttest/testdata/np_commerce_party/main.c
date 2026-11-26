@@ -18,7 +18,7 @@
         }                                                                         \
     } while (0)
 
-#define A(p) ((uint64_t)(uintptr_t)(p))
+#include "../host_guest_mem.h"
 
 static int64_t rc_of(const GuestContext *ctx) {
     return (int64_t)ctx->rax;
@@ -28,6 +28,7 @@ static int64_t rc_of(const GuestContext *ctx) {
 static int64_t call(void (*shim)(GuestContext *), uint64_t arg) {
     GuestContext ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.mem_base = GUEST_MEM;
     ctx.rdi = arg;
     ctx.rax = 99;
     shim(&ctx);
@@ -134,8 +135,8 @@ static void make_param(int32_t mode, uint32_t num_targets) {
 static int test_commerce_lifecycle(void) {
     CHECK(sceNpCommerceDialogGetStatus() == NP_COMMERCE_STATUS_NONE);
     make_param(NP_COMMERCE_MODE_PRODUCT, 0);
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED);
-    CHECK(sceNpCommerceDialogOpen(NULL, NULL) == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED); // state first
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, NULL) == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED); // state first
     CHECK(sceNpCommerceDialogClose() == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED);
     CHECK(sceNpCommerceDialogTerminate() == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED);
     NpCommerceDialogResult res;
@@ -146,14 +147,14 @@ static int test_commerce_lifecycle(void) {
     CHECK(sceNpCommerceDialogInitialize() == ORBIS_COMMON_DIALOG_ERROR_ALREADY_INITIALIZED);
     CHECK(sceNpCommerceDialogUpdateStatus() == NP_COMMERCE_STATUS_INITIALIZED);
     CHECK(sceNpCommerceDialogClose() == ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING);
-    CHECK(sceNpCommerceDialogOpen(NULL, NULL) == ORBIS_COMMON_DIALOG_ERROR_ARG_NULL);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, NULL) == ORBIS_COMMON_DIALOG_ERROR_ARG_NULL);
     CHECK(!sceCommonDialogIsUsed()); // the library does not take the common dialog system
 
     // The player presses Close.
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == 0);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == 0);
     CHECK(g_shown == 1);
     CHECK(sceNpCommerceDialogUpdateStatus() == NP_COMMERCE_STATUS_RUNNING);
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED);
     CHECK(sceNpCommerceDialogGetResult(&res) == ORBIS_COMMON_DIALOG_ERROR_NOT_FINISHED);
     ps4_np_commerce_finish(g_seen.serial + 1, NP_COMMERCE_RESULT_PURCHASED); // another dialog's window
     CHECK(sceNpCommerceDialogGetStatus() == NP_COMMERCE_STATUS_RUNNING);
@@ -167,7 +168,7 @@ static int test_commerce_lifecycle(void) {
 
     // PLUS: the action button buys and authorizes.
     make_param(NP_COMMERCE_MODE_PLUS, 0);
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == 0);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == 0);
     CHECK(g_seen.mode == NP_COMMERCE_MODE_PLUS && g_seen.features == 1);
     ps4_np_commerce_finish(g_seen.serial, NP_COMMERCE_RESULT_PURCHASED);
     CHECK(sceNpCommerceDialogGetResult(&res) == NP_COMMERCE_RESULT_PURCHASED);
@@ -175,30 +176,30 @@ static int test_commerce_lifecycle(void) {
 
     // Outside PLUS a purchase is not "authorized" and features are dropped.
     make_param(NP_COMMERCE_MODE_CHECKOUT, 0);
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == 0);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == 0);
     CHECK(g_seen.features == 0);
     ps4_np_commerce_finish(g_seen.serial, NP_COMMERCE_RESULT_PURCHASED);
     CHECK(sceNpCommerceDialogGetResult(&res) == NP_COMMERCE_RESULT_PURCHASED);
     CHECK(res.authorized == 0);
 
     // The game closes it: OK.
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == 0);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == 0);
     CHECK(call(shim_sceNpCommerceDialogClose, 0) == 0);
     CHECK(g_dismissed == 1);
     CHECK(sceNpCommerceDialogGetResult(&res) == NP_COMMERCE_RESULT_OK);
 
     // An invalid mode finishes the dialog with the error as its result.
     make_param(6, 0);
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID);
     CHECK(sceNpCommerceDialogGetStatus() == NP_COMMERCE_STATUS_FINISHED);
     CHECK(sceNpCommerceDialogGetResult(&res) == ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID);
     CHECK(res.result == ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID);
     make_param(-1, 0);
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID);
 
     // Terminate ends a dialog still up.
     make_param(NP_COMMERCE_MODE_DOWNLOADLIST, 0);
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == 0);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == 0);
     CHECK(call(shim_sceNpCommerceDialogTerminate, 0) == 0);
     CHECK(g_dismissed == 2);
     CHECK(call(shim_sceNpCommerceDialogGetStatus, 0) == NP_COMMERCE_STATUS_NONE);
@@ -207,7 +208,7 @@ static int test_commerce_lifecycle(void) {
     // No window (headless run): the dialog finishes at once, cancelled.
     g_ui_available = false;
     CHECK(sceNpCommerceDialogInitialize() == 0);
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == 0);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == 0);
     CHECK(sceNpCommerceDialogUpdateStatus() == NP_COMMERCE_STATUS_FINISHED);
     CHECK(sceNpCommerceDialogGetResult(&res) == NP_COMMERCE_RESULT_USER_CANCELED);
     CHECK(sceNpCommerceDialogTerminate() == 0);
@@ -225,7 +226,7 @@ static int test_commerce_view(void) {
 
     CHECK(sceNpCommerceDialogInitialize() == 0);
     make_param(NP_COMMERCE_MODE_CATEGORY, 12);
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == 0);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == 0);
     CHECK(strcmp(g_seen.userName, "Player1") == 0);
     CHECK(g_seen.userId == 0x10000000 && g_seen.serviceLabel == 7);
     CHECK(g_seen.targetCount == 9); // 10 read, the NULL one skipped
@@ -237,7 +238,7 @@ static int test_commerce_view(void) {
     // Unknown user: no name.
     make_param(NP_COMMERCE_MODE_PRODUCT_CODE, 0);
     g_param.userId = 5;
-    CHECK(sceNpCommerceDialogOpen(NULL, &g_param) == 0);
+    CHECK(sceNpCommerceDialogOpen(GUEST_MEM, &g_param) == 0);
     CHECK(g_seen.userName[0] == '\0' && g_seen.targetCount == 0);
     CHECK(sceNpCommerceDialogTerminate() == 0);
     return 0;

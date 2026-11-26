@@ -18,12 +18,13 @@
         }                                                                         \
     } while (0)
 
-#define A(p) ((uint64_t)(uintptr_t)(p))
+#include "../host_guest_mem.h"
 
 // Calls a shim with rdi = arg on a zeroed context and returns its rax.
 static int64_t call(void (*shim)(GuestContext *), uint64_t arg) {
     GuestContext ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.mem_base = GUEST_MEM;
     ctx.rdi = arg;
     ctx.rax = 99;
     shim(&ctx);
@@ -97,7 +98,7 @@ static int test_invitation_lifecycle(void) {
 
     InvitationDialogResult r;
     memset(&r, 0, sizeof(r));
-    CHECK(sceInvitationDialogGetResultA(NULL, &r) == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED);
+    CHECK(sceInvitationDialogGetResultA(GUEST_MEM, &r) == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED);
     CHECK(sceInvitationDialogTerminate() == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED);
     CHECK(sceInvitationDialogClose() == ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING);
     // Open checks the state first, OpenA the parameter and the mode first.
@@ -112,7 +113,7 @@ static int test_invitation_lifecycle(void) {
     CHECK(call(shim_sceInvitationDialogInitialize, 0) == 0);
     CHECK(sceCommonDialogIsUsed());
     CHECK(sceInvitationDialogInitialize() == ORBIS_COMMON_DIALOG_ERROR_ALREADY_INITIALIZED);
-    CHECK(sceInvitationDialogGetResult(NULL, &r) == ORBIS_COMMON_DIALOG_ERROR_NOT_FINISHED);
+    CHECK(sceInvitationDialogGetResult(GUEST_MEM, &r) == ORBIS_COMMON_DIALOG_ERROR_NOT_FINISHED);
     CHECK(call(shim_sceInvitationDialogOpen, 0) == ORBIS_COMMON_DIALOG_ERROR_ARG_NULL);
     g_ip.mode = INVITATION_DIALOG_MODE_INVALID;
     CHECK(call(shim_sceInvitationDialogOpen, A(&g_ip)) == ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID);
@@ -129,17 +130,17 @@ static int test_invitation_lifecycle(void) {
     CHECK(g_inv_shown == 1 && g_inv_seen.mode == INVITATION_DIALOG_MODE_RECV);
     CHECK(call(shim_sceInvitationDialogUpdateStatus, 0) == INVITATION_DIALOG_STATUS_RUNNING);
     CHECK(call(shim_sceInvitationDialogOpenA, A(&g_ip)) == ORBIS_COMMON_DIALOG_ERROR_INVALID_STATE);
-    CHECK(sceInvitationDialogGetResultA(NULL, &r) == ORBIS_COMMON_DIALOG_ERROR_NOT_FINISHED);
+    CHECK(sceInvitationDialogGetResultA(GUEST_MEM, &r) == ORBIS_COMMON_DIALOG_ERROR_NOT_FINISHED);
     CHECK(call(shim_sceInvitationDialogClose, 0) == 0);
     CHECK(g_inv_dismissed == 1);
     CHECK(sceInvitationDialogClose() == ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING);
     CHECK(sceInvitationDialogGetStatus() == INVITATION_DIALOG_STATUS_FINISHED);
-    CHECK(sceInvitationDialogGetResultA(NULL, NULL) == ORBIS_COMMON_DIALOG_ERROR_ARG_NULL);
+    CHECK(sceInvitationDialogGetResultA(GUEST_MEM, NULL) == ORBIS_COMMON_DIALOG_ERROR_ARG_NULL);
     CHECK(call(shim_sceInvitationDialogGetResultA, A(&r)) == INVITATION_DIALOG_RESULT_OK);
     CHECK(r.callbackArg == 0xCA11BAC4 && r.errorCode == 0 && r.result == INVITATION_DIALOG_RESULT_OK);
 
     // The window's Cancel: GetResult returns USER_CANCELED itself; a stale window is ignored.
-    CHECK(sceInvitationDialogOpen(NULL, &g_ip) == 0);
+    CHECK(sceInvitationDialogOpen(GUEST_MEM, &g_ip) == 0);
     const uint32_t first = g_inv_seen.serial;
     ps4_invitation_dialog_finish(first - 1, INVITATION_DIALOG_RESULT_OK);
     CHECK(sceInvitationDialogGetStatus() == INVITATION_DIALOG_STATUS_RUNNING);
@@ -149,7 +150,7 @@ static int test_invitation_lifecycle(void) {
     CHECK(r.result == INVITATION_DIALOG_RESULT_USER_CANCELED);
 
     // Terminate closes a running dialog and gives the common dialog system back.
-    CHECK(sceInvitationDialogOpen(NULL, &g_ip) == 0);
+    CHECK(sceInvitationDialogOpen(GUEST_MEM, &g_ip) == 0);
     CHECK(call(shim_sceInvitationDialogTerminate, 0) == 0);
     CHECK(g_inv_dismissed == 2);
     CHECK(sceInvitationDialogGetStatus() == INVITATION_DIALOG_STATUS_NONE);
@@ -159,10 +160,10 @@ static int test_invitation_lifecycle(void) {
     // Without a window the dialog finishes at once, as if Cancel had been pressed.
     CHECK(sceInvitationDialogInitialize() == 0);
     g_ui_available = false;
-    CHECK(sceInvitationDialogOpen(NULL, &g_ip) == 0);
+    CHECK(sceInvitationDialogOpen(GUEST_MEM, &g_ip) == 0);
     g_ui_available = true;
     CHECK(sceInvitationDialogUpdateStatus() == INVITATION_DIALOG_STATUS_FINISHED);
-    CHECK(sceInvitationDialogGetResult(NULL, &r) == INVITATION_DIALOG_RESULT_USER_CANCELED);
+    CHECK(sceInvitationDialogGetResult(GUEST_MEM, &r) == INVITATION_DIALOG_RESULT_USER_CANCELED);
     CHECK(sceInvitationDialogTerminate() == 0);
     return 0;
 }
@@ -173,7 +174,7 @@ static int test_invitation_send(void) {
 
     // USERDISABLE: the app's fixed recipients; the window shows session and message.
     make_invitation(INVITATION_DIALOG_MODE_SEND, INVITATION_DIALOG_ADDRESS_TYPE_USERDISABLE, 20);
-    CHECK(sceInvitationDialogOpenA(NULL, &g_ip) == 0);
+    CHECK(sceInvitationDialogOpenA(GUEST_MEM, &g_ip) == 0);
     CHECK(g_inv_seen.mode == INVITATION_DIALOG_MODE_SEND && !g_inv_seen.userEditable);
     CHECK(strcmp(g_inv_seen.sessionId, "session-0001") == 0);
     CHECK(strcmp(g_inv_seen.message, "Join my game") == 0);
@@ -188,11 +189,11 @@ static int test_invitation_send(void) {
     InvitationDialogResult r;
     memset(&r, 0, sizeof(r));
     r.sentUsers = A(&sent);
-    CHECK(sceInvitationDialogGetResultA(NULL, &r) == INVITATION_DIALOG_RESULT_OK);
+    CHECK(sceInvitationDialogGetResultA(GUEST_MEM, &r) == INVITATION_DIALOG_RESULT_OK);
     CHECK(sent.count == 0 && sent.users[0] == 0xAB);
     // A second Send from the same window does nothing more.
     ps4_invitation_dialog_send(g_inv_seen.serial);
-    CHECK(sceInvitationDialogGetResultA(NULL, &r) == INVITATION_DIALOG_RESULT_OK);
+    CHECK(sceInvitationDialogGetResultA(GUEST_MEM, &r) == INVITATION_DIALOG_RESULT_OK);
 
     // USERENABLE: the player picks the recipients; the session id stops at its terminator and
     // the message at 512 bytes.
@@ -203,20 +204,20 @@ static int test_invitation_send(void) {
     memset(long_msg, 'm', sizeof(long_msg) - 1);
     long_msg[sizeof(long_msg) - 1] = '\0';
     g_send.userMessage = A(long_msg);
-    CHECK(sceInvitationDialogOpen(NULL, &g_ip) == 0);
+    CHECK(sceInvitationDialogOpen(GUEST_MEM, &g_ip) == 0);
     CHECK(g_inv_seen.userEditable);
     CHECK(strlen(g_inv_seen.sessionId) == 45);
     CHECK(strlen(g_inv_seen.message) == INVITATION_DIALOG_MAX_USER_MSG_SIZE);
     ps4_invitation_dialog_finish(g_inv_seen.serial, INVITATION_DIALOG_RESULT_USER_CANCELED);
     memset(&sent, 0xAB, sizeof(sent));
-    CHECK(sceInvitationDialogGetResult(NULL, &r) == INVITATION_DIALOG_RESULT_USER_CANCELED);
+    CHECK(sceInvitationDialogGetResult(GUEST_MEM, &r) == INVITATION_DIALOG_RESULT_USER_CANCELED);
     CHECK(sent.count == 0);
 
     // No session id and no message: the window shows neither.
     make_invitation(INVITATION_DIALOG_MODE_SEND, INVITATION_DIALOG_ADDRESS_TYPE_INVALID, 0);
     g_send.sessionId = 0;
     g_send.userMessage = 0;
-    CHECK(sceInvitationDialogOpen(NULL, &g_ip) == 0);
+    CHECK(sceInvitationDialogOpen(GUEST_MEM, &g_ip) == 0);
     CHECK(g_inv_seen.sessionId[0] == '\0' && g_inv_seen.message[0] == '\0' && !g_inv_seen.userEditable);
     CHECK(sceInvitationDialogTerminate() == 0);
     return 0;

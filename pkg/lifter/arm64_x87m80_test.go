@@ -174,13 +174,13 @@ int main(int argc, char **argv) {
 	}
 
 	var in bytes.Buffer
-	binary.Write(&in, binary.LittleEndian, uint32(len(m80s)))
-	binary.Write(&in, binary.LittleEndian, uint32(len(f64s)))
+	in.Write(binary.LittleEndian.AppendUint32(nil, uint32(len(m80s))))
+	in.Write(binary.LittleEndian.AppendUint32(nil, uint32(len(f64s))))
 	for _, b := range m80s {
 		in.Write(b[:])
 	}
 	for _, v := range f64s {
-		binary.Write(&in, binary.LittleEndian, v)
+		in.Write(binary.LittleEndian.AppendUint64(nil, v))
 	}
 	inPath := write("in.bin", in.String())
 	run := func(bin, out string, args ...string) []byte {

@@ -24,7 +24,7 @@
         }                                                                         \
     } while (0)
 
-#define A(p) ((uint64_t)(uintptr_t)(p))
+#include "../host_guest_mem.h"
 
 void shim_sceHmdSetupDialogInitialize(GuestContext *ctx);
 void shim_sceHmdSetupDialogOpen(GuestContext *ctx);
@@ -136,6 +136,7 @@ static int test_error_dialog(void) {
     CHECK(sceErrorDialogTerminate() == 0);
 
     GuestContext ctx = {0};
+    ctx.mem_base = GUEST_MEM;
     ctx.rax = 99;
     shim_sceErrorDialogOpenDetail(&ctx);
     CHECK(rc_of(&ctx) == 0);
@@ -159,6 +160,7 @@ static int test_error_dialog_bad_size(void) {
 
 static int test_hmd_vr_dialogs(void) {
     GuestContext ctx = {0};
+    ctx.mem_base = GUEST_MEM;
     void (*const ok[])(GuestContext *) = {
         shim_sceHmdSetupDialogInitialize, shim_sceHmdSetupDialogOpen,  shim_sceHmdSetupDialogClose,
         shim_sceHmdSetupDialogTerminate,  shim_sceVrServiceDialogClose, shim_sceVrServiceDialogGetResult,
@@ -204,6 +206,7 @@ static int test_np_partner(void) {
     CHECK(sub == true);
 
     GuestContext ctx = {0};
+    ctx.mem_base = GUEST_MEM;
     ctx.rdi = 0x10000001;
     ctx.rsi = A(&sub);
     shim_sceNpHasEAAccessSubscription(&ctx);
@@ -220,6 +223,7 @@ static int test_np_partner(void) {
 
 static int test_entitlement_requests(void) {
     GuestContext ctx = {0};
+    ctx.mem_base = GUEST_MEM;
     uint32_t id = 0;
     char tx[NP_ENTITLEMENT_TRANSACTION_ID_SIZE + 4];
     ctx.rdx = A("LABEL");

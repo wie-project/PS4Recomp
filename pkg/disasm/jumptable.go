@@ -636,7 +636,7 @@ func switchTableCountKill(window []Instruction, idxReg x86asm.Reg) (int, bool, x
 					}
 					continue
 				}
-				if prev.Op != x86asm.CMP && !(above && prev.Op == x86asm.SUB) {
+				if prev.Op != x86asm.CMP && (!above || prev.Op != x86asm.SUB) {
 					break
 				}
 				if r, ok := prev.Args[0].(x86asm.Reg); ok && (sameGPR(r, cand) || copiedFrom(window, j, cand, r)) {

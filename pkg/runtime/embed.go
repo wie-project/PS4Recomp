@@ -36,16 +36,19 @@ func Extract(destDir string) error {
 		if err != nil {
 			return fmt.Errorf("open embedded runtime file %s: %w", path, err)
 		}
-		defer srcFile.Close()
+		defer func() { _ = srcFile.Close() }() // read only: closing cannot lose data
 
 		dstFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 		if err != nil {
 			return fmt.Errorf("create runtime file %s: %w", targetPath, err)
 		}
-		defer dstFile.Close()
-
 		if _, err := io.Copy(dstFile, srcFile); err != nil {
+			_ = dstFile.Close() // the copy error is the one to report
 			return fmt.Errorf("copy %s to %s: %w", path, targetPath, err)
+		}
+		// Close reports a failed write-back, so its error is the file's.
+		if err := dstFile.Close(); err != nil {
+			return fmt.Errorf("write %s: %w", targetPath, err)
 		}
 		return nil
 	})

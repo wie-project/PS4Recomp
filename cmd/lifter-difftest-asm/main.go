@@ -475,7 +475,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only: closing cannot lose data
 
 	l := lifter.NewArm64Lifter(nil)
 	l.SetTSO(*tso)
@@ -833,7 +833,7 @@ func writeList(path string, tests []*test) {
 	for i, t := range tests {
 		fmt.Fprintf(&b, "%d\t0x%x\t%s\t%s\t%s\t%s\t%s\n", i, t.addr, t.sig, t.text, t.flags, t.vregs, t.vdest)
 	}
-	os.WriteFile(path, []byte(b.String()), 0o644)
+	writeOutput(path, b.String())
 }
 
 func writeSkipped(path string, classes map[string]*classInfo, skipped map[string]*skipInfo, sampledOut int) {
@@ -868,7 +868,7 @@ func writeSkipped(path string, classes map[string]*classInfo, skipped map[string
 	for _, k := range keys {
 		fmt.Fprintf(&b, "%s\t%d\t%d\t%s\n", k, skipped[k].count, skipped[k].sites, skipped[k].example)
 	}
-	os.WriteFile(path, []byte(b.String()), 0o644)
+	writeOutput(path, b.String())
 }
 
 // State layout (shared with harness.h): u64 gpr[16]; u64 flags; u32 mxcsr; u32 pad; u8 ymm[16][32]
@@ -954,7 +954,7 @@ func writeNative(path string, tests []*test) {
 	}
 	b.WriteString(".globl _nt_regsets\n_nt_regsets:\n")
 	writeRegsets(&b, tests)
-	os.WriteFile(path, []byte(b.String()), 0o644)
+	writeOutput(path, b.String())
 }
 
 func writeRegsets(b *strings.Builder, tests []*test) {
@@ -1112,7 +1112,7 @@ func writeAsm(path string, tests []*test) {
 	}
 	b.WriteString(".globl _lt_regsets\n_lt_regsets:\n")
 	writeRegsets(&b, tests)
-	os.WriteFile(path, []byte(b.String()), 0o644)
+	writeOutput(path, b.String())
 }
 
 func safeText(inst x86asm.Inst, addr uint64) (out string) {
@@ -1242,4 +1242,13 @@ func btOffset(r x86asm.Reg) uint64 {
 		return 77
 	}
 	return uint64(0xffffffffffffffd3) // -45
+}
+
+// writeOutput writes one of the generated files; the run is useless without it, so a failed
+// write ends the program like the other I/O errors.
+func writeOutput(path, data string) {
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }

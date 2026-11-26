@@ -36,7 +36,9 @@ func TestJSONLines(t *testing.T) {
 		}
 	}
 	var p map[string]any
-	json.Unmarshal([]byte(lines[0]), &p)
+	if err := json.Unmarshal([]byte(lines[0]), &p); err != nil {
+		t.Fatal(err)
+	}
 	if p["done"].(float64) != 5 || p["total"].(float64) != 10 || p["unit"] != "files" || p["stage"] != "extract" {
 		t.Errorf("progress = %v", p)
 	}

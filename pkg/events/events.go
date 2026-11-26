@@ -37,6 +37,8 @@ type event struct {
 	Result  any    `json:"result,omitempty"`
 }
 
+// emit writes one event. Events report on the operation and never change its outcome, so a failed
+// write (a closed pipe on the reader side) is dropped.
 func (w *Writer) emit(e event, human string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -46,10 +48,10 @@ func (w *Writer) emit(e event, human string) {
 		if err != nil {
 			b, _ = json.Marshal(event{Event: "error", Op: w.op, Code: "io", Message: err.Error()})
 		}
-		w.w.Write(append(b, '\n'))
+		_, _ = w.w.Write(append(b, '\n'))
 		return
 	}
-	fmt.Fprintln(w.w, human)
+	_, _ = fmt.Fprintln(w.w, human)
 }
 
 // Progress reports done of total units in a stage.

@@ -152,17 +152,18 @@ func (l *Arm64Lifter) liftFpu(inst disasm.Instruction, nextPC uint64, lines []st
 	case x86asm.FILD:
 		if mem, ok := args[0].(x86asm.Mem); ok {
 			lines = append(lines, computeEffAddr(mem, nextPC, "x16")...)
-			if defMemSz == 8 {
+			switch defMemSz {
+			case 8:
 				lines = append(lines,
 					"    ldr x17, [x28, x16]",
 					"    scvtf d28, x17",
 				)
-			} else if defMemSz == 2 {
+			case 2:
 				lines = append(lines,
 					"    ldrsh w17, [x28, x16]",
 					"    scvtf d28, w17",
 				)
-			} else {
+			default:
 				lines = append(lines,
 					"    ldrsw x17, [x28, x16]",
 					"    scvtf d28, x17",
@@ -284,11 +285,6 @@ func (l *Arm64Lifter) liftFpu(inst disasm.Instruction, nextPC uint64, lines []st
 		isPop := (op == x86asm.FADDP || op == x86asm.FSUBP || op == x86asm.FSUBRP ||
 			op == x86asm.FMULP || op == x86asm.FDIVP || op == x86asm.FDIVRP)
 
-		dstIdx := 0
-		if isPop {
-			dstIdx = 1
-		}
-
 		armFpOp := "fadd"
 		isRev := false
 		switch op {
@@ -310,7 +306,7 @@ func (l *Arm64Lifter) liftFpu(inst disasm.Instruction, nextPC uint64, lines []st
 
 		if len(args) > 0 && args[0] != nil {
 			if reg0, ok0 := args[0].(x86asm.Reg); ok0 && reg0 >= x86asm.F0 && reg0 <= x86asm.F7 {
-				dstIdx = int(reg0 - x86asm.F0)
+				dstIdx := int(reg0 - x86asm.F0)
 				srcIdx := 0
 				if len(args) > 1 && args[1] != nil {
 					if reg1, ok1 := args[1].(x86asm.Reg); ok1 && reg1 >= x86asm.F0 && reg1 <= x86asm.F7 {
@@ -685,9 +681,10 @@ func (l *Arm64Lifter) liftFpu(inst disasm.Instruction, nextPC uint64, lines []st
 			"    strh w17, [x16, #0x2e6]",
 			"    msr  nzcv, x6",
 		)
-		if op == x86asm.FCOMP || op == x86asm.FICOMP {
+		switch op {
+		case x86asm.FCOMP, x86asm.FICOMP:
 			lines = append(lines, emitFpuDiscard()...)
-		} else if op == x86asm.FCOMPP {
+		case x86asm.FCOMPP:
 			lines = append(lines, emitFpuDiscard()...)
 			lines = append(lines, emitFpuDiscard()...)
 		}

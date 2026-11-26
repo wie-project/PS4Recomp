@@ -23,7 +23,7 @@
         }                                                                         \
     } while (0)
 
-#define A(p) ((uint64_t)(uintptr_t)(p))
+#include "../host_guest_mem.h"
 
 // ---------------------------------------------------------------------------------------------
 // Hooks: the VFS, the compiled SDK version and the system language.
@@ -75,6 +75,7 @@ static const char *mounted(const char *guest) {
 static int32_t call(void (*shim)(GuestContext *), uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
     GuestContext ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.mem_base = GUEST_MEM;
     ctx.rdi = a0;
     ctx.rsi = a1;
     ctx.rdx = a2;

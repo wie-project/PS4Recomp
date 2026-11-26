@@ -338,4 +338,3 @@ func TestBundleDylibDependenciesRpathAndLoaderPath(t *testing.T) {
 		t.Fatalf("bundled app execution failed: %v\n%s", err, out)
 	}
 }
-

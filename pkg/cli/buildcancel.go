@@ -36,7 +36,8 @@ func groupCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		pgid := cmd.Process.Pid
-		time.AfterFunc(groupKillDelay, func() { syscall.Kill(-pgid, syscall.SIGKILL) })
+		// ESRCH once the group has exited after SIGTERM is expected, so the result is not needed.
+		time.AfterFunc(groupKillDelay, func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
 		return syscall.Kill(-pgid, syscall.SIGTERM)
 	}
 	cmd.WaitDelay = groupKillDelay + time.Second

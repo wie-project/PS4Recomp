@@ -292,6 +292,14 @@ var stdout io.Writer = os.Stdout
 // JSON lines.
 var logw io.Writer = os.Stdout
 
+// logf, logln and logPrint write to the build log. The log only reports progress: a failed write
+// (a closed terminal or pipe) must not fail the build, so its error is dropped here.
+func logf(format string, args ...any) { _, _ = fmt.Fprintf(logw, format, args...) }
+
+func logln(args ...any) { _, _ = fmt.Fprintln(logw, args...) }
+
+func logPrint(args ...any) { _, _ = fmt.Fprint(logw, args...) }
+
 // Execute runs the complete recompilation and optional execution pipeline.
 func Execute(args []string) (err error) {
 	if len(args) > 0 && (args[0] == "version" || args[0] == "-version" || args[0] == "--version") {
@@ -300,8 +308,8 @@ func Execute(args []string) (err error) {
 			ev.Done(map[string]string{"version": Version, "go": runtime.Version()})
 			return nil
 		}
-		fmt.Fprintf(stdout, "ps4-recomp %s\n", Version)
-		return nil
+		_, err := fmt.Fprintf(stdout, "ps4-recomp %s\n", Version)
+		return err
 	}
 	if len(args) > 0 && args[0] == "analyze" {
 		if len(args) < 2 {
@@ -345,7 +353,7 @@ func Execute(args []string) (err error) {
 			case errors.Is(err, fs.ErrNotExist):
 				code = "bad_input"
 			}
-			ev.Error(code, err.Error())
+			_ = ev.Error(code, err.Error()) // the build error itself is returned either way
 		}
 	}()
 	// SIGINT or SIGTERM cancels the build: the ninja or clang process groups are stopped,
@@ -354,22 +362,22 @@ func Execute(args []string) (err error) {
 	defer stopSignals()
 
 	totalStart := time.Now()
-	fmt.Fprintln(logw, banner)
+	logln(banner)
 
 	// Step 1: Load ELF
 	stepStart := time.Now()
 	ev.Progress("load", 1, 4, "stages", "loading the ELF")
-	fmt.Fprintf(logw, "[ps4-recomp] [1/4] Loading ELF: %s\n", cfg.ElfPath)
+	logf("[ps4-recomp] [1/4] Loading ELF: %s\n", cfg.ElfPath)
 	loaded, patches, err := loadPatchedELF(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to load ELF '%s': %w", cfg.ElfPath, err)
 	}
 	if patches != nil {
 		for _, s := range patches.Sets {
-			fmt.Fprintf(logw, "             Patch applied: %s (%d lines, %d bytes)\n", s.Name, len(s.Writes), s.Bytes())
+			logf("             Patch applied: %s (%d lines, %d bytes)\n", s.Name, len(s.Writes), s.Bytes())
 		}
 	}
-	fmt.Fprintf(logw, "             Entry point: 0x%x | Segments: %d | Relocations: %d | Unwind functions: %d | Time: %v\n",
+	logf("             Entry point: 0x%x | Segments: %d | Relocations: %d | Unwind functions: %d | Time: %v\n",
 		loaded.EntryPoint, len(loaded.Segments), len(loaded.Relocations), len(loaded.FuncBounds), time.Since(stepStart).Round(time.Millisecond))
 
 	if ctx.Err() != nil {
@@ -379,7 +387,7 @@ func Execute(args []string) (err error) {
 	// Step 2: Disassembly and CFG Analysis
 	stepStart = time.Now()
 	ev.Progress("cfg", 2, 4, "stages", "analyzing the control flow")
-	fmt.Fprintf(logw, "[ps4-recomp] [2/4] Analyzing CFG and discovering reachable code...\n")
+	logf("[ps4-recomp] [2/4] Analyzing CFG and discovering reachable code...\n")
 	for _, p := range elfloader.AddTLSModule(loaded, loaded) {
 		fmt.Fprintf(os.Stderr, "             Warning: %s\n", p)
 	}
@@ -392,7 +400,7 @@ func Execute(args []string) (err error) {
 		fmt.Fprintf(os.Stderr, "             Warning: %s\n", p)
 	}
 	if n := len(loaded.TLSModules); n > 0 {
-		fmt.Fprintf(logw, "             Static TLS: %d modules, 0x%x bytes\n", n, loaded.TLSModules[n-1].Offset)
+		logf("             Static TLS: %d modules, 0x%x bytes\n", n, loaded.TLSModules[n-1].Offset)
 	}
 	var allCompanionExports []elfloader.Symbol
 	for _, m := range moduleInfos {
@@ -402,7 +410,7 @@ func Execute(args []string) (err error) {
 		return fmt.Errorf("failed resolving module relocations: %w", err)
 	}
 	hle := emitter.NewHLEReport(loaded, moduleInfos)
-	fmt.Fprint(logw, hle.ImportSummary())
+	logPrint(hle.ImportSummary())
 
 	d, err := disasm.NewDisassembler(loaded)
 	if err != nil {
@@ -413,7 +421,7 @@ func Execute(args []string) (err error) {
 	lastReport := time.Now()
 	funcs, err := d.DiscoverReachable(entries, func(nFn, nInst int) {
 		if time.Since(lastReport) >= 2*time.Second {
-			fmt.Fprintf(logw, "             ... %d functions, %d instructions\n", nFn, nInst)
+			logf("             ... %d functions, %d instructions\n", nFn, nInst)
 			lastReport = time.Now()
 		}
 	})
@@ -425,7 +433,7 @@ func Execute(args []string) (err error) {
 	for _, f := range funcs {
 		totalInsts += f.Insts
 	}
-	fmt.Fprintf(logw, "             Discovered %d functions, %d instructions | cap hits: %d | privileged stops: %d | Time: %v\n",
+	logf("             Discovered %d functions, %d instructions | cap hits: %d | privileged stops: %d | Time: %v\n",
 		len(funcs), totalInsts, d.CapHits, d.PrivilegedStops, time.Since(stepStart).Round(time.Millisecond))
 	if d.CapHits > 0 {
 		fmt.Fprintf(os.Stderr, "             Warning: %d function(s) hit decode caps:\n", d.CapHits)
@@ -446,7 +454,7 @@ func Execute(args []string) (err error) {
 	// Step 3: C Source Code Generation
 	stepStart = time.Now()
 	ev.Progress("emit", 3, 4, "stages", "emitting C sources")
-	fmt.Fprintf(logw, "[ps4-recomp] [3/4] Emitting source files to '%s/'...\n", cfg.OutDir)
+	logf("[ps4-recomp] [3/4] Emitting source files to '%s/'...\n", cfg.OutDir)
 	if err := os.MkdirAll(cfg.OutDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create output directory '%s': %w", cfg.OutDir, err)
 	}
@@ -459,7 +467,7 @@ func Execute(args []string) (err error) {
 		}
 		runtimeSrc = os.DirFS(runtimeDir)
 	} else {
-		fmt.Fprintf(logw, "             Using embedded runtime files (standalone mode)...\n")
+		logf("             Using embedded runtime files (standalone mode)...\n")
 		if err := recompruntime.Extract(runtimeOutDir); err != nil {
 			return fmt.Errorf("failed to extract embedded runtime: %w", err)
 		}
@@ -506,7 +514,7 @@ func Execute(args []string) (err error) {
 	minimp3Inc := findMinimp3()
 
 	if (gcnLib == "" || spirvInc == "" || (atracLib == "" && len(atracSrcs) == 0) || minimp3Inc == "") && thirdparty.HasEmbedded() {
-		fmt.Fprintf(logw, "             Extracting embedded 3rdparty libraries to '%s'...\n", thirdPartyOutDir)
+		logf("             Extracting embedded 3rdparty libraries to '%s'...\n", thirdPartyOutDir)
 		if err := thirdparty.Extract(thirdPartyOutDir); err != nil {
 			return fmt.Errorf("failed to extract embedded 3rdparty libraries: %w", err)
 		}
@@ -568,22 +576,22 @@ func Execute(args []string) (err error) {
 	if err := hle.WriteFile(hlePath); err != nil {
 		return fmt.Errorf("failed to write HLE report: %w", err)
 	}
-	fmt.Fprint(logw, hle.SyscallSummary())
-	fmt.Fprintf(logw, "             Unresolved imports bound to the abort stub: %d calls, %d data (GLOB_DAT/R_64)\n",
+	logPrint(hle.SyscallSummary())
+	logf("             Unresolved imports bound to the abort stub: %d calls, %d data (GLOB_DAT/R_64)\n",
 		em.UnresolvedFuncImports, em.UnresolvedDataImports)
 	if len(em.UnresolvedDataNames) > 0 {
-		fmt.Fprintf(logw, "             Unresolved data imports: %s\n", strings.Join(em.UnresolvedDataNames, ", "))
+		logf("             Unresolved data imports: %s\n", strings.Join(em.UnresolvedDataNames, ", "))
 	}
 	for _, w := range em.Warnings {
-		fmt.Fprintf(logw, "             Warning: %s\n", w)
+		logf("             Warning: %s\n", w)
 	}
-	fmt.Fprintf(logw, "             Wrote %s\n", hlePath)
+	logf("             Wrote %s\n", hlePath)
 	if patches != nil {
 		patchPath := filepath.Join(cfg.OutDir, "patch_report.txt")
 		if err := os.WriteFile(patchPath, []byte(patches.Report()), 0o644); err != nil {
 			return fmt.Errorf("failed to write patch report: %w", err)
 		}
-		fmt.Fprintf(logw, "             Wrote %s\n", patchPath)
+		logf("             Wrote %s\n", patchPath)
 	}
 
 	if cfg.AppDir != "" {
@@ -606,7 +614,7 @@ func Execute(args []string) (err error) {
 			nAsm++
 		}
 	}
-	fmt.Fprintf(logw, "             Emitted %d source files (%d assembly, %d C) | TSO: %s | Time: %v\n",
+	logf("             Emitted %d source files (%d assembly, %d C) | TSO: %s | Time: %v\n",
 		len(cFiles), nAsm, len(cFiles)-nAsm, tso, time.Since(stepStart).Round(time.Millisecond))
 
 	if ctx.Err() != nil {
@@ -619,14 +627,14 @@ func Execute(args []string) (err error) {
 	if cfg.Compile {
 		stepStart = time.Now()
 		ev.Progress("compile", 0, int64(len(cFiles)), "files", "compiling")
-		fmt.Fprintf(logw, "[ps4-recomp] [4/4] Compiling native ARM64 binary with clang (-O%s, %d workers)...\n",
+		logf("[ps4-recomp] [4/4] Compiling native ARM64 binary with clang (-O%s, %d workers)...\n",
 			cfg.OptLevel, cfg.Jobs)
 		if err := compileParallel(ctx, cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.Jobs, cfg.OptLevel, cfg.Asan, func(done, total int64) {
 			ev.Progress("compile", done, total, "files", "compiling")
 		}); err != nil {
 			return fmt.Errorf("compilation failed: %w", err)
 		}
-		fmt.Fprintf(logw, "             Compiled binary: %s | Time: %v\n",
+		logf("             Compiled binary: %s | Time: %v\n",
 			targetBin, time.Since(stepStart).Round(time.Millisecond))
 
 		appName := strings.TrimSuffix(filepath.Base(cfg.ElfPath), filepath.Ext(cfg.ElfPath))
@@ -639,19 +647,19 @@ func Execute(args []string) (err error) {
 				return fmt.Errorf("failed to package macOS app bundle: %w", err)
 			}
 			targetBin = filepath.Join(bundleDir, "Contents", "MacOS", appName)
-			fmt.Fprintf(logw, "             Packaged macOS App Bundle: %s\n", bundleDir)
+			logf("             Packaged macOS App Bundle: %s\n", bundleDir)
 			appBundle = bundleDir
 		}
 	} else {
-		fmt.Fprintln(logw, "[ps4-recomp] [4/4] Clang compilation skipped (--compile=false). Generating build.ninja...")
+		logln("[ps4-recomp] [4/4] Clang compilation skipped (--compile=false). Generating build.ninja...")
 		if err := generateNinjaBuild(cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.OptLevel, cfg.Asan); err != nil {
-			fmt.Fprintf(logw, "             Warning: failed to generate build.ninja: %v\n", err)
+			logf("             Warning: failed to generate build.ninja: %v\n", err)
 		} else {
-			fmt.Fprintf(logw, "             Generated %s\n", filepath.Join(cfg.OutDir, "build.ninja"))
+			logf("             Generated %s\n", filepath.Join(cfg.OutDir, "build.ninja"))
 		}
 	}
 
-	fmt.Fprintf(logw, "[ps4-recomp] All tasks completed successfully in %v\n", time.Since(totalStart).Round(time.Millisecond))
+	logf("[ps4-recomp] All tasks completed successfully in %v\n", time.Since(totalStart).Round(time.Millisecond))
 
 	if ctx.Err() != nil {
 		return errBuildCancelled
@@ -663,7 +671,7 @@ func Execute(args []string) (err error) {
 // --json the last event of the stream is "done" only if the whole command succeeded.
 func finishBuild(ctx context.Context, ev *events.Writer, cfg *Config, targetBin, appBundle string, patches []string) error {
 	if cfg.Run && cfg.Compile {
-		fmt.Fprintln(logw, "===================================================================")
+		logln("===================================================================")
 		if err := runBinary(ctx, targetBin, cfg.TimeoutSec, cfg.AppDir); err != nil {
 			return fmt.Errorf("execution failed: %w", cancelledOr(ctx, err))
 		}
@@ -756,7 +764,7 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	}
 	if runtime.GOOS == "darwin" {
 		ldflags = append(ldflags, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
-			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-lz")
+			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "AVFoundation", "-lz")
 	} else {
 		ldflags = append(ldflags, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
 	}
@@ -793,13 +801,14 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		objFile := strings.TrimSuffix(relCFile, ext) + ".o"
 		objFiles = append(objFiles, objFile)
 		rule := "compile_c"
-		if ext == ".s" {
+		switch ext {
+		case ".s":
 			rule = "compile_s"
-		} else if ext == ".m" {
+		case ".m":
 			rule = "compile_m"
-		} else if ext == ".mm" {
+		case ".mm":
 			rule = "compile_mm"
-		} else if ext == ".cpp" {
+		case ".cpp":
 			rule = "compile_cpp"
 		}
 		fmt.Fprintf(&sb, "build %s: %s %s\n", ninjaEscape(objFile), rule, ninjaEscape(relCFile))
@@ -850,14 +859,14 @@ func runNinja(ctx context.Context, ninjaPath, outDir string, numWorkers int, pro
 	sc := bufio.NewScanner(pipe)
 	for sc.Scan() {
 		line := sc.Bytes()
-		fmt.Fprintf(logw, "%s\n", line)
+		logf("%s\n", line)
 		if m := ninjaStatus.FindSubmatch(line); m != nil && progress != nil {
 			done, _ := strconv.ParseInt(string(m[1]), 10, 64)
 			total, _ := strconv.ParseInt(string(m[2]), 10, 64)
 			progress(done, total)
 		}
 	}
-	io.Copy(io.Discard, pipe) // drain, so a very long line cannot block ninja
+	_, _ = io.Copy(io.Discard, pipe) // drain, so a very long line cannot block ninja
 	return cancelledOr(ctx, cmd.Wait())
 }
 
@@ -867,7 +876,7 @@ func runNinja(ctx context.Context, ninjaPath, outDir string, numWorkers int, pro
 // ".../PS4Recomp.app/Contents/Resources/3rdparty/..." may contain a space.
 func shellQuote(arg string) string {
 	if arg != "" && strings.IndexFunc(arg, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_./=,+:@%", r))
+		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && !strings.ContainsRune("-_./=,+:@%", r)
 	}) < 0 {
 		return arg
 	}
@@ -921,30 +930,30 @@ func ninjaLinkBuild(target string, objs, libs []string) string {
 func compileParallel(ctx context.Context, cFiles []string, outDir string, includeDirs []string, targetBin string, numWorkers int, optLevel string, asan bool, progress func(done, total int64)) error {
 	ftCflags, ftLibs := findFreeType()
 	if len(ftCflags)+len(ftLibs) == 0 {
-		fmt.Fprintln(logw, "             FreeType: not found")
+		logln("             FreeType: not found")
 	} else {
-		fmt.Fprintf(logw, "             FreeType: %s\n", strings.Join(append(slices.Clone(ftCflags), ftLibs...), " "))
+		logf("             FreeType: %s\n", strings.Join(append(slices.Clone(ftCflags), ftLibs...), " "))
 	}
 	ffCflags, ffLibs := findFFmpeg()
 	if len(ffCflags)+len(ffLibs) == 0 {
-		fmt.Fprintln(logw, "             FFmpeg: not found")
+		logln("             FFmpeg: not found")
 	} else {
-		fmt.Fprintf(logw, "             FFmpeg: %s\n", strings.Join(append(slices.Clone(ffCflags), ffLibs...), " "))
+		logf("             FFmpeg: %s\n", strings.Join(append(slices.Clone(ffCflags), ffLibs...), " "))
 	}
 	// Try building with Ninja first if available
 	if ninjaPath := findNinja(); ninjaPath != "" {
-		fmt.Fprintf(logw, "             ninja: %s\n", ninjaPath)
+		logf("             ninja: %s\n", ninjaPath)
 		if err := generateNinjaBuild(cFiles, outDir, includeDirs, targetBin, optLevel, asan); err != nil {
-			fmt.Fprintf(logw, "             ninja: cannot write build.ninja (%v); compiling with clang directly\n", err)
+			logf("             ninja: cannot write build.ninja (%v); compiling with clang directly\n", err)
 		} else {
 			err := runNinja(ctx, ninjaPath, outDir, numWorkers, progress)
 			if err == nil || errors.Is(err, errBuildCancelled) {
 				return err
 			}
-			fmt.Fprintf(logw, "             ninja: build failed (%v); compiling with clang directly\n", err)
+			logf("             ninja: build failed (%v); compiling with clang directly\n", err)
 		}
 	} else {
-		fmt.Fprintln(logw, "             ninja: not found; compiling with clang directly")
+		logln("             ninja: not found; compiling with clang directly")
 	}
 	total := int64(len(cFiles))
 	var finished atomic.Int64
@@ -1021,12 +1030,13 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 					clangArgs = append(clangArgs, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
 				}
 				compilerBin := "clang"
-				if ext == ".m" {
+				switch ext {
+				case ".m":
 					clangArgs = append(clangArgs, "-fobjc-arc")
-				} else if ext == ".mm" {
+				case ".mm":
 					clangArgs = append(clangArgs, "-fobjc-arc", "-std=c++17")
 					compilerBin = "clang++"
-				} else if ext == ".cpp" {
+				case ".cpp":
 					clangArgs = append(clangArgs, "-std=c++17")
 					compilerBin = "clang++"
 				}
@@ -1071,7 +1081,7 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 	}
 	if runtime.GOOS == "darwin" {
 		linkArgs = append(linkArgs, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
-			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-lz")
+			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "AVFoundation", "-lz")
 	} else {
 		linkArgs = append(linkArgs, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
 	}
@@ -1114,14 +1124,14 @@ func runBinary(ctx context.Context, targetBin string, timeoutSec int, appDir str
 	}
 
 	if timeoutSec > 0 {
-		fmt.Fprintf(logw, "[ps4-recomp] Running %s (watchdog timeout: %ds)...\n", targetBin, timeoutSec)
+		logf("[ps4-recomp] Running %s (watchdog timeout: %ds)...\n", targetBin, timeoutSec)
 	} else {
-		fmt.Fprintf(logw, "[ps4-recomp] Running %s...\n", targetBin)
+		logf("[ps4-recomp] Running %s...\n", targetBin)
 	}
 
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
-		fmt.Fprintf(logw, "[ps4-recomp] Watchdog timeout of %ds reached. Terminated cleanly.\n", timeoutSec)
+		logf("[ps4-recomp] Watchdog timeout of %ds reached. Terminated cleanly.\n", timeoutSec)
 		return nil
 	}
 	return err
@@ -1145,7 +1155,7 @@ func loadCompanionModules(cfg *Config, main *elfloader.LoadedELF) ([]emitter.Gue
 		if _, ok := found[strings.ToLower(filepath.Base(cleanName))]; ok {
 			continue
 		}
-		fmt.Fprintf(logw, "             Referenced module %s was not found for AOT linking\n", name)
+		logf("             Referenced module %s was not found for AOT linking\n", name)
 	}
 	if len(refs) == 0 {
 		return nil, nil
@@ -1159,7 +1169,7 @@ func loadCompanionModules(cfg *Config, main *elfloader.LoadedELF) ([]emitter.Gue
 	for _, ref := range refs {
 		mod, err := elfloader.LoadELF(ref.Path)
 		if err != nil {
-			fmt.Fprintf(logw, "             Skipping module %s: %v\n", filepath.Base(ref.Path), err)
+			logf("             Skipping module %s: %v\n", filepath.Base(ref.Path), err)
 			continue
 		}
 		if elfloader.Overlaps(main, mod) {
@@ -1190,7 +1200,7 @@ func loadCompanionModules(cfg *Config, main *elfloader.LoadedELF) ([]emitter.Gue
 			EHFrameSize:    mod.EHFrameSize,
 			Segments:       mod.Segments,
 		})
-		fmt.Fprintf(logw, "             Linked module %s (%d exports, load 0x%x-0x%x)\n",
+		logf("             Linked module %s (%d exports, load 0x%x-0x%x)\n",
 			mod.FileName, len(exports), mod.MinVAddr, mod.MaxVAddr)
 	}
 	return modules, nil
@@ -1422,7 +1432,7 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 
 	// 1. Bundle external dynamic libraries into Contents/Frameworks/ and patch compiledBin BEFORE copying
 	if err := bundleDylibDependencies(contentsDir, compiledBin); err != nil {
-		fmt.Fprintf(logw, "             Warning: dylib bundling had issues: %v\n", err)
+		logf("             Warning: dylib bundling had issues: %v\n", err)
 	}
 
 	// 2. Move/copy the cleanly signed binary into Contents/MacOS/<appName>
@@ -1655,8 +1665,9 @@ func xmlEscape(s string) string {
 
 // appInfoPlist is the Contents/Info.plist of a generated game bundle. LSSupportsGameMode and the
 // games category let macOS run it in Game Mode (CPU and GPU priority, lower Bluetooth latency for
-// controllers) when it is full screen. NSMicrophoneUsageDescription is required for libSceAudioIn
-// capture: macOS terminates a bundle that opens an input device without it.
+// controllers) when it is full screen. NSMicrophoneUsageDescription and NSCameraUsageDescription
+// are required for libSceAudioIn and libSceCamera capture: macOS terminates a bundle that opens
+// an input device without them.
 func appInfoPlist(appName string, hasIcon bool, meta bundleMeta) string {
 	iconXML := ""
 	if hasIcon {
@@ -1692,6 +1703,8 @@ func appInfoPlist(appName string, hasIcon bool, meta bundleMeta) string {
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>The game records audio from the microphone (voice chat and voice input).</string>
+    <key>NSCameraUsageDescription</key>
+    <string>The game uses the camera as a PlayStation Camera.</string>
 %s</dict>
 </plist>
 `, xmlEscape(appName), xmlEscape(meta.BundleID), xmlEscape(meta.DisplayName), xmlEscape(meta.DisplayName),
@@ -1774,12 +1787,6 @@ func readMachODepsAndRpaths(path string) ([]string, []string, error) {
 		}
 	}
 	return deps, rpaths, nil
-}
-
-// getNonSystemDylibs returns all non-system dylibs that target directly depends on.
-func getNonSystemDylibs(target string) ([]string, error) {
-	deps, _, err := readMachODepsAndRpaths(target)
-	return deps, err
 }
 
 type dylibQueueItem struct {
@@ -1984,7 +1991,7 @@ func bundleDylibDependencies(contentsDir, bundleBin string) error {
 	_ = exec.Command("codesign", "--force", "--sign", "-", bundleBin).Run()
 
 	if len(copiedByBase) > 0 {
-		fmt.Fprintf(logw, "             Bundled %d external dynamic libraries into Contents/Frameworks/\n", len(copiedByBase))
+		logf("             Bundled %d external dynamic libraries into Contents/Frameworks/\n", len(copiedByBase))
 	}
 	return nil
 }

@@ -18,7 +18,7 @@
         }                                                                         \
     } while (0)
 
-#define A(p) ((uint64_t)(uintptr_t)(p))
+#include "../host_guest_mem.h"
 #define FIRST_ID (ORBIS_NP_AUTH_REQUEST_ID_OFFSET + 1)
 #define NP_SIGNED_OUT ((int32_t)ORBIS_NP_ERROR_SIGNED_OUT)
 #define NP_USER_NOT_FOUND ((int32_t)ORBIS_NP_ERROR_USER_NOT_FOUND)
@@ -27,6 +27,7 @@ static int32_t call(void (*shim)(GuestContext *), uint64_t a0, uint64_t a1, uint
                     uint64_t a5) {
     GuestContext ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.mem_base = GUEST_MEM;
     ctx.rdi = a0;
     ctx.rsi = a1;
     ctx.rdx = a2;

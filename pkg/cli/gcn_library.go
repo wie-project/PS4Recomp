@@ -119,7 +119,7 @@ func gcnBuildID(dir string, files []string) (string, error) {
 		}
 		h.Reset()
 		_, err = io.CopyBuffer(h, r, buf)
-		r.Close()
+		_ = r.Close() // read only: closing cannot lose data
 		if err != nil {
 			return "", err
 		}

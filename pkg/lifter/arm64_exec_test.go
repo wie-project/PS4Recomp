@@ -156,7 +156,9 @@ func runExec(t *testing.T, cases []execCase, want []map[int][]byte) {
 	dir := t.TempDir()
 	if k := os.Getenv("EXEC_KEEP"); k != "" {
 		dir = k
-		os.MkdirAll(dir, 0o755)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	var host, native, data strings.Builder

@@ -141,7 +141,7 @@ func TestGravityRushIsaSites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }() // read only
 	images := map[string][]byte{}
 	image := func(name string) []byte {
 		if img, ok := images[name]; ok {

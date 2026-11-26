@@ -669,9 +669,7 @@ func parseInitArray(loaded *LoadedELF) {
 						}
 						if len(ctors) > 1 && ctors[len(ctors)-1] == ^uint64(0) {
 							// Found valid backwards ctors list terminated by __CTOR_LIST__ sentinel
-							for _, fn := range ctors[:len(ctors)-1] {
-								loaded.InitArray = append(loaded.InitArray, fn)
-							}
+							loaded.InitArray = append(loaded.InitArray, ctors[:len(ctors)-1]...)
 						}
 					}
 				}

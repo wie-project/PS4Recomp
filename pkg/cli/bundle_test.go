@@ -41,6 +41,7 @@ func TestPackageAppBundleWithGameMode(t *testing.T) {
 		"CFBundleExecutable":           "eboot",
 		"CFBundleIdentifier":           "org.ps4recomp.eboot",
 		"NSMicrophoneUsageDescription": "The game records audio from the microphone (voice chat and voice input).",
+		"NSCameraUsageDescription":     "The game uses the camera as a PlayStation Camera.",
 	} {
 		o, err := exec.Command("plutil", "-extract", key, "raw", plist).Output()
 		if err != nil || strings.TrimSpace(string(o)) != want {

@@ -125,12 +125,12 @@ func TestFreeTypeHomebrewAndNone(t *testing.T) {
 
 func TestShellQuote(t *testing.T) {
 	for in, want := range map[string]string{
-		"-O3":                     "-O3",
-		"-I/w/3rdparty/ft":        "-I/w/3rdparty/ft",
-		"-I/A/PS4 Recomp.app/x":   "'-I/A/PS4 Recomp.app/x'",
-		"it's":                    `'it'\''s'`,
-		"":                        "''",
-		"$HOME":                   "'$HOME'",
+		"-O3":                   "-O3",
+		"-I/w/3rdparty/ft":      "-I/w/3rdparty/ft",
+		"-I/A/PS4 Recomp.app/x": "'-I/A/PS4 Recomp.app/x'",
+		"it's":                  `'it'\''s'`,
+		"":                      "''",
+		"$HOME":                 "'$HOME'",
 	} {
 		if got := shellQuote(in); got != want {
 			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)

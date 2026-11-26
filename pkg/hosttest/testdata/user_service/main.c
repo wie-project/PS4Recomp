@@ -27,13 +27,14 @@ uint32_t ps4_compiled_sdk_version(const GuestContext *ctx) {
         }                                                                         \
     } while (0)
 
-#define A(p) ((uint64_t)(uintptr_t)(p))
+#include "../host_guest_mem.h"
 #define USER ORBIS_USER_SERVICE_INITIAL_USER_ID
 
 static uint8_t g_stack[0x4000] __attribute__((aligned(16)));
 
 static void reset_ctx(GuestContext *ctx) {
     memset(ctx, 0, sizeof(*ctx));
+    ctx->mem_base = GUEST_MEM;
     ctx->mem_size = ~0ull;
     ctx->rsp = A(g_stack + sizeof(g_stack) - 8); // as on entry to a called function
 }
@@ -68,7 +69,7 @@ static struct {
 
 static void callback_common(GuestContext *ctx) {
     if ((ctx->rsp + 8) % 16 != 0) seen.misaligned++;
-    memcpy(&seen.last, (const void *)(uintptr_t)ctx->rdi, sizeof(seen.last));
+    memcpy(&seen.last, host_ptr(ctx->rdi), sizeof(seen.last));
     seen.last_userdata = ctx->rsi;
 }
 
