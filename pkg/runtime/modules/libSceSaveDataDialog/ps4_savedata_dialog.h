@@ -83,6 +83,12 @@ OrbisCommonDialogStatus sceSaveDataDialogUpdateStatus(void);
 OrbisCommonDialogStatus sceSaveDataDialogGetStatus(void);
 int32_t sceSaveDataDialogGetResult(OrbisSaveDataDialogResult *result);
 int32_t sceSaveDataDialogTerminate(void);
+int32_t sceSaveDataDialogClose(const void *param);
+int32_t sceSaveDataDialogIsReadyToDisplay(void);
+int32_t sceSaveDataDialogProgressBarInc(uint32_t target, uint32_t delta);
+int32_t sceSaveDataDialogProgressBarSetValue(uint32_t target, uint32_t rate);
+// Current progress bar value (percent) of the open dialog, for tests.
+uint32_t ps4_savedata_dialog_progress(void);
 
 // Shims
 void shim_sceSaveDataDialogInitialize(GuestContext *ctx);
@@ -91,6 +97,10 @@ void shim_sceSaveDataDialogUpdateStatus(GuestContext *ctx);
 void shim_sceSaveDataDialogGetStatus(GuestContext *ctx);
 void shim_sceSaveDataDialogGetResult(GuestContext *ctx);
 void shim_sceSaveDataDialogTerminate(GuestContext *ctx);
+void shim_sceSaveDataDialogClose(GuestContext *ctx);
+void shim_sceSaveDataDialogIsReadyToDisplay(GuestContext *ctx);
+void shim_sceSaveDataDialogProgressBarInc(GuestContext *ctx);
+void shim_sceSaveDataDialogProgressBarSetValue(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

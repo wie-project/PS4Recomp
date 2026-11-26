@@ -25,6 +25,7 @@
 #include <time.h>
 
 #define VIDEODEC_ERROR_API_FAIL          ((int32_t)0x80C10000)
+#define VIDEODEC_ERROR_STRUCT_SIZE       ((int32_t)0x80C10002)
 #define VIDEODEC_ERROR_HANDLE            ((int32_t)0x80C10003)
 #define VIDEODEC_ERROR_ARGUMENT_POINTER  ((int32_t)0x80C1000F)
 #define VIDEODEC_ERROR_AU_POINTER        ((int32_t)0x80C1000A)
@@ -107,7 +108,19 @@ typedef struct VideodecPictureInfo {
     } codec;
 } VideodecPictureInfo;
 
-#define VIDEODEC_MEM_SIZE 0x10000ULL
+_Static_assert(sizeof(VideodecConfigInfo) == 0x28, "VideodecConfigInfo");
+_Static_assert(sizeof(VideodecResourceInfo) == 0x38, "VideodecResourceInfo");
+_Static_assert(sizeof(VideodecCtrl) == 0x18, "VideodecCtrl");
+_Static_assert(sizeof(VideodecFrameBuffer) == 0x18, "VideodecFrameBuffer");
+_Static_assert(sizeof(VideodecInputData) == 0x30, "VideodecInputData");
+_Static_assert(sizeof(VideodecPictureInfo) == 0x70, "VideodecPictureInfo");
+
+#define VIDEODEC_MIB(n) ((uint64_t)(n) << 20)
+// Memory sizes reported when the frame size cannot be computed, as in shadPS4.
+#define VIDEODEC_FALLBACK_MEM_SIZE VIDEODEC_MIB(16)
+// H.264 VUI value of colour_primaries / transfer_characteristics / matrix_coefficients when the
+// stream carries no colour description (E.2.1).
+#define H264_COLOUR_UNSPECIFIED 2
 
 void ps4_gnm_notify_cpu_write(uint64_t addr, uint64_t size) __attribute__((weak));
 
@@ -242,6 +255,32 @@ int ps4_videodec_stats(const void *mem_base, uint64_t ctrl_addr, Ps4VideodecStat
     return 0;
 }
 
+// The VUI fields of the picture's sequence parameter set, with the values H.264 Annex E infers
+// for absent syntax elements. shadPS4 reports only colourPrimaries (FFmpeg's color_primaries,
+// which is the same VUI value) and leaves the rest of the union as the guest left it.
+static void vdec_fill_avc_info(VideodecAvcInfo *avc, const H264SpsInfo *s) {
+    if (s->timing_info_present_flag) {
+        avc->numUnitsInTick = s->num_units_in_tick;
+        avc->timeScale = s->time_scale;
+        avc->fixedFrameRateFlag = s->fixed_frame_rate_flag;
+    }
+    if (s->aspect_ratio_info_present_flag) {
+        avc->aspectRatioIdc = s->aspect_ratio_idc;
+        avc->sarWidth = s->sar_width;
+        avc->sarHeight = s->sar_height;
+    }
+    if (s->colour_description_present_flag) {
+        avc->colourPrimaries = s->colour_primaries;
+        avc->transferCharacteristics = s->transfer_characteristics;
+        avc->matrixCoefficients = s->matrix_coefficients;
+    } else {
+        avc->colourPrimaries = H264_COLOUR_UNSPECIFIED;
+        avc->transferCharacteristics = H264_COLOUR_UNSPECIFIED;
+        avc->matrixCoefficients = H264_COLOUR_UNSPECIFIED;
+    }
+    avc->videoFullRangeFlag = s->video_signal_type_present_flag ? s->video_full_range_flag : 0;
+}
+
 // Copy a decoded picture into the guest frame buffer and fill the picture info.
 static int32_t vdec_emit(GuestContext *ctx, Vdec *d, const H264VtFrame *f, uint64_t fb_addr, uint64_t pic_addr,
                          bool flush) {
@@ -273,9 +312,9 @@ static int32_t vdec_emit(GuestContext *ctx, Vdec *d, const H264VtFrame *f, uint6
         pic->isErrorPic = 0;
         pic->ptsData = (uint64_t)f->pts;
         pic->attachedData = f->attached;
-        pic->codec.avc.colourPrimaries = 1;
-        pic->codec.avc.transferCharacteristics = 1;
-        pic->codec.avc.matrixCoefficients = 1;
+        vdec_fill_avc_info(&pic->codec.avc, &f->sps);
+        pic->codec.avc.frameCropLeftOffset = 0;
+        pic->codec.avc.frameCropTopOffset = 0;
         pic->codec.avc.frameCropRightOffset = pitch - w;
         pic->codec.avc.frameCropBottomOffset = ah - h;
     }
@@ -306,6 +345,8 @@ static Vdec *vdec_from_ctrl(GuestContext *ctx, uint64_t ctrl_addr) {
 }
 
 // int sceVideodecQueryResourceInfo(const SceVideodecConfigInfo *cfg, SceVideodecResourceInfo *rsrc)
+// Sizes as in shadPS4: the worst-case picture is maxFrameWidth x maxFrameHeight (1920x1080, or
+// 3840x2160 from level 5.0 on, when they are not given), pitch 256-aligned, DPB + 2 surfaces.
 void shim_sceVideodecQueryResourceInfo(GuestContext *ctx) {
     if (!ctx->rdi || !ctx->rsi) {
         ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_ARGUMENT_POINTER;
@@ -313,18 +354,26 @@ void shim_sceVideodecQueryResourceInfo(GuestContext *ctx) {
     }
     const VideodecConfigInfo *cfg = (const VideodecConfigInfo *)(ctx->mem_base + ctx->rdi);
     VideodecResourceInfo *ri = (VideodecResourceInfo *)(ctx->mem_base + ctx->rsi);
-    uint64_t w = cfg->maxFrameWidth > 0 ? (uint64_t)cfg->maxFrameWidth : 1920;
-    uint64_t h = cfg->maxFrameHeight > 0 ? (uint64_t)cfg->maxFrameHeight : 1088;
-    uint64_t pitch = (w + 255) & ~255ULL;
-    uint64_t fb = (pitch * ((h + 15) & ~15ULL) * 3) / 2; // NV12
+    if (cfg->thisSize != sizeof(*cfg) || ri->thisSize != sizeof(*ri)) {
+        ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_STRUCT_SIZE;
+        SHIM_RETURN();
+    }
+    int32_t w = cfg->maxFrameWidth;
+    int32_t h = cfg->maxFrameHeight;
+    if (w <= 0 || h <= 0) {
+        w = cfg->maxLevel >= 150 ? 3840 : 1920;
+        h = cfg->maxLevel >= 150 ? 2160 : 1080;
+    }
+    const uint64_t frame = ((uint64_t)align_up((uint32_t)w, 256) * align_up((uint32_t)h, 16) * 3) / 2;
+    const uint64_t dpb = cfg->maxDpbFrameCount > 0 ? (uint64_t)cfg->maxDpbFrameCount : 8;
+    const uint64_t padded = ((frame + 255) & ~255ULL) + 0x4000;
     ri->thisSize = sizeof(*ri);
-    ri->cpuMemorySize = VIDEODEC_MEM_SIZE;
     ri->pCpuMemory = 0;
-    ri->cpuGpuMemorySize = VIDEODEC_MEM_SIZE;
     ri->pCpuGpuMemory = 0;
-    ri->maxFrameBufferSize = (fb + 0xFFFF) & ~0xFFFFULL;
+    ri->cpuGpuMemorySize = padded * (dpb + 2) + VIDEODEC_MIB(8);
+    ri->cpuMemorySize = VIDEODEC_FALLBACK_MEM_SIZE;
+    ri->maxFrameBufferSize = padded;
     ri->frameBufferAlignment = 0x100;
-    ri->reserved0 = 0;
     ctx->rax = 0;
     SHIM_RETURN();
 }
@@ -334,6 +383,11 @@ void shim_sceVideodecQueryResourceInfo(GuestContext *ctx) {
 void shim_sceVideodecCreateDecoder(GuestContext *ctx) {
     if (!ctx->rdi || !ctx->rsi || !ctx->rdx) {
         ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_ARGUMENT_POINTER;
+        SHIM_RETURN();
+    }
+    if (((const VideodecConfigInfo *)(ctx->mem_base + ctx->rdi))->thisSize != sizeof(VideodecConfigInfo) ||
+        ((const VideodecResourceInfo *)(ctx->mem_base + ctx->rsi))->thisSize != sizeof(VideodecResourceInfo)) {
+        ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_STRUCT_SIZE;
         SHIM_RETURN();
     }
     VideodecCtrl *c = (VideodecCtrl *)(ctx->mem_base + ctx->rdx);
@@ -363,8 +417,9 @@ void shim_sceVideodecCreateDecoder(GuestContext *ctx) {
                 (unsigned long long)ri->maxFrameBufferSize, ri->frameBufferAlignment);
     }
     d->magic = VDEC_MAGIC;
+    c->thisSize = sizeof(*c);
     c->handle = (uint64_t)(uintptr_t)d;
-    c->version = 0;
+    c->version = 1;
     ctx->rax = 0;
     SHIM_RETURN();
 }
@@ -396,16 +451,21 @@ static void vdec_trace(Vdec *d, const H264AuCensus *c, uint64_t au_index, const 
 // int sceVideodecDecode(SceVideodecCtrl *ctrl, const SceVideodecInputData *in,
 //                       SceVideodecFrameBuffer *fb, SceVideodecPictureInfo *pic)
 void shim_sceVideodecDecode(GuestContext *ctx) {
-    videodec_mark_no_picture(ctx, ctx->rcx);
+    if (!ctx->rdi || !ctx->rsi || !ctx->rdx || !ctx->rcx) {
+        ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_ARGUMENT_POINTER;
+        SHIM_RETURN();
+    }
+    if (((const VideodecCtrl *)(ctx->mem_base + ctx->rdi))->thisSize != sizeof(VideodecCtrl) ||
+        ((const VideodecFrameBuffer *)(ctx->mem_base + ctx->rdx))->thisSize != sizeof(VideodecFrameBuffer)) {
+        ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_STRUCT_SIZE;
+        SHIM_RETURN();
+    }
     Vdec *d = vdec_from_ctrl(ctx, ctx->rdi);
     if (!d) {
         ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_HANDLE;
         SHIM_RETURN();
     }
-    if (!ctx->rsi || !ctx->rdx) {
-        ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_ARGUMENT_POINTER;
-        SHIM_RETURN();
-    }
+    videodec_mark_no_picture(ctx, ctx->rcx);
     const VideodecInputData *in = (const VideodecInputData *)(ctx->mem_base + ctx->rsi);
     if (!in->pAuData) {
         ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_AU_POINTER;
@@ -438,21 +498,28 @@ void shim_sceVideodecDecode(GuestContext *ctx) {
 // int sceVideodecFlush(SceVideodecCtrl *ctrl, SceVideodecFrameBuffer *fb, SceVideodecPictureInfo *pic)
 // Drains delayed pictures, one per call.
 void shim_sceVideodecFlush(GuestContext *ctx) {
-    if (!ctx->rdi) {
+    if (!ctx->rsi || !ctx->rdx) {
         ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_ARGUMENT_POINTER;
         SHIM_RETURN();
     }
-    videodec_mark_no_picture(ctx, ctx->rdx);
-    int32_t rc = 0;
+    if (((const VideodecFrameBuffer *)(ctx->mem_base + ctx->rsi))->thisSize != sizeof(VideodecFrameBuffer) ||
+        ((const VideodecPictureInfo *)(ctx->mem_base + ctx->rdx))->thisSize != sizeof(VideodecPictureInfo)) {
+        ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_STRUCT_SIZE;
+        SHIM_RETURN();
+    }
     Vdec *d = vdec_from_ctrl(ctx, ctx->rdi);
-    if (d) {
-        h264vt_finish(d->core);
-        if (ctx->rsi) vdec_note_fb(d, ((const VideodecFrameBuffer *)(ctx->mem_base + ctx->rsi))->frameBufferSize);
-        H264VtFrame *f = ctx->rsi ? videodec_pop(d) : NULL;
-        if (f) {
-            rc = vdec_emit(ctx, d, f, ctx->rsi, ctx->rdx, true);
-            h264vt_frame_free(f);
-        }
+    if (!d) {
+        ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_HANDLE;
+        SHIM_RETURN();
+    }
+    videodec_mark_no_picture(ctx, ctx->rdx);
+    h264vt_finish(d->core);
+    vdec_note_fb(d, ((const VideodecFrameBuffer *)(ctx->mem_base + ctx->rsi))->frameBufferSize);
+    int32_t rc = 0;
+    H264VtFrame *f = videodec_pop(d);
+    if (f) {
+        rc = vdec_emit(ctx, d, f, ctx->rsi, ctx->rdx, true);
+        h264vt_frame_free(f);
     }
     ctx->rax = (uint64_t)(int64_t)rc;
     SHIM_RETURN();
@@ -465,7 +532,11 @@ void shim_sceVideodecReset(GuestContext *ctx) {
         SHIM_RETURN();
     }
     Vdec *d = vdec_from_ctrl(ctx, ctx->rdi);
-    if (d) h264vt_reset(d->core);
+    if (!d) {
+        ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_HANDLE;
+        SHIM_RETURN();
+    }
+    h264vt_reset(d->core);
     ctx->rax = 0;
     SHIM_RETURN();
 }
@@ -477,25 +548,33 @@ void shim_sceVideodecDeleteDecoder(GuestContext *ctx) {
         SHIM_RETURN();
     }
     Vdec *d = vdec_from_ctrl(ctx, ctx->rdi);
-    if (d) {
-        d->magic = 0;
-        Ps4VideodecStats s;
-        vdec_snapshot(d, &s);
-        fprintf(stderr,
-                "[libSceVideodec] decoder %u deleted: AUs %llu (slices %llu, max per AU %u, mid-picture %llu), pictures "
-                "%llu (flushed %llu, error %llu, refused %llu), first picture mono %.3f, last mono %.3f, pts %lld..%lld, frame buffer "
-                "min 0x%llx need 0x%llx\n",
-                d->ordinal, (unsigned long long)s.aus, (unsigned long long)s.slices, s.max_slices_per_au,
-                (unsigned long long)s.mid_picture_aus, (unsigned long long)s.pictures,
-                (unsigned long long)s.flush_pictures, (unsigned long long)s.error_pictures,
-                (unsigned long long)s.refused_pictures, s.first_picture_mono,
-                s.last_picture_mono, (long long)s.first_pts, (long long)s.last_pts, (unsigned long long)s.min_fb_size,
-                (unsigned long long)s.need_fb_size);
-        h264vt_destroy(d->core);
-        pthread_mutex_destroy(&d->stats_lock);
-        free(d);
+    if (!d) {
+        ctx->rax = (uint64_t)(int64_t)VIDEODEC_ERROR_HANDLE;
+        SHIM_RETURN();
     }
-    ((VideodecCtrl *)(ctx->mem_base + ctx->rdi))->handle = 0;
+    d->magic = 0;
+    Ps4VideodecStats s;
+    vdec_snapshot(d, &s);
+    fprintf(stderr,
+            "[libSceVideodec] decoder %u deleted: AUs %llu (slices %llu, max per AU %u, mid-picture %llu), pictures "
+            "%llu (flushed %llu, error %llu, refused %llu), first picture mono %.3f, last mono %.3f, pts %lld..%lld, frame buffer "
+            "min 0x%llx need 0x%llx\n",
+            d->ordinal, (unsigned long long)s.aus, (unsigned long long)s.slices, s.max_slices_per_au,
+            (unsigned long long)s.mid_picture_aus, (unsigned long long)s.pictures,
+            (unsigned long long)s.flush_pictures, (unsigned long long)s.error_pictures,
+            (unsigned long long)s.refused_pictures, s.first_picture_mono,
+            s.last_picture_mono, (long long)s.first_pts, (long long)s.last_pts, (unsigned long long)s.min_fb_size,
+            (unsigned long long)s.need_fb_size);
+    h264vt_destroy(d->core);
+    pthread_mutex_destroy(&d->stats_lock);
+    free(d);
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+// int sceVideodecMapMemory(...): stubbed in shadPS4 (returns SCE_OK); the decoder's memory is
+// host memory here, there is nothing to map.
+void shim_sceVideodecMapMemory(GuestContext *ctx) {
     ctx->rax = 0;
     SHIM_RETURN();
 }

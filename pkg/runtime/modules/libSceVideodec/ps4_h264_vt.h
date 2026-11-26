@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Shared H.264 decode core on VideoToolbox, used by libSceVideodec (TLOU) and libSceVdecsw
-// (Uncharted 4). It takes Annex-B access units and hands out decoded pictures in display order.
+// Shared H.264 / HEVC decode core on VideoToolbox, used by libSceVideodec (TLOU), libSceVdecsw
+// (Uncharted 4) and libSceVideodec2. It takes Annex-B access units and hands out decoded
+// pictures in display order. The codec is chosen when the decoder is created; the h264vt_
+// names predate HEVC support.
 //
-// - SPS/PPS are pulled out of the stream and turned into the CMVideoFormatDescription; the
-//   other NAL units of an access unit are re-packed as one AVCC sample.
+// - The parameter sets (H.264 SPS/PPS, HEVC VPS/SPS/PPS) are pulled out of the stream and turned
+//   into the CMVideoFormatDescription; the other NAL units of an access unit are re-packed as
+//   one sample with 4-byte length prefixes (AVCC / HVCC).
+// - HEVC: the POC comes from slice_pic_order_cnt_lsb and the previous TemporalId-0 picture
+//   (8.3.1); IDR / BLA pictures, and a CRA that starts the stream or follows an end of sequence
+//   (NoRaslOutputFlag), start a new POC sequence like an H.264 IDR. The reorder depth is the
+//   SPS sps_max_num_reorder_pics of the highest sub-layer.
 // - The session decodes synchronously. VideoToolbox returns pictures in decode order (even with
 //   temporal processing requested; checked by tests/host/vdecsw_test.c), so the core puts them in
 //   display order itself: it computes each picture's POC from the slice header (8.2.1) and holds
@@ -14,6 +21,7 @@
 // - Every access unit carries a tag (pts, dts, attached data, the SPS in force and the NAL-unit
 //   flags of that access unit); the decoded picture gets the tag of the access unit it came
 //   from, so reordering never mixes them up.
+// - HEVC streams of more than 8 bits are decoded to 10-bit NV12 and rounded to 8 bits on copy.
 // - Pictures are copied out as linear NV12: pitch = align(width, 64), height = align(height, 16),
 //   chroma plane right after the luma plane. Rows past the picture repeat the last row.
 //
@@ -26,9 +34,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ps4_hevc.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef enum H264VtCodec {
+    H264VT_CODEC_AVC = 0,
+    H264VT_CODEC_HEVC = 1,
+} H264VtCodec;
 
 // Timestamp value meaning "none" (the guests pass -1 for pts/dts they do not know).
 #define H264VT_NO_TIME ((int64_t)-1)
@@ -72,7 +87,9 @@ typedef struct H264SpsInfo {
     uint8_t max_dec_frame_buffering;
 } H264SpsInfo;
 
-// Which NAL units an access unit contained.
+// Which NAL units an access unit contained. The numbers are H.264 nal_unit_types; HEVC
+// streams set the same fields from their own types (IDR_W_RADL / IDR_N_LP, SPS, PPS, AUD, EOS,
+// EOB, FD), plus the HEVC-only ones below.
 typedef struct H264AuFlags {
     uint8_t slice;                // a coded slice (nal_unit_type 1..5): the unit makes a picture
     uint8_t idr;                  // nal_unit_type 5
@@ -84,17 +101,24 @@ typedef struct H264AuFlags {
     uint8_t filler;               // 12
     uint8_t sei_buffering_period; // SEI payloadType 0
     uint8_t sei_pic_timing;       // SEI payloadType 1
+    uint8_t vps;                  // HEVC VPS
+    uint8_t irap;                 // HEVC IRAP picture (BLA, IDR, CRA)
+    uint8_t sei_frame_packing;    // HEVC SEI payloadType 45
+    uint8_t sei_alternative_transfer;           // HEVC SEI payloadType 147
+    uint8_t preferred_transfer_characteristics; // its value
 } H264AuFlags;
 
 typedef struct H264VtFrame {
-    void *pixbuf; // CVPixelBufferRef (NV12, video range); NULL for an error picture
+    void *pixbuf; // CVPixelBufferRef (NV12 8- or 10-bit, video range); NULL for an error picture
     bool error;   // the access unit could not be decoded; width/height come from its SPS (0 if none)
     uint32_t width;
     uint32_t height;
     int64_t pts;
     int64_t dts;
     uint64_t attached;
-    H264SpsInfo sps;
+    H264VtCodec codec;
+    H264SpsInfo sps;  // H.264 streams
+    HevcSpsInfo hevc; // HEVC streams
     H264AuFlags au;
     int32_t poc; // picture order count; pictures leave the decoder in POC order
     struct H264VtFrame *next;
@@ -102,8 +126,10 @@ typedef struct H264VtFrame {
 
 typedef struct H264VtDecoder H264VtDecoder;
 
-// log_tag prefixes the decoder's stderr messages, e.g. "libSceVideodec".
+// log_tag prefixes the decoder's stderr messages, e.g. "libSceVideodec". h264vt_create makes an
+// H.264 decoder.
 H264VtDecoder *h264vt_create(const char *log_tag);
+H264VtDecoder *h264vt_create_codec(const char *log_tag, H264VtCodec codec);
 void h264vt_destroy(H264VtDecoder *d);
 
 // Decodes one Annex-B access unit. Returns 0 or a negative H264VT_ERR_*; *ready (may be NULL)
@@ -131,6 +157,9 @@ H264VtFrame *h264vt_pop(H264VtDecoder *d);
 #define H264VT_POP_TOO_SMALL 2
 int h264vt_pop_fitting(H264VtDecoder *d, uint64_t capacity, uint64_t extra, H264VtFrame **out, uint64_t *need);
 int h264vt_queued(H264VtDecoder *d);
+// Frees the queued error pictures (for APIs that have no way to report one) and returns how
+// many pictures stay queued.
+int h264vt_drop_errors(H264VtDecoder *d);
 void h264vt_frame_free(H264VtFrame *f);
 
 // Linear NV12 geometry of a picture.

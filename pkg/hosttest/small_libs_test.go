@@ -4,6 +4,13 @@ package hosttest
 
 import "testing"
 
+const (
+	frameworkFlag  = "-framework"
+	coreFoundation = "CoreFoundation"
+	// caseLifecycle is the host test case of a library's initialize / terminate rules.
+	caseLifecycle = "lifecycle"
+)
+
 // TestMouse runs testdata/mouse/main.c: libSceMouse handle rules, error codes and the input
 // report queue fed by the host pointer.
 func TestMouse(t *testing.T) {
@@ -23,7 +30,7 @@ func TestMouse(t *testing.T) {
 // port limit and reads from a port without a capture device (PS4_AUDIO_IN=none).
 func TestAudioIn(t *testing.T) {
 	bin := buildHostCFlags(t, "audioin",
-		[]string{"-framework", "AudioToolbox"},
+		[]string{frameworkFlag, "AudioToolbox"},
 		"../runtime/modules/libSceAudioIn/ps4_audioin.c",
 	)
 	runHostCases(t, bin, []string{
@@ -63,7 +70,7 @@ func TestRtc(t *testing.T) {
 // handles, and encode -> parse header -> decode round trips in every supported pixel format.
 func TestJpeg(t *testing.T) {
 	bin := buildHostCFlags(t, "jpeg",
-		[]string{"-framework", "ImageIO", "-framework", "CoreGraphics", "-framework", "CoreFoundation"},
+		[]string{frameworkFlag, "ImageIO", frameworkFlag, "CoreGraphics", frameworkFlag, coreFoundation},
 		"../runtime/modules/libSceJpegDec/ps4_jpegdec.c",
 		"../runtime/modules/libSceJpegEnc/ps4_jpegenc.c",
 	)
@@ -85,7 +92,7 @@ func TestGameCustomDataDialog(t *testing.T) {
 		"../runtime/modules/libSceGameCustomDataDialog/ps4_game_custom_data_dialog.c",
 	)
 	runHostCases(t, bin, []string{
-		"lifecycle",
+		caseLifecycle,
 		"validation",
 		"send-cancel",
 		"close-ok",
@@ -116,7 +123,7 @@ func TestSysmodule(t *testing.T) {
 // by ImageIO and the decoder, with the row filters each filter mask allows.
 func TestPngDec(t *testing.T) {
 	bin := buildHostCFlags(t, "pngdec",
-		[]string{linkZlib, "-framework", "ImageIO", "-framework", "CoreGraphics", "-framework", "CoreFoundation"},
+		[]string{linkZlib, frameworkFlag, "ImageIO", frameworkFlag, "CoreGraphics", frameworkFlag, coreFoundation},
 		"../runtime/modules/libScePngDec/ps4_pngdec.c",
 	)
 	runHostCases(t, bin, []string{
@@ -151,7 +158,7 @@ func TestWebBrowserDialog(t *testing.T) {
 		"../runtime/modules/libSceWebBrowserDialog/ps4_web_browser_dialog.c",
 		"../runtime/modules/libSceMsgDialog/ps4_common_dialog.c",
 	)
-	runHostCases(t, bin, []string{"lifecycle", "busy"})
+	runHostCases(t, bin, []string{caseLifecycle, "busy"})
 }
 
 // TestFiber runs testdata/fiber/main.c: libSceFiber argument checks in shadPS4's order, the opt
@@ -205,5 +212,69 @@ func TestNetCtl(t *testing.T) {
 	runHostCases(t, bin, []string{
 		"disconnected",
 		"connected",
+	})
+}
+
+// TestVideoCoredump runs testdata/video_coredump/main.c: libSceCoredump handler registration,
+// libSceVideoCoreServerInterface resource bookkeeping, the libSceVideodec / libSceVideodec2
+// argument, struct size and handle checks and memory queries, and the blocking libSceVdecsw
+// SyncDecodeInput / SyncDecodeOutput calls and picture info entry points.
+func TestVideoCoredump(t *testing.T) {
+	bin := buildHostCFlags(t, "video_coredump",
+		[]string{frameworkFlag, "VideoToolbox", frameworkFlag, "CoreMedia", frameworkFlag, "CoreVideo",
+			frameworkFlag, coreFoundation},
+		"../runtime/modules/libSceCoredump/ps4_coredump.c",
+		"../runtime/modules/libSceVideoCoreServerInterface/ps4_videocore_server.c",
+		"../runtime/modules/libSceVideodec/ps4_videodec.c",
+		"../runtime/modules/libSceVideodec/ps4_h264_vt.c",
+		"../runtime/modules/libSceVideodec/ps4_hevc_parse.c",
+		"../runtime/modules/libSceVideodec2/ps4_videodec2.c",
+		"../runtime/modules/libSceVdecsw/ps4_vdecsw.c",
+	)
+	runHostCases(t, bin, []string{
+		"coredump",
+		"videocore-server",
+		"videodec",
+		"videodec2",
+		"vdecsw-sync",
+	})
+}
+
+// TestSaveDataDialog runs testdata/savedata_dialog/main.c: libSceSaveDataDialog's common dialog
+// system rules, the check order of Open and GetResult, Close and the progress bar calls, with
+// automatic answers instead of the AppKit window.
+func TestSaveDataDialog(t *testing.T) {
+	bin := buildHostCFlags(t, "savedata_dialog",
+		[]string{"-I../runtime/modules/libSceSaveData", "-fobjc-arc", frameworkFlag, "Cocoa"},
+		"../runtime/modules/libSceMsgDialog/ps4_common_dialog.c",
+		"../runtime/modules/libSceSaveDataDialog/ps4_savedata_dialog.m",
+	)
+	runHostCases(t, bin, []string{
+		caseLifecycle,
+		"open-result-order",
+		"progress-bar",
+	})
+}
+
+// TestHevcDecode runs testdata/hevc_decode/main.c: an HEVC stream made with VideoToolbox's
+// encoder (B-frames, conformance window) through the HEVC parser, libSceVideodec2,
+// libSceVdecsw and libSceVdecCore, and an H.264 one through libSceVdecCore: pictures in display
+// order with the right content, the picture info, and VdecCore's frame-buffer slots and errors.
+func TestHevcDecode(t *testing.T) {
+	bin := buildHostCFlags(t, "hevc_decode",
+		[]string{frameworkFlag, "VideoToolbox", frameworkFlag, "CoreMedia", frameworkFlag, "CoreVideo",
+			frameworkFlag, coreFoundation},
+		"../runtime/modules/libSceVideodec/ps4_h264_vt.c",
+		"../runtime/modules/libSceVideodec/ps4_hevc_parse.c",
+		"../runtime/modules/libSceVideodec2/ps4_videodec2.c",
+		"../runtime/modules/libSceVdecsw/ps4_vdecsw.c",
+		"../runtime/modules/libSceVdecCore/ps4_vdeccore.c",
+	)
+	runHostCases(t, bin, []string{
+		"parse",
+		"videodec2",
+		"vdecsw",
+		"vdeccore-hevc",
+		"vdeccore-avc",
 	})
 }

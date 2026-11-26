@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // libSceVdecsw (the PS4 "software" video decoder API, used by Uncharted 4) on the shared
-// VideoToolbox H.264 core (libSceVideodec/ps4_h264_vt.c). H.264/AVC only; HEVC is refused.
+// VideoToolbox decode core (libSceVideodec/ps4_h264_vt.c), H.264/AVC and HEVC.
 //
 // Struct layouts, error codes and the picture-info trailer follow shadPS4
 // (src/core/libraries/videodec/vdecsw.{h,cpp}, vdecsw_impl.cpp, videodec_error.h,
@@ -50,8 +50,10 @@
 //
 // Calls and return codes:
 //   QueryComputeMemoryInfo / AllocateComputeQueue / ReleaseComputeQueue: bookkeeping [S].
-//   QueryDecoderMemoryInfo / CreateDecoder: size checks as shadPS4 [S]; codec != AVC ->
-//     CODEC_TYPE [I]; memory sizes below the query -> MEMORY_SIZE, NULL block -> MEMORY_POINTER [I].
+//   QueryDecoderMemoryInfo / CreateDecoder: size checks as shadPS4 [S]; codec other than AVC or
+//     HEVC -> CODEC_TYPE [I]; memory sizes below the query -> MEMORY_SIZE, NULL block ->
+//     MEMORY_POINTER [I]. The HEVC extra_config_info (tier, bit depths, temporal id) is not
+//     looked at, as in shadPS4 [S].
 //   SetDecodeInput: decodes the access unit synchronously (it is copied into the sample, so the
 //     guest may reuse its buffer at once [S]) and queues an input completion. Every access unit
 //     with a slice yields exactly one picture (player B relies on it [V]); one that cannot be
@@ -65,6 +67,9 @@
 //   TrySyncDecodeInput: pops one completion {decoded_au = the guest AU address, frame count,
 //     result}; INPUT_QUEUE_EMPTY when none [S]. DECODE_PENDING is never needed (decoding is
 //     synchronous); U4 accepts both codes [V].
+//   SyncDecodeInput: shadPS4 waits until a completion exists or no input is unsynced [S]. An
+//     input is complete when SetDecodeInput returns, so it never has to wait: same result as
+//     TrySyncDecodeInput.
 //   SetDecodeOutput: one pending buffer at a time, else OUTPUT_BUFFER_FULL [S]; U4 player B
 //     ignores that error and retries [V].
 //   TrySyncDecodeOutput: a buffer too small for the picture -> FRAME_BUFFER_SIZE, keeping both
@@ -73,21 +78,31 @@
 //     FinalizeDecodeSequence with nothing left -> OK with is_valid 0, is_last_frame 1 [S];
 //     otherwise writes one NV12 picture (see ps4_h264_vt.h), OutputInfo and the trailer. The
 //     last picture after a finalize has is_last_frame 1 [S].
+//   SyncDecodeOutput: takes the pending buffer (OUTPUT_BUFFER_EMPTY without one) and waits until
+//     a picture is queued, the sequence is finalized or the decoder is deleted [S]; with no
+//     picture it returns OK, is_valid 0, is_last_frame = finalized [S]. A picture too large for
+//     the buffer gives FRAME_BUFFER_SIZE as in TrySyncDecodeOutput, and the buffer is pending
+//     again unless the guest set another one meanwhile [I].
 //   FinalizeDecodeSequence: flushes the pictures held for reordering [S]. A later
 //     SetDecodeInput starts a new sequence [I].
 //   ResetDecoder: drops queued pictures, completions and the pending output buffer [S].
 //   DeleteDecoder: a call in progress on another thread keeps the decoder alive until it
 //     returns; handles carry a generation, so a stale one never reaches a newer decoder [I].
 //   Guest ranges (AU, frame buffer, trailer) are checked without wrap-around.
-//   GetAvcPictureInfo: (OutputInfo.this_size | 8) == 0x38, picture_count 0 -> OK without
-//     writing [S]; the second picture (interlaced) is never produced.
-// Picture-info values: pts/dts/attached_data of the access unit the picture came from [S];
+//   GetPictureInfo / GetAvcPictureInfo / GetHevcPictureInfo: one implementation, as in shadPS4:
+//     (OutputInfo.this_size | 8) == 0x38, picture_count 0 -> OK without writing [S]; the second
+//     picture (interlaced) is never produced. A requested size above the trailer of the
+//     OutputInfo's codec_type (AVC 0x78, HEVC 0xB8) is STRUCT_SIZE [I].
+// HEVC pictures get SceVdecswHevcPictureInfo (0xB8, libSceVideodec/ps4_hevc_picture_info.h) as
+// the trailer, OutputInfo codec_type 974921 [S].
+// AVC picture-info values: pts/dts/attached_data of the access unit the picture came from [S];
 // SPS/VUI fields parsed from the SPS in force [I: shadPS4 leaves them zero]; NAL flags of that
 // access unit [I]; crop offsets as shadPS4: left/top 0, right = pitch - width, bottom =
 // align(height,16) - height, in pixels [S, unverified on hardware]; pic_struct 0 (frame).
 // ---------------------------------------------------------------------------------------------
 #include "recomp_runtime.h"
 #include "ps4_h264_vt.h"
+#include "ps4_hevc_picture_info.h"
 #include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -116,6 +131,7 @@
 #define VDECSW_ERROR_API_FAIL ((int32_t)0x81510100)
 
 #define VDECSW_CODEC_AVC 1u
+#define VDECSW_CODEC_HEVC 974921u
 
 typedef struct VdecswDecoderConfigInfo {
     uint64_t this_size;
@@ -297,9 +313,12 @@ typedef struct Vdecsw {
     int slot;
     uint64_t handle; // tag | generation << 8 | slot + 1, so a stale handle never names a new decoder
     H264VtDecoder *core;
+    uint32_t codec_type; // VDECSW_CODEC_AVC or VDECSW_CODEC_HEVC
     uint32_t pipeline_depth;
     pthread_mutex_t in_lock; // serialises SetDecodeInput / Finalize / Reset
     pthread_mutex_t lock;    // everything below
+    pthread_cond_t output_cv; // signalled (under lock) when pictures are queued, on finalize and on delete
+    bool deleted;
     VdecswCompletion done[VDECSW_MAX_INPUTS];
     int done_head;
     int done_count;
@@ -325,6 +344,7 @@ static void vdecsw_free(Vdecsw *d) {
     h264vt_destroy(d->core);
     pthread_mutex_destroy(&d->in_lock);
     pthread_mutex_destroy(&d->lock);
+    pthread_cond_destroy(&d->output_cv);
     free(d);
 }
 
@@ -380,6 +400,13 @@ static uint64_t max_frame_buffer_size(const VdecswDecoderConfigInfo *cfg) {
 
 static bool config_size_ok(const VdecswDecoderConfigInfo *cfg) { return cfg->this_size == 0x50 || cfg->this_size == 0x48; }
 
+static bool codec_ok(uint32_t codec_type) { return codec_type == VDECSW_CODEC_AVC || codec_type == VDECSW_CODEC_HEVC; }
+
+// Size of the picture info written after a picture of the codec.
+static uint64_t trailer_size(uint32_t codec_type) {
+    return codec_type == VDECSW_CODEC_HEVC ? sizeof(Ps4HevcPictureInfo) : sizeof(VdecswAvcPictureInfo);
+}
+
 // int sceVdecswQueryComputeMemoryInfo(SceVdecswComputeMemoryInfo *info)
 void shim_sceVdecswQueryComputeMemoryInfo(GuestContext *ctx) {
     VdecswComputeMemoryInfo *info = (VdecswComputeMemoryInfo *)gptr(ctx, ctx->rdi);
@@ -417,7 +444,7 @@ void shim_sceVdecswQueryDecoderMemoryInfo(GuestContext *ctx) {
     VdecswDecoderMemoryInfo *info = (VdecswDecoderMemoryInfo *)gptr(ctx, ctx->rsi);
     if (!cfg || !info) VDECSW_RETURN(VDECSW_ERROR_ARGUMENT_POINTER);
     if (!config_size_ok(cfg) || info->this_size != sizeof(*info)) VDECSW_RETURN(VDECSW_ERROR_STRUCT_SIZE);
-    if (cfg->codec_type != VDECSW_CODEC_AVC) VDECSW_RETURN(VDECSW_ERROR_CODEC_TYPE);
+    if (!codec_ok(cfg->codec_type)) VDECSW_RETURN(VDECSW_ERROR_CODEC_TYPE);
     info->cpu_memory_size = VDECSW_DECODER_MEM_SIZE;
     info->cpu_memory = 0;
     info->gpu_memory_size = VDECSW_DECODER_MEM_SIZE;
@@ -438,8 +465,8 @@ void shim_sceVdecswCreateDecoder(GuestContext *ctx) {
     uint64_t *out = (uint64_t *)gptr(ctx, ctx->rdx);
     if (!cfg || !mem || !out) VDECSW_RETURN(VDECSW_ERROR_ARGUMENT_POINTER);
     if (!config_size_ok(cfg) || mem->this_size != sizeof(*mem)) VDECSW_RETURN(VDECSW_ERROR_STRUCT_SIZE);
-    if (cfg->codec_type != VDECSW_CODEC_AVC) {
-        fprintf(stderr, "[libSceVdecsw] CreateDecoder: codec %u is not supported (H.264 only)\n", cfg->codec_type);
+    if (!codec_ok(cfg->codec_type)) {
+        fprintf(stderr, "[libSceVdecsw] CreateDecoder: codec %u is not supported (AVC 1, HEVC 974921)\n", cfg->codec_type);
         VDECSW_RETURN(VDECSW_ERROR_CODEC_TYPE);
     }
     if (mem->cpu_memory_size < VDECSW_DECODER_MEM_SIZE || mem->gpu_memory_size < VDECSW_DECODER_MEM_SIZE ||
@@ -448,15 +475,18 @@ void shim_sceVdecswCreateDecoder(GuestContext *ctx) {
     if (!mem->cpu_memory || !mem->gpu_memory || !mem->cpu_gpu_memory) VDECSW_RETURN(VDECSW_ERROR_MEMORY_POINTER);
 
     Vdecsw *d = (Vdecsw *)calloc(1, sizeof(*d));
-    if (d) d->core = h264vt_create("libSceVdecsw");
+    if (d) d->core = h264vt_create_codec("libSceVdecsw",
+                                         cfg->codec_type == VDECSW_CODEC_HEVC ? H264VT_CODEC_HEVC : H264VT_CODEC_AVC);
     if (!d || !d->core) {
         free(d);
         VDECSW_RETURN(VDECSW_ERROR_API_FAIL);
     }
+    d->codec_type = cfg->codec_type;
     d->pipeline_depth = cfg->decode_pipeline_depth ? cfg->decode_pipeline_depth : 1;
     if (d->pipeline_depth > VDECSW_MAX_INPUTS) d->pipeline_depth = VDECSW_MAX_INPUTS;
     pthread_mutex_init(&d->in_lock, NULL);
     pthread_mutex_init(&d->lock, NULL);
+    pthread_cond_init(&d->output_cv, NULL);
     int slot = -1;
     pthread_mutex_lock(&g_table_lock);
     for (int i = 0; i < VDECSW_MAX_DECODERS; i++)
@@ -470,10 +500,7 @@ void shim_sceVdecswCreateDecoder(GuestContext *ctx) {
         }
     pthread_mutex_unlock(&g_table_lock);
     if (slot < 0) {
-        h264vt_destroy(d->core);
-        pthread_mutex_destroy(&d->in_lock);
-        pthread_mutex_destroy(&d->lock);
-        free(d);
+        vdecsw_free(d);
         VDECSW_RETURN(VDECSW_ERROR_API_FAIL);
     }
     *out = d->handle;
@@ -493,6 +520,13 @@ void shim_sceVdecswDeleteDecoder(GuestContext *ctx) {
         d->refs--; // the table's reference
     }
     pthread_mutex_unlock(&g_table_lock);
+    if (mine) {
+        // Wake SyncDecodeOutput callers; their references keep the decoder until they return.
+        pthread_mutex_lock(&d->lock);
+        d->deleted = true;
+        pthread_cond_broadcast(&d->output_cv);
+        pthread_mutex_unlock(&d->lock);
+    }
     vdecsw_release(d);
     VDECSW_RETURN(mine ? VDECSW_OK : VDECSW_ERROR_DECODER_INSTANCE);
 }
@@ -546,6 +580,7 @@ static int32_t vdecsw_SetDecodeInput(GuestContext *ctx, Vdecsw *d) {
         c->frames = (uint32_t)ready;
         c->result = VDECSW_OK;
         d->done_count++;
+        if (ready > 0) pthread_cond_broadcast(&d->output_cv);
         pthread_mutex_unlock(&d->lock);
     }
     pthread_mutex_unlock(&d->in_lock);
@@ -572,6 +607,10 @@ static int32_t vdecsw_TrySyncDecodeInput(GuestContext *ctx, Vdecsw *d) {
     return c.result;
 }
 void shim_sceVdecswTrySyncDecodeInput(GuestContext *ctx) { VDECSW_WITH_DECODER(vdecsw_TrySyncDecodeInput); }
+
+// int sceVdecswSyncDecodeInput(SceVdecswDecoder decoder, SceVdecswInputResult *result)
+// Inputs complete inside SetDecodeInput, so there is never one to wait for.
+void shim_sceVdecswSyncDecodeInput(GuestContext *ctx) { VDECSW_WITH_DECODER(vdecsw_TrySyncDecodeInput); }
 
 // int sceVdecswSetDecodeOutput(SceVdecswDecoder decoder, SceVdecswFrameBuffer *fb)
 static int32_t vdecsw_SetDecodeOutput(GuestContext *ctx, Vdecsw *d) {
@@ -652,8 +691,8 @@ static void fill_picture_info(VdecswAvcPictureInfo *p, const H264VtFrame *f) {
     p->constraint_set5_flag = (s->constraint_set_flags >> 5) & 1;
 }
 
-// int sceVdecswTrySyncDecodeOutput(SceVdecswDecoder decoder, SceVdecswOutputInfo *info)
-static int32_t vdecsw_TrySyncDecodeOutput(GuestContext *ctx, Vdecsw *d) {
+// sceVdecswTrySyncDecodeOutput (wait = false) and sceVdecswSyncDecodeOutput (wait = true).
+static int32_t vdecsw_sync_output(GuestContext *ctx, Vdecsw *d, bool wait) {
     VdecswOutputInfo *info = (VdecswOutputInfo *)gptr(ctx, ctx->rsi);
     if (!info) return VDECSW_ERROR_ARGUMENT_POINTER;
     if (info->this_size != 0x30 && info->this_size != 0x38) return VDECSW_ERROR_STRUCT_SIZE;
@@ -668,16 +707,24 @@ static int32_t vdecsw_TrySyncDecodeOutput(GuestContext *ctx, Vdecsw *d) {
         pthread_mutex_unlock(&d->lock);
         return VDECSW_ERROR_OUTPUT_BUFFER_EMPTY;
     }
+    const VdecswFrameBuffer fb = d->output;
+    if (wait) {
+        // shadPS4 takes the buffer before waiting: the guest may set the next one meanwhile.
+        d->have_output = false;
+        while (h264vt_queued(d->core) == 0 && !d->finalized && !d->deleted)
+            pthread_cond_wait(&d->output_cv, &d->lock);
+    }
     // Size check and pop in one step: ResetDecoder can drop the queue at any time (it holds
     // only in_lock), so a picture must never be looked at outside the queue lock before it is ours.
     H264VtFrame *f = NULL;
     uint64_t need = 0;
-    const int pr = h264vt_pop_fitting(d->core, d->output.frame_buffer_size, sizeof(VdecswAvcPictureInfo), &f, &need);
+    const uint64_t info_size = trailer_size(d->codec_type);
+    const int pr = h264vt_pop_fitting(d->core, fb.frame_buffer_size, info_size, &f, &need);
     if (pr == H264VT_POP_EMPTY) {
         int32_t rc = VDECSW_ERROR_DECODE_PENDING;
-        if (d->finalized) {
-            info->is_last_frame = 1;
-            d->have_output = false;
+        if (wait || d->finalized) {
+            info->is_last_frame = d->finalized ? 1 : 0;
+            d->have_output = d->have_output && wait; // Try consumes its buffer only when finalized
             rc = VDECSW_OK;
         }
         pthread_mutex_unlock(&d->lock);
@@ -689,32 +736,41 @@ static int32_t vdecsw_TrySyncDecodeOutput(GuestContext *ctx, Vdecsw *d) {
         static int warned;
         if (warned++ < 8)
             fprintf(stderr, "[libSceVdecsw] picture does not fit the frame buffer (0x%llx < 0x%llx)\n",
-                    (unsigned long long)d->output.frame_buffer_size, (unsigned long long)need);
+                    (unsigned long long)fb.frame_buffer_size, (unsigned long long)need);
+        if (!d->have_output) {
+            d->output = fb;
+            d->have_output = true;
+        }
         pthread_mutex_unlock(&d->lock);
         return VDECSW_ERROR_FRAME_BUFFER_SIZE;
     }
     const uint64_t frame_size = h264vt_nv12_size(f->width, f->height);
-    const VdecswFrameBuffer fb = d->output;
-    d->have_output = false;
+    if (!wait) d->have_output = false;
     const bool last = d->finalized && h264vt_queued(d->core) == 0;
     pthread_mutex_unlock(&d->lock);
 
     uint8_t *dst = ctx->mem_base + fb.frame_buffer;
     // An error picture leaves the frame buffer as it is; the trailer is still written.
     if (!f->error) h264vt_copy_nv12(f, dst);
-    VdecswAvcPictureInfo pic;
-    fill_picture_info(&pic, f);
-    memcpy(dst + frame_size, &pic, sizeof(pic));
+    if (d->codec_type == VDECSW_CODEC_HEVC) {
+        Ps4HevcPictureInfo pic;
+        ps4_hevc_fill_picture_info(&pic, f);
+        memcpy(dst + frame_size, &pic, sizeof(pic));
+    } else {
+        VdecswAvcPictureInfo pic;
+        fill_picture_info(&pic, f);
+        memcpy(dst + frame_size, &pic, sizeof(pic));
+    }
     if (ps4_gnm_notify_cpu_write) {
-        if (f->error) ps4_gnm_notify_cpu_write(fb.frame_buffer + frame_size, sizeof(pic));
-        else ps4_gnm_notify_cpu_write(fb.frame_buffer, frame_size + sizeof(pic));
+        if (f->error) ps4_gnm_notify_cpu_write(fb.frame_buffer + frame_size, info_size);
+        else ps4_gnm_notify_cpu_write(fb.frame_buffer, frame_size + info_size);
     }
 
     info->is_valid = 1;
     info->is_last_frame = last ? 1 : 0;
     info->is_error_frame = f->error ? 1 : 0;
     info->picture_count = 1;
-    info->codec_type = VDECSW_CODEC_AVC;
+    info->codec_type = d->codec_type;
     info->frame_width = (f->width + 15u) & ~15u;
     info->frame_pitch = h264vt_pitch(f->width);
     info->frame_height = h264vt_aligned_height(f->height);
@@ -729,7 +785,14 @@ static int32_t vdecsw_TrySyncDecodeOutput(GuestContext *ctx, Vdecsw *d) {
     h264vt_frame_free(f);
     return VDECSW_OK;
 }
+static int32_t vdecsw_TrySyncDecodeOutput(GuestContext *ctx, Vdecsw *d) { return vdecsw_sync_output(ctx, d, false); }
+static int32_t vdecsw_SyncDecodeOutput(GuestContext *ctx, Vdecsw *d) { return vdecsw_sync_output(ctx, d, true); }
+
+// int sceVdecswTrySyncDecodeOutput(SceVdecswDecoder decoder, SceVdecswOutputInfo *info)
 void shim_sceVdecswTrySyncDecodeOutput(GuestContext *ctx) { VDECSW_WITH_DECODER(vdecsw_TrySyncDecodeOutput); }
+
+// int sceVdecswSyncDecodeOutput(SceVdecswDecoder decoder, SceVdecswOutputInfo *info)
+void shim_sceVdecswSyncDecodeOutput(GuestContext *ctx) { VDECSW_WITH_DECODER(vdecsw_SyncDecodeOutput); }
 
 // int sceVdecswFinalizeDecodeSequence(SceVdecswDecoder decoder)
 static int32_t vdecsw_FinalizeDecodeSequence(GuestContext *ctx, Vdecsw *d) {
@@ -737,15 +800,15 @@ static int32_t vdecsw_FinalizeDecodeSequence(GuestContext *ctx, Vdecsw *d) {
     h264vt_finish(d->core);
     pthread_mutex_lock(&d->lock);
     d->finalized = true;
+    pthread_cond_broadcast(&d->output_cv);
     pthread_mutex_unlock(&d->lock);
     pthread_mutex_unlock(&d->in_lock);
     return VDECSW_OK;
 }
 void shim_sceVdecswFinalizeDecodeSequence(GuestContext *ctx) { VDECSW_WITH_DECODER(vdecsw_FinalizeDecodeSequence); }
 
-// int sceVdecswGetAvcPictureInfo(const SceVdecswOutputInfo *info, SceVdecswAvcPictureInfo *first,
-//                                SceVdecswAvcPictureInfo *second)
-void shim_sceVdecswGetAvcPictureInfo(GuestContext *ctx) {
+// int sceVdecswGetPictureInfo(const SceVdecswOutputInfo *info, void *first, void *second)
+void shim_sceVdecswGetPictureInfo(GuestContext *ctx) {
     const VdecswOutputInfo *info = (const VdecswOutputInfo *)gptr(ctx, ctx->rdi);
     uint8_t *first = (uint8_t *)gptr(ctx, ctx->rsi);
     if (!info) VDECSW_RETURN(VDECSW_ERROR_ARGUMENT_POINTER);
@@ -754,11 +817,22 @@ void shim_sceVdecswGetAvcPictureInfo(GuestContext *ctx) {
     if (!first) VDECSW_RETURN(VDECSW_ERROR_ARGUMENT_POINTER);
     uint64_t size;
     memcpy(&size, first, sizeof(size));
-    if (size <= 8 || size > sizeof(VdecswAvcPictureInfo)) VDECSW_RETURN(VDECSW_ERROR_STRUCT_SIZE);
+    const uint64_t trailer = trailer_size(info->codec_type);
+    if (size <= 8 || size > trailer) VDECSW_RETURN(VDECSW_ERROR_STRUCT_SIZE);
     if (!info->frame_buffer || !grange_ok(ctx, info->frame_buffer, info->frame_buffer_size) ||
-        !grange_ok(ctx, info->frame_buffer + info->frame_buffer_size, sizeof(VdecswAvcPictureInfo)))
+        !grange_ok(ctx, info->frame_buffer + info->frame_buffer_size, trailer))
         VDECSW_RETURN(VDECSW_ERROR_FRAME_BUFFER_POINTER);
     // The caller's this_size stays; the rest is the start of the trailer's layout.
     memcpy(first + 8, ctx->mem_base + info->frame_buffer + info->frame_buffer_size + 8, size - 8);
     VDECSW_RETURN(VDECSW_OK);
+}
+
+// int sceVdecswGetAvcPictureInfo(const SceVdecswOutputInfo *info, SceVdecswAvcPictureInfo *first,
+//                                SceVdecswAvcPictureInfo *second)
+void shim_sceVdecswGetAvcPictureInfo(GuestContext *ctx) { shim_sceVdecswGetPictureInfo(ctx); }
+
+// int sceVdecswGetHevcPictureInfo(const SceVdecswOutputInfo *info, SceVdecswHevcPictureInfo *picture)
+void shim_sceVdecswGetHevcPictureInfo(GuestContext *ctx) {
+    ctx->rdx = 0;
+    shim_sceVdecswGetPictureInfo(ctx);
 }

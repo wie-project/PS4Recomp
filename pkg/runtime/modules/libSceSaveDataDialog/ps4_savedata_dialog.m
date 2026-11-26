@@ -12,8 +12,16 @@
 // list answer (default: see sdd_auto_pick); a comma-separated sequence answers the
 // lists in the order they open (the last choice repeats), e.g. "new,gameUser0" for a
 // game that offers a save list before its load list.
+//
+// The common dialog rules follow shadPS4 savedatadialog.cpp: Initialize needs
+// sceCommonDialogInitialize and takes the common dialog slot (BUSY while another dialog holds
+// it), Terminate closes a running dialog and frees the slot, Close / ProgressBarInc /
+// ProgressBarSetValue need a RUNNING dialog. Dialogs that stay up until the game closes them
+// (progress bar, "Saving..." message, user message without buttons) are shown as a
+// non-modal panel; the progress bar mode adds a bar fed by the ProgressBar calls (percent).
 #import <Cocoa/Cocoa.h>
 #include "ps4_savedata_dialog.h"
+#include "ps4_common_dialog.h"
 #include "ps4_savedata.h"
 #include <pthread.h>
 #include <stdio.h>
@@ -77,6 +85,8 @@ enum { SDD_FOCUS_LISTHEAD = 0, SDD_FOCUS_LISTTAIL = 1, SDD_FOCUS_DATAHEAD = 2,
        SDD_FOCUS_DIRNAME = 6 };
 enum { SDD_BUTTON_INVALID = 0, SDD_BUTTON_OK = 1, SDD_BUTTON_YES = 1, SDD_BUTTON_NO = 2 };
 enum { SDD_BTN_OK = 0, SDD_BTN_YESNO = 1, SDD_BTN_NONE = 2, SDD_BTN_OKCANCEL = 3 };
+enum { SDD_PROGRESS_SYS_INVALID = 0, SDD_PROGRESS_SYS_PROGRESS = 1, SDD_PROGRESS_SYS_RESTORE = 2 };
+#define SDD_PROGRESS_BAR_TARGET_DEFAULT 0u
 enum { SDD_SYS_NODATA = 1, SDD_SYS_CONFIRM = 2, SDD_SYS_OVERWRITE = 3, SDD_SYS_NOSPACE = 4,
        SDD_SYS_PROGRESS = 5, SDD_SYS_FILE_CORRUPTED = 6, SDD_SYS_FINISHED = 7,
        SDD_SYS_NOSPACE_CONTINUABLE = 8, SDD_SYS_CORRUPTED_AND_DELETED = 10,
@@ -106,6 +116,8 @@ typedef struct SddSpec {
     uint64_t sys_value;
     uint32_t user_btn;
     char *msg;         // user message / progress text (UTF-8), may be NULL
+    uint32_t bar_sys_type; // progress bar system message, used when msg is NULL
+    uint32_t progress; // progress bar value, percent (ProgressBarInc / ProgressBarSetValue)
     uint32_t error_code;
 } SddSpec;
 
@@ -120,6 +132,9 @@ static bool g_sdd_sel_has_param;
 static Ps4SaveDataParam g_sdd_sel_param;
 static uint32_t g_sdd_sdk_version;
 static NSAlert *g_sdd_alert; // main thread only
+static NSPanel *g_sdd_panel;  // main thread only: the panel of a dialog that waits for Close
+static NSProgressIndicator *g_sdd_panel_bar;
+static uint64_t g_sdd_panel_gen;
 
 static bool sdd_russian(void) { return ps4_host_choose_language() == 8; }
 #define TR(en, ru) (sdd_russian() ? @"" ru : @"" en)
@@ -260,7 +275,10 @@ static void sdd_build_spec(const GuestContext *ctx, const OrbisSaveDataDialogPar
     const uint32_t *err = (const uint32_t *)sdd_guest(ctx, (uint64_t)param->errorCodeParam, 4);
     if (err) s->error_code = *err;
     const SddProgressBar *bar = (const SddProgressBar *)sdd_guest(ctx, (uint64_t)param->progressBarParam, sizeof(SddProgressBar));
-    if (bar && !s->msg) s->msg = sdd_guest_strdup(ctx, bar->msg, 4096);
+    if (bar && !s->msg) {
+        s->msg = sdd_guest_strdup(ctx, bar->msg, 4096);
+        s->bar_sys_type = bar->sysMsgType;
+    }
 }
 
 // True when the dialog has no confirming button and stays up until the game closes it
@@ -442,6 +460,8 @@ static NSString *sdd_system_text(const SddSpec *s, bool *yesno, bool *show_cance
     NSString *need = sdd_size_string(s->sys_value * 32768ULL);
     switch (s->sys_type) {
     case SDD_SYS_NODATA: return TR("There is no saved data.", "Нет сохраненных данных.");
+    case SDD_SYS_PROGRESS:
+        return M(TR("Saving...", "Сохранение..."), TR("Loading...", "Загрузка..."), TR("Deleting...", "Удаление..."));
     case SDD_SYS_CONFIRM:
         *yesno = true;
         return M(TR("Do you want to save?", "Сохранить?"),
@@ -594,9 +614,99 @@ static void sdd_show_ui_main(uint64_t gen) {
     }
 }
 
-// Dismisses an alert left open by a dialog that the game closed (main thread).
+// Text of a progress bar dialog: its message, else the system message it asks for (shadPS4
+// ProgressBarState).
+static NSString *sdd_progress_text(const SddSpec *s) {
+    if (s->msg) return sdd_ns(s->msg);
+    switch (s->bar_sys_type) {
+    case SDD_PROGRESS_SYS_PROGRESS: {
+        bool yesno, show_cancel;
+        SddSpec sys = *s;
+        sys.sys_type = SDD_SYS_PROGRESS;
+        return sdd_system_text(&sys, &yesno, &show_cancel);
+    }
+    case SDD_PROGRESS_SYS_RESTORE: return TR("Restoring saved data...", "Восстановление сохраненных данных...");
+    default: return @"";
+    }
+}
+
+static NSTextField *sdd_label(NSString *text, CGFloat size, bool bold) {
+    NSTextField *l = [NSTextField wrappingLabelWithString:text];
+    l.font = bold ? [NSFont boldSystemFontOfSize:size] : [NSFont systemFontOfSize:size];
+    l.alignment = NSTextAlignmentCenter;
+    [l.widthAnchor constraintEqualToConstant:440].active = YES;
+    return l;
+}
+
+// Shows the panel of a dialog that stays up until the game closes it, opened as generation
+// `gen` (main thread).
+static void sdd_show_panel_main(uint64_t gen) {
+    @autoreleasepool {
+        pthread_mutex_lock(&g_sdd_mutex);
+        if (gen != g_sdd_generation || g_sdd_status != ORBIS_COMMON_DIALOG_STATUS_RUNNING) {
+            pthread_mutex_unlock(&g_sdd_mutex);
+            return;
+        }
+        const bool with_bar = g_sdd_spec.mode == ORBIS_SAVE_DATA_DIALOG_MODE_PROGRESS_BAR;
+        bool yesno, show_cancel;
+        NSString *text = with_bar ? sdd_progress_text(&g_sdd_spec)
+                         : g_sdd_spec.mode == ORBIS_SAVE_DATA_DIALOG_MODE_SYSTEM_MSG
+                             ? sdd_system_text(&g_sdd_spec, &yesno, &show_cancel)
+                             : sdd_ns(g_sdd_spec.msg);
+        const int item = g_sdd_spec.first_save >= 0 ? g_sdd_spec.first_save : (g_sdd_spec.entry_count > 0 ? 0 : -1);
+        NSString *info = item >= 0 ? sdd_entry_label(&g_sdd_spec.entries[item]) : nil;
+        const uint32_t progress = g_sdd_spec.progress;
+        pthread_mutex_unlock(&g_sdd_mutex);
+
+        if (g_sdd_panel) [g_sdd_panel orderOut:nil];
+        [NSApplication sharedApplication];
+        NSPanel *panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 480, 120)
+                                                    styleMask:NSWindowStyleMaskTitled
+                                                      backing:NSBackingStoreBuffered
+                                                        defer:NO];
+        panel.title = TR("Saved Data", "Сохраненные данные");
+        panel.releasedWhenClosed = NO;
+        panel.floatingPanel = YES;
+        NSStackView *stack = [[NSStackView alloc] init];
+        stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+        stack.alignment = NSLayoutAttributeCenterX;
+        stack.spacing = 10;
+        stack.edgeInsets = NSEdgeInsetsMake(16, 20, 16, 20);
+        if (info) [stack addArrangedSubview:sdd_label(info, 11, false)];
+        if (text.length) [stack addArrangedSubview:sdd_label(text, 13, true)];
+        NSProgressIndicator *bar = nil;
+        if (with_bar) {
+            bar = [[NSProgressIndicator alloc] init];
+            bar.style = NSProgressIndicatorStyleBar;
+            bar.indeterminate = NO;
+            bar.minValue = 0;
+            bar.maxValue = 100;
+            bar.doubleValue = progress > 100 ? 100 : progress;
+            [bar.widthAnchor constraintEqualToConstant:440].active = YES;
+            [stack addArrangedSubview:bar];
+        }
+        panel.contentView = stack;
+        [panel center];
+        [panel orderFrontRegardless];
+        g_sdd_panel = panel;
+        g_sdd_panel_bar = bar;
+        g_sdd_panel_gen = gen;
+    }
+}
+
+// Moves the bar of the panel opened as generation `gen` (main thread).
+static void sdd_update_panel_main(uint64_t gen, uint32_t progress) {
+    if (g_sdd_panel_bar && g_sdd_panel_gen == gen) g_sdd_panel_bar.doubleValue = progress > 100 ? 100 : progress;
+}
+
+// Dismisses an alert or panel left open by a dialog that the game closed (main thread).
 static void sdd_dismiss_ui_main(void) {
     if (g_sdd_alert) [NSApp abortModal];
+    if (g_sdd_panel) {
+        [g_sdd_panel orderOut:nil];
+        g_sdd_panel = nil;
+        g_sdd_panel_bar = nil;
+    }
 }
 
 //----------------------------------------------------------------------------
@@ -604,20 +714,35 @@ static void sdd_dismiss_ui_main(void) {
 //----------------------------------------------------------------------------
 
 int32_t sceSaveDataDialogInitialize(void) {
+    if (!ps4_common_dialog_system_initialized()) return ORBIS_COMMON_DIALOG_ERROR_NOT_SYSTEM_INITIALIZED;
     pthread_mutex_lock(&g_sdd_mutex);
-    g_sdd_status = ORBIS_COMMON_DIALOG_STATUS_INITIALIZED;
-    memset(&g_sdd_result, 0, sizeof(g_sdd_result));
-    memset(&g_sdd_param, 0, sizeof(g_sdd_param));
+    int32_t rc = 0;
+    if (g_sdd_status != ORBIS_COMMON_DIALOG_STATUS_NONE) {
+        rc = ORBIS_COMMON_DIALOG_ERROR_ALREADY_INITIALIZED;
+    } else if (!ps4_common_dialog_acquire()) {
+        rc = ORBIS_COMMON_DIALOG_ERROR_BUSY;
+    } else {
+        g_sdd_status = ORBIS_COMMON_DIALOG_STATUS_INITIALIZED;
+        memset(&g_sdd_result, 0, sizeof(g_sdd_result));
+        memset(&g_sdd_param, 0, sizeof(g_sdd_param));
+    }
     pthread_mutex_unlock(&g_sdd_mutex);
-    return 0;
+    return rc;
 }
 
 static int32_t sdd_open(const GuestContext *ctx, const OrbisSaveDataDialogParam *param) {
+    pthread_mutex_lock(&g_sdd_mutex);
+    const bool openable = g_sdd_status == ORBIS_COMMON_DIALOG_STATUS_INITIALIZED ||
+                          g_sdd_status == ORBIS_COMMON_DIALOG_STATUS_FINISHED;
+    pthread_mutex_unlock(&g_sdd_mutex);
+    if (!openable) {
+        return ORBIS_COMMON_DIALOG_ERROR_INVALID_STATE;
+    }
     if (!param) {
-        return (int32_t)0x80b8000d; // ARG_NULL
+        return ORBIS_COMMON_DIALOG_ERROR_ARG_NULL;
     }
     if (param->mode < ORBIS_SAVE_DATA_DIALOG_MODE_LIST || param->mode > ORBIS_SAVE_DATA_DIALOG_MODE_PROGRESS_BAR) {
-        return (int32_t)0x80b80009; // PARAM_INVALID
+        return ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID;
     }
     SddSpec spec;
     sdd_build_spec(ctx, param, &spec);
@@ -627,7 +752,7 @@ static int32_t sdd_open(const GuestContext *ctx, const OrbisSaveDataDialogParam 
         g_sdd_status != ORBIS_COMMON_DIALOG_STATUS_FINISHED) {
         pthread_mutex_unlock(&g_sdd_mutex);
         sdd_spec_free(&spec);
-        return (int32_t)0x80b80006; // INVALID_STATE
+        return ORBIS_COMMON_DIALOG_ERROR_INVALID_STATE;
     }
     if (!g_sdd_sdk_version) g_sdd_sdk_version = sdd_read_sdk_version(ctx);
     sdd_spec_free(&g_sdd_spec);
@@ -640,11 +765,11 @@ static int32_t sdd_open(const GuestContext *ctx, const OrbisSaveDataDialogParam 
     g_sdd_status = ORBIS_COMMON_DIALOG_STATUS_RUNNING;
     uint64_t gen = ++g_sdd_generation;
     bool until_close = sdd_waits_for_close(&spec);
-    bool ui = !until_close && sdd_interactive();
+    bool ui = sdd_interactive();
 
     fprintf(stderr, "[ps4-savedata-dialog] Open: mode=%d dispType=%d entries=%d focus=%d(pos %u) sys=%u user_btn=%u err=0x%x sdk=0x%x %s\n",
             (int)param->mode, (int)param->dispType, spec.entry_count, spec.focus, spec.focus_pos, spec.sys_type, spec.user_btn,
-            spec.error_code, g_sdd_sdk_version, ui ? "(ui)" : until_close ? "(until close)" : "(auto)");
+            spec.error_code, g_sdd_sdk_version, until_close ? (ui ? "(panel until close)" : "(until close)") : ui ? "(ui)" : "(auto)");
     if (spec.msg) {
         // The question an automatic answer replies to, on one line.
         fprintf(stderr, "[ps4-savedata-dialog]   msg: \"");
@@ -659,7 +784,9 @@ static int32_t sdd_open(const GuestContext *ctx, const OrbisSaveDataDialogParam 
     }
     pthread_mutex_unlock(&g_sdd_mutex);
 
-    if (ui) {
+    if (ui && until_close) {
+        dispatch_async(dispatch_get_main_queue(), ^{ sdd_show_panel_main(gen); });
+    } else if (ui) {
         dispatch_async(dispatch_get_main_queue(), ^{ sdd_show_ui_main(gen); });
     }
     return 0;
@@ -697,13 +824,14 @@ OrbisCommonDialogStatus sceSaveDataDialogUpdateStatus(void) {
 }
 
 static int32_t sdd_get_result(const GuestContext *ctx, OrbisSaveDataDialogResult *result) {
-    if (!result) {
-        return (int32_t)0x80b8000d; // ARG_NULL
-    }
     pthread_mutex_lock(&g_sdd_mutex);
     if (g_sdd_status != ORBIS_COMMON_DIALOG_STATUS_FINISHED) {
         pthread_mutex_unlock(&g_sdd_mutex);
-        return (int32_t)0x80b80005; // NOT_FINISHED
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_FINISHED;
+    }
+    if (!result) {
+        pthread_mutex_unlock(&g_sdd_mutex);
+        return ORBIS_COMMON_DIALOG_ERROR_ARG_NULL;
     }
     // dirName/param are guest pointers to caller-owned buffers: write through them,
     // never replace them.
@@ -729,33 +857,46 @@ int32_t sceSaveDataDialogGetResult(OrbisSaveDataDialogResult *result) {
     return sdd_get_result(NULL, result);
 }
 
+// Finishes a running dialog as closed by the application: OK, no button, the listed save for
+// the non-list modes (shadPS4 SaveDialogUi::Finish(ButtonId::INVALID)). Caller holds
+// g_sdd_mutex. Returns whether a dialog was running.
+static bool sdd_close_locked(void) {
+    if (g_sdd_status != ORBIS_COMMON_DIALOG_STATUS_RUNNING) return false;
+    g_sdd_generation++;
+    int sel = g_sdd_spec.mode != ORBIS_SAVE_DATA_DIALOG_MODE_LIST && g_sdd_spec.first_save >= 0
+                  ? g_sdd_spec.first_save : -1;
+    sdd_finish_locked(ORBIS_COMMON_DIALOG_RESULT_OK, SDD_BUTTON_INVALID, sel);
+    return true;
+}
+
 int32_t sceSaveDataDialogTerminate(void) {
     pthread_mutex_lock(&g_sdd_mutex);
-    g_sdd_status = ORBIS_COMMON_DIALOG_STATUS_NONE;
-    g_sdd_generation++;
-    memset(&g_sdd_result, 0, sizeof(g_sdd_result));
-    memset(&g_sdd_param, 0, sizeof(g_sdd_param));
-    sdd_spec_free(&g_sdd_spec);
+    const bool was_running = sdd_close_locked();
+    int32_t rc = 0;
+    if (g_sdd_status == ORBIS_COMMON_DIALOG_STATUS_NONE) {
+        rc = ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED;
+    } else {
+        g_sdd_status = ORBIS_COMMON_DIALOG_STATUS_NONE;
+        g_sdd_generation++;
+        memset(&g_sdd_result, 0, sizeof(g_sdd_result));
+        memset(&g_sdd_param, 0, sizeof(g_sdd_param));
+        sdd_spec_free(&g_sdd_spec);
+    }
     pthread_mutex_unlock(&g_sdd_mutex);
-    dispatch_async(dispatch_get_main_queue(), ^{ sdd_dismiss_ui_main(); });
-    return 0;
+    if (was_running) dispatch_async(dispatch_get_main_queue(), ^{ sdd_dismiss_ui_main(); });
+    if (rc == 0) ps4_common_dialog_release();
+    return rc;
 }
 
 // sceSaveDataDialogClose(const OrbisSaveDataDialogCloseParam *param): force-finishes a
 // running dialog (games use it to dismiss progress bars once the operation is done).
 int32_t sceSaveDataDialogClose(const void *param) {
     (void)param;
-    bool had_ui = false;
     pthread_mutex_lock(&g_sdd_mutex);
-    if (g_sdd_status == ORBIS_COMMON_DIALOG_STATUS_RUNNING) {
-        g_sdd_generation++;
-        had_ui = !sdd_waits_for_close(&g_sdd_spec);
-        int sel = g_sdd_spec.mode != ORBIS_SAVE_DATA_DIALOG_MODE_LIST && g_sdd_spec.first_save >= 0
-                      ? g_sdd_spec.first_save : -1;
-        sdd_finish_locked(ORBIS_COMMON_DIALOG_RESULT_OK, SDD_BUTTON_INVALID, sel); // closed by the application
-    }
+    const bool was_running = sdd_close_locked();
     pthread_mutex_unlock(&g_sdd_mutex);
-    if (had_ui) dispatch_async(dispatch_get_main_queue(), ^{ sdd_dismiss_ui_main(); });
+    if (!was_running) return ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING;
+    dispatch_async(dispatch_get_main_queue(), ^{ sdd_dismiss_ui_main(); });
     return 0;
 }
 
@@ -764,11 +905,50 @@ int32_t sceSaveDataDialogIsReadyToDisplay(void) {
     return 1;
 }
 
-// Progress values are not rendered on the host; accept and ignore.
-int32_t sceSaveDataDialogProgressBarSetValue(int32_t target, uint32_t rate) {
-    (void)target;
-    (void)rate;
+// The checks the progress bar calls share; on success g_sdd_mutex stays held.
+static int32_t sdd_lock_progress_bar(uint32_t target) {
+    pthread_mutex_lock(&g_sdd_mutex);
+    int32_t rc = 0;
+    if (g_sdd_status != ORBIS_COMMON_DIALOG_STATUS_RUNNING) {
+        rc = ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING;
+    } else if (g_sdd_spec.mode != ORBIS_SAVE_DATA_DIALOG_MODE_PROGRESS_BAR) {
+        rc = ORBIS_COMMON_DIALOG_ERROR_NOT_SUPPORTED;
+    } else if (target != SDD_PROGRESS_BAR_TARGET_DEFAULT) {
+        rc = ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID;
+    }
+    if (rc != 0) pthread_mutex_unlock(&g_sdd_mutex);
+    return rc;
+}
+
+// Hands the new value to the panel and releases g_sdd_mutex.
+static void sdd_unlock_progress_bar(void) {
+    const uint64_t gen = g_sdd_generation;
+    const uint32_t progress = g_sdd_spec.progress;
+    pthread_mutex_unlock(&g_sdd_mutex);
+    if (sdd_interactive()) dispatch_async(dispatch_get_main_queue(), ^{ sdd_update_panel_main(gen, progress); });
+}
+
+int32_t sceSaveDataDialogProgressBarInc(uint32_t target, uint32_t delta) {
+    const int32_t rc = sdd_lock_progress_bar(target);
+    if (rc != 0) return rc;
+    g_sdd_spec.progress += delta;
+    sdd_unlock_progress_bar();
     return 0;
+}
+
+int32_t sceSaveDataDialogProgressBarSetValue(uint32_t target, uint32_t rate) {
+    const int32_t rc = sdd_lock_progress_bar(target);
+    if (rc != 0) return rc;
+    g_sdd_spec.progress = rate;
+    sdd_unlock_progress_bar();
+    return 0;
+}
+
+uint32_t ps4_savedata_dialog_progress(void) {
+    pthread_mutex_lock(&g_sdd_mutex);
+    const uint32_t v = g_sdd_spec.progress;
+    pthread_mutex_unlock(&g_sdd_mutex);
+    return v;
 }
 
 //----------------------------------------------------------------------------
@@ -820,6 +1000,11 @@ void shim_sceSaveDataDialogIsReadyToDisplay(GuestContext *ctx) {
 }
 
 void shim_sceSaveDataDialogProgressBarSetValue(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)sceSaveDataDialogProgressBarSetValue((int32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceSaveDataDialogProgressBarSetValue((uint32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceSaveDataDialogProgressBarInc(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceSaveDataDialogProgressBarInc((uint32_t)ctx->rdi, (uint32_t)ctx->rsi);
     SHIM_RETURN();
 }

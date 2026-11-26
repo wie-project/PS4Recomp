@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// libSceVideodec2 (H.264/AVC) backed by the shared VideoToolbox decode core (ps4_h264_vt.c).
-// Struct layouts and error codes follow shadPS4 (src/core/libraries/videodec/videodec2.{h,cpp},
-// videodec2_impl.cpp, videodec_error.h).
+// libSceVideodec2 (H.264/AVC and HEVC) backed by the shared VideoToolbox decode core
+// (ps4_h264_vt.c). Struct layouts and error codes follow shadPS4
+// (src/core/libraries/videodec/videodec2.{h,cpp}, videodec2_impl.cpp, videodec_error.h). The
+// picture info after each picture is SceVideodec2AvcPictureInfo for AVC decoders and
+// SceVideodec2HevcPictureInfo (ps4_hevc_picture_info.h) for HEVC ones.
 
 #include "ps4_videodec2.h"
 #include "ps4_h264_vt.h"
+#include "ps4_hevc_picture_info.h"
 #include "recomp_runtime.h"
 
 #include <pthread.h>
@@ -38,8 +41,9 @@
 #define VIDEODEC2_CODEC_AVC                   1u
 #define VIDEODEC2_CODEC_HEVC                  974921u
 
-#define VIDEODEC2_COMPUTE_MEM_SIZE            0x4000ULL
-#define VIDEODEC2_DECODER_MEM_SIZE            0x10000ULL
+// shadPS4 reports this size for every compute and decoder memory query ("fake minimum memory
+// size"); the decoder keeps its state in host memory and never touches these blocks.
+#define VIDEODEC2_MIN_MEM_SIZE                (16ULL << 20)
 #define VIDEODEC2_FRAME_BUFFER_ALIGN          0x100u
 
 typedef struct Videodec2DecoderConfigInfo {
@@ -301,9 +305,11 @@ static void vdec2_fill_avc_pic_info(Videodec2AvcPictureInfo *p, const H264VtFram
 
 static int32_t vdec2_emit_picture(GuestContext *ctx, Vdec2Decoder *d,
                                   Videodec2FrameBuffer *fb, Videodec2OutputInfo *out) {
+    const bool hevc = d->codec_type == VIDEODEC2_CODEC_HEVC;
+    const uint64_t info_size = hevc ? sizeof(Ps4HevcPictureInfo) : sizeof(Videodec2AvcPictureInfo);
     H264VtFrame *f = NULL;
     uint64_t need = 0;
-    const int pr = h264vt_pop_fitting(d->core, fb->frame_buffer_size, sizeof(Videodec2AvcPictureInfo), &f, &need);
+    const int pr = h264vt_pop_fitting(d->core, fb->frame_buffer_size, info_size, &f, &need);
     if (pr == H264VT_POP_EMPTY) {
         return VIDEODEC2_OK;
     }
@@ -314,7 +320,7 @@ static int32_t vdec2_emit_picture(GuestContext *ctx, Vdec2Decoder *d,
     }
 
     const uint64_t frame_size = h264vt_nv12_size(f->width, f->height);
-    if (!grange_ok(ctx, fb->frame_buffer, frame_size + sizeof(Videodec2AvcPictureInfo))) {
+    if (!grange_ok(ctx, fb->frame_buffer, frame_size + info_size)) {
         h264vt_frame_free(f);
         return VIDEODEC2_ERROR_FRAME_BUFFER_SIZE;
     }
@@ -324,12 +330,18 @@ static int32_t vdec2_emit_picture(GuestContext *ctx, Vdec2Decoder *d,
         h264vt_copy_nv12(f, dst);
     }
 
-    Videodec2AvcPictureInfo pic;
-    vdec2_fill_avc_pic_info(&pic, f);
-    memcpy(dst + frame_size, &pic, sizeof(pic));
+    if (hevc) {
+        Ps4HevcPictureInfo pic;
+        ps4_hevc_fill_picture_info(&pic, f);
+        memcpy(dst + frame_size, &pic, sizeof(pic));
+    } else {
+        Videodec2AvcPictureInfo pic;
+        vdec2_fill_avc_pic_info(&pic, f);
+        memcpy(dst + frame_size, &pic, sizeof(pic));
+    }
     if (ps4_gnm_notify_cpu_write) {
-        if (f->error) ps4_gnm_notify_cpu_write(fb->frame_buffer + frame_size, sizeof(pic));
-        else ps4_gnm_notify_cpu_write(fb->frame_buffer, frame_size + sizeof(pic));
+        if (f->error) ps4_gnm_notify_cpu_write(fb->frame_buffer + frame_size, info_size);
+        else ps4_gnm_notify_cpu_write(fb->frame_buffer, frame_size + info_size);
     }
 
     fb->is_accepted = 1;
@@ -362,7 +374,7 @@ void shim_sceVideodec2QueryComputeMemoryInfo(GuestContext *ctx) {
         SHIM_RETURN();
     }
     info->cpu_gpu_memory = 0;
-    info->cpu_gpu_memory_size = VIDEODEC2_COMPUTE_MEM_SIZE;
+    info->cpu_gpu_memory_size = VIDEODEC2_MIN_MEM_SIZE;
     ctx->rax = VIDEODEC2_OK;
     SHIM_RETURN();
 }
@@ -442,9 +454,9 @@ void shim_sceVideodec2QueryDecoderMemoryInfo(GuestContext *ctx) {
     mem->cpu_memory = 0;
     mem->gpu_memory = 0;
     mem->cpu_gpu_memory = 0;
-    mem->cpu_memory_size = VIDEODEC2_DECODER_MEM_SIZE;
-    mem->gpu_memory_size = VIDEODEC2_DECODER_MEM_SIZE;
-    mem->cpu_gpu_memory_size = VIDEODEC2_DECODER_MEM_SIZE;
+    mem->cpu_memory_size = VIDEODEC2_MIN_MEM_SIZE;
+    mem->gpu_memory_size = VIDEODEC2_MIN_MEM_SIZE;
+    mem->cpu_gpu_memory_size = VIDEODEC2_MIN_MEM_SIZE;
     mem->max_frame_buffer_size = align_up_u64(fb, 256ULL) + 0x4000ULL;
     mem->frame_buffer_alignment = VIDEODEC2_FRAME_BUFFER_ALIGN;
 
@@ -468,7 +480,7 @@ void shim_sceVideodec2CreateDecoder(GuestContext *ctx) {
         ctx->rax = (uint64_t)(int64_t)VIDEODEC2_ERROR_STRUCT_SIZE;
         SHIM_RETURN();
     }
-    if (cfg->codec_type != VIDEODEC2_CODEC_AVC) {
+    if (cfg->codec_type != VIDEODEC2_CODEC_AVC && cfg->codec_type != VIDEODEC2_CODEC_HEVC) {
         fprintf(stderr, "[libSceVideodec2] unsupported codec_type=%u\n", cfg->codec_type);
         ctx->rax = (uint64_t)(int64_t)VIDEODEC2_ERROR_CODEC_TYPE;
         SHIM_RETURN();
@@ -479,7 +491,8 @@ void shim_sceVideodec2CreateDecoder(GuestContext *ctx) {
         ctx->rax = (uint64_t)(int64_t)VIDEODEC2_ERROR_API_FAIL;
         SHIM_RETURN();
     }
-    d->core = h264vt_create("libSceVideodec2");
+    d->core = h264vt_create_codec("libSceVideodec2",
+                                  cfg->codec_type == VIDEODEC2_CODEC_HEVC ? H264VT_CODEC_HEVC : H264VT_CODEC_AVC);
     if (!d->core) {
         free(d);
         ctx->rax = (uint64_t)(int64_t)VIDEODEC2_ERROR_API_FAIL;
@@ -564,8 +577,7 @@ void shim_sceVideodec2Decode(GuestContext *ctx) {
         ctx->rax = (uint64_t)(int64_t)VIDEODEC2_ERROR_ARGUMENT_POINTER;
         SHIM_RETURN();
     }
-    if (in->this_size != sizeof(*in) || fb->this_size != sizeof(*fb) ||
-        (out->this_size | 8ULL) != sizeof(*out)) {
+    if (in->this_size != sizeof(*in) || fb->this_size != sizeof(*fb)) {
         ctx->rax = (uint64_t)(int64_t)VIDEODEC2_ERROR_STRUCT_SIZE;
         SHIM_RETURN();
     }
