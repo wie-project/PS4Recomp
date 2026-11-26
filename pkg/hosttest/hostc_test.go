@@ -12,6 +12,10 @@ import (
 	"testing"
 )
 
+// userServiceInclude puts ps4_user_service.h on the include path of a program whose runtime
+// sources use libSceUserService.
+const userServiceInclude = "-I../runtime/modules/libSceUserService"
+
 // buildHostC compiles a host test program from testdata/<name>/main.c and the given runtime
 // sources (paths relative to this package, e.g. ../runtime/modules/...), with each source's
 // directory on the include path.

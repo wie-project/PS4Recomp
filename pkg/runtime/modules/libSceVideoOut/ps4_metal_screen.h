@@ -100,6 +100,9 @@ void ps4_metal_screen_set_texture_hooks(void (*created)(void *ctx, void *tex), v
 void *ps4_metal_screen_get_command_queue(void);
 void *ps4_metal_screen_get_layer(void);
 void *ps4_metal_screen_get_texture(void);
+// The game window (NSWindow *), or NULL before the screen exists. Main thread only; does not
+// create the screen.
+void *ps4_metal_screen_get_window(void);
 void ps4_metal_screen_destroy(void);
 // Debug hooks for exit tests: same paths as the window close button and Cmd+Q.
 void ps4_metal_screen_request_close(void);

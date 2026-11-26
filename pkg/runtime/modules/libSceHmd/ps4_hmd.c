@@ -163,35 +163,3 @@ void shim_sceHmdReprojectionSetOutputMinColor(GuestContext *ctx) {
     ctx->rax = 0;
     SHIM_RETURN();
 }
-
-// libSceHmdSetupDialog
-void shim_sceHmdSetupDialogInitialize(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceHmdSetupDialogOpen(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceHmdSetupDialogClose(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceHmdSetupDialogGetResult(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceHmdSetupDialogUpdateStatus(GuestContext *ctx) {
-    // 2 = Finished/Closed dialog
-    ctx->rax = 2;
-    SHIM_RETURN();
-}
-
-void shim_sceHmdSetupDialogTerminate(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}

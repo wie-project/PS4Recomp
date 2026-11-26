@@ -2,6 +2,12 @@
 // offline host: requests can be created/deleted but every token fetch fails
 // with SIGNED_OUT; the dialog opens, immediately finishes and reports
 // "user cancelled" so callers never block.
+//
+// shadPS4 (src/core/libraries/np/np_sns_facebook_dialog.cpp) registers only
+// sceNpSnsFacebookDialogUpdateStatus, as a stub that always reports NONE, and
+// none of libSceNpSns. This module implements the whole dialog lifecycle
+// instead: with only UpdateStatus answering NONE, a game that opened the
+// dialog would never see it finish and would read a result nobody wrote.
 #include "recomp_runtime.h"
 #include <pthread.h>
 #include <stdio.h>

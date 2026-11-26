@@ -145,15 +145,6 @@ typedef struct OrbisNpScoreGameInfo {
     uint8_t pad2[3];
 } OrbisNpScoreGameInfo;
 
-typedef struct OrbisNpCommerceDialogResult {
-    int32_t result;
-    bool authorized;
-    char dummy8;
-    int16_t dummy16;
-    void* userData;
-    uint8_t reserved[32];
-} OrbisNpCommerceDialogResult;
-
 // C APIs
 int32_t sceNpCheckNpAvailability(int32_t req_id, OrbisNpOnlineId* online_id);
 int32_t sceNpCheckNpAvailabilityA(int32_t req_id, int32_t user_id);
@@ -243,12 +234,6 @@ int32_t sceNpTusDeleteRequest(int32_t requestId);
 int32_t sceNpTusPollAsync(int32_t reqId, int32_t* result);
 int32_t sceNpTusWaitAsync(int32_t reqId, int32_t* result);
 
-int32_t sceNpCommerceDialogInitialize(void);
-int32_t sceNpCommerceDialogTerminate(void);
-int32_t sceNpCommerceDialogClose(void);
-int8_t sceNpCommerceDialogGetStatus(void);
-int32_t sceNpCommerceDialogGetResult(OrbisNpCommerceDialogResult* result);
-int32_t sceNpCommerceDialogOpen(const void* param);
 
 int32_t sceNpUtilityInit(void);
 int32_t sceNpUtilityTerm(void);
@@ -400,12 +385,6 @@ void shim_sceNpScoreGetRankingByRangeAsync(GuestContext *ctx);
 void shim_sceNpScoreGetFriendsRankingAsync(GuestContext *ctx);
 void shim_sceNpTusGetDataAAsync(GuestContext *ctx);
 
-void shim_sceNpCommerceDialogInitialize(GuestContext *ctx);
-void shim_sceNpCommerceDialogTerminate(GuestContext *ctx);
-void shim_sceNpCommerceDialogClose(GuestContext *ctx);
-void shim_sceNpCommerceDialogGetStatus(GuestContext *ctx);
-void shim_sceNpCommerceDialogGetResult(GuestContext *ctx);
-void shim_sceNpCommerceDialogOpen(GuestContext *ctx);
 
 void shim_sceNpUtilityInit(GuestContext *ctx);
 void shim_sceNpUtilityTerm(GuestContext *ctx);
@@ -420,32 +399,40 @@ void shim_sceNpTssCreateNpTitleCtx(GuestContext *ctx);
 
 void shim_sceNpWebApiDeleteHandle(GuestContext *ctx);
 
-// libSceNpParty (ps4_np_party.c)
-int32_t sceNpPartyInitialize(void);
-int32_t sceNpPartyTerminate(void);
-int32_t sceNpPartyRegisterHandler(uint64_t param_gaddr);
-int32_t sceNpPartyRegisterPrivateHandler(uint64_t param_gaddr);
-int32_t sceNpPartyUnregisterPrivateHandler(void);
-int32_t sceNpPartyCheckCallback(void);
-int32_t sceNpPartyGetVoiceChatPriority(uint64_t out_gaddr);
-int32_t sceNpPartySetVoiceChatPriority(uint64_t in_gaddr);
-int32_t sceNpPartyGetState(uint32_t *state);
-int32_t sceNpPartyGetMemberInfo(void);
+// libSceNpParty (ps4_np_party.c). Errors from shadPS4 np_error.h.
+#define ORBIS_NP_PARTY_ERROR_INVALID_ARGUMENT ((int32_t)0x80552504)
+#define ORBIS_NP_PARTY_ERROR_NOT_IN_PARTY ((int32_t)0x80552506)
+// OrbisNpPartyState (u16).
+#define ORBIS_NP_PARTY_STATE_NOT_IN_PARTY 2
+#define ORBIS_NP_PARTY_STATE_IN_PRIVATE_PARTY 3
+int32_t sceNpPartyGetState(uint16_t *state);
 int32_t sceNpPartyGetMembers(void);
-int32_t sceNpPartySendBinaryMessage(void);
-uint64_t ps4_np_party_handler(bool private_handler);
-void shim_sceNpPartyInitialize(GuestContext *ctx);
-void shim_sceNpPartyTerminate(GuestContext *ctx);
-void shim_sceNpPartyRegisterHandler(GuestContext *ctx);
-void shim_sceNpPartyRegisterPrivateHandler(GuestContext *ctx);
-void shim_sceNpPartyUnregisterPrivateHandler(GuestContext *ctx);
 void shim_sceNpPartyCheckCallback(GuestContext *ctx);
-void shim_sceNpPartyGetVoiceChatPriority(GuestContext *ctx);
-void shim_sceNpPartySetVoiceChatPriority(GuestContext *ctx);
-void shim_sceNpPartyGetState(GuestContext *ctx);
+void shim_sceNpPartyCreate(GuestContext *ctx);
+void shim_sceNpPartyCreateA(GuestContext *ctx);
+void shim_sceNpPartyGetId(GuestContext *ctx);
 void shim_sceNpPartyGetMemberInfo(GuestContext *ctx);
+void shim_sceNpPartyGetMemberInfoA(GuestContext *ctx);
 void shim_sceNpPartyGetMembers(GuestContext *ctx);
+void shim_sceNpPartyGetMembersA(GuestContext *ctx);
+void shim_sceNpPartyGetMemberSessionInfo(GuestContext *ctx);
+void shim_sceNpPartyGetMemberVoiceInfo(GuestContext *ctx);
+void shim_sceNpPartyGetState(GuestContext *ctx);
+void shim_sceNpPartyGetStateAsUser(GuestContext *ctx);
+void shim_sceNpPartyGetStateAsUserA(GuestContext *ctx);
+void shim_sceNpPartyGetVoiceChatPriority(GuestContext *ctx);
+void shim_sceNpPartyInitialize(GuestContext *ctx);
+void shim_sceNpPartyJoin(GuestContext *ctx);
+void shim_sceNpPartyLeave(GuestContext *ctx);
+void shim_sceNpPartyRegisterHandler(GuestContext *ctx);
+void shim_sceNpPartyRegisterHandlerA(GuestContext *ctx);
+void shim_sceNpPartyRegisterPrivateHandler(GuestContext *ctx);
 void shim_sceNpPartySendBinaryMessage(GuestContext *ctx);
+void shim_sceNpPartySetVoiceChatPriority(GuestContext *ctx);
+void shim_sceNpPartyShowInvitationList(GuestContext *ctx);
+void shim_sceNpPartyShowInvitationListA(GuestContext *ctx);
+void shim_sceNpPartyTerminate(GuestContext *ctx);
+void shim_sceNpPartyUnregisterPrivateHandler(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

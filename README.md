@@ -172,6 +172,14 @@ When playing without a physical controller, built-in keyboard emulation is activ
 - **Mouse (`libSceMouse`)**: off by default, as in shadPS4 (`use_mice_as_mice`). Run with `PS4_MOUSE=1` to use the host mouse as a PS4 mouse: once the game initializes the library, the cursor is hidden and captured in the game window, and motion, the five buttons and the wheel reach the game. Without it, games see a disconnected mouse.
 - **Microphone (`libSceAudioIn`)**: input ports capture the default macOS input device (macOS asks for microphone permission on first use). Run with `PS4_AUDIO_IN=none` to disable capture; ports then deliver silence and report no device.
 
+### Licenses
+
+`libSceNpEntitlementAccess` reads the SKU flag and add-on content entitlement keys from license files copied from a console, as shadPS4 does: place `<service id>.idx` with its `<service id>.rif` container (or a single `<service id>.rif`) in `~/Library/Application Support/PS4Recomp/licenses` (`$PS4RECOMP_DATA_DIR/licenses` when that variable is set). A game application (`CATEGORY` `gd`) needs no license for its SKU flag.
+
+### Store dialog
+
+`libSceNpCommerce` opens a native window in place of the PlayStation Store, as shadPS4 does: it shows what the game asked for (store category, product, code redemption, checkout, downloads or Plus) and offers the mode's action ("Simulate purchase", "Redeem code", "Join Plus") or Close. The action only reports a purchase to the game; nothing is bought or downloaded. The store icon a game requests is drawn over the bottom of the game window.
+
 ---
 
 ## Project Structure

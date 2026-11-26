@@ -8,7 +8,7 @@ import "testing"
 // report queue fed by the host pointer.
 func TestMouse(t *testing.T) {
 	bin := buildHostCFlags(t, "mouse",
-		[]string{"-I../runtime/modules/libSceUserService"},
+		[]string{userServiceInclude},
 		"../runtime/modules/libSceMouse/ps4_mouse.c",
 	)
 	runHostCases(t, bin, []string{
@@ -80,7 +80,7 @@ func TestJpeg(t *testing.T) {
 // replaced by recording hooks.
 func TestGameCustomDataDialog(t *testing.T) {
 	bin := buildHostCFlags(t, "gcdd",
-		[]string{"-I../runtime/modules/libSceUserService"},
+		[]string{userServiceInclude},
 		"../runtime/modules/libSceMsgDialog/ps4_common_dialog.c",
 		"../runtime/modules/libSceGameCustomDataDialog/ps4_game_custom_data_dialog.c",
 	)

@@ -1862,6 +1862,10 @@ void *ps4_metal_screen_get_layer(void) {
     return (__bridge void *)g_metalLayer;
 }
 
+void *ps4_metal_screen_get_window(void) {
+    return (__bridge void *)g_window;
+}
+
 void *ps4_metal_screen_get_texture(void) {
     if (!g_inited) ps4_metal_screen_init(1920, 1080, "PS4Recomp - Native Metal Display");
     return (__bridge void *)g_screenTexture;

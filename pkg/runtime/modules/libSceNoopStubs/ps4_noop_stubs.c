@@ -39,9 +39,6 @@ void shim_sceCoredumpGetStopInfoGpu(GuestContext *ctx) {
 
 NOOP_SHIM(sceKernelSync)
 NOOP_SHIM(sceRemoteplayTerminate)
-NOOP_SHIM(sceNpCommerceShowPsStoreIcon)
-NOOP_SHIM(sceNpCommerceHidePsStoreIcon)
-NOOP_SHIM(sceNpCommerceDialogUpdateStatus)
 NOOP_SHIM(sceNpSetContentRestriction)
 NOOP_SHIM(sceNpNotifyPlusFeature)
 NOOP_SHIM(sceNpAbortRequest)

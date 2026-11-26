@@ -45,7 +45,6 @@ static _Atomic int32_t g_signaling_ctx_counter = 1;
 static int32_t g_webapi_user_ctx_counter = 1;
 static int64_t g_webapi_req_counter = 1;
 
-static int8_t g_commerce_status = 0; // 0=None, 1=Initialized, 2=Running, 3=Finished
 
 //=============================================================================
 // libSceNpManager
@@ -1336,76 +1335,6 @@ void shim_sceNpScoreGetFriendsRankingAsync(GuestContext *ctx) {
     np_server_request_signed_out(ctx);
 }
 
-
-//=============================================================================
-// libSceNpCommerce
-//=============================================================================
-
-int32_t sceNpCommerceDialogInitialize(void) {
-    NP_LOG("sceNpCommerceDialogInitialize");
-    g_commerce_status = 1; // Initialized
-    return 0;
-}
-
-int32_t sceNpCommerceDialogTerminate(void) {
-    NP_LOG("sceNpCommerceDialogTerminate");
-    g_commerce_status = 0; // None
-    return 0;
-}
-
-int32_t sceNpCommerceDialogClose(void) {
-    NP_LOG("sceNpCommerceDialogClose");
-    g_commerce_status = 3; // Finished
-    return 0;
-}
-
-int8_t sceNpCommerceDialogGetStatus(void) {
-    return g_commerce_status;
-}
-
-int32_t sceNpCommerceDialogGetResult(OrbisNpCommerceDialogResult* result) {
-    if (!result) return ORBIS_NP_ERROR_INVALID_ARGUMENT;
-    result->result = 1; // User canceled
-    result->authorized = false;
-    return 0;
-}
-
-int32_t sceNpCommerceDialogOpen(const void* param) {
-    (void)param;
-    NP_LOG("sceNpCommerceDialogOpen -> Finished (canceled)");
-    g_commerce_status = 3; // Finished
-    return 0;
-}
-
-void shim_sceNpCommerceDialogInitialize(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCommerceDialogInitialize();
-    SHIM_RETURN();
-}
-
-void shim_sceNpCommerceDialogTerminate(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCommerceDialogTerminate();
-    SHIM_RETURN();
-}
-
-void shim_sceNpCommerceDialogClose(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCommerceDialogClose();
-    SHIM_RETURN();
-}
-
-void shim_sceNpCommerceDialogGetStatus(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCommerceDialogGetStatus();
-    SHIM_RETURN();
-}
-
-void shim_sceNpCommerceDialogGetResult(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCommerceDialogGetResult((OrbisNpCommerceDialogResult*)NP_GPTR(ctx, ctx->rdi));
-    SHIM_RETURN();
-}
-
-void shim_sceNpCommerceDialogOpen(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpCommerceDialogOpen((const void*)NP_GPTR(ctx, ctx->rdi));
-    SHIM_RETURN();
-}
 
 //=============================================================================
 // libSceNpUtility & libSceNpGameIntent
