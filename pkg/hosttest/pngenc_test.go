@@ -8,7 +8,7 @@ import "testing"
 // parameter validation, and real PNG generation with zlib compression.
 func TestPngEnc(t *testing.T) {
 	bin := buildHostC(t, "pngenc",
-		"-lz",
+		linkZlib,
 		"../runtime/modules/libScePngDec/ps4_pngdec.c",
 	)
 	runHostCases(t, bin, []string{

@@ -25,7 +25,7 @@ func TestZlib(t *testing.T) {
 		append([]string{"clang++", "-std=c++20", "-c", "../runtime/modules/libSceZlib/ps4_zlib.cpp",
 			"-o", obj}, common...),
 		append([]string{"clang", "-std=gnu11", "-I../runtime/modules/libSceZlib",
-			filepath.Join("testdata", "zlib", "main.c"), obj, "-lz", "-lc++", "-o", bin}, common...),
+			filepath.Join("testdata", "zlib", "main.c"), obj, linkZlib, "-lc++", "-o", bin}, common...),
 	}
 	for _, args := range build {
 		if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {

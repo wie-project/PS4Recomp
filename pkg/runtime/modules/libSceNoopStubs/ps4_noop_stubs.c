@@ -41,8 +41,6 @@ NOOP_SHIM(sceKernelSync)
 NOOP_SHIM(sceRemoteplayTerminate)
 NOOP_SHIM(sceNpWebApiAbortRequest)
 NOOP_SHIM(sceNpSnsFacebookAbortRequest)
-NOOP_SHIM(sceHttpAbortWaitRequest)
-NOOP_SHIM(sceHttpUnsetEpoll)
 NOOP_SHIM(sceNetSocketAbort)
 
 // sce::Toolkit::NP::V2::Core::Request::InitParams::InitParams() (NID: vbh-MWtjMh4)

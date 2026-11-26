@@ -116,7 +116,7 @@ func TestSysmodule(t *testing.T) {
 // by ImageIO and the decoder, with the row filters each filter mask allows.
 func TestPngDec(t *testing.T) {
 	bin := buildHostCFlags(t, "pngdec",
-		[]string{"-lz", "-framework", "ImageIO", "-framework", "CoreGraphics", "-framework", "CoreFoundation"},
+		[]string{linkZlib, "-framework", "ImageIO", "-framework", "CoreGraphics", "-framework", "CoreFoundation"},
 		"../runtime/modules/libScePngDec/ps4_pngdec.c",
 	)
 	runHostCases(t, bin, []string{

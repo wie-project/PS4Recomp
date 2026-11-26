@@ -36,6 +36,8 @@ var auditedShadPS4Libraries = []string{
 	"keyboard",
 	"libpng",
 	"mouse",
+	"network/http.cpp",
+	"network/http2.cpp",
 	"network/netctl.cpp",
 	// shadPS4 loads libSceSsl from ssl2.cpp; its ssl.cpp is not registered (libs.cpp).
 	"network/ssl2.cpp",

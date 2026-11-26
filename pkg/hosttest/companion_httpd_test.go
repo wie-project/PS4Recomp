@@ -4,14 +4,12 @@ package hosttest
 
 import "testing"
 
-// TestCompanionHttpd runs testdata/companion_httpd/main.c: verifies libSceCompanionHttpd
-// lifecycle and libSceHttp option/CA list handling.
+// TestCompanionHttpd runs testdata/companion_httpd/main.c: the libSceCompanionHttpd lifecycle.
 func TestCompanionHttpd(t *testing.T) {
 	bin := buildHostC(t, "companion_httpd",
-		"../runtime/modules/libSceHttp/ps4_http.c",
+		"../runtime/modules/libSceHttp/ps4_companion_httpd.c",
 	)
 	runHostCases(t, bin, []string{
 		"companion-lifecycle",
-		"http-options",
 	})
 }

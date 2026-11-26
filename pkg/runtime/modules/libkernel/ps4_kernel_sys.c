@@ -140,7 +140,7 @@ int32_t sceKernelGetSystemSwVersion(OrbisKernelSwVersion *version) {
     if (!version) return -EINVAL;
     version->Size = sizeof(OrbisKernelSwVersion);
     strncpy(version->VersionString, " 9.000.001", sizeof(version->VersionString) - 1);
-    version->Version = 0x09000001;
+    version->Version = PS4_SYSTEM_SW_VERSION;
     return 0;
 }
 

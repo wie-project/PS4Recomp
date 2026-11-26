@@ -764,7 +764,7 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	}
 	if runtime.GOOS == "darwin" {
 		ldflags = append(ldflags, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
-			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "AVFoundation", "-lz")
+			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "AVFoundation", "-lz", "-lcurl")
 	} else {
 		ldflags = append(ldflags, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
 	}
@@ -1081,7 +1081,7 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 	}
 	if runtime.GOOS == "darwin" {
 		linkArgs = append(linkArgs, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
-			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "AVFoundation", "-lz")
+			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "AVFoundation", "-lz", "-lcurl")
 	} else {
 		linkArgs = append(linkArgs, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
 	}

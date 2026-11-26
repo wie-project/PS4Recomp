@@ -32,6 +32,10 @@ typedef struct OrbisKernelTimezone {
     int32_t tz_dsttime;
 } OrbisKernelTimezone;
 
+// The system software version the runtime reports (sceKernelGetSystemSwVersion, and the
+// libhttp version in the libSceHttp User-Agent): 9.00, BCD-coded as the console does.
+#define PS4_SYSTEM_SW_VERSION 0x09000001u
+
 typedef struct OrbisKernelSwVersion {
     size_t Size;
     char VersionString[0x1C];
