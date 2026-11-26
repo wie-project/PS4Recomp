@@ -1,154 +1,68 @@
-// libSceGameLiveStreaming module implementation following shadPS4 reference.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+// libSceGameLiveStreaming after shadPS4: there is no broadcasting service on a desktop host.
+// sceGameLiveStreamingGetCurrentStatus reports "not on air"; every other function has no effect
+// and returns ORBIS_OK, as in shadPS4.
+
 #include "ps4_gamelivestreaming.h"
-#include <stdio.h>
+#include "ps4_hle_stub.h"
 #include <string.h>
-#ifndef ORBIS_OK
-#define ORBIS_OK 0
-#endif
 
-typedef struct OrbisGameLiveStreamingStatus {
-  uint8_t isOnAir;
-  uint8_t align[3];
-  uint32_t spectatorCounts;
-  int32_t userId;
-  uint8_t reserved[60];
-} OrbisGameLiveStreamingStatus;
-
-typedef struct OrbisGameLiveStreamingStatus2 {
-  int32_t userId;
-  uint8_t isOnAir;
-  uint8_t align[3];
-  uint32_t spectatorCounts;
-  uint32_t textMessageCounts;
-  uint32_t commandMessageCounts;
-  uint32_t broadcastVideoResolution;
-  uint8_t reserved[48];
-} OrbisGameLiveStreamingStatus2;
-
-void shim_sceGameLiveStreamingInitialize(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingTerminate(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingEnableLiveStreaming(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingPermitLiveStreaming(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingPermitServerSideRecording(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
+// sceGameLiveStreamingGetCurrentStatus(OrbisGameLiveStreamingStatus *status): the console writes
+// the status without a null check.
 void shim_sceGameLiveStreamingGetCurrentStatus(GuestContext *ctx) {
-  if (ctx->rdi && ctx->mem_base) {
-    OrbisGameLiveStreamingStatus *status =
-        (OrbisGameLiveStreamingStatus *)(ctx->mem_base + ctx->rdi);
-    memset(status, 0, sizeof(*status));
-    status->isOnAir = 0;
-  }
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
+    if (ctx->rdi) {
+        OrbisGameLiveStreamingStatus *status =
+            (OrbisGameLiveStreamingStatus *)(ctx->mem_base + ctx->rdi);
+        memset(status, 0, sizeof(*status));
+    }
+    ctx->rax = 0;
+    SHIM_RETURN();
 }
 
-void shim_sceGameLiveStreamingGetCurrentStatus2(GuestContext *ctx) {
-  if (ctx->rdi && ctx->mem_base) {
-    OrbisGameLiveStreamingStatus2 *status =
-        (OrbisGameLiveStreamingStatus2 *)(ctx->mem_base + ctx->rdi);
-    memset(status, 0, sizeof(*status));
-    status->isOnAir = 0;
-  }
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingSetServiceProviderPermission(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingSetDefaultServiceProviderPermission(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingSetGuardAreas(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingSetSpoilerTag(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingClearSpoilerTag(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingStartSocialFeedbackMessageFiltering(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingStopSocialFeedbackMessageFiltering(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingCheckCallback(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingSetCameraFrameSetting(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingGetProgramInfo(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingSetInvitationSessionId(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingSetMetadata(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingSetMaxBitrate(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingEnableSocialFeedback(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingSetStandbyScreenResource(GuestContext *ctx) {
-  (void)ctx->rdi;
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
-
-void shim_sceGameLiveStreamingPostSocialMessage(GuestContext *ctx) {
-  ctx->rax = ORBIS_OK;
-  SHIM_RETURN();
-}
+PS4_HLE_STUB(sceGameLiveStreamingStartDebugBroadcast)
+PS4_HLE_STUB(sceGameLiveStreamingStopDebugBroadcast)
+PS4_HLE_STUB(sceGameLiveStreamingApplySocialFeedbackMessageFilter)
+PS4_HLE_STUB(sceGameLiveStreamingCheckCallback)
+PS4_HLE_STUB(sceGameLiveStreamingClearPresetSocialFeedbackCommands)
+PS4_HLE_STUB(sceGameLiveStreamingClearSocialFeedbackMessages)
+PS4_HLE_STUB(sceGameLiveStreamingClearSpoilerTag)
+PS4_HLE_STUB(sceGameLiveStreamingEnableLiveStreaming)
+PS4_HLE_STUB(sceGameLiveStreamingEnableSocialFeedback)
+PS4_HLE_STUB(sceGameLiveStreamingGetCurrentBroadcastScreenLayout)
+PS4_HLE_STUB(sceGameLiveStreamingGetCurrentStatus2)
+PS4_HLE_STUB(sceGameLiveStreamingGetProgramInfo)
+PS4_HLE_STUB(sceGameLiveStreamingGetSocialFeedbackMessages)
+PS4_HLE_STUB(sceGameLiveStreamingGetSocialFeedbackMessagesCount)
+PS4_HLE_STUB(sceGameLiveStreamingInitialize)
+PS4_HLE_STUB(sceGameLiveStreamingLaunchLiveViewer)
+PS4_HLE_STUB(sceGameLiveStreamingLaunchLiveViewerA)
+PS4_HLE_STUB(sceGameLiveStreamingPermitLiveStreaming)
+PS4_HLE_STUB(sceGameLiveStreamingPermitServerSideRecording)
+PS4_HLE_STUB(sceGameLiveStreamingPostSocialMessage)
+PS4_HLE_STUB(sceGameLiveStreamingRegisterCallback)
+PS4_HLE_STUB(sceGameLiveStreamingScreenCloseSeparateMode)
+PS4_HLE_STUB(sceGameLiveStreamingScreenConfigureSeparateMode)
+PS4_HLE_STUB(sceGameLiveStreamingScreenInitialize)
+PS4_HLE_STUB(sceGameLiveStreamingScreenInitializeSeparateModeParameter)
+PS4_HLE_STUB(sceGameLiveStreamingScreenOpenSeparateMode)
+PS4_HLE_STUB(sceGameLiveStreamingScreenSetMode)
+PS4_HLE_STUB(sceGameLiveStreamingScreenTerminate)
+PS4_HLE_STUB(sceGameLiveStreamingSetCameraFrameSetting)
+PS4_HLE_STUB(sceGameLiveStreamingSetDefaultServiceProviderPermission)
+PS4_HLE_STUB(sceGameLiveStreamingSetGuardAreas)
+PS4_HLE_STUB(sceGameLiveStreamingSetInvitationSessionId)
+PS4_HLE_STUB(sceGameLiveStreamingSetLinkCommentPreset)
+PS4_HLE_STUB(sceGameLiveStreamingSetMaxBitrate)
+PS4_HLE_STUB(sceGameLiveStreamingSetMetadata)
+PS4_HLE_STUB(sceGameLiveStreamingSetPresetSocialFeedbackCommands)
+PS4_HLE_STUB(sceGameLiveStreamingSetPresetSocialFeedbackCommandsDescription)
+PS4_HLE_STUB(sceGameLiveStreamingSetServiceProviderPermission)
+PS4_HLE_STUB(sceGameLiveStreamingSetSpoilerTag)
+PS4_HLE_STUB(sceGameLiveStreamingSetStandbyScreenResource)
+PS4_HLE_STUB(sceGameLiveStreamingStartGenerateStandbyScreenResource)
+PS4_HLE_STUB(sceGameLiveStreamingStartSocialFeedbackMessageFiltering)
+PS4_HLE_STUB(sceGameLiveStreamingStopGenerateStandbyScreenResource)
+PS4_HLE_STUB(sceGameLiveStreamingStopSocialFeedbackMessageFiltering)
+PS4_HLE_STUB(sceGameLiveStreamingTerminate)
+PS4_HLE_STUB(sceGameLiveStreamingUnregisterCallback)

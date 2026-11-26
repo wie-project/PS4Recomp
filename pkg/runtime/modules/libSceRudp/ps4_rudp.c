@@ -1,43 +1,32 @@
+// libSceRudp, following shadPS4 (src/core/libraries/rudp), where every function is a stub that
+// returns ORBIS_OK: there is no RUDP transport on the host, so no connection ever forms.
 #include "ps4_rudp.h"
-#include <stdio.h>
+#include <stdatomic.h>
 #include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
-#include <pthread.h>
 
 #ifndef ORBIS_OK
 #define ORBIS_OK 0
 #endif
 
-static pthread_mutex_t g_rudp_mutex = PTHREAD_MUTEX_INITIALIZER;
-static bool g_rudp_initialized = false;
-static int32_t g_rudp_next_ctx_id = 1;
+static _Atomic int32_t g_rudp_next_ctx_id = 1;
 
 void shim_sceRudpInit(GuestContext *ctx) {
-    pthread_mutex_lock(&g_rudp_mutex);
-    g_rudp_initialized = true;
-    pthread_mutex_unlock(&g_rudp_mutex);
     ctx->rax = ORBIS_OK;
     SHIM_RETURN();
 }
 
 void shim_sceRudpTerminate(GuestContext *ctx) {
-    pthread_mutex_lock(&g_rudp_mutex);
-    g_rudp_initialized = false;
-    pthread_mutex_unlock(&g_rudp_mutex);
     ctx->rax = ORBIS_OK;
     SHIM_RETURN();
 }
 
+// sceRudpCreateContext(handler, arg, ctxId*). shadPS4 returns ORBIS_OK without writing *ctxId;
+// the SDK signature has the context id as an output, and games pass the id read back from it
+// to every later call (Yakuza 0: MOV RDX, R14; CALL; MOV EDI, [R14]), so a successful call
+// stores a distinct id there instead of leaving the caller's memory uninitialized.
 void shim_sceRudpCreateContext(GuestContext *ctx) {
-    pthread_mutex_lock(&g_rudp_mutex);
-    int32_t ctx_id = g_rudp_next_ctx_id++;
-    pthread_mutex_unlock(&g_rudp_mutex);
-
-    // As disassembled in games like Yakuza 0:
-    // RDX holds pointer to output context id storage (e.g. MOV RDX, R14; CALL; MOV EDI, [R14])
     if (ctx->rdx && ctx->mem_base) {
-        *(int32_t *)(ctx->mem_base + ctx->rdx) = ctx_id;
+        *(int32_t *)(ctx->mem_base + ctx->rdx) = atomic_fetch_add(&g_rudp_next_ctx_id, 1);
     }
     ctx->rax = ORBIS_OK;
     SHIM_RETURN();
@@ -136,7 +125,7 @@ void shim_sceRudpGetSizeReadable(GuestContext *ctx) {
 }
 
 void shim_sceRudpGetSizeWritable(GuestContext *ctx) {
-    ctx->rax = 0x4000;
+    ctx->rax = ORBIS_OK;
     SHIM_RETURN();
 }
 

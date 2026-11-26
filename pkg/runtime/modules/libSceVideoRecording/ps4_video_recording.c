@@ -1,134 +1,56 @@
+// libSceVideoRecording, following shadPS4 (src/core/libraries/video_recording).
+//
+// shadPS4 registers only sceVideoRecordingSetInfo. Every other function of the library resolves
+// there to the generic unresolved-import stub, which returns 0 and touches nothing; the shims
+// for those functions below do the same. There is no recorder on the host.
 #include "ps4_video_recording.h"
-#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
-static pthread_mutex_t g_vr_mutex = PTHREAD_MUTEX_INITIALIZER;
-static bool g_vr_open = false;
-static OrbisVideoRecordingStatus g_vr_status = ORBIS_VIDEO_RECORDING_STATUS_NONE;
+// One line per function the first time a game calls it, as shadPS4's stub logs every call.
+static void video_recording_stub(const char *name, _Atomic bool *warned) {
+    if (!atomic_exchange(warned, true)) {
+        fprintf(stderr, "[ps4-stub] %s -> 0 (not implemented in shadPS4)\n", name);
+    }
+}
 
-int32_t sceVideoRecordingQueryMemSize2(const OrbisVideoRecordingParam2 *param, size_t *out_size) {
-    if (!param || !out_size) {
-        return (int32_t)0x80a80003; // INVALID_VALUE
+#define VIDEO_RECORDING_STUB(fn)                                          \
+    void shim_##fn(GuestContext *ctx) {                                   \
+        static _Atomic bool warned;                                       \
+        video_recording_stub(#fn, &warned);                               \
+        ctx->rax = 0;                                                     \
+        SHIM_RETURN();                                                    \
     }
 
-    size_t required = 16 * 1024 * 1024; // Standard 16MB ring buffer
-    if (param->ring_sec > 0) {
-        required = (size_t)param->ring_sec * 32768 + 1048576;
-    }
-    *out_size = required;
-    return 0;
-}
+VIDEO_RECORDING_STUB(sceVideoRecordingQueryMemSize2)
+VIDEO_RECORDING_STUB(sceVideoRecordingOpen2)
+VIDEO_RECORDING_STUB(sceVideoRecordingClose)
+VIDEO_RECORDING_STUB(sceVideoRecordingStart)
+VIDEO_RECORDING_STUB(sceVideoRecordingStop)
+VIDEO_RECORDING_STUB(sceVideoRecordingGetStatus)
 
-int32_t sceVideoRecordingOpen2(const OrbisVideoRecordingParam2 *param, void *work_mem) {
-    (void)work_mem;
-    if (!param) {
-        return (int32_t)0x80a80003; // INVALID_VALUE
-    }
-
-    pthread_mutex_lock(&g_vr_mutex);
-    g_vr_open = true;
-    g_vr_status = ORBIS_VIDEO_RECORDING_STATUS_NONE;
-    pthread_mutex_unlock(&g_vr_mutex);
-    return 0;
-}
-
-int32_t sceVideoRecordingClose(void) {
-    pthread_mutex_lock(&g_vr_mutex);
-    g_vr_open = false;
-    g_vr_status = ORBIS_VIDEO_RECORDING_STATUS_NONE;
-    pthread_mutex_unlock(&g_vr_mutex);
-    return 0;
-}
-
-int32_t sceVideoRecordingStart(void) {
-    pthread_mutex_lock(&g_vr_mutex);
-    g_vr_status = ORBIS_VIDEO_RECORDING_STATUS_RUNNING;
-    pthread_mutex_unlock(&g_vr_mutex);
-    return 0;
-}
-
-int32_t sceVideoRecordingStop(void) {
-    pthread_mutex_lock(&g_vr_mutex);
-    g_vr_status = ORBIS_VIDEO_RECORDING_STATUS_NONE;
-    pthread_mutex_unlock(&g_vr_mutex);
-    return 0;
-}
-
-OrbisVideoRecordingStatus sceVideoRecordingGetStatus(void) {
-    pthread_mutex_lock(&g_vr_mutex);
-    OrbisVideoRecordingStatus st = g_vr_status;
-    pthread_mutex_unlock(&g_vr_mutex);
-    return st;
-}
-
-int32_t sceVideoRecordingSetInfo(OrbisVideoRecordingInfo set_info, const void *info, uint64_t info_len) {
+int32_t sceVideoRecordingSetInfo(uint32_t set_info, const void *info, uint64_t info_len) {
     (void)info_len;
+    // shadPS4's range checks, unchanged. Its fourth range, (Chapter, PermissionLevel), also
+    // covers Copyright (0xA01), so Copyright is rejected as well.
+    if (set_info < ORBIS_VIDEO_RECORDING_INFO_SUBTITLE ||
+        (set_info > ORBIS_VIDEO_RECORDING_INFO_SUBTITLE && set_info < ORBIS_VIDEO_RECORDING_INFO_DESCRIPTION) ||
+        (set_info > ORBIS_VIDEO_RECORDING_INFO_KEYWORDS && set_info < ORBIS_VIDEO_RECORDING_INFO_CHAPTER) ||
+        (set_info > ORBIS_VIDEO_RECORDING_INFO_CHAPTER && set_info < ORBIS_VIDEO_RECORDING_INFO_COPYRIGHT) ||
+        (set_info > ORBIS_VIDEO_RECORDING_INFO_CHAPTER && set_info < ORBIS_VIDEO_RECORDING_INFO_PERMISSION_LEVEL) ||
+        set_info > ORBIS_VIDEO_RECORDING_INFO_USER_META) {
+        return ORBIS_VIDEO_RECORDING_ERROR_INVALID_VALUE;
+    }
+    // The library relies on libSceAvcap for errors in the other parameters.
     if (!info) {
-        return (int32_t)0x80a80003; // INVALID_VALUE
+        return ORBIS_VIDEO_RECORDING_ERROR_INVALID_VALUE;
     }
-
-    switch (set_info) {
-    case ORBIS_VIDEO_RECORDING_INFO_SUBTITLE:
-    case ORBIS_VIDEO_RECORDING_INFO_DESCRIPTION:
-    case ORBIS_VIDEO_RECORDING_INFO_COMMENTS:
-    case ORBIS_VIDEO_RECORDING_INFO_KEYWORDS:
-    case ORBIS_VIDEO_RECORDING_INFO_CHAPTER:
-    case ORBIS_VIDEO_RECORDING_INFO_COPYRIGHT:
-    case ORBIS_VIDEO_RECORDING_INFO_PERMISSION_LEVEL:
-    case ORBIS_VIDEO_RECORDING_INFO_GUARD_AREA:
-    case ORBIS_VIDEO_RECORDING_INFO_USER_META:
-        break;
-    default:
-        return (int32_t)0x80a80003; // INVALID_VALUE
-    }
-
     return 0;
 }
 
-// Shims
-void shim_sceVideoRecordingQueryMemSize2(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceVideoRecordingQueryMemSize2(
-        ctx->rdi ? (const OrbisVideoRecordingParam2 *)(ctx->mem_base + ctx->rdi) : NULL,
-        ctx->rsi ? (size_t *)(ctx->mem_base + ctx->rsi) : NULL
-    );
-    SHIM_RETURN();
-}
-
-void shim_sceVideoRecordingOpen2(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceVideoRecordingOpen2(
-        ctx->rdi ? (const OrbisVideoRecordingParam2 *)(ctx->mem_base + ctx->rdi) : NULL,
-        ctx->rsi ? (void *)(ctx->mem_base + ctx->rsi) : NULL
-    );
-    SHIM_RETURN();
-}
-
-void shim_sceVideoRecordingClose(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceVideoRecordingClose();
-    SHIM_RETURN();
-}
-
-void shim_sceVideoRecordingStart(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceVideoRecordingStart();
-    SHIM_RETURN();
-}
-
-void shim_sceVideoRecordingStop(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceVideoRecordingStop();
-    SHIM_RETURN();
-}
-
-void shim_sceVideoRecordingGetStatus(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceVideoRecordingGetStatus();
-    SHIM_RETURN();
-}
-
+// sceVideoRecordingSetInfo(info, data, size)
 void shim_sceVideoRecordingSetInfo(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceVideoRecordingSetInfo(
-        (OrbisVideoRecordingInfo)ctx->rdi,
-        ctx->rsi ? (const void *)(ctx->mem_base + ctx->rsi) : NULL,
-        (uint64_t)ctx->rdx
-    );
+    const void *info = ctx->rsi ? (const void *)(ctx->mem_base + ctx->rsi) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceVideoRecordingSetInfo((uint32_t)ctx->rdi, info, ctx->rdx);
     SHIM_RETURN();
 }

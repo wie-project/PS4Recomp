@@ -1031,18 +1031,6 @@ int32_t sceRazorCaptureCommandBuffersOnlySinceLastFlip(void) {
     return ORBIS_GNM_ERROR_CAPTURE_FAILED_INTERNAL;
 }
 
-int32_t sceRazorCpuJobManagerSequence(void) {
-    return 0;
-}
-
-int32_t sceRazorCpuJobManagerJob(void) {
-    return 0;
-}
-
-int32_t sceRazorCpuJobManagerDispatch(void) {
-    return 0;
-}
-
 bool sceGnmDriverTraceInProgress(void) {
     return false;
 }
@@ -1875,24 +1863,6 @@ void shim_sceRazorCaptureCommandBuffersOnlyImmediate(GuestContext *ctx) {
 void shim_sceRazorCaptureCommandBuffersOnlySinceLastFlip(GuestContext *ctx) {
     (void)ctx;
     ctx->rax = (uint64_t)(int64_t)sceRazorCaptureCommandBuffersOnlySinceLastFlip();
-    SHIM_RETURN();
-}
-
-void shim_sceRazorCpuJobManagerSequence(GuestContext *ctx) {
-    (void)ctx;
-    ctx->rax = (uint64_t)(int64_t)sceRazorCpuJobManagerSequence();
-    SHIM_RETURN();
-}
-
-void shim_sceRazorCpuJobManagerJob(GuestContext *ctx) {
-    (void)ctx;
-    ctx->rax = (uint64_t)(int64_t)sceRazorCpuJobManagerJob();
-    SHIM_RETURN();
-}
-
-void shim_sceRazorCpuJobManagerDispatch(GuestContext *ctx) {
-    (void)ctx;
-    ctx->rax = (uint64_t)(int64_t)sceRazorCpuJobManagerDispatch();
     SHIM_RETURN();
 }
 

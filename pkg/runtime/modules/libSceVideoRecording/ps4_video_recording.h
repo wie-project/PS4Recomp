@@ -10,53 +10,31 @@
 extern "C" {
 #endif
 
-typedef enum OrbisVideoRecordingStatus {
-    ORBIS_VIDEO_RECORDING_STATUS_NONE    = 0,
-    ORBIS_VIDEO_RECORDING_STATUS_RUNNING = 1,
-    ORBIS_VIDEO_RECORDING_STATUS_PAUSED  = 2
-} OrbisVideoRecordingStatus;
+// Error codes (shadPS4 video_recording_error.h).
+#define ORBIS_VIDEO_RECORDING_ERROR_OUT_OF_MEMORY ((int32_t)0x80A80001)
+#define ORBIS_VIDEO_RECORDING_ERROR_FATAL ((int32_t)0x80A80002)
+#define ORBIS_VIDEO_RECORDING_ERROR_INVALID_VALUE ((int32_t)0x80A80003)
+#define ORBIS_VIDEO_RECORDING_ERROR_FILE_OPEN ((int32_t)0x80A80004)
+#define ORBIS_VIDEO_RECORDING_ERROR_FILE_WRITE ((int32_t)0x80A80005)
+#define ORBIS_VIDEO_RECORDING_ERROR_INVALID_STATE ((int32_t)0x80A80006)
+#define ORBIS_VIDEO_RECORDING_ERROR_INTERRUPTED ((int32_t)0x80A80007)
+#define ORBIS_VIDEO_RECORDING_ERROR_UNSUPPORTED ((int32_t)0x80A80008)
+#define ORBIS_VIDEO_RECORDING_ERROR_NO_SPACE ((int32_t)0x80A80009)
+#define ORBIS_VIDEO_RECORDING_ERROR_FILE_NO_DATA ((int32_t)0x80A8000A)
 
-typedef enum OrbisVideoRecordingInfo {
-    ORBIS_VIDEO_RECORDING_INFO_SUBTITLE         = 0x2,
-    ORBIS_VIDEO_RECORDING_INFO_DESCRIPTION      = 0x6,
-    ORBIS_VIDEO_RECORDING_INFO_COMMENTS         = 0x7,
-    ORBIS_VIDEO_RECORDING_INFO_KEYWORDS         = 0x8,
-    ORBIS_VIDEO_RECORDING_INFO_CHAPTER          = 0xd,
-    ORBIS_VIDEO_RECORDING_INFO_COPYRIGHT        = 0xa01,
-    ORBIS_VIDEO_RECORDING_INFO_PERMISSION_LEVEL = 0xa007,
-    ORBIS_VIDEO_RECORDING_INFO_GUARD_AREA       = 0xa008,
-    ORBIS_VIDEO_RECORDING_INFO_USER_META        = 0xa009
-} OrbisVideoRecordingInfo;
+// OrbisVideoRecordingInfo: what sceVideoRecordingSetInfo sets.
+#define ORBIS_VIDEO_RECORDING_INFO_SUBTITLE 0x2u
+#define ORBIS_VIDEO_RECORDING_INFO_DESCRIPTION 0x6u
+#define ORBIS_VIDEO_RECORDING_INFO_COMMENTS 0x7u
+#define ORBIS_VIDEO_RECORDING_INFO_KEYWORDS 0x8u
+#define ORBIS_VIDEO_RECORDING_INFO_CHAPTER 0xDu
+#define ORBIS_VIDEO_RECORDING_INFO_COPYRIGHT 0xA01u
+#define ORBIS_VIDEO_RECORDING_INFO_PERMISSION_LEVEL 0xA007u
+#define ORBIS_VIDEO_RECORDING_INFO_GUARD_AREA 0xA008u
+#define ORBIS_VIDEO_RECORDING_INFO_USER_META 0xA009u
 
-typedef struct OrbisVideoRecordingParam2 {
-    uint64_t size;
-    uint64_t affinity_mask;
-    int32_t thread_priority;
-    int32_t ring_sec;
-} OrbisVideoRecordingParam2;
+int32_t sceVideoRecordingSetInfo(uint32_t set_info, const void *info, uint64_t info_len);
 
-typedef struct OrbisVideoRecordingInfoGuardArea {
-    float x1, y1;
-    float x2, y2;
-} OrbisVideoRecordingInfoGuardArea;
-
-typedef struct OrbisVideoRecordingInfoUserMeta {
-    uint64_t size;
-    int32_t flags;
-    char name[32];
-    char data[128];
-} OrbisVideoRecordingInfoUserMeta;
-
-// C API
-int32_t sceVideoRecordingQueryMemSize2(const OrbisVideoRecordingParam2 *param, size_t *out_size);
-int32_t sceVideoRecordingOpen2(const OrbisVideoRecordingParam2 *param, void *work_mem);
-int32_t sceVideoRecordingClose(void);
-int32_t sceVideoRecordingStart(void);
-int32_t sceVideoRecordingStop(void);
-OrbisVideoRecordingStatus sceVideoRecordingGetStatus(void);
-int32_t sceVideoRecordingSetInfo(OrbisVideoRecordingInfo set_info, const void *info, uint64_t info_len);
-
-// Shims
 void shim_sceVideoRecordingQueryMemSize2(GuestContext *ctx);
 void shim_sceVideoRecordingOpen2(GuestContext *ctx);
 void shim_sceVideoRecordingClose(GuestContext *ctx);

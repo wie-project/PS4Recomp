@@ -153,3 +153,35 @@ func TestWebBrowserDialog(t *testing.T) {
 	)
 	runHostCases(t, bin, []string{"lifecycle", "busy"})
 }
+
+// TestFiber runs testdata/fiber/main.c: libSceFiber argument checks in shadPS4's order, the opt
+// param magic, context size checking and the margin sceFiberGetInfo measures, attaching a
+// context, the FPU control words a fiber starts with, coroutine Run / Switch / ReturnToThread,
+// and the stack overflow check on a switch.
+func TestFiber(t *testing.T) {
+	bin := buildHostCFlags(t, "fiber",
+		[]string{"-I../runtime/kernel/threading"},
+		"../runtime/modules/libSceFiber/ps4_fiber.c",
+	)
+	runHostCases(t, bin, []string{
+		"init-checks",
+		"context-size-check",
+		"attach",
+		"run-switch",
+		"overflow",
+	})
+}
+
+// TestVideoRecordingRudp runs testdata/videorecording_rudp/main.c: the info values
+// sceVideoRecordingSetInfo accepts, the VideoRecording functions shadPS4 leaves to its
+// unresolved stub, and the libSceRudp stubs.
+func TestVideoRecordingRudp(t *testing.T) {
+	bin := buildHostC(t, "videorecording_rudp",
+		"../runtime/modules/libSceVideoRecording/ps4_video_recording.c",
+		"../runtime/modules/libSceRudp/ps4_rudp.c",
+	)
+	runHostCases(t, bin, []string{
+		"video-recording",
+		"rudp",
+	})
+}

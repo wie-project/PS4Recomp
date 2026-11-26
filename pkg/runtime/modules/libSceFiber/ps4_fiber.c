@@ -16,16 +16,34 @@
 #define FIBER_MAGIC_END 0xB37592A0U
 #define FIBER_OPT_MAGIC 0xBB40E64DU
 #define FIBER_HOST_STACK_SIZE (8u * 1024u * 1024u)
+// Written to the lowest word of a fiber context; a switch away from a fiber whose word was
+// overwritten reports a stack overflow (shadPS4 kFiberStackSignature).
+#define FIBER_STACK_SIGNATURE 0x7149F2CA7149F2CAULL
+// Fills the rest of the context while context size checking is on (kFiberStackSizeCheck).
+#define FIBER_STACK_SIZE_CHECK 0xDEADBEEFDEADBEEFULL
+// SDK version from which a fiber starts with the default FPU control words (FW_350).
+#define FIBER_SDK_SET_FPU_REGS 0x3500000U
 
+// Orbis fiber states, with the values shadPS4 uses.
 enum {
-  FIBER_STATE_IDLE = 0,
   FIBER_STATE_RUNNING = 1,
-  FIBER_STATE_FINALIZED = 2,
+  FIBER_STATE_IDLE = 2,
+  FIBER_STATE_FINALIZED = 3,
   // Coroutine mode: the fiber has called Switch/ReturnToThread but its host
   // thread is still on the fiber's host stack. Whatever runs next on that
   // thread marks it IDLE once the stack is free.
-  FIBER_STATE_SUSPENDING = 3,
+  FIBER_STATE_SUSPENDING = 4,
 };
+
+// Fiber flags (shadPS4 FiberFlags).
+enum {
+  FIBER_FLAG_CONTEXT_SIZE_CHECK = 0x10,
+  FIBER_FLAG_SET_FPU_REGS = 0x100,
+};
+
+// sceFiberStartContextSizeCheck: fibers initialized or given a context while it is on fill their
+// context with FIBER_STACK_SIZE_CHECK so sceFiberGetInfo can measure the unused part.
+static _Atomic uint32_t g_context_size_check;
 
 // Guest-visible fiber object (the game allocates 256 bytes, 8-byte aligned).
 typedef struct OrbisFiberObject {
@@ -117,6 +135,10 @@ typedef struct FiberHost {
   void *stack;
   void *sp;
   _Atomic uint32_t *release;
+  // FPU control words of the endpoint that ran on the worker before this fiber was entered.
+  // A fiber that starts from its entry without FIBER_FLAG_SET_FPU_REGS keeps them.
+  uint16_t entry_fpu_cw;
+  uint32_t entry_mxcsr;
 } FiberHost;
 
 static _Thread_local FiberHost *tl_fiber_self = NULL;
@@ -415,6 +437,15 @@ static void fiber_call_entry(FiberHost *h, uint64_t arg_on_run) {
     ctx->rsp = (h->worker->ctx->rsp - FIBER_CONTEXTLESS_STACK_GAP) & ~0xFULL;
     ctx->unwind_frame = NULL;
   }
+  // shadPS4 _sceFiberSwitchEntry: fibers of SDK 3.50 and later start with the default x87
+  // control word and an MXCSR with FTZ/DAZ set; older ones keep the switching endpoint's.
+  if (f->flags & FIBER_FLAG_SET_FPU_REGS) {
+    ctx->fpu_cw = 0x037F;
+    ctx->mxcsr = 0x9FC0;
+  } else {
+    ctx->fpu_cw = h->entry_fpu_cw;
+    ctx->mxcsr = h->entry_mxcsr;
+  }
   ctx->rbp = 0;
   ctx->rdi = f->arg_on_initialize;
   ctx->rsi = arg_on_run;
@@ -433,8 +464,10 @@ static bool fiber_restarts(GuestContext *ctx, const FiberHost *h) {
 static void *fiber_host_main(void *arg);
 
 // Hand the worker to fiber h. The caller has already moved h to RUNNING.
-static int fiber_resume(FiberHost *h, FiberWorker *w, uint64_t arg, int kind) {
+static int fiber_resume(FiberHost *h, FiberWorker *w, const GuestContext *from, uint64_t arg, int kind) {
   fiber_adopt_thread(h->fctx, w->ctx);
+  h->entry_fpu_cw = from->fpu_cw;
+  h->entry_mxcsr = from->mxcsr;
   h->worker = w;
   h->in_arg = arg;
   w->current = h;
@@ -585,8 +618,11 @@ static bool co_alloc_stack(FiberHost *h) {
 
 // Prepare fiber h to run on worker w's host thread and make it the thread's
 // current endpoint. The caller then switches to h->sp.
-static void co_enter(FiberHost *h, FiberWorker *w, uint64_t arg, _Atomic uint32_t *release) {
+static void co_enter(FiberHost *h, FiberWorker *w, const GuestContext *from, uint64_t arg,
+                     _Atomic uint32_t *release) {
   fiber_adopt_thread(h->fctx, w->ctx);
+  h->entry_fpu_cw = from->fpu_cw;
+  h->entry_mxcsr = from->mxcsr;
   h->worker = w;
   h->in_arg = arg;
   h->release = release;
@@ -600,18 +636,47 @@ static void co_enter(FiberHost *h, FiberWorker *w, uint64_t arg, _Atomic uint32_
 
 static void fiber_log_failure(GuestContext *ctx, const char *op, uint64_t addr, int32_t ret);
 
+// Writes the stack signature to the lowest word of f's context and, with context size checking,
+// fills the rest of it (shadPS4 does this when a context is attached at initialization or later).
+// The fill follows the fiber's own flags in both cases, so sceFiberGetInfo always measures a
+// filled context.
+static void fiber_prepare_context(GuestContext *ctx, const OrbisFiberObject *f) {
+  uint64_t *words = (uint64_t *)(ctx->mem_base + f->addr_context);
+  words[0] = FIBER_STACK_SIGNATURE;
+  if (f->flags & FIBER_FLAG_CONTEXT_SIZE_CHECK) {
+    const uint64_t n = f->size_context / sizeof(uint64_t);
+    for (uint64_t i = 1; i < n; i++) words[i] = FIBER_STACK_SIZE_CHECK;
+  }
+}
+
+// shadPS4 _sceFiberCheckStackOverflow: runs when a fiber with a context switches away.
+static void fiber_check_stack_overflow(GuestContext *ctx, const OrbisFiberObject *f) {
+  if (!f->addr_context) return;
+  if (*(const uint64_t *)(ctx->mem_base + f->addr_context) == FIBER_STACK_SIGNATURE) return;
+  fprintf(stderr, "[ps4-fiber] FATAL: stack overflow detected in fiber '%s' with size = 0x%llx\n", f->name,
+          (unsigned long long)f->size_context);
+  fflush(stderr);
+  abort();
+}
+
+// _sceFiberInitializeImpl / _sceFiberInitializeWithInternalOptionImpl, with shadPS4's checks in
+// shadPS4's order.
 static int32_t fiber_initialize(GuestContext *ctx, uint64_t fiber_addr, uint64_t name_addr,
                                 uint64_t entry, uint64_t arg_on_init, uint64_t addr_context,
-                                uint64_t size_context, uint64_t opt_addr) {
+                                uint64_t size_context, uint64_t opt_addr, uint32_t flags,
+                                uint32_t build_ver) {
   if (!fiber_addr || !name_addr || !entry) return (int32_t)ORBIS_FIBER_ERROR_NULL;
-  if (fiber_addr & 7) return (int32_t)ORBIS_FIBER_ERROR_ALIGNMENT;
+  if ((fiber_addr & 7) || (addr_context & 0xF)) return (int32_t)ORBIS_FIBER_ERROR_ALIGNMENT;
   if (opt_addr & 7) return (int32_t)ORBIS_FIBER_ERROR_ALIGNMENT;
-  if (addr_context) {
-    if ((addr_context & 0xF) || (size_context & 0xF)) return (int32_t)ORBIS_FIBER_ERROR_ALIGNMENT;
-    if (size_context < ORBIS_FIBER_CONTEXT_MINIMUM_SIZE) return (int32_t)ORBIS_FIBER_ERROR_RANGE;
-  } else if (size_context) {
+  if (size_context && size_context < ORBIS_FIBER_CONTEXT_MINIMUM_SIZE) return (int32_t)ORBIS_FIBER_ERROR_RANGE;
+  if (size_context & 0xF) return (int32_t)ORBIS_FIBER_ERROR_INVALID;
+  if (!addr_context != !size_context) return (int32_t)ORBIS_FIBER_ERROR_INVALID;
+  if (opt_addr && *(const uint32_t *)(ctx->mem_base + opt_addr) != FIBER_OPT_MAGIC)
     return (int32_t)ORBIS_FIBER_ERROR_INVALID;
-  }
+
+  uint32_t user_flags = flags;
+  if (build_ver >= FIBER_SDK_SET_FPU_REGS) user_flags |= FIBER_FLAG_SET_FPU_REGS;
+  if (atomic_load(&g_context_size_check)) user_flags |= FIBER_FLAG_CONTEXT_SIZE_CHECK;
 
   static pthread_once_t init_once = PTHREAD_ONCE_INIT;
   pthread_once(&init_once, fiber_global_init);
@@ -622,9 +687,8 @@ static int32_t fiber_initialize(GuestContext *ctx, uint64_t fiber_addr, uint64_t
     free(fctx);
     return (int32_t)ORBIS_FIBER_ERROR_INVALID;
   }
+  // The FPU control words are set when the fiber starts from its entry (fiber_call_entry).
   fiber_adopt_thread(fctx, ctx);
-  fctx->fpu_cw = ctx->fpu_cw ? ctx->fpu_cw : 0x037F;
-  fctx->mxcsr = ctx->mxcsr ? ctx->mxcsr : 0x1F80;
   h->guest_addr = fiber_addr;
   h->fctx = fctx;
   baton_init(&h->baton);
@@ -638,7 +702,9 @@ static int32_t fiber_initialize(GuestContext *ctx, uint64_t fiber_addr, uint64_t
   f->arg_on_initialize = arg_on_init;
   f->addr_context = addr_context;
   f->size_context = size_context;
+  f->flags = user_flags;
   strncpy(f->name, (const char *)(ctx->mem_base + name_addr), ORBIS_FIBER_MAX_NAME_LENGTH);
+  if (addr_context) fiber_prepare_context(ctx, f);
   atomic_store(&f->state, FIBER_STATE_IDLE);
   return 0;
 }
@@ -650,24 +716,30 @@ void shim_sceFiberOptParamInitialize(GuestContext *ctx) {
   } else if (opt & 7) {
     ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_FIBER_ERROR_ALIGNMENT;
   } else {
-    memset(ctx->mem_base + opt, 0, ORBIS_FIBER_OPT_PARAM_SIZE);
     *(uint32_t *)(ctx->mem_base + opt) = FIBER_OPT_MAGIC;
     ctx->rax = 0;
   }
   SHIM_RETURN();
 }
 
-// _sceFiberInitializeImpl(fiber, name, entry, argOnInitialize, addrContext,
-//                         sizeContext, optParam, buildVersion)
+// _sceFiberInitializeImpl(fiber, name, entry, argOnInitialize, addrContext, sizeContext,
+//                         optParam, buildVersion)
 void shim_sceFiberInitializeImpl(GuestContext *ctx) {
-  uint64_t opt_addr = *(uint64_t *)(ctx->mem_base + ctx->rsp + 8);
-  int32_t ret = fiber_initialize(ctx, ctx->rdi, ctx->rsi, ctx->rdx, ctx->rcx, ctx->r8, ctx->r9, opt_addr);
+  const uint64_t *stack_args = (const uint64_t *)(ctx->mem_base + ctx->rsp + 8);
+  int32_t ret = fiber_initialize(ctx, ctx->rdi, ctx->rsi, ctx->rdx, ctx->rcx, ctx->r8, ctx->r9, stack_args[0], 0,
+                                 (uint32_t)stack_args[1]);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
 }
 
+// _sceFiberInitializeWithInternalOptionImpl(fiber, name, entry, argOnInitialize, addrContext,
+//                                           sizeContext, optParam, flags, buildVersion)
 void shim_sceFiberInitializeWithInternalOptionImpl(GuestContext *ctx) {
-  shim_sceFiberInitializeImpl(ctx);
+  const uint64_t *stack_args = (const uint64_t *)(ctx->mem_base + ctx->rsp + 8);
+  int32_t ret = fiber_initialize(ctx, ctx->rdi, ctx->rsi, ctx->rdx, ctx->rcx, ctx->r8, ctx->r9, stack_args[0],
+                                 (uint32_t)stack_args[1], (uint32_t)stack_args[2]);
+  ctx->rax = (uint64_t)(int64_t)ret;
+  SHIM_RETURN();
 }
 
 void shim_sceFiberFinalize(GuestContext *ctx) {
@@ -703,36 +775,64 @@ void shim_sceFiberFinalize(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-static int32_t fiber_attach_context(OrbisFiberObject *f, uint64_t addr_context, uint64_t size_context) {
-  if (f->addr_context) return (int32_t)ORBIS_FIBER_ERROR_STATE;
-  if (!addr_context) return (int32_t)ORBIS_FIBER_ERROR_NULL;
-  if ((addr_context & 0xF) || (size_context & 0xF)) return (int32_t)ORBIS_FIBER_ERROR_ALIGNMENT;
-  if (size_context < ORBIS_FIBER_CONTEXT_MINIMUM_SIZE) return (int32_t)ORBIS_FIBER_ERROR_RANGE;
-  f->addr_context = addr_context;
-  f->size_context = size_context;
-  return 0;
-}
-
-// Claim fiber `addr` for running: validates it and moves it IDLE -> RUNNING.
-static int32_t fiber_claim(GuestContext *ctx, uint64_t addr, OrbisFiberObject **out) {
+// First checks of Run and Switch (and their AttachContextAnd variants), in shadPS4's order:
+// NULL, ALIGNMENT, INVALID. The caller then checks PERMISSION, the context to attach and STATE.
+static int32_t fiber_check(GuestContext *ctx, uint64_t addr, uint64_t addr_context, OrbisFiberObject **out) {
   if (!addr) return (int32_t)ORBIS_FIBER_ERROR_NULL;
-  if (addr & 7) return (int32_t)ORBIS_FIBER_ERROR_ALIGNMENT;
+  if ((addr & 7) || (addr_context & 0xF)) return (int32_t)ORBIS_FIBER_ERROR_ALIGNMENT;
   OrbisFiberObject *f = fiber_obj(ctx, addr);
   if (!fiber_valid(f)) return (int32_t)ORBIS_FIBER_ERROR_INVALID;
-  if (!fiber_take_idle(f, FIBER_STATE_RUNNING)) return (int32_t)ORBIS_FIBER_ERROR_STATE;
   *out = f;
   return 0;
 }
 
+// shadPS4 _sceFiberAttachContext checks. A context is attached when the caller passes one; the
+// fiber is attached only after it was claimed (fiber_attach_context), so a fiber that runs
+// elsewhere never sees its context change.
+static int32_t fiber_check_attach(const OrbisFiberObject *f, uint64_t addr_context, uint64_t size_context) {
+  if (size_context && size_context < ORBIS_FIBER_CONTEXT_MINIMUM_SIZE) return (int32_t)ORBIS_FIBER_ERROR_RANGE;
+  if (size_context & 0xF) return (int32_t)ORBIS_FIBER_ERROR_INVALID;
+  if (!addr_context || !size_context) return (int32_t)ORBIS_FIBER_ERROR_INVALID;
+  if (f->addr_context) return (int32_t)ORBIS_FIBER_ERROR_INVALID;
+  return 0;
+}
+
+static void fiber_attach_context(GuestContext *ctx, OrbisFiberObject *f, uint64_t addr_context,
+                                 uint64_t size_context) {
+  f->addr_context = addr_context;
+  f->size_context = size_context;
+  fiber_prepare_context(ctx, f);
+}
+
+// Validates the context to attach (when one is passed) and moves f IDLE -> RUNNING.
+static int32_t fiber_claim(GuestContext *ctx, OrbisFiberObject *f, uint64_t addr_context, uint64_t size_context) {
+  const bool attach = addr_context || size_context;
+  if (attach) {
+    int32_t ret = fiber_check_attach(f, addr_context, size_context);
+    if (ret != 0) return ret;
+  }
+  if (!fiber_take_idle(f, FIBER_STATE_RUNNING)) return (int32_t)ORBIS_FIBER_ERROR_STATE;
+  if (attach) {
+    if (f->addr_context) {
+      // Another thread attached a context between the check and the claim.
+      atomic_store(&f->state, FIBER_STATE_IDLE);
+      return (int32_t)ORBIS_FIBER_ERROR_INVALID;
+    }
+    fiber_attach_context(ctx, f, addr_context, size_context);
+  }
+  return 0;
+}
+
 static int32_t fiber_run(GuestContext *ctx, uint64_t addr, uint64_t addr_context, uint64_t size_context,
-                         bool attach, uint64_t arg_on_run_to, uint64_t arg_on_return_addr) {
-  if (tl_fiber_self) return (int32_t)ORBIS_FIBER_ERROR_PERMISSION;
+                         uint64_t arg_on_run_to, uint64_t arg_on_return_addr) {
   OrbisFiberObject *f = NULL;
-  int32_t ret = fiber_claim(ctx, addr, &f);
+  int32_t ret = fiber_check(ctx, addr, addr_context, &f);
   if (ret != 0) return ret;
-  if (attach) ret = fiber_attach_context(f, addr_context, size_context);
-  FiberWorker *w = ret == 0 ? get_worker(ctx) : NULL;
-  if (ret == 0 && !w) ret = (int32_t)ORBIS_FIBER_ERROR_INVALID;
+  if (tl_fiber_self) return (int32_t)ORBIS_FIBER_ERROR_PERMISSION;
+  ret = fiber_claim(ctx, f, addr_context, size_context);
+  if (ret != 0) return ret;
+  FiberWorker *w = get_worker(ctx);
+  if (!w) ret = (int32_t)ORBIS_FIBER_ERROR_INVALID;
   FiberHost *h = (FiberHost *)(uintptr_t)f->host;
   if (ret == 0 && !g_fiber_threads && !co_alloc_stack(h)) ret = (int32_t)ORBIS_FIBER_ERROR_INVALID;
   if (ret != 0) {
@@ -742,7 +842,7 @@ static int32_t fiber_run(GuestContext *ctx, uint64_t addr, uint64_t addr_context
 
   w->return_arg = 0;
   if (g_fiber_threads) {
-    int err = fiber_resume(h, w, arg_on_run_to, FSTAT_RUN);
+    int err = fiber_resume(h, w, w->ctx, arg_on_run_to, FSTAT_RUN);
     if (err != 0) {
       atomic_store(&f->state, FIBER_STATE_IDLE);
       return (int32_t)ORBIS_FIBER_ERROR_INVALID;
@@ -750,7 +850,7 @@ static int32_t fiber_run(GuestContext *ctx, uint64_t addr, uint64_t addr_context
     baton_wait(&w->baton);
   } else {
     fstat_count(FSTAT_RUN);
-    co_enter(h, w, arg_on_run_to, NULL);
+    co_enter(h, w, w->ctx, arg_on_run_to, NULL);
     ps4_fiber_ctx_switch(&w->sp, h->sp);
     // Back from sceFiberReturnToThread; always on this host thread, since
     // only this thread's fibers return to its stack.
@@ -761,28 +861,29 @@ static int32_t fiber_run(GuestContext *ctx, uint64_t addr, uint64_t addr_context
 }
 
 static int32_t fiber_switch(GuestContext *ctx, uint64_t addr, uint64_t addr_context, uint64_t size_context,
-                            bool attach, uint64_t arg_on_run_to, uint64_t arg_on_run_addr) {
+                            uint64_t arg_on_run_to, uint64_t arg_on_run_addr) {
   FiberHost *self = tl_fiber_self;
-  if (!self) return (int32_t)ORBIS_FIBER_ERROR_PERMISSION;
   OrbisFiberObject *f = NULL;
-  int32_t ret = fiber_claim(ctx, addr, &f);
+  int32_t ret = fiber_check(ctx, addr, addr_context, &f);
   if (ret != 0) return ret;
-  if (attach) ret = fiber_attach_context(f, addr_context, size_context);
+  if (!self) return (int32_t)ORBIS_FIBER_ERROR_PERMISSION;
+  ret = fiber_claim(ctx, f, addr_context, size_context);
+  if (ret != 0) return ret;
   FiberHost *h = (FiberHost *)(uintptr_t)f->host;
-  if (ret == 0 && !g_fiber_threads && !co_alloc_stack(h)) ret = (int32_t)ORBIS_FIBER_ERROR_INVALID;
-  if (ret != 0) {
+  if (!g_fiber_threads && !co_alloc_stack(h)) {
     atomic_store(&f->state, FIBER_STATE_IDLE);
-    return ret;
+    return (int32_t)ORBIS_FIBER_ERROR_INVALID;
   }
 
   FiberWorker *w = self->worker;
   OrbisFiberObject *self_obj = fiber_obj(ctx, self->guest_addr);
+  fiber_check_stack_overflow(ctx, self_obj);
   fiber_release_thread(self->fctx, w->ctx);
   if (!g_fiber_threads) {
     fstat_count(FSTAT_SWITCH);
     const bool restarts = fiber_restarts(ctx, self);
     atomic_store(&self_obj->state, FIBER_STATE_SUSPENDING);
-    co_enter(h, w, arg_on_run_to, &self_obj->state);
+    co_enter(h, w, self->fctx, arg_on_run_to, &self_obj->state);
     void *discard_sp;
     if (restarts) co_reset_frame(self);
     ps4_fiber_ctx_switch(restarts ? &discard_sp : &self->sp, h->sp);
@@ -801,7 +902,7 @@ static int32_t fiber_switch(GuestContext *ctx, uint64_t addr, uint64_t addr_cont
   // A restarting fiber ends this host thread; whoever claims it next starts a new one.
   if (restarts) atomic_store(&self->host_started, false);
   atomic_store(&self_obj->state, FIBER_STATE_IDLE);
-  int err = fiber_resume(h, w, arg_on_run_to, FSTAT_SWITCH);
+  int err = fiber_resume(h, w, self->fctx, arg_on_run_to, FSTAT_SWITCH);
   if (err != 0) {
     uint32_t idle = FIBER_STATE_IDLE;
     // Unless another thread has claimed us meanwhile (then we may be finalized), we run on.
@@ -845,7 +946,7 @@ static void fiber_log_failure(GuestContext *ctx, const char *op, uint64_t addr, 
 
 // sceFiberRun(fiber, argOnRunTo, argOnReturn*)
 void shim_sceFiberRun(GuestContext *ctx) {
-  int32_t ret = fiber_run(ctx, ctx->rdi, 0, 0, false, ctx->rsi, ctx->rdx);
+  int32_t ret = fiber_run(ctx, ctx->rdi, 0, 0, ctx->rsi, ctx->rdx);
   fiber_log_failure(ctx, "sceFiberRun", ctx->rdi, ret);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
@@ -853,7 +954,7 @@ void shim_sceFiberRun(GuestContext *ctx) {
 
 // sceFiberSwitch(fiber, argOnRunTo, argOnRun*)
 void shim_sceFiberSwitch(GuestContext *ctx) {
-  int32_t ret = fiber_switch(ctx, ctx->rdi, 0, 0, false, ctx->rsi, ctx->rdx);
+  int32_t ret = fiber_switch(ctx, ctx->rdi, 0, 0, ctx->rsi, ctx->rdx);
   fiber_log_failure(ctx, "sceFiberSwitch", ctx->rdi, ret);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
@@ -861,7 +962,7 @@ void shim_sceFiberSwitch(GuestContext *ctx) {
 
 // _sceFiberAttachContextAndRun(fiber, addrContext, sizeContext, argOnRunTo, argOnReturn*)
 void shim_sceFiberAttachContextAndRun(GuestContext *ctx) {
-  int32_t ret = fiber_run(ctx, ctx->rdi, ctx->rsi, ctx->rdx, true, ctx->rcx, ctx->r8);
+  int32_t ret = fiber_run(ctx, ctx->rdi, ctx->rsi, ctx->rdx, ctx->rcx, ctx->r8);
   fiber_log_failure(ctx, "sceFiberAttachContextAndRun", ctx->rdi, ret);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
@@ -869,7 +970,7 @@ void shim_sceFiberAttachContextAndRun(GuestContext *ctx) {
 
 // _sceFiberAttachContextAndSwitch(fiber, addrContext, sizeContext, argOnRunTo, argOnRun*)
 void shim_sceFiberAttachContextAndSwitch(GuestContext *ctx) {
-  int32_t ret = fiber_switch(ctx, ctx->rdi, ctx->rsi, ctx->rdx, true, ctx->rcx, ctx->r8);
+  int32_t ret = fiber_switch(ctx, ctx->rdi, ctx->rsi, ctx->rdx, ctx->rcx, ctx->r8);
   fiber_log_failure(ctx, "sceFiberAttachContextAndSwitch", ctx->rdi, ret);
   ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
@@ -885,6 +986,7 @@ void shim_sceFiberReturnToThread(GuestContext *ctx) {
   uint64_t arg_on_run_addr = ctx->rsi;
   FiberWorker *w = self->worker;
   OrbisFiberObject *self_obj = fiber_obj(ctx, self->guest_addr);
+  fiber_check_stack_overflow(ctx, self_obj);
   fiber_release_thread(self->fctx, w->ctx);
   w->return_arg = ctx->rdi;
   w->current = NULL;
@@ -958,7 +1060,7 @@ void shim_sceFiberGetInfo(GuestContext *ctx) {
   } else {
     OrbisFiberObject *f = fiber_obj(ctx, addr);
     OrbisFiberInfo *info = (OrbisFiberInfo *)(ctx->mem_base + info_addr);
-    if (!fiber_valid(f) || info->size != sizeof(OrbisFiberInfo)) {
+    if (info->size != sizeof(OrbisFiberInfo) || !fiber_valid(f)) {
       ret = (int32_t)ORBIS_FIBER_ERROR_INVALID;
     } else {
       info->entry = f->entry;
@@ -966,8 +1068,21 @@ void shim_sceFiberGetInfo(GuestContext *ctx) {
       info->addr_context = f->addr_context;
       info->size_context = f->size_context;
       memcpy(info->name, f->name, sizeof(info->name));
-      // Context usage tracking is not enabled, so no margin is measured.
       info->size_context_margin = (uint64_t)-1;
+      if ((f->flags & FIBER_FLAG_CONTEXT_SIZE_CHECK) && f->addr_context) {
+        // The margin is the size of the pattern still intact above the signature word, which
+        // the stack, growing down from the end of the context, never reached. shadPS4 scans
+        // the same words but its loop never stops at the first overwritten one.
+        const uint64_t *words = (const uint64_t *)(ctx->mem_base + f->addr_context);
+        const uint64_t n = f->size_context / sizeof(uint64_t);
+        uint64_t margin = 0;
+        if (words[0] == FIBER_STACK_SIGNATURE) {
+          uint64_t i = 1;
+          while (i < n && words[i] == FIBER_STACK_SIZE_CHECK) i++;
+          margin = (i - 1) * sizeof(uint64_t);
+        }
+        info->size_context_margin = margin;
+      }
     }
   }
   ctx->rax = (uint64_t)(int64_t)ret;
@@ -996,14 +1111,23 @@ void shim_sceFiberRename(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-// Context size checking fills fiber stacks with a pattern to measure peak
-// usage. It only feeds sceFiberGetInfo's margin, which reports "unknown".
+// sceFiberStartContextSizeCheck(flags): fibers initialized or given a context from now on fill
+// their context with a pattern so sceFiberGetInfo can measure the part never used.
 void shim_sceFiberStartContextSizeCheck(GuestContext *ctx) {
-  ctx->rax = 0;
+  int32_t ret = 0;
+  if ((uint32_t)ctx->rdi != 0) {
+    ret = (int32_t)ORBIS_FIBER_ERROR_INVALID;
+  } else {
+    uint32_t expected = 0;
+    if (!atomic_compare_exchange_strong(&g_context_size_check, &expected, 1u)) ret = (int32_t)ORBIS_FIBER_ERROR_STATE;
+  }
+  ctx->rax = (uint64_t)(int64_t)ret;
   SHIM_RETURN();
 }
 
 void shim_sceFiberStopContextSizeCheck(GuestContext *ctx) {
-  ctx->rax = 0;
+  uint32_t expected = 1;
+  const bool stopped = atomic_compare_exchange_strong(&g_context_size_check, &expected, 0u);
+  ctx->rax = stopped ? 0 : (uint64_t)(int64_t)(int32_t)ORBIS_FIBER_ERROR_STATE;
   SHIM_RETURN();
 }

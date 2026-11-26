@@ -66,7 +66,8 @@ void zlib_task_thread(void) {
         {
             std::unique_lock<std::mutex> lock(g_mutex);
             g_task_cv.wait(lock, [] { return g_stop || !g_tasks.empty(); });
-            if (g_stop && g_tasks.empty()) {
+            // Finalize abandons the requests still queued, as shadPS4's stop token does.
+            if (g_stop) {
                 break;
             }
             task = g_tasks.front();
@@ -121,14 +122,13 @@ int32_t sceZlibInflate(const void *src, uint32_t src_len, void *dst, uint32_t ds
     constexpr uint32_t kMaxDstLen = 64u << 10;
     constexpr uint32_t kDstAlign = 2u << 10;
 
-    if (!src || !src_len || !dst || !dst_len || !request_id ||
-        dst_len > kMaxDstLen || (dst_len % kDstAlign) != 0) {
-        return ORBIS_ZLIB_ERROR_INVALID;
-    }
-
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_initialized) {
         return ORBIS_ZLIB_ERROR_NOT_INITIALIZED;
+    }
+    if (!src || !src_len || !dst || !dst_len || !request_id ||
+        dst_len > kMaxDstLen || (dst_len % kDstAlign) != 0) {
+        return ORBIS_ZLIB_ERROR_INVALID;
     }
 
     const uint64_t req_id = g_next_request_id++;
@@ -145,13 +145,12 @@ int32_t sceZlibInflate(const void *src, uint32_t src_len, void *dst, uint32_t ds
 }
 
 int32_t sceZlibWaitForDone(uint64_t *request_id, const uint32_t *timeout) {
-    if (!request_id) {
-        return ORBIS_ZLIB_ERROR_INVALID;
-    }
-
     std::unique_lock<std::mutex> lock(g_mutex);
     if (!g_initialized) {
         return ORBIS_ZLIB_ERROR_NOT_INITIALIZED;
+    }
+    if (!request_id) {
+        return ORBIS_ZLIB_ERROR_INVALID;
     }
 
     const auto pred = [] { return g_stop || !g_done.empty(); };
@@ -163,6 +162,7 @@ int32_t sceZlibWaitForDone(uint64_t *request_id, const uint32_t *timeout) {
         g_done_cv.wait(lock, pred);
     }
 
+    // Woken by Finalize.
     if (g_done.empty()) {
         return ORBIS_ZLIB_ERROR_NOT_INITIALIZED;
     }
@@ -173,13 +173,12 @@ int32_t sceZlibWaitForDone(uint64_t *request_id, const uint32_t *timeout) {
 }
 
 int32_t sceZlibGetResult(uint64_t request_id, uint32_t *dst_length, int32_t *status) {
-    if (!dst_length || !status) {
-        return ORBIS_ZLIB_ERROR_INVALID;
-    }
-
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_initialized) {
         return ORBIS_ZLIB_ERROR_NOT_INITIALIZED;
+    }
+    if (!dst_length || !status) {
+        return ORBIS_ZLIB_ERROR_INVALID;
     }
 
     auto it = g_results.find(request_id);
