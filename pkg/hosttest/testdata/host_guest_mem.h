@@ -32,6 +32,14 @@ static inline void *host_ptr(uint64_t addr) {
     return addr ? (void *)(GUEST_MEM + addr) : NULL;
 }
 
-#define A(p) guest_addr((uintptr_t)(p))
+// The guest address of p, with p escaped first. Converting a pointer to an integer exposes only
+// its address, not the object behind it: without the escape a compiler may assume a shim that
+// rebuilds the pointer from mem_base + address cannot read or write the object, and drop or
+// reorder the test's stores and loads around the call (newer LLVM does).
+#define A(p)                                         \
+    __extension__({                                  \
+        __asm__ volatile("" : : "r"(p) : "memory"); \
+        guest_addr((uintptr_t)(p));                  \
+    })
 
 #endif

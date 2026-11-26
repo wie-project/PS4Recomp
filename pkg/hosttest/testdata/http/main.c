@@ -810,8 +810,13 @@ static int test_parse(void) {
   g.rcx = A(&minor);
   g.r8 = A(&code);
   g.r9 = A(&reason);
-  *(uint64_t *)host_ptr(g.rsp + 8) = A(&phrase_len);
+  // The stack slot rsp + 8, written through g_stack itself.
+  uint64_t *stack_arg = (uint64_t *)(g_stack + sizeof(g_stack) / 2 + 8);
+  CHECK(A(stack_arg) == g.rsp + 8);
+  *stack_arg = A(&phrase_len);
   shim_sceHttpParseStatusLine(&g);
+  CHECK((int32_t)g.rax == 24);
+  CHECK(major == 1 && minor == 1 && code == 404);
   CHECK(reason == A(line + 12) &&
         phrase_len == 10); // " Not Found", from after the code
   const char *phrase = NULL;

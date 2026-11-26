@@ -5,7 +5,7 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 |                                                                   |                                                                          |
 | :---------------------------------------------------------------: | :----------------------------------------------------------------------: |
 |               ![Blood 1](images/blood_test_01.jpg)                |                   ![Blood 2](images/blood_test_02.jpg)                   |
-|              ![Last Of Us Remastered](images/last_test_01.jpg)               |                  ![Yakuza 2](images/yakuza_test_02.jpg)                  |
+|         ![Last Of Us Remastered](images/last_test_01.jpg)         |                  ![Yakuza 2](images/yakuza_test_02.jpg)                  |
 | ![Drake’s Fortune — seaplane cabin](images/uncharted_test_01.jpg) | ![Drake’s Fortune — island shore and boat](images/uncharted_test_02.jpg) |
 
 ---
@@ -24,17 +24,18 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 
 > PS4Recomp operates **exclusively on decrypted and extracted game folders** (`eboot.bin` and assets). For dumping/extracting PKG files on macOS using **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)**
 
-| Title                                      | Title ID    | Engine / Type       | Status                 | Notes                                                                                                                                 |
-| ------------------------------------------ | ----------- | ------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| **Yakuza 0**                               | `CUSA05070` | Kiwami Engine       | **Playble**            | Starts, settings works, cutscenes and gameplay works in first mission                                                                 |
-| **Driveclub**                              | `CUSA00093` | Evolution Engine    | **Playble**            | Cutscenes and gameplay works                                                                                                          |
-| **Gravity Rush Remastered**                | `CUSA01113` | SIE Japan Studio    | **Playable**           | Boots, menus, cutscenes, gravity shift via DualSense gyro                                                                             |
-| **Uncharted: The Nathan Drake Collection** | `CUSA02343` | Naughty Dog Engine  | **Playable**           | Tested in _Drake’s Fortune_ only: intro, cutscenes, gunplay, HUD and 2D overlays at 1080p; the other collection entries are untested. |
-| **Catherine: Full Body**                   | `CUSA14836` | Atlus Engine        | **Bootable**           | Starts. Has a graphic artifacts                                                                                                       |
-| **Bloodborne: Game of the Year Edition**   | `CUSA03173` | FromSoftware Engine | **In-Game**            | Starts, settings, cutscenes and character editor works. The gameplay starts                                                           |
-| **The Last of Us Remastered**              | `CUSA00557` | Naughty Dog Engine  | **Bootable / In-Game** | Boots, renders 3D graphics and audio                                                                                                  |
-| **Hollow Knight: Silksong**                | —           | Unity 6             | **Suspended**          | Paused pending guest C++ exception unwinding in ARM64 backend                                                                         |
-| **Hogwarts Legacy**                        | `CUSA12824` | Unreal Engine 4     | **In Progress**        | Recompiles; halts during early engine startup                                                                                         |
+| Title                                      | Title ID    | Engine / Type       | Status          | Notes                                                                                                                                 |
+| ------------------------------------------ | ----------- | ------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| **Yakuza 0**                               | `CUSA05070` | Kiwami Engine       | **Playable**    | Starts, settings works, cutscenes and gameplay works in first mission                                                                 |
+| **Driveclub**                              | `CUSA00093` | Evolution Engine    | **Playable**    | Cutscenes and gameplay works                                                                                                          |
+| **Gravity Rush Remastered**                | `CUSA01113` | SIE Japan Studio    | **Playable**    | Boots, menus, cutscenes, gravity shift via DualSense gyro                                                                             |
+| **Uncharted: The Nathan Drake Collection** | `CUSA02343` | Naughty Dog Engine  | **Playable**    | Tested in _Drake’s Fortune_ only: intro, cutscenes, gunplay, HUD and 2D overlays at 1080p; the other collection entries are untested. |
+| **The Last of Us Remastered**              | `CUSA00557` | Naughty Dog Engine  | **In-Game**     | Boots, renders 3D graphics and audio                                                                                                  |
+| **The Last Guardian**                      | `CUSA03627` | Ico Japan Studio    | **In-Game**     | Boots, renders 3D graphics and audio                                                                                                  |
+| **Catherine: Full Body**                   | `CUSA14836` | Atlus Engine        | **In-Game**     | Starts. Has a graphic artifacts                                                                                                       |
+| **Bloodborne: Game of the Year Edition**   | `CUSA03173` | FromSoftware Engine | **In-Game**     | Starts, settings, cutscenes and character editor works. The gameplay starts. Has a graphic artifacts                                  |     |
+| **Hollow Knight: Silksong**                | —           | Unity 6             | **Suspended**   | Paused pending guest C++ exception unwinding in ARM64 backend                                                                         |
+| **Hogwarts Legacy**                        | `CUSA12824` | Unreal Engine 4     | **In Progress** | Recompiles; halts during early engine startup                                                                                         |
 
 ---
 
