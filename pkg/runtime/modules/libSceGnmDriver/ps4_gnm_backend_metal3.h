@@ -23,7 +23,7 @@ public:
     Metal3Backend();
     ~Metal3Backend() override;
     GnmBackendKind Kind() const override { return GnmBackendKind::Metal3; }
-    uint32_t Caps() const override { return kGnmCapAll | kGnmCapAsyncCompute; }
+    uint32_t Caps() const override { return kGnmCapAll | kGnmCapAsyncCompute | kGnmCapPatchDraws; }
     bool Init(id<MTLDevice> dev, std::string* why) override;
     id<MTLDevice> Device() const override { return dev_; }
     id<MTLCommandQueue> SideQueue() const override { return queue_; }

@@ -263,3 +263,15 @@ Any future changes, opcode implementations, or pass modifications in `3rdparty/g
   - At renderer start `SamplerAppliesLodBias` draws one pixel with a sampler whose `lodBias` is 1 and checks that level 1 is read. When it is not (or before macOS 26), the renderer sets `gcn_profile::needs_sampler_lod_bias` and clears the bias of the sampler states it creates, so the bias is applied once.
   - With the flag, `PatchImageSampleArgs` adds the S# bias the way Vulkan adds `mipLodBias`: an implicit-LOD sample gets it as (or added to) its bias operand, an explicit LOD (`_L`, `_LZ`) is offset by it, and the derivatives of a `_D` sample are scaled by `2^bias`, which moves their LOD by the bias. Gathers read one level and are unchanged.
   - `SamplerSpecialization::lod_bias` holds the raw S# field when the flag is set (0 otherwise), so draws with another bias get their own permutation only on those hosts; `SpecHash` and the shader cache format (version 13) include it. The flag is part of `gcn_profile`, which the runtime shader cache key already hashes.
+
+### 6.6 TessEval Pull Variant for Compute Tessellation
+- **Files**:
+  - `3rdparty/gcn-recompiler/src/api/gcn_msl.cpp` (`MakeTessEvalPull`, `gcn_compile_tess_shaders_msl`, `gcn_free_tess_shaders_msl`)
+  - `3rdparty/gcn-recompiler/include/gcn_recompiler.h` (`gcn_tess_shader_set.vs_pull_msl`, `GCN_TESS_DOMAIN_BUFFER_SLOT`)
+  - `3rdparty/gcn-recompiler/tests/tess_gs_smoke.mm` (`CheckTessEvalPull`)
+  - `pkg/runtime/modules/libSceGnmDriver/ps4_gnm_tessellator.{h,mm}`, `ps4_gnm_draw.mm` (`GetTessPipelines`, `EncodeTessDraw`, `FlushPendingTess`)
+- **Rationale**: Metal 4 has no hardware tessellation (`MTL4RenderCommandEncoder` has no `drawPatches`, `MTL4RenderPipelineDescriptor` no tessellation state). On that backend the renderer tessellates with compute kernels, a port of Microsoft's D3D11 tessellator reference (MIT licence, notice in `ps4_gnm_tessellator.mm`), and draws the resulting triangles with an ordinary indexed draw. The TessEval stage then cannot be a `[[patch(...)]]` post-tessellation vertex function.
+- **Implementation**:
+  - `MakeTessEvalPull` derives a plain vertex function from the TessEval MSL: the `[[ patch(...) ]]` attribute is dropped, and the `[[position_in_patch]]` (`float3` triangles, `float2` quads) and `[[patch_id]]` entry point arguments become locals read from `const device float4* spvTessDomain [[buffer(GCN_TESS_DOMAIN_BUFFER_SLOT)]]` at `[[vertex_id]]`: `(u, v, w, as_type<float>(patch))`.
+  - `gcn_compile_tess_shaders_msl` returns it as `vs_pull_msl` next to `vs_msl`; the renderer compiles `vs_msl` with hardware tessellation (Metal 3) and `vs_pull_msl` without it (Metal 4).
+  - `tests/gnm_metal_test/tessellator.mm` (`go test ./pkg/runtime -run TestMetalComputeTessellator`) draws the same patches with Metal 3's `drawPatches` and with the compute tessellator, directly and through `Metal4Backend`, and requires identical images and vertex counts.

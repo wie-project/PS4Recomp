@@ -808,6 +808,16 @@ void Metal4Backend::AfterDispatch(TargetState& x) {
     if (x.serial || full_barriers_) EncoderBarrier(x);
 }
 
+void Metal4Backend::SetTessellationFactorBuffer(id<MTLBuffer>, uint64_t, uint64_t) {
+    fprintf(stderr, "[gnm-draw] FATAL: Metal4Backend::SetTessellationFactorBuffer: Metal 4 has no hardware tessellation\n");
+    abort();
+}
+
+void Metal4Backend::DrawPatches(uint32_t, uint32_t, uint32_t, id<MTLBuffer>, uint64_t, uint32_t, uint32_t) {
+    fprintf(stderr, "[gnm-draw] FATAL: Metal4Backend::DrawPatches: Metal 4 has no hardware tessellation\n");
+    abort();
+}
+
 void Metal4Backend::Dispatch(MTLSize groups, MTLSize tpt) {
     BeforeCommand();
     TargetState& x = Cur();

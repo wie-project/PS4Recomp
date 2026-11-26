@@ -191,6 +191,19 @@ bool CheckTessVertexKernel(const char* label, const gcn_shader* sh, const char* 
     return true;
 }
 
+// The pull variant of the TessEval (for a compute tessellator): a plain vertex function reading its
+// domain point at [[vertex_id]].
+bool CheckTessEvalPull(const char* label, const char* msl) {
+    const std::string domain = "spvTessDomain [[buffer(" + std::to_string(GCN_TESS_DOMAIN_BUFFER_SLOT) + ")]]";
+    if (!msl || std::strstr(msl, "[[ patch(") || std::strstr(msl, "[[position_in_patch]]") ||
+        std::strstr(msl, "[[patch_id]]") || !std::strstr(msl, domain.c_str()) ||
+        !std::strstr(msl, "[[vertex_id]]") || !std::strstr(msl, "gl_TessCoord = spvTessPoint.xyz")) {
+        std::fprintf(stderr, "[FAIL] %s: expected a plain vertex function reading the domain point buffer\n", label);
+        return false;
+    }
+    return true;
+}
+
 bool ValidateMsl(id<MTLDevice> dev, const char* label, const char* src,
                  const char* fn_name = "main0") {
     if (!src || src[0] == '\0') {
@@ -530,6 +543,8 @@ bool TestTessShadersAndStride(id<MTLDevice> dev) {
             ValidateMsl(dev, mode ? "tess_ls_u32_argbuf" : "tess_ls_u32_direct", set.ls_u32_msl) &&
             ValidateMsl(dev, mode ? "tess_hs_argbuf" : "tess_hs_direct", set.hs_msl) &&
             ValidateMsl(dev, mode ? "tess_vs_argbuf" : "tess_vs_direct", set.vs_msl) &&
+            ValidateMsl(dev, mode ? "tess_vs_pull_argbuf" : "tess_vs_pull_direct", set.vs_pull_msl) &&
+            CheckTessEvalPull(mode ? "tess_vs_pull_argbuf" : "tess_vs_pull_direct", set.vs_pull_msl) &&
             CheckTessVertexKernel("tess_ls", ls_sh, set.ls_msl) &&
             CheckTessVertexKernel("tess_ls_u16", ls_sh, set.ls_u16_msl) &&
             CheckTessVertexKernel("tess_ls_u32", ls_sh, set.ls_u32_msl);

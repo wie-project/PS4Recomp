@@ -49,6 +49,9 @@ enum GnmCaps : uint32_t {
     // a second command queue for compute-ring work (GnmCmdTarget::AsyncCompute, CommitAsync); not in
     // kGnmCapAll, which is what a backend needs to be chosen
     kGnmCapAsyncCompute = 1u << 4,
+    // hardware tessellation: SetTessellationFactorBuffer, DrawPatches (Metal 4 has none: the
+    // renderer then tessellates with compute, ps4_gnm_tessellator.h)
+    kGnmCapPatchDraws = 1u << 5,
 };
 
 // A Metal 3 queue holds at most this many uncompleted command buffers; the Metal 4 backend applies
@@ -311,6 +314,7 @@ public:
 
     // ---- work
     virtual void Draw(const GnmDraw& d) = 0;
+    // kGnmCapPatchDraws only
     virtual void SetTessellationFactorBuffer(id<MTLBuffer> buf, uint64_t offset, uint64_t instance_stride) = 0;
     virtual void DrawPatches(uint32_t num_control_points, uint32_t patch_start, uint32_t patch_count,
                              id<MTLBuffer> patch_index_buffer, uint64_t patch_index_buffer_offset,

@@ -75,6 +75,7 @@
 #include "ps4_gnm_kernel_compile.h"
 #include "ps4_gnm_backend.h"
 #include "ps4_gnm_backend_metal3.h"
+#include "ps4_gnm_tessellator.h"
 #include "ps4_gnm_util_passes.h"
 #include "ps4_gnm_vertex_layout.h"
 #include "ps4_metal_screen.h"
@@ -7781,7 +7782,8 @@ struct TessShaderCacheEntry {
     id<MTLFunction> ls_u16_fn = nil;
     id<MTLFunction> ls_u32_fn = nil;
     id<MTLFunction> hs_fn = nil;
-    id<MTLFunction> ds_fn = nil;
+    id<MTLFunction> ds_fn = nil;      // post-tessellation vertex function (kGnmCapPatchDraws)
+    id<MTLFunction> ds_pull_fn = nil; // the same as a plain vertex function (compute tessellation)
     uint32_t ls_stride = 0;
     uint32_t hs_cp_stride = 0;
     uint32_t hs_patch_stride = 0;
@@ -7806,6 +7808,15 @@ struct TessPipelineState {
     uint32_t output_control_points = 0;
     uint32_t domain = 0;
     uint32_t hs_local_size[3] = {1, 1, 1};
+    // Compute tessellation (no kGnmCapPatchDraws): ds_ps_pso draws the tessellator's indices with
+    // the pull variant of the DS (ps4_gnm_tessellator.h).
+    bool compute_tess = false;
+    ps4gnm_tess::Params tess{};  // domain, partitioning, output; the rest is set per draw
+    MTLPrimitiveType tess_prim = MTLPrimitiveTypeTriangle;
+    // What this pipeline's draws needed at most (written by the GPU, read when sizing a draw) and
+    // the capacities sized from it: they only grow.
+    id<MTLBuffer> tess_feedback = nil;
+    mutable uint32_t tess_points = 0, tess_indices = 0;
 };
 
 static std::unordered_map<uint64_t, TessShaderCacheEntry>& s_tess_shaders =
@@ -7861,7 +7872,11 @@ const TessPipelineState* GetTessPipelines(Shader* ls, Shader* hs, Shader* vs, Sh
             entry.ls_u16_fn = CompileStageFn(tset.ls_u16_msl, false, "main0", "Tess LS u16", ls->code_addr);
             entry.ls_u32_fn = CompileStageFn(tset.ls_u32_msl, false, "main0", "Tess LS u32", ls->code_addr);
             entry.hs_fn = CompileStageFn(tset.hs_msl, false, "main0", "Tess HS", hs->code_addr);
-            entry.ds_fn = CompileStageFn(tset.vs_msl, true, "main0", "Tess DS", vs->code_addr);
+            if (BackendHas(kGnmCapPatchDraws))
+                entry.ds_fn = CompileStageFn(tset.vs_msl, true, "main0", "Tess DS", vs->code_addr);
+            else
+                entry.ds_pull_fn = CompileStageFn(tset.vs_pull_msl, true, "main0", "Tess DS (compute tessellation)",
+                                                  vs->code_addr);
             entry.ls_stride = tset.ls_stride;
             entry.hs_cp_stride = tset.cp_stride;
             entry.hs_patch_stride = tset.patch_stride;
@@ -7875,7 +7890,7 @@ const TessPipelineState* GetTessPipelines(Shader* ls, Shader* hs, Shader* vs, Sh
             entry.hs_local_size[0] = std::max(1u, tset.hs_local_size[0]);
             entry.hs_local_size[1] = std::max(1u, tset.hs_local_size[1]);
             entry.hs_local_size[2] = std::max(1u, tset.hs_local_size[2]);
-            entry.valid = entry.ls_fn != nil && entry.hs_fn != nil && entry.ds_fn != nil;
+            entry.valid = entry.ls_fn != nil && entry.hs_fn != nil && (entry.ds_fn != nil || entry.ds_pull_fn != nil);
         } else {
             RLog("tess-fail", "gcn_compile_tess_shaders_msl failed (LS=0x%llx HS=0x%llx DS=0x%llx): %s",
                  (unsigned long long)ls->code_addr, (unsigned long long)hs->code_addr,
@@ -7921,7 +7936,8 @@ const TessPipelineState* GetTessPipelines(Shader* ls, Shader* hs, Shader* vs, Sh
     }
 
     MTLRenderPipelineDescriptor* d = [MTLRenderPipelineDescriptor new];
-    d.vertexFunction = tsh.ds_fn;
+    const bool compute_tess = tsh.ds_fn == nil;
+    d.vertexFunction = compute_tess ? tsh.ds_pull_fn : tsh.ds_fn;
     d.fragmentFunction = (ps && !rs.raster.rasterizer_discard) ? PipelineFn(ps) : nil;
     for (int i = 0; i < 8; ++i) {
         if (!color_fmt[i]) continue;
@@ -7944,22 +7960,26 @@ const TessPipelineState* GetTessPipelines(Shader* ls, Shader* hs, Shader* vs, Sh
     d.rasterSampleCount = samples;
     d.alphaToCoverageEnabled = alpha_to_cov && !rs.raster.rasterizer_discard && ps != nullptr;
     d.rasterizationEnabled = !rs.raster.rasterizer_discard;
-    d.maxTessellationFactor = 64;
-    d.tessellationFactorScaleEnabled = NO;
-    d.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
-    d.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
-    d.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
-    d.tessellationOutputWindingOrder = tsh.winding_cw ? MTLWindingCounterClockwise : MTLWindingClockwise;
-    switch (tsh.spacing) {
-        case GCN_TESS_SPACING_FRACTIONAL_ODD:
-            d.tessellationPartitionMode = MTLTessellationPartitionModeFractionalOdd;
-            break;
-        case GCN_TESS_SPACING_FRACTIONAL_EVEN:
-            d.tessellationPartitionMode = MTLTessellationPartitionModeFractionalEven;
-            break;
-        default:
-            d.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
-            break;
+    if (compute_tess) {
+        if (tsh.point_mode) d.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint;
+    } else {
+        d.maxTessellationFactor = 64;
+        d.tessellationFactorScaleEnabled = NO;
+        d.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+        d.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+        d.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
+        d.tessellationOutputWindingOrder = tsh.winding_cw ? MTLWindingCounterClockwise : MTLWindingClockwise;
+        switch (tsh.spacing) {
+            case GCN_TESS_SPACING_FRACTIONAL_ODD:
+                d.tessellationPartitionMode = MTLTessellationPartitionModeFractionalOdd;
+                break;
+            case GCN_TESS_SPACING_FRACTIONAL_EVEN:
+                d.tessellationPartitionMode = MTLTessellationPartitionModeFractionalEven;
+                break;
+            default:
+                d.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
+                break;
+        }
     }
 
     err = nil;
@@ -7988,6 +8008,28 @@ const TessPipelineState* GetTessPipelines(Shader* ls, Shader* hs, Shader* vs, Sh
     out.hs_local_size[0] = tsh.hs_local_size[0];
     out.hs_local_size[1] = tsh.hs_local_size[1];
     out.hs_local_size[2] = tsh.hs_local_size[2];
+    if (compute_tess) {
+        out.compute_tess = true;
+        out.tess.domain = tsh.domain == GCN_TESS_DOMAIN_QUADS ? ps4gnm_tess::kQuad : ps4gnm_tess::kTriangle;
+        out.tess.partitioning = tsh.spacing == GCN_TESS_SPACING_FRACTIONAL_ODD    ? ps4gnm_tess::kFractionalOdd
+                                : tsh.spacing == GCN_TESS_SPACING_FRACTIONAL_EVEN ? ps4gnm_tess::kFractionalEven
+                                                                                  : ps4gnm_tess::kInteger;
+        // the same triangles as the hardware path's tessellationOutputWindingOrder above: Metal's
+        // MTLWindingCounterClockwise output is the reference tessellator's TRIANGLE_CW (and the reverse),
+        // which tests/gnm_metal_test/tessellator.mm checks
+        out.tess.output = tsh.point_mode   ? ps4gnm_tess::kPoints
+                          : tsh.winding_cw ? ps4gnm_tess::kTrianglesCw
+                                           : ps4gnm_tess::kTrianglesCcw;
+        out.tess_prim = tsh.point_mode ? MTLPrimitiveTypePoint : MTLPrimitiveTypeTriangle;
+        out.tess_feedback = [S.dev newBufferWithLength:sizeof(ps4gnm_tess::Feedback) options:MTLResourceStorageModeShared];
+        if (!out.tess_feedback) {
+            RLog("pso-fail", "Tess: no compute tessellation feedback buffer");
+            s_tess_pipelines.emplace(key, TessPipelineState{});
+            return nullptr;
+        }
+        memset(out.tess_feedback.contents, 0, sizeof(ps4gnm_tess::Feedback));
+        S.be->MakeResident(out.tess_feedback, GnmResidencyClass::Builtin);
+    }
     auto ins = s_tess_pipelines.emplace(key, out);
     return &ins.first->second;
 }
@@ -11181,7 +11223,54 @@ struct PendingTessDraw {
     uint64_t indirect_addr = 0;
     const char* name = "";
     bool hazards_resolved = false;
+    // compute tessellation (TessPipelineState::compute_tess): per instance, the tessellator's
+    // domain points and indices and the indexed indirect draw arguments (Result::draw)
+    struct TessOut {
+        id<MTLBuffer> points = nil, indices = nil, result = nil;
+        size_t points_off = 0, indices_off = 0, result_off = 0;
+        uint64_t indices_len = 0;
+    };
+    std::vector<TessOut> tess_out;
 };
+
+// The compute tessellator's kernels, made at the first compute tessellation (nullptr: they failed).
+const ps4gnm_tess::Kernels* TessKernels() {
+    static ps4gnm_tess::Kernels kernels;
+    static int state = 0; // 0: not tried, 1: made, -1: failed
+    if (state == 0) {
+        std::string why;
+        state = ps4gnm_tess::MakeKernels(S.dev, &kernels, &why) ? 1 : -1;
+        if (state < 0) RLog("tess-kernels", "compute tessellator kernels failed: %s", why.c_str());
+    }
+    return state > 0 ? &kernels : nullptr;
+}
+
+// The capacities (points, indices) of one compute tessellation of patch_count patches: what the
+// pipeline's draws needed so far (Feedback, written by earlier draws' GPU work), rounded up to a
+// power of two and never shrinking, at most the patches' worst case. A draw that needed more than
+// it had dropped patches (logged once per growth).
+void TessCapacities(const TessPipelineState& tp, uint32_t patch_count, uint32_t* points, uint32_t* indices) {
+    constexpr uint32_t kMinPoints = 1u << 16, kMinIndices = 1u << 18;
+    constexpr uint32_t kMaxPoints = 1u << 24, kMaxIndices = 1u << 26; // 256 MiB each
+    const auto* fb = static_cast<const ps4gnm_tess::Feedback*>(tp.tess_feedback.contents);
+    const uint32_t need_points = fb->max_points, need_indices = fb->max_indices;
+    auto grow = [](uint32_t have, uint32_t need, uint32_t lo, uint32_t hi) {
+        uint32_t v = std::max(have, lo);
+        while (v < need && v < hi) v <<= 1;
+        return std::min(v, hi);
+    };
+    const uint32_t old_points = tp.tess_points, old_indices = tp.tess_indices;
+    tp.tess_points = grow(old_points, need_points, kMinPoints, kMaxPoints);
+    tp.tess_indices = grow(old_indices, need_indices, kMinIndices, kMaxIndices);
+    if (old_points && (tp.tess_points != old_points || tp.tess_indices != old_indices))
+        RLog("tess-grow", "compute tessellation needed %u points / %u indices (had %u / %u): patches of earlier "
+             "draws were dropped; now %u / %u", need_points, need_indices, old_points, old_indices, tp.tess_points,
+             tp.tess_indices);
+    const uint64_t worst_points = (uint64_t)patch_count * ps4gnm_tess::kMaxPointsPerPatch;
+    const uint64_t worst_indices = (uint64_t)patch_count * ps4gnm_tess::kMaxIndicesPerPatch;
+    *points = (uint32_t)std::min<uint64_t>(tp.tess_points, worst_points);
+    *indices = (uint32_t)std::min<uint64_t>(tp.tess_indices, worst_indices);
+}
 
 static std::vector<PendingTessDraw>& g_pending_tess = *new std::vector<PendingTessDraw>;
 static bool g_flushing_tess = false;
@@ -11303,8 +11392,24 @@ void FlushPendingTess() {
             vb.Buffer(p.hs_cp_buf, hs_cp_inst_off, GCN_TESS_INPUT_BUFFER_SLOT);
             vb.Buffer(p.hs_patch_buf, hs_patch_inst_off, GCN_TESS_PATCH_BUFFER_SLOT);
             vb.Buffer(p.tf_buf, tf_inst_off, GCN_TESS_FACTOR_BUFFER_SLOT);
-            S.be->SetTessellationFactorBuffer(p.tf_buf, tf_inst_off, 0);
-            S.be->DrawPatches(p.out_cp, 0, p.patch_count, nil, 0, 1, p.instance_offset + inst_idx);
+            if (p.tpipe->compute_tess) {
+                // the tessellator's indices over its domain points (EncodeTessDraw)
+                const PendingTessDraw::TessOut& t = p.tess_out[inst_idx];
+                vb.Buffer(t.points, t.points_off, GCN_TESS_DOMAIN_BUFFER_SLOT);
+                GnmDraw d;
+                d.kind = GnmDrawKind::IndexedIndirect;
+                d.prim = p.tpipe->tess_prim;
+                d.index_type = MTLIndexTypeUInt32;
+                d.index_buffer = t.indices;
+                d.index_offset = t.indices_off;
+                d.index_length = t.indices_len;
+                d.indirect_buffer = t.result;
+                d.indirect_offset = t.result_off;
+                S.be->Draw(d);
+            } else {
+                S.be->SetTessellationFactorBuffer(p.tf_buf, tf_inst_off, 0);
+                S.be->DrawPatches(p.out_cp, 0, p.patch_count, nil, 0, 1, p.instance_offset + inst_idx);
+            }
         }
         S.pending = true;
         S.n_draws++;
@@ -11657,7 +11762,21 @@ void EncodeTessDraw(DrawRec& r) {
     BindCtx bc{&regs, 1};
     std::string why;
 
-    // ---- Step 1: Compute Pre-Pass (LS + HS)
+    // Compute tessellation (no hardware tessellation): the kernels and this draw's capacities
+    const ps4gnm_tess::Kernels* tess_kernels = nullptr;
+    uint32_t tess_points = 0, tess_indices = 0;
+    std::vector<PendingTessDraw::TessOut> tess_out;
+    if (tpipe->compute_tess && !g_only_clears) {
+        tess_kernels = TessKernels();
+        if (!tess_kernels) {
+            NoteSkip(SkipReason::PipelineFailed);
+            return;
+        }
+        TessCapacities(*tpipe, patch_count, &tess_points, &tess_indices);
+        tess_out.reserve(inst);
+    }
+
+    // ---- Step 1: Compute Pre-Pass (LS + HS, and with compute tessellation the tessellator)
     if (!g_only_clears) {
         std::optional<UploadTargetScope> hoist_scope;
         if (can_hoist) hoist_scope.emplace();
@@ -11753,6 +11872,49 @@ void EncodeTessDraw(DrawRec& r) {
                 std::max<uint32_t>(1u, std::min<uint32_t>(64u, (uint32_t)tpipe->hs_pso.maxTotalThreadsPerThreadgroup));
             S.be->DispatchThreads(MTLSizeMake((uint64_t)patch_count * out_cp, 1, 1), MTLSizeMake(hs_tg_x, 1, 1));
             FlushBufferStores();
+
+            if (tess_kernels) {
+                // the HS's factors -> count -> offsets and draw arguments -> points and indices
+                PendingTessDraw::TessOut t;
+                id<MTLBuffer> counts = nil, offsets = nil;
+                size_t counts_off = 0, offsets_off = 0;
+                const size_t per_patch = (size_t)patch_count * sizeof(uint32_t) * 2;
+                if (!S.arena.Alloc(S.dev, per_patch, 256, &counts, &counts_off, &unused_ptr) ||
+                    !S.arena.Alloc(S.dev, per_patch, 256, &offsets, &offsets_off, &unused_ptr) ||
+                    !S.arena.Alloc(S.dev, sizeof(ps4gnm_tess::Result), 256, &t.result, &t.result_off, &unused_ptr) ||
+                    !S.arena.Alloc(S.dev, (size_t)tess_points * 16, 256, &t.points, &t.points_off, &unused_ptr) ||
+                    !S.arena.Alloc(S.dev, (size_t)tess_indices * 4, 256, &t.indices, &t.indices_off, &unused_ptr)) {
+                    NoteSkip(SkipReason::Arena);
+                    return;
+                }
+                t.indices_len = (uint64_t)tess_indices * 4;
+                ps4gnm_tess::Params tp = tpipe->tess;
+                tp.patch_count = patch_count;
+                tp.point_capacity = tess_points;
+                tp.index_capacity = tess_indices;
+                tp.base_instance = instance_offset + inst_idx; // as the hardware path's DrawPatches
+                S.be->Barrier(kGnmStageDispatch, kGnmStageDispatch, kGnmScopeBuffers); // the HS's factors
+                S.be->BindBytes(GnmStage::Compute, ps4gnm_tess::kParamsSlot, &tp, sizeof(tp));
+                S.be->BindBuffer(GnmStage::Compute, ps4gnm_tess::kFactorsSlot, tf_buf, tf_inst_off);
+                S.be->BindBuffer(GnmStage::Compute, ps4gnm_tess::kCountsSlot, counts, counts_off);
+                S.be->BindBuffer(GnmStage::Compute, ps4gnm_tess::kOffsetsSlot, offsets, offsets_off);
+                S.be->BindBuffer(GnmStage::Compute, ps4gnm_tess::kResultSlot, t.result, t.result_off);
+                S.be->BindBuffer(GnmStage::Compute, ps4gnm_tess::kPointsSlot, t.points, t.points_off);
+                S.be->BindBuffer(GnmStage::Compute, ps4gnm_tess::kIndicesSlot, t.indices, t.indices_off);
+                S.be->BindBuffer(GnmStage::Compute, ps4gnm_tess::kFeedbackSlot, tpipe->tess_feedback, 0);
+                S.be->SetComputePipeline(tess_kernels->count);
+                S.be->DispatchThreads(MTLSizeMake(patch_count, 1, 1), MTLSizeMake(64, 1, 1));
+                S.be->Barrier(kGnmStageDispatch, kGnmStageDispatch, kGnmScopeBuffers);
+                S.be->SetComputePipeline(tess_kernels->offsets);
+                S.be->DispatchThreads(MTLSizeMake(1, 1, 1), MTLSizeMake(1, 1, 1));
+                S.be->Barrier(kGnmStageDispatch, kGnmStageDispatch, kGnmScopeBuffers);
+                S.be->SetComputePipeline(tess_kernels->emit);
+                S.be->DispatchThreads(MTLSizeMake(patch_count, 1, 1), MTLSizeMake(64, 1, 1));
+                S.n_cbarriers += 3;
+                S.cbarriers_total += 3;
+                g_cstate.Reset(S.be->EncoderSerial()); // the kernels' bindings replaced the tracked ones
+                tess_out.push_back(t);
+            }
         }
     }
 
@@ -11796,6 +11958,7 @@ void EncodeTessDraw(DrawRec& r) {
     p.indirect_addr = args.indirect_addr;
     p.name = args.name;
     p.hazards_resolved = true;
+    p.tess_out = std::move(tess_out);
     g_pending_tess.push_back(std::move(p));
     if (can_hoist) FlushPendingTess();
 }

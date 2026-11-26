@@ -249,6 +249,74 @@ static void TakeStageInRegionFromBuffer(std::string& msl) {
     msl.insert(args_begin + args.size() + std::strlen(")\n{\n"), locals);
 }
 
+// The pull variant of a TessEval post-tessellation vertex function (gcn_tess_shader_set.vs_pull_msl):
+// drops the [[ patch(...) ]] attribute and replaces the [[position_in_patch]] / [[patch_id]] entry
+// point arguments with the domain point at GCN_TESS_DOMAIN_BUFFER_SLOT that [[vertex_id]] selects,
+// read into locals of the same names at the top of the entry point.
+static bool MakeTessEvalPull(const std::string& patch_msl, std::string& out, std::string& err) {
+    out = patch_msl;
+    const size_t attr = out.find("[[ patch(");
+    const size_t vertex = attr == std::string::npos ? attr : out.find("]] vertex ", attr);
+    if (vertex == std::string::npos) {
+        err = "TessEval vertex function without a patch attribute";
+        return false;
+    }
+    out.erase(attr, vertex + std::strlen("]] ") - attr);
+    const size_t entry = out.find(" main0(", attr);
+    if (entry == std::string::npos) {
+        err = "TessEval entry point missing";
+        return false;
+    }
+    const size_t args_begin = entry + std::strlen(" main0(");
+    const size_t args_end = out.find(")\n{\n", args_begin);
+    if (args_end == std::string::npos) {
+        err = "TessEval entry point arguments not found";
+        return false;
+    }
+    std::string args = out.substr(args_begin, args_end - args_begin);
+    if (args.find("[[vertex_id]]") != std::string::npos) {
+        err = "TessEval entry point already reads [[vertex_id]]";
+        return false;
+    }
+    std::string locals = "    const float4 spvTessPoint = spvTessDomain[spvTessVertex];\n";
+    const char* const builtins[] = {" [[position_in_patch]]", " [[patch_id]]"};
+    for (const char* builtin : builtins) {
+        const size_t at = args.find(builtin);
+        if (at == std::string::npos) {
+            continue;
+        }
+        const size_t sep = args.rfind(", ", at);
+        const size_t decl = sep == std::string::npos ? 0 : sep + 2;
+        const std::string declaration = args.substr(decl, at - decl); // "type name"
+        const size_t space = declaration.find(' ');
+        const std::string type = declaration.substr(0, space);
+        const std::string name = space == std::string::npos ? "" : declaration.substr(space + 1);
+        if (type == "float3") {
+            locals += "    float3 " + name + " = spvTessPoint.xyz;\n";
+        } else if (type == "float2") {
+            locals += "    float2 " + name + " = spvTessPoint.xy;\n";
+        } else if (type == "uint") {
+            locals += "    uint " + name + " = as_type<uint>(spvTessPoint.w);\n";
+        } else {
+            err = "unexpected TessEval domain argument: " + declaration;
+            return false;
+        }
+        // the argument and one separator next to it
+        size_t from = decl, to = at + std::strlen(builtin);
+        if (sep != std::string::npos) {
+            from = sep;
+        } else if (args.compare(to, 2, ", ") == 0) {
+            to += 2;
+        }
+        args.erase(from, to - from);
+    }
+    args += std::string(args.empty() ? "" : ", ") + "const device float4* spvTessDomain [[buffer(" +
+            std::to_string(GCN_TESS_DOMAIN_BUFFER_SLOT) + ")]], uint spvTessVertex [[vertex_id]]";
+    out.replace(args_begin, args_end - args_begin, args);
+    out.insert(args_begin + args.size() + std::strlen(")\n{\n"), locals);
+    return true;
+}
+
 // One SPIRV-Cross run. arg_ids: SPIR-V binding -> [[id(n)]] of the storage buffers to place in
 // the descriptor set 0 argument buffer (empty: every resource gets a discrete slot).
 // capture: non-null for a vertex shader whose outputs go to a buffer instead of the rasterizer
@@ -741,6 +809,11 @@ GCN_API bool gcn_compile_tess_shaders_msl(const GcnShader* ls, const GcnShader* 
         out->error = DupStr(err);
         return false;
     }
+    std::string vs_pull_msl;
+    if (!GcnMsl::MakeTessEvalPull(vs_msl, vs_pull_msl, err)) {
+        out->error = DupStr(err);
+        return false;
+    }
 
     auto* m_ls = const_cast<GcnShader*>(ls);
     auto* m_hs = const_cast<GcnShader*>(hs);
@@ -763,6 +836,7 @@ GCN_API bool gcn_compile_tess_shaders_msl(const GcnShader* ls, const GcnShader* 
     out->ls_u32_msl = DupStr(ls_msl2);
     out->hs_msl = DupStr(hs_msl);
     out->vs_msl = DupStr(vs_msl);
+    out->vs_pull_msl = DupStr(vs_pull_msl);
     out->ls_stride = std::max(ls_layout.output, hs_layout.input);
     out->cp_stride = std::max(hs_layout.output, vs_layout.input);
     out->patch_stride = std::max(hs_layout.patch_output, vs_layout.patch_input);
@@ -791,6 +865,7 @@ GCN_API void gcn_free_tess_shaders_msl(GcnTessShaderSet* set) {
     std::free(set->ls_u32_msl);
     std::free(set->hs_msl);
     std::free(set->vs_msl);
+    std::free(set->vs_pull_msl);
     std::free(set->error);
     std::memset(set, 0, sizeof(*set));
 }
