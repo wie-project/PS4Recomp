@@ -844,6 +844,9 @@ enum {
     GCN_TESS_PARAMS_BUFFER_SLOT = 16,
     GCN_TESS_INPUT_BUFFER_SLOT = 17,
     GCN_TESS_STAGE_IN_REGION_SLOT = 18,
+    /* TessEval pull variant (gcn_tess_shader_set.vs_pull_msl): float4 per domain point, read at
+     * [[vertex_id]]: (u, v, w, as_type<float>(patch index)) */
+    GCN_TESS_DOMAIN_BUFFER_SLOT = 19,
     GCN_GEO_ES_BUFFER_SLOT = 13,     /* kGeometryKernelSet = 7, binding = 0 */
     GCN_GEO_RECORD_BUFFER_SLOT = 14, /* set = 7, binding = 1 */
     GCN_GEO_INDEX_BUFFER_SLOT = 15,  /* set = 7, binding = 2 */
@@ -898,6 +901,10 @@ typedef struct gcn_tess_shader_set {
         char* vs_msl;           /* TessEval post-tessellation vertex shader */
         char* tes_msl;
     };
+    /* The same TessEval as a plain vertex shader for a compute tessellator (no hardware
+     * tessellation, as on Metal 4): gl_TessCoord and gl_PrimitiveID come from the domain point
+     * at GCN_TESS_DOMAIN_BUFFER_SLOT that [[vertex_id]] selects. */
+    char* vs_pull_msl;
     union {
         uint32_t ls_stride;     /* bytes of one LS output control point struct in MSL */
         uint32_t ls_output_stride;
