@@ -304,16 +304,6 @@ void Metal3Backend::Draw(const GnmDraw& d) {
     }
 }
 
-void Metal3Backend::SetStageInRegion(MTLRegion region) {
-    TargetState& x = Cur();
-    if (x.cenc) [x.cenc setStageInRegion:region];
-}
-
-void Metal3Backend::SetStageInRegionIndirect(id<MTLBuffer> buf, uint64_t offset) {
-    TargetState& x = Cur();
-    if (x.cenc) [x.cenc setStageInRegionWithIndirectBuffer:buf indirectBufferOffset:offset];
-}
-
 void Metal3Backend::SetTessellationFactorBuffer(id<MTLBuffer> buf, uint64_t offset, uint64_t instance_stride) {
     TargetState& x = Cur();
     if (x.renc) [x.renc setTessellationFactorBuffer:buf offset:offset instanceStride:instance_stride];

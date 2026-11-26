@@ -1262,7 +1262,11 @@ void Translator::EmitFetch(const GcnInst& inst) {
     // as GCN applies them), and the vertex and instance offsets reach the loads through the fetch
     // shader's own adds of its offset SGPRs. Its V#s are part of the shader's specialization
     // (VsAttribSpecialization::fetchable before, BufferSpecialization after).
-    bool inline_fetch = EmulatorSettings.IsInlineFetchShader();
+    // PS4Recomp: an LS or ES runs as a compute kernel (tessellation / geometry emulation), where
+    // vertex attributes would need a compute stage-in descriptor, which Metal 4 does not have: its
+    // fetch shader always translates inline.
+    bool inline_fetch = EmulatorSettings.IsInlineFetchShader() || info.hw_stage == HwStage::Local ||
+                        info.hw_stage == HwStage::Export;
     for (u32 i = 0; i < fetch_data.attributes.size(); ++i) {
         const auto sharp = fetch_data.attributes[i].GetSharp(info);
         const u8 problems = sharp ? VertexFetchProblems(sharp) : u8(0);

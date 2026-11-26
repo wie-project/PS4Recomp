@@ -7814,9 +7814,7 @@ static std::unordered_map<std::string, TessPipelineState>& s_tess_pipelines =
 const TessPipelineState* GetTessPipelines(Shader* ls, Shader* hs, Shader* vs, Shader* ps,
                                           const RenderState& rs, const uint32_t color_fmt[8],
                                           const uint32_t write_mask[8], uint32_t depth_fmt,
-                                          uint32_t samples, const std::vector<VertexAttr>& attrs,
-                                          const std::vector<uint32_t>& attr_locs, bool alpha_to_cov,
-                                          uint32_t index_mode) {
+                                          uint32_t samples, bool alpha_to_cov, uint32_t index_mode) {
     if (!ls || !hs || !vs) return nullptr;
 
     std::string key;
@@ -7841,10 +7839,6 @@ const TessPipelineState* GetTessPipelines(Shader* ls, Shader* hs, Shader* vs, Sh
     uint32_t a2c = alpha_to_cov, rd = rs.raster.rasterizer_discard;
     put(&a2c, 4);
     put(&rd, 4);
-    for (size_t i = 0; i < attrs.size(); ++i) {
-        put(&attrs[i], sizeof(VertexAttr));
-        put(&attr_locs[i], 4);
-    }
 
     auto pit = s_tess_pipelines.find(key);
     if (pit != s_tess_pipelines.end()) {
@@ -7903,35 +7897,6 @@ const TessPipelineState* GetTessPipelines(Shader* ls, Shader* hs, Shader* vs, Sh
     NSError* err = nil;
     MTLComputePipelineDescriptor* ls_desc = [[MTLComputePipelineDescriptor alloc] init];
     ls_desc.computeFunction = ls_fn;
-    if (!attrs.empty() || index_mode != 0) {
-        MTLStageInputOutputDescriptor* sio = [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
-        for (size_t i = 0; i < attrs.size(); ++i) {
-            const VertexAttr& a = attrs[i];
-            const uint32_t loc = attr_locs[i];
-            const uint32_t slot = a.buffer;
-            sio.attributes[loc].format = (MTLAttributeFormat)a.format;
-            sio.attributes[loc].offset = a.offset;
-            sio.attributes[loc].bufferIndex = slot;
-            sio.layouts[slot].stride = a.stride ? a.stride : 4;
-            if (a.stride == 0) {
-                sio.layouts[slot].stepFunction = MTLStepFunctionConstant;
-                sio.layouts[slot].stepRate = 0;
-            } else if (a.step_fn == MTLVertexStepFunctionPerInstance) {
-                sio.layouts[slot].stepFunction = MTLStepFunctionThreadPositionInGridY;
-                sio.layouts[slot].stepRate = std::max(1u, a.step_rate);
-            } else {
-                sio.layouts[slot].stepFunction =
-                    index_mode != 0 ? MTLStepFunctionThreadPositionInGridXIndexed
-                                    : MTLStepFunctionThreadPositionInGridX;
-                sio.layouts[slot].stepRate = 1;
-            }
-        }
-        if (index_mode != 0) {
-            sio.indexBufferIndex = GCN_TESS_INDEX_BUFFER_SLOT;
-            sio.indexType = index_mode == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
-        }
-        ls_desc.stageInputDescriptor = sio;
-    }
     id<MTLComputePipelineState> ls_pso =
         [S.dev newComputePipelineStateWithDescriptor:ls_desc
                                              options:MTLPipelineOptionNone
@@ -8066,9 +8031,8 @@ static std::unordered_map<std::string, GsPipelineState>& s_gs_pipelines =
 const GsPipelineState* GetGsPipelines(Shader* es, Shader* gs, Shader* ps,
                                       const RenderState& rs, const uint32_t color_fmt[8],
                                       const uint32_t write_mask[8], uint32_t depth_fmt,
-                                      uint32_t samples, const std::vector<VertexAttr>& attrs,
-                                      const std::vector<uint32_t>& attr_locs, bool alpha_to_cov,
-                                      uint32_t index_mode, bool emulate_depth_neg_one_to_one) {
+                                      uint32_t samples, bool alpha_to_cov, uint32_t index_mode,
+                                      bool emulate_depth_neg_one_to_one) {
     if (!es || !gs) return nullptr;
 
     std::string key;
@@ -8093,10 +8057,6 @@ const GsPipelineState* GetGsPipelines(Shader* es, Shader* gs, Shader* ps,
     uint32_t a2c = alpha_to_cov, rd = rs.raster.rasterizer_discard;
     put(&a2c, 4);
     put(&rd, 4);
-    for (size_t i = 0; i < attrs.size(); ++i) {
-        put(&attrs[i], sizeof(VertexAttr));
-        put(&attr_locs[i], 4);
-    }
 
     auto pit = s_gs_pipelines.find(key);
     if (pit != s_gs_pipelines.end()) {
@@ -8152,35 +8112,6 @@ const GsPipelineState* GetGsPipelines(Shader* es, Shader* gs, Shader* ps,
     NSError* err = nil;
     MTLComputePipelineDescriptor* es_desc = [[MTLComputePipelineDescriptor alloc] init];
     es_desc.computeFunction = es_fn;
-    if (!attrs.empty() || index_mode != 0) {
-        MTLStageInputOutputDescriptor* sio = [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
-        for (size_t i = 0; i < attrs.size(); ++i) {
-            const VertexAttr& a = attrs[i];
-            const uint32_t loc = attr_locs[i];
-            const uint32_t slot = a.buffer;
-            sio.attributes[loc].format = (MTLAttributeFormat)a.format;
-            sio.attributes[loc].offset = a.offset;
-            sio.attributes[loc].bufferIndex = slot;
-            sio.layouts[slot].stride = a.stride ? a.stride : 4;
-            if (a.stride == 0) {
-                sio.layouts[slot].stepFunction = MTLStepFunctionConstant;
-                sio.layouts[slot].stepRate = 0;
-            } else if (a.step_fn == MTLVertexStepFunctionPerInstance) {
-                sio.layouts[slot].stepFunction = MTLStepFunctionThreadPositionInGridY;
-                sio.layouts[slot].stepRate = std::max(1u, a.step_rate);
-            } else {
-                sio.layouts[slot].stepFunction =
-                    index_mode != 0 ? MTLStepFunctionThreadPositionInGridXIndexed
-                                    : MTLStepFunctionThreadPositionInGridX;
-                sio.layouts[slot].stepRate = 1;
-            }
-        }
-        if (index_mode != 0) {
-            sio.indexBufferIndex = GCN_TESS_INDEX_BUFFER_SLOT;
-            sio.indexType = index_mode == 1 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
-        }
-        es_desc.stageInputDescriptor = sio;
-    }
     id<MTLComputePipelineState> es_pso =
         [S.dev newComputePipelineStateWithDescriptor:es_desc
                                              options:MTLPipelineOptionNone
@@ -10745,33 +10676,7 @@ bool PrepareTessDraw(const uint32_t* regs, const DrawArgs& args,
         }
     }
 
-    // 5. Fetch LS vertex attribute sharps.
-    r.vtx.resize(ls->attrs.size());
-    for (uint32_t i = 0; i < ls->attrs.size(); ++i) {
-        VtxIn& vi = r.vtx[i];
-        uint32_t v[4] = {};
-        GmCpGuarded([&](gcn_read_guest_fn read) {
-            return gcn_shader_fetch_vertex_attrib_sharp(ls->sh, i, r.ls_es_ud, read, S.ctx, v);
-        });
-        DecodeBuffer(v, &vi.bd);
-        vi.vf = GetVertexFormat(vi.bd.raw_dfmt, vi.bd.raw_nfmt);
-        const uint32_t slot = GCN_TESS_VERTEX_ATTR_BASE_SLOT + i;
-        if (slot > 30 || !vi.vf.mtl_vertex_format) {
-            RLog("vtx-fmt", "%s: LS 0x%llx attribute %u unsupported (fmt %u/%u slot %u)", args.name,
-                 (unsigned long long)ls->code_addr, i, vi.bd.raw_dfmt, vi.bd.raw_nfmt, slot);
-            NoteSkip(SkipReason::VertexFormat);
-            return true;
-        }
-        if ((vi.bd.stride & 3) || (vi.bd.address & 3)) {
-            RLog("vtx-stride", "%s: LS 0x%llx attribute %u: stride %u / address 0x%llx not a multiple of 4",
-                 args.name, (unsigned long long)ls->code_addr, i, vi.bd.stride,
-                 (unsigned long long)vi.bd.address);
-            NoteSkip(SkipReason::VertexAlign);
-            return true;
-        }
-    }
-
-    // 6. Build flattened user data and decode stage images for LS, HS, DS, PS.
+    // 5. Build flattened user data and decode stage images for LS, HS, DS, PS.
     StageFlat(6, ls, r.ls_es_ud);
     r.ls_es_flat = S.flat_scratch[6];
     r.ls_es_reads = S.flat_reads[6];
@@ -10883,33 +10788,7 @@ bool PrepareGsDraw(const uint32_t* regs, const DrawArgs& args,
         }
     }
 
-    // 4. Fetch ES vertex attribute sharps.
-    r.vtx.resize(es->attrs.size());
-    for (uint32_t i = 0; i < es->attrs.size(); ++i) {
-        VtxIn& vi = r.vtx[i];
-        uint32_t v[4] = {};
-        GmCpGuarded([&](gcn_read_guest_fn read) {
-            return gcn_shader_fetch_vertex_attrib_sharp(es->sh, i, r.ls_es_ud, read, S.ctx, v);
-        });
-        DecodeBuffer(v, &vi.bd);
-        vi.vf = GetVertexFormat(vi.bd.raw_dfmt, vi.bd.raw_nfmt);
-        const uint32_t slot = GCN_TESS_VERTEX_ATTR_BASE_SLOT + i;
-        if (slot > 30 || !vi.vf.mtl_vertex_format) {
-            RLog("vtx-fmt", "%s: ES 0x%llx attribute %u unsupported (fmt %u/%u slot %u)", args.name,
-                 (unsigned long long)es->code_addr, i, vi.bd.raw_dfmt, vi.bd.raw_nfmt, slot);
-            NoteSkip(SkipReason::VertexFormat);
-            return true;
-        }
-        if ((vi.bd.stride & 3) || (vi.bd.address & 3)) {
-            RLog("vtx-stride", "%s: ES 0x%llx attribute %u: stride %u / address 0x%llx not a multiple of 4",
-                 args.name, (unsigned long long)es->code_addr, i, vi.bd.stride,
-                 (unsigned long long)vi.bd.address);
-            NoteSkip(SkipReason::VertexAlign);
-            return true;
-        }
-    }
-
-    // 5. Build flattened user data and decode stage images for ES, GS, PS.
+    // 4. Build flattened user data and decode stage images for ES, GS, PS.
     StageFlat(4, es, r.ls_es_ud);
     r.ls_es_flat = S.flat_scratch[4];
     r.ls_es_reads = S.flat_reads[4];
@@ -11611,44 +11490,6 @@ void EncodeTessDraw(DrawRec& r) {
     key.width = any_rt ? 0 : rt_w;
     key.height = any_rt ? 0 : rt_h;
 
-    static std::vector<VertexAttr>& vattrs = *new std::vector<VertexAttr>;
-    static std::vector<uint32_t>& vlocs = *new std::vector<uint32_t>;
-    static std::vector<std::pair<id<MTLBuffer>, uint64_t>>& vbufs = *new std::vector<std::pair<id<MTLBuffer>, uint64_t>>;
-    vattrs.clear();
-    vlocs.clear();
-    vbufs.clear();
-    for (uint32_t i = 0; i < ls->attrs.size(); ++i) {
-        const gcn_vertex_attrib& a = ls->attrs[i];
-        const BufferDesc& bd = r.vtx[i].bd;
-        const VertexFormatInfo& vf = r.vtx[i].vf;
-        const uint32_t slot = GCN_TESS_VERTEX_ATTR_BASE_SLOT + i;
-        VertexAttr va{};
-        va.format = vf.mtl_vertex_format;
-        va.offset = 0;
-        va.buffer = slot;
-        uint32_t stride = bd.stride;
-        id<MTLBuffer> mb = S.dummy;
-        uint64_t off = 0;
-        if (bd.address && bd.size) {
-            if (!GuestBuffer(bd.address & ~3ull, bd.size + 4, GuestAccess::Read, &mb, &off)) {
-                mb = S.dummy;
-                off = 0;
-            }
-        }
-        if (a.step_rate == 0) {
-            va.step_fn = stride ? MTLVertexStepFunctionPerVertex : MTLVertexStepFunctionConstant;
-            va.step_rate = stride ? 1 : 0;
-        } else {
-            va.step_fn = MTLVertexStepFunctionPerInstance;
-            va.step_rate = std::max(1u, a.divisor);
-        }
-        if (stride == 0) va.step_fn = MTLVertexStepFunctionConstant, va.step_rate = 0;
-        va.stride = stride;
-        vattrs.push_back(va);
-        vlocs.push_back(a.location);
-        vbufs.push_back({mb, off});
-    }
-
     const uint32_t index_mode = args.indexed ? (args.index_type == 1 ? 2u : 1u) : 0u;
     id<MTLBuffer> ib = nil;
     uint64_t ib_off = 0;
@@ -11675,7 +11516,7 @@ void EncodeTessDraw(DrawRec& r) {
 
     const bool a2c = (regs[0xA2DC] & 1) != 0;
     const TessPipelineState* tpipe =
-        GetTessPipelines(ls, hs, vs, ps, rs, color_fmt, write_mask, depth_fmt, samples, vattrs, vlocs, a2c, index_mode);
+        GetTessPipelines(ls, hs, vs, ps, rs, color_fmt, write_mask, depth_fmt, samples, a2c, index_mode);
     if (!tpipe) {
         NoteSkip(SkipReason::PipelineFailed);
         return;
@@ -11860,9 +11701,9 @@ void EncodeTessDraw(DrawRec& r) {
             }
             lb.Buffer(ls_out_buf, ls_out_inst_off, GCN_TESS_OUTPUT_BUFFER_SLOT);
             if (args.indexed) lb.Buffer(ib, ib_off, GCN_TESS_INDEX_BUFFER_SLOT);
-            for (size_t i = 0; i < vbufs.size(); ++i) lb.Buffer(vbufs[i].first, vbufs[i].second, vattrs[i].buffer);
-            S.be->SetStageInRegion(
-                MTLRegionMake2D(vertex_offset, instance_offset + inst_idx, ls_vertices_per_inst, 1));
+            // the vertex range (gcn_recompiler.h GCN_TESS_STAGE_IN_REGION_SLOT): origin, then size
+            const uint32_t region[6] = {vertex_offset, instance_offset + inst_idx, 0, ls_vertices_per_inst, 1, 1};
+            lb.Bytes(region, sizeof(region), GCN_TESS_STAGE_IN_REGION_SLOT);
 
             const uint32_t ls_tg_x =
                 std::max<uint32_t>(1u, std::min<uint32_t>(64u, (uint32_t)tpipe->ls_pso.maxTotalThreadsPerThreadgroup));
@@ -12111,44 +11952,6 @@ void EncodeGsDraw(DrawRec& r) {
     key.width = any_rt ? 0 : rt_w;
     key.height = any_rt ? 0 : rt_h;
 
-    static std::vector<VertexAttr>& vattrs = *new std::vector<VertexAttr>;
-    static std::vector<uint32_t>& vlocs = *new std::vector<uint32_t>;
-    static std::vector<std::pair<id<MTLBuffer>, uint64_t>>& vbufs = *new std::vector<std::pair<id<MTLBuffer>, uint64_t>>;
-    vattrs.clear();
-    vlocs.clear();
-    vbufs.clear();
-    for (uint32_t i = 0; i < es->attrs.size(); ++i) {
-        const gcn_vertex_attrib& a = es->attrs[i];
-        const BufferDesc& bd = r.vtx[i].bd;
-        const VertexFormatInfo& vf = r.vtx[i].vf;
-        const uint32_t slot = GCN_TESS_VERTEX_ATTR_BASE_SLOT + i;
-        VertexAttr va{};
-        va.format = vf.mtl_vertex_format;
-        va.offset = 0;
-        va.buffer = slot;
-        uint32_t stride = bd.stride;
-        id<MTLBuffer> mb = S.dummy;
-        uint64_t off = 0;
-        if (bd.address && bd.size) {
-            if (!GuestBuffer(bd.address & ~3ull, bd.size + 4, GuestAccess::Read, &mb, &off)) {
-                mb = S.dummy;
-                off = 0;
-            }
-        }
-        if (a.step_rate == 0) {
-            va.step_fn = stride ? MTLVertexStepFunctionPerVertex : MTLVertexStepFunctionConstant;
-            va.step_rate = stride ? 1 : 0;
-        } else {
-            va.step_fn = MTLVertexStepFunctionPerInstance;
-            va.step_rate = std::max(1u, a.divisor);
-        }
-        if (stride == 0) va.step_fn = MTLVertexStepFunctionConstant, va.step_rate = 0;
-        va.stride = stride;
-        vattrs.push_back(va);
-        vlocs.push_back(a.location);
-        vbufs.push_back({mb, off});
-    }
-
     const bool indirect = args.indirect_addr != 0;
     const uint32_t index_mode = args.indexed ? (indirect ? 2u : (args.index_type == 1 ? 2u : 1u)) : 0u;
     id<MTLBuffer> ib = nil;
@@ -12197,8 +12000,8 @@ void EncodeGsDraw(DrawRec& r) {
     const bool emulate_depth_neg_one_to_one =
         ((regs[0xA204] >> 19) & 1u) == 0 && !S.profile.supports_depth_clip_control;
     const GsPipelineState* gpipe =
-        GetGsPipelines(es, gs, ps, rs, color_fmt, write_mask, depth_fmt, samples, vattrs, vlocs,
-                       a2c, index_mode, emulate_depth_neg_one_to_one);
+        GetGsPipelines(es, gs, ps, rs, color_fmt, write_mask, depth_fmt, samples, a2c, index_mode,
+                       emulate_depth_neg_one_to_one);
     if (!gpipe) {
         NoteSkip(SkipReason::PipelineFailed);
         return;
@@ -12438,12 +12241,14 @@ void EncodeGsDraw(DrawRec& r) {
             else
                 eb.Buffer(ib, ib_off, GCN_TESS_INDEX_BUFFER_SLOT);
         }
-        for (size_t i = 0; i < vbufs.size(); ++i) eb.Buffer(vbufs[i].first, vbufs[i].second, vattrs[i].buffer);
+        // the vertex range (gcn_recompiler.h GCN_TESS_STAGE_IN_REGION_SLOT): origin, then size; the
+        // indirect one as bb_gs_prep wrote it
         if (indirect) {
-            S.be->SetStageInRegionIndirect(ind_ctrl_buf, ind_ctrl_off + kGsControlStageIn);
+            eb.Buffer(ind_ctrl_buf, ind_ctrl_off + kGsControlStageIn, GCN_TESS_STAGE_IN_REGION_SLOT);
             S.be->DispatchIndirect(ind_ctrl_buf, ind_ctrl_off + kGsControlEsGroups, MTLSizeMake(1, 1, 1));
         } else {
-            S.be->SetStageInRegion(MTLRegionMake2D(vertex_offset, instance_offset, es_verts_per_inst, inst));
+            const uint32_t region[6] = {vertex_offset, instance_offset, 0, es_verts_per_inst, inst, 1};
+            eb.Bytes(region, sizeof(region), GCN_TESS_STAGE_IN_REGION_SLOT);
             const uint32_t es_tg_x =
                 std::max<uint32_t>(1u, std::min<uint32_t>(64u, (uint32_t)gpipe->es_pso.maxTotalThreadsPerThreadgroup));
             S.be->DispatchThreads(MTLSizeMake(es_verts_per_inst, inst, 1), MTLSizeMake(es_tg_x, 1, 1));

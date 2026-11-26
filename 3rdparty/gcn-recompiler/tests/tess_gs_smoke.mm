@@ -174,6 +174,23 @@ void AppendExp(std::vector<uint32_t>& code, uint32_t target, uint32_t v0, uint32
     code.push_back(w1);
 }
 
+// An LS / ES kernel runs without compute stage-in (Metal 4 has none): its fetch shader is
+// translated inline and its vertex range comes from the region buffer.
+bool CheckTessVertexKernel(const char* label, const gcn_shader* sh, const char* msl) {
+    gcn_shader_info info{};
+    gcn_shader_get_info(sh, &info);
+    const std::string region = "spvStageInRegion [[buffer(" + std::to_string(GCN_TESS_STAGE_IN_REGION_SLOT) + ")]]";
+    if (!msl || std::strstr(msl, "[[stage_in]]") || std::strstr(msl, "[[grid_origin]]") ||
+        std::strstr(msl, "[[grid_size]]") || !std::strstr(msl, region.c_str()) ||
+        !std::strstr(msl, "spvStageInRegion[3]") || !info.fetch_shader_inlined || info.has_fetch_shader ||
+        info.num_vertex_attribs != 0) {
+        std::fprintf(stderr, "[FAIL] %s: expected an inlined fetch shader and the stage-in region from buffer %d\n",
+                     label, GCN_TESS_STAGE_IN_REGION_SLOT);
+        return false;
+    }
+    return true;
+}
+
 bool ValidateMsl(id<MTLDevice> dev, const char* label, const char* src,
                  const char* fn_name = "main0") {
     if (!src || src[0] == '\0') {
@@ -512,7 +529,10 @@ bool TestTessShadersAndStride(id<MTLDevice> dev) {
             ValidateMsl(dev, mode ? "tess_ls_u16_argbuf" : "tess_ls_u16_direct", set.ls_u16_msl) &&
             ValidateMsl(dev, mode ? "tess_ls_u32_argbuf" : "tess_ls_u32_direct", set.ls_u32_msl) &&
             ValidateMsl(dev, mode ? "tess_hs_argbuf" : "tess_hs_direct", set.hs_msl) &&
-            ValidateMsl(dev, mode ? "tess_vs_argbuf" : "tess_vs_direct", set.vs_msl);
+            ValidateMsl(dev, mode ? "tess_vs_argbuf" : "tess_vs_direct", set.vs_msl) &&
+            CheckTessVertexKernel("tess_ls", ls_sh, set.ls_msl) &&
+            CheckTessVertexKernel("tess_ls_u16", ls_sh, set.ls_u16_msl) &&
+            CheckTessVertexKernel("tess_ls_u32", ls_sh, set.ls_u32_msl);
         if (!ok || set.output_control_points != 3 || set.cp_stride == 0 ||
             set.domain != GCN_TESS_DOMAIN_TRIANGLES) {
             std::fprintf(stderr,
@@ -551,6 +571,77 @@ bool TestTessShadersAndStride(id<MTLDevice> dev) {
     return true;
 }
 
+// Runs the ES kernel (direct bindings) over vertices first..first+count-1 through the stage-in region
+// buffer and checks what it writes: the fetch shader's float4 of each vertex, x plus extra_cb[0] (1.0),
+// in both of its outputs (Position0 and Param0, es_stride bytes per vertex).
+bool RunEsKernel(id<MTLDevice> dev, const gcn_shader* es, const char* msl, const uint32_t user_data[16],
+                 uint64_t code_addr, FakeMem& mem, uint32_t es_stride, uint32_t first, uint32_t count) {
+    NSError* error = nil;
+    id<MTLLibrary> lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:msl] options:nil error:&error];
+    id<MTLFunction> fn = [lib newFunctionWithName:@"main0"];
+    id<MTLComputePipelineState> pso = fn ? [dev newComputePipelineStateWithFunction:fn error:&error] : nil;
+    if (!pso) {
+        std::fprintf(stderr, "[FAIL] ES dispatch: pipeline: %s\n", error.localizedDescription.UTF8String);
+        return false;
+    }
+    gcn_shader_info info{};
+    gcn_shader_get_info(es, &info);
+    std::vector<uint32_t> flat(std::max<uint32_t>(info.flatbuf_size_dw, 16));
+    gcn_shader_build_flatbuf(es, user_data, FakeMem::Read, &mem, flat.data(), flat.size());
+    id<MTLCommandQueue> queue = [dev newCommandQueue];
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:pso];
+    gcn_push_data push{};
+    for (uint32_t i = 0; i < info.num_buffers; ++i) {
+        gcn_buffer_binding bb{};
+        uint32_t v[4] = {};
+        gcn_buffer_desc bd{};
+        if (!gcn_shader_get_buffer(es, i, &bb) || !gcn_shader_fetch_buffer_sharp(es, i, flat.data(), code_addr, v)) {
+            continue;
+        }
+        gcn_decode_buffer(v, &bd);
+        std::vector<uint8_t> bytes(std::max<uint32_t>(bd.size_bytes, 4));
+        if (!FakeMem::Read(&mem, bd.base_address, bytes.data(), bd.size_bytes)) {
+            continue;
+        }
+        id<MTLBuffer> b = [dev newBufferWithBytes:bytes.data() length:bytes.size() options:MTLResourceStorageModeShared];
+        for (uint32_t k = 0; k < bb.num_msl_buffers; ++k) {
+            [enc setBuffer:b offset:0 atIndex:bb.msl_buffers[k]];
+        }
+        if (bb.buffer_slot < GCN_MAX_BUFFERS) {
+            push.buf_sizes[bb.buffer_slot] = bd.size_bytes;
+        }
+    }
+    if (info.msl_push_constant_buffer >= 0) {
+        [enc setBytes:&push length:sizeof(push) atIndex:(NSUInteger)info.msl_push_constant_buffer];
+    }
+    id<MTLBuffer> out = [dev newBufferWithLength:size_t(es_stride) * count options:MTLResourceStorageModeShared];
+    std::memset(out.contents, 0xFF, out.length);
+    [enc setBuffer:out offset:0 atIndex:GCN_TESS_OUTPUT_BUFFER_SLOT];
+    const uint32_t region[6] = {first, 0, 0, count, 1, 1};
+    [enc setBytes:region length:sizeof(region) atIndex:GCN_TESS_STAGE_IN_REGION_SLOT];
+    [enc dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(count, 1, 1)];
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    const float* f = static_cast<const float*>(out.contents);
+    for (uint32_t i = 0; i < count; ++i) {
+        const float vtx = float(first + i);
+        const float want[4] = {vtx + 1.0f, vtx + 0.25f, vtx + 0.5f, vtx + 0.75f};
+        for (uint32_t half = 0; half < 2; ++half) {
+            const float* got = f + i * (es_stride / 4) + half * 4;
+            if (std::memcmp(got, want, sizeof(want)) != 0) {
+                std::fprintf(stderr, "[FAIL] ES dispatch: vertex %u output %u = (%g %g %g %g), want (%g %g %g %g)\n",
+                             first + i, half, got[0], got[1], got[2], got[3], want[0], want[1], want[2], want[3]);
+                return false;
+            }
+        }
+    }
+    std::printf("[OK] ES kernel over vertices %u..%u from the stage-in region buffer\n", first, first + count - 1);
+    return true;
+}
+
 bool TestGsShaders(id<MTLDevice> dev) {
     FakeMem mem;
     const uint64_t es_addr = 0x300000;
@@ -573,6 +664,13 @@ bool TestGsShaders(id<MTLDevice> dev) {
     mem.Add32(vtab_addr, MakeVSharp(vb0_addr, 16, 64, 14, 7));
     mem.Add32(extra_cb_table_addr, MakeVSharp(extra_cb_addr, 0, 64, 14, 7));
     mem.Add32(extra_cb_addr, std::vector<uint32_t>(16, 0x3F800000u));
+    std::vector<float> vb0(64 * 4); // vertex k: (k, k + 0.25, k + 0.5, k + 0.75)
+    for (uint32_t k = 0; k < 64; ++k) {
+        for (uint32_t c = 0; c < 4; ++c) {
+            vb0[k * 4 + c] = float(k) + 0.25f * float(c);
+        }
+    }
+    mem.Add(vb0_addr, vb0.data(), vb0.size() * sizeof(float));
 
     // 1. Build ES shader (GCN_HW_ES / GCN_SW_VERTEX):
     //    Calls fetch shader (v[4:7]), reads extra_cb[0] into s12, adds to v4,
@@ -741,7 +839,10 @@ bool TestGsShaders(id<MTLDevice> dev) {
             ValidateMsl(dev, mode ? "gs_kernel_argbuf" : "gs_kernel_direct", set.gs_msl) &&
             ValidateMsl(dev, mode ? "gs_passthrough_vs_depth" : "gs_passthrough_vs", set.vs_msl) &&
             ValidateMsl(dev, mode ? "gs_passthrough_vs_bb_gs_pass" : "gs_passthrough_vs_bb_gs_pass",
-                        set.vs_msl, "bb_gs_pass");
+                        set.vs_msl, "bb_gs_pass") &&
+            CheckTessVertexKernel("gs_es", es_sh, set.es_msl) &&
+            CheckTessVertexKernel("gs_es_u16", es_sh, set.es_u16_msl) &&
+            CheckTessVertexKernel("gs_es_u32", es_sh, set.es_u32_msl);
         if (!ok || set.input_vertices != 3 || set.max_vertices != 3 ||
             set.es_stride == 0 || set.record_stride == 0 ||
             set.input_primitive != GCN_GS_INPUT_TRIANGLES ||
@@ -768,6 +869,13 @@ bool TestGsShaders(id<MTLDevice> dev) {
                 gcn_free_gs_shaders_msl(&set);
                 return false;
             }
+        }
+        if (mode == 0 && dev &&
+            !RunEsKernel(dev, es_sh, set.es_msl, es_desc.user_data, es_addr, mem, set.es_stride, 5, 4)) {
+            gcn_free_gs_shaders_msl(&set);
+            gcn_shader_destroy(gs_sh);
+            gcn_shader_destroy(es_sh);
+            return false;
         }
         std::printf("[OK] geometry MSL set (%s): in_verts=%u max_out=%u es_stride=%u rec_stride=%u\n",
                     mode ? "argbuf+depth_neg1" : "direct", set.input_vertices, set.max_vertices,

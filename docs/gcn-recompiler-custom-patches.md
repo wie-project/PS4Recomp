@@ -233,3 +233,16 @@ Any future changes, opcode implementations, or pass modifications in `3rdparty/g
 
 
 
+
+### 6.4 LS / ES Kernels Without Compute Stage-In
+- **Files**:
+  - `3rdparty/gcn-recompiler/src/shader_recompiler/frontend/translate/translate.cpp` (`Translator::EmitFetch`)
+  - `3rdparty/gcn-recompiler/src/api/gcn_msl.cpp` (`TakeStageInRegionFromBuffer`, `ConvertOnce`)
+  - `3rdparty/gcn-recompiler/include/gcn_recompiler.h` (`GCN_TESS_STAGE_IN_REGION_SLOT`)
+  - `3rdparty/gcn-recompiler/tests/tess_gs_smoke.mm` (`CheckTessVertexKernel`)
+  - `pkg/runtime/modules/libSceGnmDriver/ps4_gnm_draw.mm` (`EncodeTessDraw`, `EncodeGsDraw`, `GetTessPipelines`, `GetGsPipelines`)
+- **Rationale**: The LS (tessellation) and ES (geometry) stages run as compute kernels, translated by SPIRV-Cross in `vertex_for_tessellation` mode. Those kernels read their vertex range from the compute stage-in region (`[[grid_origin]]`, `[[grid_size]]`) and their vertex attributes through `[[stage_in]]`, which need `setStageInRegion` and a compute stage input descriptor. Metal 4 has neither (`MTL4ComputeCommandEncoder`, `MTL4ComputePipelineDescriptor`), so on the Metal 4 backend the kernels ran with undefined origin and size: Driveclub's 512 lens droplet sprites (a geometry shader) were all degenerate with NaN colours, or dozens of them stacked onto one spot, a dark flickering blob.
+- **Implementation**:
+  - `EmitFetch` translates the fetch shader of an LS or ES inline (as for a V# Metal's vertex fetch cannot read): its buffer loads read the vertex buffers with GCN's stride, offsets, bounds and number formats, so the kernel has no vertex attributes.
+  - `TakeStageInRegionFromBuffer` replaces the `[[grid_origin]]` / `[[grid_size]]` entry point arguments of every TessVertex kernel with `const device uint* spvStageInRegion [[buffer(GCN_TESS_STAGE_IN_REGION_SLOT)]]` (origin x, y, z, size x, y, z, the `MTLStageInRegionIndirectArguments` layout) and locals of the same names; conversion fails if a `[[stage_in]]` input is left.
+  - The renderer binds those six words for each LS / ES dispatch (direct draws: bytes; indirect geometry draws: the words `bb_gs_prep` writes), on both backends; `GnmBackend::SetStageInRegion` / `SetStageInRegionIndirect` and the compute stage input descriptors are gone.

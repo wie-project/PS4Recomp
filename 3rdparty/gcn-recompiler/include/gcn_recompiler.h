@@ -826,8 +826,13 @@ GCN_API void gcn_rectlist_msl_free(gcn_rectlist_msl* m);
 /* Reserved Metal buffer slots for inter-stage communication in tessellation (LS -> HS -> TES)
  * and geometry (ES -> GS -> Pass-Through VS) pipelines. Shader resource buffers use slots 0..12
  * (moving guest storage buffers into an argument buffer at slot 0 when > 8 guest buffers or
- * discrete slots would exceed 12), leaving 13..17 for inter-stage buffers, 18..28 for TessVertex
- * stage-in vertex attributes, and 29..30 for BDA page table / fault buffers. */
+ * discrete slots would exceed 12), leaving 13..18 for inter-stage buffers and 29..30 for BDA page
+ * table / fault buffers.
+ * The LS / ES kernels (TessVertex) have no compute stage-in (Metal 4 has none): their fetch shader
+ * is translated inline, and their vertex / instance range comes from GCN_TESS_STAGE_IN_REGION_SLOT,
+ * six uint32 laid out as MTLStageInRegionIndirectArguments: origin x, y, z, then size x, y, z.
+ * The vertex index is gid.x + origin.x (indexed: index[gid.x] + origin.x), the instance index
+ * gid.y + origin.y; threads at or past size return. */
 enum {
     GCN_TESS_OUTPUT_BUFFER_SLOT = 13,
     GCN_TESS_INDEX_BUFFER_SLOT = 14,
@@ -835,7 +840,7 @@ enum {
     GCN_TESS_FACTOR_BUFFER_SLOT = 15,
     GCN_TESS_PARAMS_BUFFER_SLOT = 16,
     GCN_TESS_INPUT_BUFFER_SLOT = 17,
-    GCN_TESS_VERTEX_ATTR_BASE_SLOT = 18,
+    GCN_TESS_STAGE_IN_REGION_SLOT = 18,
     GCN_GEO_ES_BUFFER_SLOT = 13,     /* kGeometryKernelSet = 7, binding = 0 */
     GCN_GEO_RECORD_BUFFER_SLOT = 14, /* set = 7, binding = 1 */
     GCN_GEO_INDEX_BUFFER_SLOT = 15,  /* set = 7, binding = 2 */
