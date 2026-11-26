@@ -59,6 +59,45 @@ void shim_sceAudioInClose(GuestContext *ctx);
 void shim_sceAudioInInput(GuestContext *ctx);
 void shim_sceAudioInGetSilentState(GuestContext *ctx);
 
+// Functions that shadPS4 stubs as well.
+void shim_sceAudioInChangeAppModuleState(GuestContext *ctx);
+void shim_sceAudioInCountPorts(GuestContext *ctx);
+void shim_sceAudioInDeviceHqOpen(GuestContext *ctx);
+void shim_sceAudioInDeviceIdHqOpen(GuestContext *ctx);
+void shim_sceAudioInDeviceIdOpen(GuestContext *ctx);
+void shim_sceAudioInDeviceOpen(GuestContext *ctx);
+void shim_sceAudioInDeviceOpenEx(GuestContext *ctx);
+void shim_sceAudioInExtClose(GuestContext *ctx);
+void shim_sceAudioInExtCtrl(GuestContext *ctx);
+void shim_sceAudioInExtInput(GuestContext *ctx);
+void shim_sceAudioInExtOpen(GuestContext *ctx);
+void shim_sceAudioInExtSetAecMode(GuestContext *ctx);
+void shim_sceAudioInGetGain(GuestContext *ctx);
+void shim_sceAudioInGetHandleStatusInfo(GuestContext *ctx);
+void shim_sceAudioInGetRerouteCount(GuestContext *ctx);
+void shim_sceAudioInHqOpenEx(GuestContext *ctx);
+void shim_sceAudioInInit(GuestContext *ctx);
+void shim_sceAudioInInputs(GuestContext *ctx);
+void shim_sceAudioInIsSharedDevice(GuestContext *ctx);
+void shim_sceAudioInOpenEx(GuestContext *ctx);
+void shim_sceAudioInSetAllMute(GuestContext *ctx);
+void shim_sceAudioInSetCompressorPreGain(GuestContext *ctx);
+void shim_sceAudioInSetConnections(GuestContext *ctx);
+void shim_sceAudioInSetConnectionsForUser(GuestContext *ctx);
+void shim_sceAudioInSetDevConnection(GuestContext *ctx);
+void shim_sceAudioInSetFocusForUser(GuestContext *ctx);
+void shim_sceAudioInSetMode(GuestContext *ctx);
+void shim_sceAudioInSetMode2(GuestContext *ctx);
+void shim_sceAudioInSetPortConnections(GuestContext *ctx);
+void shim_sceAudioInSetPortStatuses(GuestContext *ctx);
+void shim_sceAudioInSetSparkParam(GuestContext *ctx);
+void shim_sceAudioInSetSparkSideTone(GuestContext *ctx);
+void shim_sceAudioInSetUsbGain(GuestContext *ctx);
+void shim_sceAudioInSetUserMute(GuestContext *ctx);
+void shim_sceAudioInVmicCreate(GuestContext *ctx);
+void shim_sceAudioInVmicDestroy(GuestContext *ctx);
+void shim_sceAudioInVmicWrite(GuestContext *ctx);
+
 #ifdef __cplusplus
 }
 #endif

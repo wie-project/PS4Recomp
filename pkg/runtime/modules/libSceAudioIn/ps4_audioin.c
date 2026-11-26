@@ -6,6 +6,7 @@
 // sceAudioInInput blocks until one grain is available.
 
 #include "ps4_audioin.h"
+#include "ps4_hle_stub.h"
 #include <AudioToolbox/AudioToolbox.h>
 #include <errno.h>
 #include <pthread.h>
@@ -318,3 +319,42 @@ void shim_sceAudioInGetSilentState(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceAudioInGetSilentState((int32_t)ctx->rdi);
     SHIM_RETURN();
 }
+
+// Functions that shadPS4 stubs as well (src/core/libraries/audio/audioin.cpp).
+PS4_HLE_STUB(sceAudioInChangeAppModuleState)
+PS4_HLE_STUB(sceAudioInCountPorts)
+PS4_HLE_STUB(sceAudioInDeviceHqOpen)
+PS4_HLE_STUB(sceAudioInDeviceIdHqOpen)
+PS4_HLE_STUB(sceAudioInDeviceIdOpen)
+PS4_HLE_STUB(sceAudioInDeviceOpen)
+PS4_HLE_STUB(sceAudioInDeviceOpenEx)
+PS4_HLE_STUB(sceAudioInExtClose)
+PS4_HLE_STUB(sceAudioInExtCtrl)
+PS4_HLE_STUB(sceAudioInExtInput)
+PS4_HLE_STUB(sceAudioInExtOpen)
+PS4_HLE_STUB(sceAudioInExtSetAecMode)
+PS4_HLE_STUB(sceAudioInGetGain)
+PS4_HLE_STUB(sceAudioInGetHandleStatusInfo)
+PS4_HLE_STUB(sceAudioInGetRerouteCount)
+PS4_HLE_STUB(sceAudioInHqOpenEx)
+PS4_HLE_STUB(sceAudioInInit)
+PS4_HLE_STUB(sceAudioInInputs)
+PS4_HLE_STUB(sceAudioInIsSharedDevice)
+PS4_HLE_STUB(sceAudioInOpenEx)
+PS4_HLE_STUB(sceAudioInSetAllMute)
+PS4_HLE_STUB(sceAudioInSetCompressorPreGain)
+PS4_HLE_STUB(sceAudioInSetConnections)
+PS4_HLE_STUB(sceAudioInSetConnectionsForUser)
+PS4_HLE_STUB(sceAudioInSetDevConnection)
+PS4_HLE_STUB(sceAudioInSetFocusForUser)
+PS4_HLE_STUB(sceAudioInSetMode)
+PS4_HLE_STUB(sceAudioInSetMode2)
+PS4_HLE_STUB(sceAudioInSetPortConnections)
+PS4_HLE_STUB(sceAudioInSetPortStatuses)
+PS4_HLE_STUB(sceAudioInSetSparkParam)
+PS4_HLE_STUB(sceAudioInSetSparkSideTone)
+PS4_HLE_STUB(sceAudioInSetUsbGain)
+PS4_HLE_STUB(sceAudioInSetUserMute)
+PS4_HLE_STUB(sceAudioInVmicCreate)
+PS4_HLE_STUB(sceAudioInVmicDestroy)
+PS4_HLE_STUB(sceAudioInVmicWrite)

@@ -43,34 +43,8 @@ static int64_t g_webapi_req_counter = 1;
 
 
 //=============================================================================
-// libSceNpManager utilities (the manager itself is in ps4_np_manager.c)
+// libSceNpTss / NpTus title-context utilities
 //=============================================================================
-
-int32_t sceNpCmpOnlineId(const OrbisNpOnlineId* id1, const OrbisNpOnlineId* id2) {
-    if (!id1 || !id2) {
-        return ORBIS_NP_ERROR_INVALID_ARGUMENT;
-    }
-    if (strncmp(id1->data, id2->data, ORBIS_NP_ONLINEID_MAX_LENGTH) != 0) {
-        return ORBIS_NP_UTIL_ERROR_NOT_MATCH;
-    }
-    return 0;
-}
-
-int32_t sceNpCmpNpId(const OrbisNpId* id1, const OrbisNpId* id2) {
-    if (!id1 || !id2) {
-        return ORBIS_NP_ERROR_INVALID_ARGUMENT;
-    }
-    if (strncmp(id1->handle.data, id2->handle.data, ORBIS_NP_ONLINEID_MAX_LENGTH) != 0) {
-        return ORBIS_NP_UTIL_ERROR_NOT_MATCH;
-    }
-    for (int i = 0; i < 8; i++) {
-        if (id1->opt[i] != id2->opt[i]) return ORBIS_NP_UTIL_ERROR_NOT_MATCH;
-    }
-    for (int i = 0; i < 8; i++) {
-        if (id1->reserved[i] != id2->reserved[i]) return ORBIS_NP_UTIL_ERROR_NOT_MATCH;
-    }
-    return 0;
-}
 
 int32_t sceNpTssCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel, OrbisNpId* npId) {
     return sceNpTusCreateNpTitleCtx(serviceLabel, npId);
@@ -104,20 +78,6 @@ int32_t sceNpTusGetMultiSlotVariableVUserAsync(int32_t reqId, uint64_t targetVir
         return ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     }
     return 0; // Async operation started, returns NO_LOGIN on poll/wait
-}
-
-void shim_sceNpCmpOnlineId(GuestContext *ctx) {
-    const OrbisNpOnlineId* id1 = (const OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rdi);
-    const OrbisNpOnlineId* id2 = (const OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rsi);
-    ctx->rax = (uint64_t)(int64_t)sceNpCmpOnlineId(id1, id2);
-    SHIM_RETURN();
-}
-
-void shim_sceNpCmpNpId(GuestContext *ctx) {
-    const OrbisNpId* id1 = (const OrbisNpId*)NP_GPTR(ctx, ctx->rdi);
-    const OrbisNpId* id2 = (const OrbisNpId*)NP_GPTR(ctx, ctx->rsi);
-    ctx->rax = (uint64_t)(int64_t)sceNpCmpNpId(id1, id2);
-    SHIM_RETURN();
 }
 
 void shim_sceNpTssGetSmallStorage(GuestContext *ctx) {

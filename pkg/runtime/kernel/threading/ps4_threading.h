@@ -78,6 +78,10 @@ typedef struct RecompThread {
   GuestContext *ctx;
   uint64_t start_routine;
   uint64_t arg;
+  // A thread made by ps4_create_host_entry_thread runs host_entry(ctx, host_arg) instead of
+  // the guest start_routine.
+  void (*host_entry)(GuestContext *ctx, void *arg);
+  void *host_arg;
   uint64_t ret_val;
   char name[64];
 
@@ -105,6 +109,22 @@ void recomp_set_current_thread(RecompThread *t);
 const char *recomp_get_current_thread_name(void);
 void shim_sceKernelIsStack(GuestContext *ctx);
 void recomp_thread_collect(void);
+
+// Thread entry points for HLE libraries that create and join guest-visible threads themselves
+// (libSceNpCommon's sceNpCreateThread and callout thread). They return 0 or a POSIX errno, as
+// the pthread_* shims do. thread_out is the guest address of a ScePthread variable that
+// receives the new thread's handle (0 for none); attr may be NULL for the defaults.
+int ps4_create_guest_thread(GuestContext *ctx, uint64_t thread_out, const PthreadAttr *attr,
+                            uint64_t start_routine, uint64_t arg, const char *name);
+// Like ps4_create_guest_thread, but the thread runs the host function entry(child_ctx, arg) on
+// its own guest context and stack: a library worker that shadPS4 starts with a host start
+// routine on a guest pthread. The thread's return value is 0.
+int ps4_create_host_entry_thread(GuestContext *ctx, uint64_t thread_out, const PthreadAttr *attr,
+                                 void (*entry)(GuestContext *child_ctx, void *arg), void *arg,
+                                 const char *name);
+// Joins the thread with the given ScePthread handle; *ret (when not NULL) receives its return
+// value.
+int ps4_join_guest_thread(uint64_t handle, uint64_t *ret);
 
 // POSIX Pthread shims
 void shim_pthread_create(GuestContext *ctx);

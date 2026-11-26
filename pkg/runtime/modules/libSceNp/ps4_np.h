@@ -123,8 +123,6 @@ typedef struct OrbisNpScoreGameInfo {
 } OrbisNpScoreGameInfo;
 
 // C APIs
-int32_t sceNpCmpOnlineId(const OrbisNpOnlineId* id1, const OrbisNpOnlineId* id2);
-int32_t sceNpCmpNpId(const OrbisNpId* id1, const OrbisNpId* id2);
 
 
 int32_t sceNpMatching2Initialize(void* param);
@@ -182,8 +180,6 @@ int32_t sceNpTssCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel, OrbisNpId* np
 int32_t sceNpWebApiDeleteHandle(int32_t handle);
 
 // GuestContext shims
-void shim_sceNpCmpOnlineId(GuestContext *ctx);
-void shim_sceNpCmpNpId(GuestContext *ctx);
 
 
 void shim_sceNpMatching2Initialize(GuestContext *ctx);

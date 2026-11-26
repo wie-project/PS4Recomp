@@ -329,6 +329,12 @@ static void *recomp_host_thread_runner(void *arg) {
 #endif
   }
 
+  if (t->host_entry) {
+    t->host_entry(ctx, t->host_arg);
+    recomp_thread_exit(t, NULL);
+    return NULL;
+  }
+
   // Push dummy return address on guest stack
   ctx->rsp -= 8;
   MEM_U64(ctx->rsp) = 0xdeadbeefULL;
@@ -415,7 +421,8 @@ static int do_thread_detach(RecompThread *t) {
 }
 
 static int do_create_thread(GuestContext *ctx, uint64_t thread_ptr_addr, const PthreadAttr *attr,
-                            uint64_t start_routine, uint64_t arg, const char *name) {
+                            uint64_t start_routine, uint64_t arg, const char *name,
+                            void (*host_entry)(GuestContext *, void *), void *host_arg) {
   recomp_thread_collect();
 
   RecompThread *t = (RecompThread *)calloc(1, sizeof(RecompThread));
@@ -436,6 +443,8 @@ static int do_create_thread(GuestContext *ctx, uint64_t thread_ptr_addr, const P
   t->thread_id = (uint64_t)tid;
   t->start_routine = start_routine;
   t->arg = arg;
+  t->host_entry = host_entry;
+  t->host_arg = host_arg;
 
   uint64_t stack_size = 2 * 1024 * 1024;
   if (attr) {
@@ -496,6 +505,25 @@ static int do_create_thread(GuestContext *ctx, uint64_t thread_ptr_addr, const P
   return 0;
 }
 
+int ps4_create_guest_thread(GuestContext *ctx, uint64_t thread_out, const PthreadAttr *attr,
+                            uint64_t start_routine, uint64_t arg, const char *name) {
+  return do_create_thread(ctx, thread_out, attr, start_routine, arg, name, NULL, NULL);
+}
+
+int ps4_create_host_entry_thread(GuestContext *ctx, uint64_t thread_out, const PthreadAttr *attr,
+                                 void (*entry)(GuestContext *child_ctx, void *arg), void *arg,
+                                 const char *name) {
+  if (!entry) return EINVAL;
+  return do_create_thread(ctx, thread_out, attr, 0, 0, name, entry, arg);
+}
+
+int ps4_join_guest_thread(uint64_t handle, uint64_t *ret) {
+  void *retval = NULL;
+  const int err = do_thread_join(find_thread(handle), &retval);
+  if (err == 0 && ret) *ret = (uint64_t)retval;
+  return err;
+}
+
 void shim_pthread_create(GuestContext *ctx) {
   uint64_t thread_ptr_addr = ctx->rdi;
   uint64_t attr_addr = ctx->rsi;
@@ -512,7 +540,7 @@ void shim_pthread_create(GuestContext *ctx) {
     }
   }
 
-  int err = do_create_thread(ctx, thread_ptr_addr, p_attr, start_routine, arg, NULL);
+  int err = do_create_thread(ctx, thread_ptr_addr, p_attr, start_routine, arg, NULL, NULL, NULL);
   if (err != 0) {
     set_guest_errno(ctx, err);
     ctx->rax = (uint64_t)err;
@@ -827,7 +855,7 @@ void shim_scePthreadCreate(GuestContext *ctx) {
     }
   }
 
-  int err = do_create_thread(ctx, thread_ptr_addr, p_attr, start_routine, arg, name);
+  int err = do_create_thread(ctx, thread_ptr_addr, p_attr, start_routine, arg, name, NULL, NULL);
   if (err != 0) {
     set_guest_errno(ctx, err);
     ctx->rax = 0x80020000ULL | (uint64_t)err;

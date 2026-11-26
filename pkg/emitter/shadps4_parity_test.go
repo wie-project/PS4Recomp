@@ -18,6 +18,7 @@ const shadps4Libraries = "../../tools/shadps4/src/core/libraries"
 // function by function: every function shadPS4 registers has a shim.
 var auditedShadPS4Libraries = []string{
 	"app_content",
+	"audio/audioin.cpp",
 	"camera",
 	"companion",
 	"content_export",
@@ -45,6 +46,7 @@ var auditedShadPS4Libraries = []string{
 	"move",
 	"np/np_auth",
 	"np/np_commerce",
+	"np/np_common.cpp",
 	"np/np_manager.cpp",
 	"np/np_entitlement_access.cpp",
 	"np/np_party.cpp",

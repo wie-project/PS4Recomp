@@ -534,6 +534,14 @@ static void abs_from_usec(struct timespec *ts, uint64_t usec) {
   }
 }
 
+int ps4_guest_mutex_init(GuestContext *ctx, uint64_t addr, int type) {
+  if (!addr) return EINVAL;
+  const uint64_t h = sync_handle(ctx, addr, 1);
+  (void)get_host_mutex_with_type(h, type);
+  *(uint32_t *)(ctx->mem_base + h + SYNC_OBJ_MUTEX_FLAGS) = (uint32_t)type & 0xff;
+  return 0;
+}
+
 void shim_pthread_mutex_init(GuestContext *ctx) {
   uint64_t mtx_addr = ctx->rdi;
   uint64_t attr_addr = ctx->rsi;
@@ -541,9 +549,8 @@ void shim_pthread_mutex_init(GuestContext *ctx) {
   if (attr_addr) {
     guest_type = *(int *)(ctx->mem_base + attr_addr);
   }
-  const uint64_t h = sync_handle(ctx, mtx_addr, 1);
-  (void)get_host_mutex_with_type(h, guest_type);
-  *(uint32_t *)(ctx->mem_base + h + SYNC_OBJ_MUTEX_FLAGS) = (uint32_t)guest_type & 0xff;
+  // A NULL mutex address is the guest's own fault; the shim has always ignored it.
+  (void)ps4_guest_mutex_init(ctx, mtx_addr, guest_type);
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -555,18 +562,51 @@ typedef struct GmCall {
   uint64_t t0, t1;
 } GmCall;
 
-static inline GuestMutex *gm_call_begin(GuestContext *ctx, GmCall *c) {
+static inline GuestMutex *gm_call_begin_at(GuestContext *ctx, uint64_t addr, GmCall *c) {
   c->s = mstat_slot();
   c->t0 = mstat_now();
-  GuestMutex *m = gm_lookup(ctx, ctx->rdi);
+  GuestMutex *m = gm_lookup(ctx, addr);
   c->t1 = mstat_now();
   return m;
+}
+
+static inline GuestMutex *gm_call_begin(GuestContext *ctx, GmCall *c) {
+  return gm_call_begin_at(ctx, ctx->rdi, c);
 }
 
 static inline void gm_call_end(const GmCall *c) {
   if (!g_mstat_detail) return;
   MSTAT_ADD(c->s, lookup, c->t1 - c->t0);
   MSTAT_ADD(c->s, shim, mach_absolute_time() - c->t0);
+}
+
+int ps4_guest_mutex_lock(GuestContext *ctx, uint64_t addr) {
+  if (!addr) return EINVAL;
+  GmCall c;
+  GuestMutex *m = gm_call_begin_at(ctx, addr, &c);
+  const int r = gm_lock(m, guest_owner_id(ctx), NULL, c.s, c.t1);
+  MSTAT_ADD(c.s, locks, 1);
+  gm_call_end(&c);
+  return r;
+}
+
+int ps4_guest_mutex_trylock(GuestContext *ctx, uint64_t addr) {
+  if (!addr) return EINVAL;
+  GmCall c;
+  GuestMutex *m = gm_call_begin_at(ctx, addr, &c);
+  const int r = gm_trylock(m, guest_owner_id(ctx), c.s, c.t1);
+  MSTAT_ADD(c.s, trylocks, 1);
+  gm_call_end(&c);
+  return r;
+}
+
+int ps4_guest_mutex_unlock(GuestContext *ctx, uint64_t addr) {
+  if (!addr) return EINVAL;
+  GmCall c;
+  GuestMutex *m = gm_call_begin_at(ctx, addr, &c);
+  const int r = gm_unlock(m, guest_owner_id(ctx), c.s, c.t1);
+  gm_call_end(&c);
+  return r;
 }
 
 void shim_pthread_mutex_lock(GuestContext *ctx) {
@@ -630,8 +670,8 @@ void shim_pthread_mutex_isowned_np(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-void shim_pthread_mutex_destroy(GuestContext *ctx) {
-  uint64_t handle = sync_handle_take(ctx, ctx->rdi);
+int ps4_guest_mutex_destroy(GuestContext *ctx, uint64_t addr) {
+  uint64_t handle = sync_handle_take(ctx, addr);
   const uint64_t id = gm_id(handle);
   GuestMutex *m = NULL;
   pthread_mutex_lock(&g_mutex_map_lock);
@@ -656,7 +696,11 @@ void shim_pthread_mutex_destroy(GuestContext *ctx) {
   }
   pthread_mutex_unlock(&g_mutex_map_lock);
   sync_obj_free(handle);
-  ctx->rax = 0;
+  return 0;
+}
+
+void shim_pthread_mutex_destroy(GuestContext *ctx) {
+  ctx->rax = (uint64_t)ps4_guest_mutex_destroy(ctx, ctx->rdi);
   SHIM_RETURN();
 }
 
@@ -878,9 +922,30 @@ static int gc_signal(CondNode *cn, bool all) {
   return r;
 }
 
+int ps4_guest_cond_init(GuestContext *ctx, uint64_t addr) {
+  if (!addr) return EINVAL;
+  (void)get_host_cond(sync_handle(ctx, addr, 1));
+  return 0;
+}
+
+int ps4_guest_cond_signal(GuestContext *ctx, uint64_t addr) {
+  if (!addr) return EINVAL;
+  return gc_signal(get_host_cond(sync_handle(ctx, addr, 0)), false);
+}
+
+int ps4_guest_cond_wait(GuestContext *ctx, uint64_t cond_addr, uint64_t mutex_addr, uint64_t usec) {
+  if (!cond_addr || !mutex_addr) return EINVAL;
+  CondNode *c = get_host_cond(sync_handle(ctx, cond_addr, 0));
+  GuestMutex *m = get_host_mutex(sync_handle(ctx, mutex_addr, 0));
+  if (usec == 0) return gm_cond_wait(m, c, guest_owner_id(ctx), NULL);
+  struct timespec ts;
+  abs_from_usec(&ts, usec);
+  return gm_cond_wait(m, c, guest_owner_id(ctx), &ts);
+}
+
 void shim_pthread_cond_init(GuestContext *ctx) {
-  uint64_t cond_addr = ctx->rdi;
-  (void)get_host_cond(sync_handle(ctx, cond_addr, 1));
+  // A NULL condition address is the guest's own fault; the shim has always ignored it.
+  (void)ps4_guest_cond_init(ctx, ctx->rdi);
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -925,8 +990,8 @@ void shim_pthread_cond_broadcast(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-void shim_pthread_cond_destroy(GuestContext *ctx) {
-  uint64_t cond_addr = sync_handle_take(ctx, ctx->rdi);
+int ps4_guest_cond_destroy(GuestContext *ctx, uint64_t addr) {
+  uint64_t cond_addr = sync_handle_take(ctx, addr);
   uint64_t bucket = sync_obj_hash(cond_addr) % COND_MAP_SIZE;
   pthread_mutex_lock(&g_cond_map_lock);
   CondNode **curr = &g_cond_map[bucket];
@@ -942,7 +1007,11 @@ void shim_pthread_cond_destroy(GuestContext *ctx) {
   }
   pthread_mutex_unlock(&g_cond_map_lock);
   sync_obj_free(cond_addr);
-  ctx->rax = 0;
+  return 0;
+}
+
+void shim_pthread_cond_destroy(GuestContext *ctx) {
+  ctx->rax = (uint64_t)ps4_guest_cond_destroy(ctx, ctx->rdi);
   SHIM_RETURN();
 }
 

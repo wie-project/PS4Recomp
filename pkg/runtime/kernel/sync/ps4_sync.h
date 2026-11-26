@@ -79,6 +79,23 @@ void shim_scePthreadCondTimedwait(GuestContext *ctx);
 void shim_scePthreadCondattrInit(GuestContext *ctx);
 void shim_scePthreadCondattrDestroy(GuestContext *ctx);
 
+// Host entry points for HLE libraries that use guest ScePthreadMutex / ScePthreadCond variables
+// themselves (libSceNpCommon). addr is the guest address of the variable and ctx the calling
+// thread's context; they return 0 or a POSIX errno, as the pthread_* shims do, and EINVAL for
+// a NULL address.
+// type is the guest mutex type (1 error check, 2 recursive, 3 normal, 4 adaptive).
+int ps4_guest_mutex_init(GuestContext *ctx, uint64_t addr, int type);
+int ps4_guest_mutex_lock(GuestContext *ctx, uint64_t addr);
+int ps4_guest_mutex_trylock(GuestContext *ctx, uint64_t addr);
+int ps4_guest_mutex_unlock(GuestContext *ctx, uint64_t addr);
+int ps4_guest_mutex_destroy(GuestContext *ctx, uint64_t addr);
+int ps4_guest_cond_init(GuestContext *ctx, uint64_t addr);
+int ps4_guest_cond_destroy(GuestContext *ctx, uint64_t addr);
+int ps4_guest_cond_signal(GuestContext *ctx, uint64_t addr);
+// Waits on the condition with the mutex held by the caller; usec == 0 waits without a timeout,
+// otherwise ETIMEDOUT is returned once usec microseconds have passed.
+int ps4_guest_cond_wait(GuestContext *ctx, uint64_t cond_addr, uint64_t mutex_addr, uint64_t usec);
+
 // Prints guest mutex statistics gathered over the last `frames` frames.
 void ps4_sync_print_stats(int frames);
 // Relocks of a mutex by its owner since start, by mutex type: out[0..4] for types 0..4,
