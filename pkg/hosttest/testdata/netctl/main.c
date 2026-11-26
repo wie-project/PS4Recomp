@@ -38,17 +38,30 @@ void shim_Func_D8DCB6973537A3DC(GuestContext *ctx);
 
 static uint8_t g_stack[0x4000] __attribute__((aligned(16)));
 
+// The context in the guest thread's TCB slot while a shim runs, and how many shim calls did not
+// give their caller its callee-saved registers and stack pointer back.
+static GuestContext *g_tcb;
+static int g_caller_regs_lost;
+
 static int32_t call(void (*shim)(GuestContext *), uint64_t a0, uint64_t a1, uint64_t a2) {
     GuestContext ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.mem_base = GUEST_MEM;
     ctx.mem_size = ~0ull;
     ctx.rsp = A(g_stack + sizeof(g_stack) - 8);
+    ctx.rbx = 0x1111;
+    ctx.rbp = 0x2222;
+    ctx.r12 = 0x3333;
     ctx.rdi = a0;
     ctx.rsi = a1;
     ctx.rdx = a2;
     ctx.rax = 99;
+    g_tcb = &ctx;
     shim(&ctx);
+    g_tcb = NULL;
+    if (ctx.rsp != A(g_stack + sizeof(g_stack)) || ctx.rbx != 0x1111 || ctx.rbp != 0x2222 || ctx.r12 != 0x3333) {
+        g_caller_regs_lost++;
+    }
     return (int32_t)ctx.rax;
 }
 
@@ -68,9 +81,15 @@ static struct {
 } g_calls[16];
 static int g_ncalls, g_misaligned;
 
-#define CALLBACK(fn, k)                                            \
-    static void fn(GuestContext *ctx) {                            \
-        if ((ctx->rsp + 8) % 16 != 0) g_misaligned++;              \
+// Each callback calls a shim with a callee-saved register in use: the trampoline stores the
+// callback's registers into the context of the TCB slot (_recomp_call_shim) and reloads them.
+#define CALLBACK(fn, k)                                                     \
+    static void fn(GuestContext *ctx) {                                     \
+        if ((ctx->rsp + 8) % 16 != 0) g_misaligned++;                       \
+        const uint64_t saved_rbx = ctx->rbx;                                \
+        ctx->rbx = 0xCA11BAC5;                                              \
+        if (g_tcb) memcpy(&g_tcb->rax, &ctx->rax, 17 * sizeof(uint64_t));   \
+        ctx->rbx = saved_rbx;                                               \
         g_calls[g_ncalls].kind = k;                                \
         g_calls[g_ncalls].event = (int32_t)ctx->rdi;               \
         g_calls[g_ncalls].arg = ctx->rsi;                          \
@@ -114,6 +133,7 @@ static int case_disconnected(void) {
           g_calls[0].arg == 11);
     CHECK(call(shim_sceNetCtlCheckCallback, 0, 0, 0) == 0 && g_ncalls == 1);
     CHECK(g_misaligned == 0);
+    CHECK(g_caller_regs_lost == 0);
     CHECK(call(shim_sceNetCtlTerm, 0, 0, 0) == 0);
     return 0;
 }
@@ -198,6 +218,7 @@ static int case_connected(void) {
     CHECK(sceNetCtlUnregisterCallbackForNpToolkit(1) == E(ID_NOT_FOUND));
     CHECK(sceNetCtlUnregisterCallbackForNpToolkit(0) == 0);
     CHECK(g_misaligned == 0);
+    CHECK(g_caller_regs_lost == 0);
 
     // A function shadPS4 leaves as a stub.
     CHECK(call(shim_Func_D8DCB6973537A3DC, 0, 0, 0) == 0);

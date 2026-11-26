@@ -324,11 +324,8 @@ void shim_sceFontMemoryTerm(GuestContext *ctx) {
     if (mem->on_destroy) {
         mem->mem_kind = 0;
         uint64_t cb = (uint64_t)(uintptr_t)mem->on_destroy;
-        GuestContext sub = *ctx;
-        sub.rdi = memGuest;
-        sub.rsi = (uint64_t)(uintptr_t)mem->mspace_handle;
-        sub.rdx = (uint64_t)(uintptr_t)mem->destroy_ctx;
-        recomp_call_guest(&sub, cb);
+        recomp_shim_call_guest(ctx, cb, 0, memGuest, (uint64_t)(uintptr_t)mem->mspace_handle,
+                               (uint64_t)(uintptr_t)mem->destroy_ctx, 0);
     }
     memset(mem, 0, sizeof(*mem));
     ctx->rax = ORBIS_FONT_OK;
@@ -742,13 +739,8 @@ void shim_sceFontCreateString(GuestContext *ctx) {
             for (uint32_t i = 0; i < 256; i++) {
                 memset(ctx->mem_base + parseResultGuest, 0, sizeof(OrbisFontTextParseResult));
 
-                GuestContext sub = *ctx;
-                sub.rdi = srcGuest;
-                sub.rsi = orderPtrGuest;
-                sub.rdx = parseResultGuest;
-                recomp_call_guest(&sub, parserFn);
-
-                int32_t state = (int32_t)sub.rax;
+                const int32_t state = (int32_t)recomp_shim_call_guest(ctx, parserFn, 0, srcGuest, orderPtrGuest,
+                                                                      parseResultGuest, 0);
                 if (state == 1) { // kTextParserResultFontCode
                     OrbisFontTextParseResult *res = (OrbisFontTextParseResult *)(ctx->mem_base + parseResultGuest);
                     uint64_t order = *(uint64_t *)(ctx->mem_base + orderPtrGuest);

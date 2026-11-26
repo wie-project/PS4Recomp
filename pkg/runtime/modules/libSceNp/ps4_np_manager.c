@@ -459,15 +459,9 @@ void ps4_np_manager_notify_user_event(int32_t eventType, int32_t userId) {
     pthread_mutex_unlock(&g_cb_mutex);
 }
 
-// Calls a guest callback with up to four integer arguments on a copy of ctx.
+// Calls a guest callback with up to four integer arguments.
 static void call_guest(GuestContext *ctx, uint64_t func, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3) {
-    GuestContext sub = *ctx;
-    sub.rsp = (sub.rsp - 128) & ~(uint64_t)15; // below the caller's red zone
-    sub.rdi = a0;
-    sub.rsi = a1;
-    sub.rdx = a2;
-    sub.rcx = a3;
-    recomp_call_guest(&sub, func);
+    recomp_shim_call_guest(ctx, func, 0, a0, a1, a2, a3);
 }
 
 // Records the reachability of a user; true when it changed. g_cb_mutex held.

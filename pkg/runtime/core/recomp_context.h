@@ -695,6 +695,33 @@ static inline void recomp_call_guest(GuestContext *ctx, uint64_t target) {
   recomp_dispatch(ctx, target);
 }
 
+// Calls guest function `func(a0, a1, a2, a3)` from inside a shim (a library callback made on the
+// calling guest thread) and returns its rax. `ctx` must be the context the shim was called with.
+// The callback runs on ctx itself, not on a copy: ctx is the context in the thread's TCB slot,
+// and when the callback calls a shim in turn the trampoline stores the guest registers there
+// (_recomp_call_shim), so with a copy the shim's caller would resume with the callback's
+// registers. The caller's register file (the 16 GPRs, rip and xmm0-7, what the trampoline
+// reloads after the shim) is saved and restored around the call. `rsp` is the callback's stack
+// pointer before the return address is pushed (16-byte aligned); 0 puts it below the caller's
+// red zone.
+static inline uint64_t recomp_shim_call_guest(GuestContext *ctx, uint64_t func, uint64_t rsp, uint64_t a0,
+                                              uint64_t a1, uint64_t a2, uint64_t a3) {
+  uint64_t gprs[17]; // rax .. r15, rip
+  xmm_reg_t xmm[8];
+  memcpy(gprs, &ctx->rax, sizeof(gprs));
+  memcpy(xmm, ctx->xmm, sizeof(xmm));
+  ctx->rsp = rsp ? rsp : (ctx->rsp - 128) & ~(uint64_t)15;
+  ctx->rdi = a0;
+  ctx->rsi = a1;
+  ctx->rdx = a2;
+  ctx->rcx = a3;
+  recomp_call_guest(ctx, func);
+  const uint64_t ret = ctx->rax;
+  memcpy(&ctx->rax, gprs, sizeof(gprs));
+  memcpy(ctx->xmm, xmm, sizeof(xmm));
+  return ret;
+}
+
 // Exception unwinding helpers
 #define RECOMP_POP_UNWIND() do { if (__cur_unwind_frame) ctx->unwind_frame = __cur_unwind_frame->prev; } while (0)
 void recomp_unwind_to(GuestContext *ctx, uint64_t target_ip);

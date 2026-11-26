@@ -62,13 +62,9 @@ static void queue_push(OrbisUserServiceEvent e) {
 
 // Calls the guest callback with a pointer to a copy of e on the guest stack.
 static void invoke_callback(GuestContext *ctx, const EventCallback *cb, OrbisUserServiceEvent e) {
-    GuestContext sub = *ctx;
-    uint64_t ev = (sub.rsp - 128 - sizeof(e)) & ~(uint64_t)15; // below the red zone
+    const uint64_t ev = (ctx->rsp - 128 - sizeof(e)) & ~(uint64_t)15; // below the red zone
     memcpy(ctx->mem_base + ev, &e, sizeof(e));
-    sub.rsp = ev;
-    sub.rdi = ev;
-    sub.rsi = cb->userdata;
-    recomp_call_guest(&sub, cb->func);
+    recomp_shim_call_guest(ctx, cb->func, ev, ev, cb->userdata, 0, 0);
 }
 
 void ps4_user_service_add_event(GuestContext *ctx, int32_t eventType, OrbisUserServiceUserId userId) {

@@ -327,11 +327,7 @@ static void check_callbacks(GuestContext *ctx, NetCtlCallbackSlot *slots) {
     }
     pthread_mutex_unlock(&g_netctl_mutex);
     for (int i = 0; i < n; i++) {
-        GuestContext sub = *ctx;
-        sub.rsp = (sub.rsp - 128) & ~(uint64_t)15; // below the caller's red zone
-        sub.rdi = (uint64_t)(int64_t)event;
-        sub.rsi = due[i].arg;
-        recomp_call_guest(&sub, due[i].func);
+        recomp_shim_call_guest(ctx, due[i].func, 0, (uint64_t)(int64_t)event, due[i].arg, 0, 0);
     }
 }
 
