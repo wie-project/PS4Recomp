@@ -38,9 +38,19 @@
 // encrypted_secret starts at 0x270; the entitlement key is 16 bytes at offset 0x70 in it.
 #define RIF_ENTITLEMENT_KEY_OFFSET (0x270 + 0x70)
 
+// Content type of a license-only entitlement (add-on content with no data to install).
+#define RIF_CONTENT_TYPE_PS4AL 0x1C00
+
 // The licenses directory: $PS4RECOMP_DATA_DIR/licenses, else
 // ~/Library/Application Support/PS4Recomp/licenses (shadPS4 user/licenses).
 void ps4_np_entitlement_licenses_dir(char *out, size_t out_size);
+
+// Calls visit for each license-only entitlement (content type RIF_CONTENT_TYPE_PS4AL) in the
+// license container <service_id>.idx / <service_id>.rif of the licenses directory, with its
+// label and its 16-byte entitlement key (shadPS4 RIF::GetLicenseOnlyEntitlements). Returns 0
+// when the container is absent, -1 when it is invalid, 1 when it was read.
+typedef void (*Ps4RifEntitlementVisitor)(const char *label, const uint8_t *key, void *arg);
+int ps4_rif_license_only_entitlements(const char *service_id, Ps4RifEntitlementVisitor visit, void *arg);
 
 int32_t sceNpEntitlementAccessInitialize(const void *param, const void *reserved);
 int32_t sceNpEntitlementAccessGetSkuFlag(uint32_t *flag);

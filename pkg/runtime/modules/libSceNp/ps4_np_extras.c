@@ -113,14 +113,6 @@ static bool npx_object_remove(NpxObjectTable *t, int32_t owner, int32_t id) {
 // libSceNpManager
 //=============================================================================
 
-// int sceNpGetParentalControlInfo(int reqId, const SceNpOnlineId *onlineId,
-//                                 int8_t *age, SceNpParentalControlInfo *info)
-void shim_sceNpGetParentalControlInfo(GuestContext *ctx) {
-    NPX_LOG_ONCE("sceNpGetParentalControlInfo -> SIGNED_OUT");
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_ERROR_SIGNED_OUT;
-    SHIM_RETURN();
-}
-
 // int sceNpInGameMessageInitialize(size_t poolSize, void *option) -> libCtxId
 void shim_sceNpInGameMessageInitialize(GuestContext *ctx) {
     NPX_LOG_ONCE("sceNpInGameMessageInitialize -> libCtxId 1 (offline)");
@@ -409,19 +401,6 @@ void shim_sceNpSessionSignalingGetLocalNetInfo(GuestContext *ctx) {
 }
 
 void shim_sceNpSessionSignalingRequestPrepare(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceNpGetParentalControlInfoA(GuestContext *ctx) {
-    NPX_LOG_ONCE("sceNpGetParentalControlInfoA -> SIGNED_OUT");
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_ERROR_SIGNED_OUT;
-    SHIM_RETURN();
-}
-
-void shim_sceNpGetUserIdByAccountId(GuestContext *ctx) {
-    int32_t *userId = (int32_t *)NPX_GPTR(ctx, ctx->rsi);
-    if (userId) *userId = 0x10000000;
     ctx->rax = 0;
     SHIM_RETURN();
 }

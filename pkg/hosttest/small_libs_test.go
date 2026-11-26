@@ -97,7 +97,7 @@ func TestGameCustomDataDialog(t *testing.T) {
 // ID checks, dependencies and load counts, game modules started with their initializers, the
 // libkernel preload and the module names hidden from unwinding.
 func TestSysmodule(t *testing.T) {
-	bin := buildHostCFlags(t, "sysmodule", []string{"-I../runtime/modules/libkernel"},
+	bin := buildHostCFlags(t, "sysmodule", []string{kernelInclude},
 		"../runtime/modules/libkernel/ps4_sysmodule_lib.c",
 		"../runtime/modules/libkernel/ps4_sysmodule.c",
 	)

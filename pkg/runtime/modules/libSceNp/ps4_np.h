@@ -19,7 +19,8 @@ extern "C" {
 #define ORBIS_NP_ERROR_USER_NOT_FOUND         0x80550007
 #define ORBIS_NP_ERROR_CALLBACK_MAX           0x8055001D
 #define ORBIS_NP_ERROR_CALLBACK_NOT_REGISTERED 0x80550009
-#define ORBIS_NP_ERROR_CALLBACK_ALREADY_REGISTERED 0x8055001E
+#define ORBIS_NP_ERROR_CALLBACK_ALREADY_REGISTERED 0x80550008
+#define ORBIS_NP_ERROR_REQUEST_MAX            0x80550013
 #define ORBIS_NP_ERROR_REQUEST_NOT_FOUND      0x80550014
 #define ORBIS_NP_ERROR_INVALID_SIZE           0x80550011
 #define ORBIS_NP_ERROR_ABORTED                0x80550012
@@ -27,10 +28,6 @@ extern "C" {
 #define ORBIS_NP_UTIL_ERROR_NOT_MATCH         0x80550609
 
 // NP Auth error codes
-#define ORBIS_NP_AUTH_ERROR_INVALID_ARGUMENT  0x80550301
-#define ORBIS_NP_AUTH_ERROR_INVALID_SIZE      0x80550302
-#define ORBIS_NP_AUTH_ERROR_NO_TOKEN_RECEIVED 0x80550308
-#define ORBIS_NP_AUTH_ERROR_REQUEST_NOT_FOUND 0x80550306
 
 // NP Matching2 error codes
 #define ORBIS_NP_MATCHING2_ERROR_NOT_INITIALIZED 0x80550C03
@@ -107,26 +104,6 @@ typedef struct OrbisNpCreateAsyncRequestParameter {
     uint8_t padding[4];
 } OrbisNpCreateAsyncRequestParameter;
 
-typedef struct OrbisNpAuthCreateAsyncRequestParameter {
-    uint64_t size;
-    uint64_t cpu_affinity_mask;
-    int32_t thread_priority;
-    uint8_t padding[4];
-} OrbisNpAuthCreateAsyncRequestParameter;
-
-typedef struct OrbisNpAuthGetAuthorizationCodeParameterA {
-    uint64_t size;
-    int32_t user_id;
-    uint8_t padding[4];
-    const char* client_id;
-    const char* scope;
-} OrbisNpAuthGetAuthorizationCodeParameterA;
-
-typedef struct OrbisNpAuthorizationCode {
-    char code[129];
-    uint8_t padding[7];
-} OrbisNpAuthorizationCode;
-
 typedef struct OrbisNpScoreBoardInfo {
     uint32_t rankLimit;
     uint32_t updateMode;
@@ -146,52 +123,9 @@ typedef struct OrbisNpScoreGameInfo {
 } OrbisNpScoreGameInfo;
 
 // C APIs
-int32_t sceNpCheckNpAvailability(int32_t req_id, OrbisNpOnlineId* online_id);
-int32_t sceNpCheckNpAvailabilityA(int32_t req_id, int32_t user_id);
-int32_t sceNpCheckPlus(int32_t req_id, const OrbisNpCheckPlusParameter* param, OrbisNpCheckPlusResult* result);
-int32_t sceNpCreateAsyncRequest(const OrbisNpCreateAsyncRequestParameter* param);
-int32_t sceNpCreateRequest(void);
-int32_t sceNpDeleteRequest(int32_t req_id);
-int32_t sceNpGetAccountCountry(OrbisNpOnlineId* online_id, OrbisNpCountryCode* country_code);
-int32_t sceNpGetAccountCountryA(int32_t user_id, OrbisNpCountryCode* country_code);
-int32_t sceNpGetAccountDateOfBirth(OrbisNpOnlineId* online_id, OrbisNpDate* date_of_birth);
-int32_t sceNpGetAccountDateOfBirthA(int32_t user_id, OrbisNpDate* date_of_birth);
-int32_t sceNpGetAccountId(OrbisNpOnlineId* online_id, uint64_t* account_id);
-int32_t sceNpGetAccountIdA(int32_t user_id, uint64_t* account_id);
-int32_t sceNpGetAccountLanguage(OrbisNpOnlineId* online_id, OrbisNpLanguageCode* language);
-int32_t sceNpGetAccountLanguageA(int32_t user_id, OrbisNpLanguageCode* language);
-int32_t sceNpGetGamePresenceStatus(OrbisNpOnlineId* online_id, int32_t* game_status);
-int32_t sceNpGetGamePresenceStatusA(int32_t user_id, int32_t* game_status);
-int32_t sceNpGetNpId(int32_t user_id, OrbisNpId* np_id);
-int32_t sceNpGetNpReachabilityState(int32_t user_id, int32_t* state);
-int32_t sceNpGetOnlineId(int32_t user_id, OrbisNpOnlineId* online_id);
-int32_t sceNpGetState(int32_t user_id, int32_t* state);
-int32_t sceNpHasSignedUp(int32_t user_id, bool* has_signed_up);
-int32_t sceNpIsPlusMember(int32_t user_id, bool* result);
-int32_t sceNpPollAsync(int32_t req_id, int32_t* result);
-int32_t sceNpWaitAsync(int32_t req_id, int32_t* result);
-int32_t sceNpRegisterStateCallback(void* callback, void* userdata);
-int32_t sceNpRegisterStateCallbackA(void* callback, void* userdata);
-int32_t sceNpUnregisterStateCallback(int32_t callback_id);
-int32_t sceNpUnregisterStateCallbackA(int32_t callback_id);
-int32_t sceNpRegisterStateCallbackForToolkit(void* callback, void* userdata);
-int32_t sceNpUnregisterStateCallbackForToolkit(void);
-int32_t sceNpCheckCallbackForLib(void);
-int32_t sceNpCheckCallback(void);
-int32_t sceNpSetNpTitleId(const void* title_id, const void* title_secret);
-int32_t sceNpRegisterPlusEventCallback(void* callback, void* userdata);
-int32_t sceNpUnregisterPlusEventCallback(void);
-void sceNpRegisterGamePresenceCallback(void* callback, void* userdata);
 int32_t sceNpCmpOnlineId(const OrbisNpOnlineId* id1, const OrbisNpOnlineId* id2);
 int32_t sceNpCmpNpId(const OrbisNpId* id1, const OrbisNpId* id2);
 
-int32_t sceNpAuthCreateRequest(void);
-int32_t sceNpAuthCreateAsyncRequest(const OrbisNpAuthCreateAsyncRequestParameter* param);
-int32_t sceNpAuthDeleteRequest(int32_t req_id);
-int32_t sceNpAuthGetAuthorizationCode(int32_t req_id, const void* param, OrbisNpAuthorizationCode* auth_code, int32_t* issuer_id);
-int32_t sceNpAuthGetAuthorizationCodeA(int32_t req_id, const OrbisNpAuthGetAuthorizationCodeParameterA* param, OrbisNpAuthorizationCode* auth_code, int32_t* issuer_id);
-int32_t sceNpAuthPollAsync(int32_t req_id, int32_t* result);
-int32_t sceNpAuthWaitAsync(int32_t req_id, int32_t* result);
 
 int32_t sceNpMatching2Initialize(void* param);
 int32_t sceNpMatching2Terminate(void);
@@ -250,52 +184,9 @@ int32_t sceNpTssCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel, OrbisNpId* np
 int32_t sceNpWebApiDeleteHandle(int32_t handle);
 
 // GuestContext shims
-void shim_sceNpCheckNpAvailability(GuestContext *ctx);
-void shim_sceNpCheckNpAvailabilityA(GuestContext *ctx);
-void shim_sceNpCheckPlus(GuestContext *ctx);
-void shim_sceNpCreateAsyncRequest(GuestContext *ctx);
-void shim_sceNpCreateRequest(GuestContext *ctx);
-void shim_sceNpDeleteRequest(GuestContext *ctx);
-void shim_sceNpGetAccountCountry(GuestContext *ctx);
-void shim_sceNpGetAccountCountryA(GuestContext *ctx);
-void shim_sceNpGetAccountDateOfBirth(GuestContext *ctx);
-void shim_sceNpGetAccountDateOfBirthA(GuestContext *ctx);
-void shim_sceNpGetAccountId(GuestContext *ctx);
-void shim_sceNpGetAccountIdA(GuestContext *ctx);
-void shim_sceNpGetAccountLanguage(GuestContext *ctx);
-void shim_sceNpGetAccountLanguageA(GuestContext *ctx);
-void shim_sceNpGetGamePresenceStatus(GuestContext *ctx);
-void shim_sceNpGetGamePresenceStatusA(GuestContext *ctx);
-void shim_sceNpGetNpId(GuestContext *ctx);
-void shim_sceNpGetNpReachabilityState(GuestContext *ctx);
-void shim_sceNpGetOnlineId(GuestContext *ctx);
-void shim_sceNpGetState(GuestContext *ctx);
-void shim_sceNpHasSignedUp(GuestContext *ctx);
-void shim_sceNpIsPlusMember(GuestContext *ctx);
-void shim_sceNpPollAsync(GuestContext *ctx);
-void shim_sceNpWaitAsync(GuestContext *ctx);
-void shim_sceNpRegisterStateCallback(GuestContext *ctx);
-void shim_sceNpRegisterStateCallbackA(GuestContext *ctx);
-void shim_sceNpUnregisterStateCallback(GuestContext *ctx);
-void shim_sceNpUnregisterStateCallbackA(GuestContext *ctx);
-void shim_sceNpRegisterStateCallbackForToolkit(GuestContext *ctx);
-void shim_sceNpUnregisterStateCallbackForToolkit(GuestContext *ctx);
-void shim_sceNpCheckCallbackForLib(GuestContext *ctx);
-void shim_sceNpCheckCallback(GuestContext *ctx);
-void shim_sceNpSetNpTitleId(GuestContext *ctx);
-void shim_sceNpRegisterPlusEventCallback(GuestContext *ctx);
-void shim_sceNpUnregisterPlusEventCallback(GuestContext *ctx);
-void shim_sceNpRegisterGamePresenceCallback(GuestContext *ctx);
 void shim_sceNpCmpOnlineId(GuestContext *ctx);
 void shim_sceNpCmpNpId(GuestContext *ctx);
 
-void shim_sceNpAuthCreateRequest(GuestContext *ctx);
-void shim_sceNpAuthCreateAsyncRequest(GuestContext *ctx);
-void shim_sceNpAuthDeleteRequest(GuestContext *ctx);
-void shim_sceNpAuthGetAuthorizationCode(GuestContext *ctx);
-void shim_sceNpAuthGetAuthorizationCodeA(GuestContext *ctx);
-void shim_sceNpAuthPollAsync(GuestContext *ctx);
-void shim_sceNpAuthWaitAsync(GuestContext *ctx);
 
 void shim_sceNpMatching2Initialize(GuestContext *ctx);
 void shim_sceNpMatching2Terminate(GuestContext *ctx);

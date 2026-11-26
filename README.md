@@ -176,9 +176,23 @@ When playing without a physical controller, built-in keyboard emulation is activ
 
 `libSceNpEntitlementAccess` reads the SKU flag and add-on content entitlement keys from license files copied from a console, as shadPS4 does: place `<service id>.idx` with its `<service id>.rif` container (or a single `<service id>.rif`) in `~/Library/Application Support/PS4Recomp/licenses` (`$PS4RECOMP_DATA_DIR/licenses` when that variable is set). A game application (`CATEGORY` `gd`) needs no license for its SKU flag.
 
+`libSceAppContent` also lists the license-only add-ons (content type `0x1C00`) of these license files, for the game's own service and for each service its `param.sfo` links through `SERVICE_ID_ADDCONT_ADD_1`..`7`.
+
+### Add-on content
+
+`libSceAppContent` finds add-ons (DLC) as shadPS4 does, per service: unpacked add-on folders, each with its `sce_sys/param.sfo` (`CATEGORY` `ac`), go in `addcont/<title id>` next to the game directory, for example `addcont/CUSA01234/<add-on>` beside `CUSA01234/`. The game's own add-ons may also be placed in `<game directory>/addcont`. A linked service's add-ons go under its own title id (the `CUSAXXXXX` part of `SERVICE_ID_ADDCONT_ADD_<n>`). The entitlement key of an add-on comes from its `sce_sys/license.info` (or `sce_sys/license.dat`). `.zar` add-on archives are not read.
+
+### User
+
+The runtime logs in one user, the initial user on player 1, as shadPS4 does with one controller. Its name is the macOS account name, and libSceUserService reports its login once when the game starts. NP libraries (`libSceNpManager`, `libSceNpAuth` and the dialogs below) behave as shadPS4 without a shadNet sign-in: the player is signed out. Once the game has read the login event, `sceNpCheckCallback` reports the signed-out state to its NP state callbacks, as shadPS4 does.
+
 ### Store dialog
 
 `libSceNpCommerce` opens a native window in place of the PlayStation Store, as shadPS4 does: it shows what the game asked for (store category, product, code redemption, checkout, downloads or Plus) and offers the mode's action ("Simulate purchase", "Redeem code", "Join Plus") or Close. The action only reports a purchase to the game; nothing is bought or downloaded. The store icon a game requests is drawn over the bottom of the game window.
+
+### Invitation and profile dialogs
+
+`libSceInvitationDialog` and `libSceNpProfileDialog` open native windows like shadPS4's. The runtime is never signed in to an NP server, so these windows show what shadPS4 shows without a shadNet sign-in. The invitation dialog has no friends to pick and no pending invitations, and its Send delivers nothing. The profile dialog shows the target player with "This player's profile could not be loaded." and a Close button.
 
 ---
 

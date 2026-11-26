@@ -39,10 +39,6 @@ void shim_sceCoredumpGetStopInfoGpu(GuestContext *ctx) {
 
 NOOP_SHIM(sceKernelSync)
 NOOP_SHIM(sceRemoteplayTerminate)
-NOOP_SHIM(sceNpSetContentRestriction)
-NOOP_SHIM(sceNpNotifyPlusFeature)
-NOOP_SHIM(sceNpAbortRequest)
-NOOP_SHIM(sceNpAuthAbortRequest)
 NOOP_SHIM(sceNpWebApiAbortRequest)
 NOOP_SHIM(sceNpSnsFacebookAbortRequest)
 NOOP_SHIM(sceHttpAbortWaitRequest)

@@ -53,10 +53,16 @@ typedef struct OrbisSystemServiceDisplaySafeAreaInfo {
     uint8_t reserved[128];
 } OrbisSystemServiceDisplaySafeAreaInfo;
 
+// OrbisSystemServiceEventType values (shadPS4 systemservice.h).
+#define ORBIS_SYSTEM_SERVICE_EVENT_ENTITLEMENT_UPDATE 0x10000003
+
 typedef struct OrbisSystemServiceEvent {
     int32_t event_type;
     uint8_t data[8192];
 } OrbisSystemServiceEvent;
+
+// Queues an event for sceSystemServiceReceiveEvent (shadPS4 PushSystemServiceEvent).
+void ps4_system_service_push_event(const OrbisSystemServiceEvent *event);
 
 int32_t sceSystemServiceParamGetInt(int32_t paramId, int32_t *value);
 int32_t sceSystemServiceParamGetString(int32_t paramId, char *buf, size_t bufSize);

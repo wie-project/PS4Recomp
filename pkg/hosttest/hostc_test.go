@@ -16,6 +16,9 @@ import (
 // sources use libSceUserService.
 const userServiceInclude = "-I../runtime/modules/libSceUserService"
 
+// kernelInclude puts the libkernel headers (ps4_kernel_sys.h) on the include path.
+const kernelInclude = "-I../runtime/modules/libkernel"
+
 // buildHostC compiles a host test program from testdata/<name>/main.c and the given runtime
 // sources (paths relative to this package, e.g. ../runtime/modules/...), with each source's
 // directory on the include path.

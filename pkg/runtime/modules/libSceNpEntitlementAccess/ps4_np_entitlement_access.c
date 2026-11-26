@@ -182,6 +182,28 @@ static bool rif_entitlement_key(const RifContainer *c, const char *wanted, uint8
     return false;
 }
 
+int ps4_rif_license_only_entitlements(const char *service_id, Ps4RifEntitlementVisitor visit, void *arg) {
+    char dir[PATH_LEN], idx_path[PATH_LEN], rif_path[PATH_LEN];
+    ps4_np_entitlement_licenses_dir(dir, sizeof(dir));
+    snprintf(idx_path, sizeof(idx_path), "%s/%s.idx", dir, service_id);
+    snprintf(rif_path, sizeof(rif_path), "%s/%s.rif", dir, service_id);
+    if (!exists(idx_path) || !exists(rif_path)) return 0;
+    RifContainer c;
+    if (!rif_open(&c, idx_path, rif_path)) {
+        fprintf(stderr, "[ps4-np-entitlement] could not open license file for %s\n", service_id);
+        return -1;
+    }
+    char label[17];
+    uint8_t rif[RIF_SIZE];
+    for (uint32_t i = 0; i < c.entry_count; i++) {
+        if (!rif_entry(&c, i, label, rif) || rif_label_taken(&c, i, label)) continue;
+        if (le16(rif + RIF_CONTENT_TYPE_OFFSET) != RIF_CONTENT_TYPE_PS4AL) continue;
+        visit(label, rif + RIF_ENTITLEMENT_KEY_OFFSET, arg);
+    }
+    rif_close(&c);
+    return 1;
+}
+
 // A query over the license files of one service id; true stops the search.
 typedef bool (*ServiceVisitor)(const char *dir, const char *service_id, void *arg);
 

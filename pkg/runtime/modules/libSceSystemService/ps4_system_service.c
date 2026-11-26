@@ -1,5 +1,7 @@
 #include "ps4_system_service.h"
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -68,12 +70,43 @@ int32_t sceSystemServiceHideSplashScreen(void) {
     return 0;
 }
 
+// Events for sceSystemServiceReceiveEvent, oldest first (shadPS4 PushSystemServiceEvent).
+typedef struct QueuedEvent {
+    struct QueuedEvent *next;
+    OrbisSystemServiceEvent event;
+} QueuedEvent;
+
+static pthread_mutex_t g_event_mutex = PTHREAD_MUTEX_INITIALIZER;
+static QueuedEvent *g_event_head, *g_event_tail;
+static int32_t g_event_count;
+
+void ps4_system_service_push_event(const OrbisSystemServiceEvent *event) {
+    QueuedEvent *q = malloc(sizeof(*q));
+    if (!q) {
+        fprintf(stderr, "[system-service] out of memory, event 0x%x dropped\n", (unsigned)event->event_type);
+        return;
+    }
+    q->next = NULL;
+    memcpy(&q->event, event, sizeof(*event));
+    pthread_mutex_lock(&g_event_mutex);
+    if (g_event_tail) {
+        g_event_tail->next = q;
+    } else {
+        g_event_head = q;
+    }
+    g_event_tail = q;
+    g_event_count++;
+    pthread_mutex_unlock(&g_event_mutex);
+}
+
 int32_t sceSystemServiceGetStatus(OrbisSystemServiceStatus *status) {
     if (!status) {
         return (int32_t)ORBIS_SYSTEM_SERVICE_ERROR_PARAMETER;
     }
     memset(status, 0, sizeof(*status));
-    status->event_num = 0;
+    pthread_mutex_lock(&g_event_mutex);
+    status->event_num = g_event_count;
+    pthread_mutex_unlock(&g_event_mutex);
     status->is_system_ui_overlaid = false;
     status->is_in_background_execution = false;
     status->is_cpu_mode7_cpu_normal = true;
@@ -95,8 +128,19 @@ int32_t sceSystemServiceReceiveEvent(OrbisSystemServiceEvent *event) {
     if (!event) {
         return (int32_t)ORBIS_SYSTEM_SERVICE_ERROR_PARAMETER;
     }
-    // No queued system events: return ORBIS_SYSTEM_SERVICE_ERROR_NO_EVENT (0x80A10004)
-    return (int32_t)ORBIS_SYSTEM_SERVICE_ERROR_NO_EVENT;
+    pthread_mutex_lock(&g_event_mutex);
+    QueuedEvent *head = g_event_head;
+    if (!head) {
+        pthread_mutex_unlock(&g_event_mutex);
+        return (int32_t)ORBIS_SYSTEM_SERVICE_ERROR_NO_EVENT;
+    }
+    g_event_head = head->next;
+    if (!g_event_head) g_event_tail = NULL;
+    g_event_count--;
+    pthread_mutex_unlock(&g_event_mutex);
+    memcpy(event, &head->event, sizeof(*event));
+    free(head);
+    return 0;
 }
 
 int32_t sceSystemServicePowerTick(void) {
