@@ -91,6 +91,7 @@ Profile ToProfile(const gcn_profile& p) {
     r.needs_unorm_fixup = p.needs_unorm_fixup;
     r.needs_clip_distance_emulation = p.needs_clip_distance_emulation;
     r.lower_left_origin_mode = p.lower_left_origin_mode;
+    r.needs_sampler_lod_bias = p.needs_sampler_lod_bias;
     // Float-controls execution modes are ignored by SPIRV-Cross; leave them unsupported.
     return r;
 }
@@ -1503,7 +1504,8 @@ u64 SpecHash(const Shader::StageSpecialization& sp, const u64 mask[2]) {
             HashMix(h, im.num_bindings);
         }
     }
-    for (const auto& sa : sp.samplers) HashMix(h, (u64(sa.force_unnormalized) << 1) | sa.force_degamma);
+    for (const auto& sa : sp.samplers)
+        HashMix(h, (u64(sa.lod_bias) << 2) | (u64(sa.force_unnormalized) << 1) | sa.force_degamma);
     return h;
 }
 } // namespace

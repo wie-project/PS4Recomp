@@ -1900,11 +1900,82 @@ MTLSamplerDescriptor* MakeSamplerDescriptor(const SamplerDesc& s, bool compare) 
     d.lodMaxClamp = std::max(s.min_lod, s.max_lod);
     d.normalizedCoordinates = YES;
     if (compare) d.compareFunction = (MTLCompareFunction)s.mtl_compare;
-    // The S# LOD bias (games bias detail textures down and blurred reflections up). Earlier macOS
-    // has no sampler LOD bias, and the sampler there samples without it.
+    // The S# LOD bias (games bias detail textures down and blurred reflections up). Where the GPU
+    // ignores it (SamplerAppliesLodBias) the renderer clears it and the shaders add it.
     if (@available(macOS 26.0, *)) d.lodBias = s.lod_bias;
     d.supportArgumentBuffers = YES;
     return d;
+}
+
+bool SamplerAppliesLodBias(id<MTLDevice> dev) {
+    // A sampler state with lodBias 1 reads the centre of a 2x2 level 0 target: level 1 if the GPU
+    // adds the bias. Apple7 GPUs (M1) accept the property and ignore it; macOS before 26 has none.
+    if (@available(macOS 26.0, *)) {
+    } else {
+        return false;
+    }
+    if (!dev) return false;
+    @autoreleasepool {
+        NSError* error = nil;
+        id<MTLLibrary> lib = [dev newLibraryWithSource:@R"(
+#include <metal_stdlib>
+using namespace metal;
+struct V { float4 position [[position]]; float2 uv; };
+vertex V probe_vs(uint i [[vertex_id]]) {
+    const float2 xy[3] = {float2(-1, -1), float2(3, -1), float2(-1, 3)};
+    return {float4(xy[i], 0, 1), xy[i] * float2(0.5, -0.5) + 0.5};
+}
+fragment float4 probe_fs(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
+    return t.sample(s, v.uv);
+}
+)" options:nil error:&error];
+        if (!lib) return false;
+        MTLRenderPipelineDescriptor* pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"probe_vs"];
+        pd.fragmentFunction = [lib newFunctionWithName:@"probe_fs"];
+        pd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        id<MTLRenderPipelineState> pso = [dev newRenderPipelineStateWithDescriptor:pd error:&error];
+        if (!pso) return false;
+
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                      width:2 height:2 mipmapped:YES];
+        id<MTLTexture> tex = [dev newTextureWithDescriptor:td];
+        const uint32_t red[4] = {0xff0000ffu, 0xff0000ffu, 0xff0000ffu, 0xff0000ffu};
+        const uint32_t green = 0xff00ff00u;
+        [tex replaceRegion:MTLRegionMake2D(0, 0, 2, 2) mipmapLevel:0 withBytes:red bytesPerRow:8];
+        [tex replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:1 withBytes:&green bytesPerRow:4];
+        MTLSamplerDescriptor* sd = [MTLSamplerDescriptor new];
+        sd.mipFilter = MTLSamplerMipFilterNearest;
+        sd.lodMaxClamp = 1.f;
+        sd.lodBias = 1.f;
+        sd.supportArgumentBuffers = YES;
+        id<MTLSamplerState> smp = [dev newSamplerStateWithDescriptor:sd];
+
+        MTLTextureDescriptor* rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                      width:2 height:2 mipmapped:NO];
+        rd.usage = MTLTextureUsageRenderTarget;
+        rd.storageMode = MTLStorageModeShared;
+        id<MTLTexture> rt = [dev newTextureWithDescriptor:rd];
+        id<MTLCommandQueue> q = [dev newCommandQueue];
+        if (!tex || !smp || !rt || !q) return false;
+        MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor new];
+        rp.colorAttachments[0].texture = rt;
+        rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandBuffer> cb = [q commandBuffer];
+        id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:rp];
+        [re setRenderPipelineState:pso];
+        [re setFragmentTexture:tex atIndex:0];
+        [re setFragmentSamplerState:smp atIndex:0];
+        [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [re endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        if (cb.status != MTLCommandBufferStatusCompleted) return false;
+        uint8_t px[4];
+        [rt getBytes:px bytesPerRow:8 fromRegion:MTLRegionMake2D(1, 1, 1, 1) mipmapLevel:0];
+        return px[0] == 0 && px[1] == 255 && px[2] == 0;
+    }
 }
 
 // =====================================================================================

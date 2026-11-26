@@ -1,148 +1,205 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+// libSceNetCtl after shadPS4 (network/netctl.cpp, net_ctl_obj.cpp, net/net_util.cpp).
+//
+// The console's connection state is shadPS4's "isConnectedToNetwork" setting, off by default:
+// PS4_NETWORK=1 reports the host connected. Disconnected, sceNetCtlGetState answers DISCONNECTED
+// and sceNetCtlGetInfo NOT_CONNECTED; connected, the state is IPOBTAINED and the information
+// comes from the host (address of the interface that routes to the Internet, its netmask and
+// hardware address, the default gateway). sceNetCtlCheckCallback reports the state to each
+// registered callback once (and again when it changes), as shadPS4 does.
+//
+// There is no shadNet signaling server: no external address is known, so sceNetCtlGetNatInfo
+// answers STUN status 0, NAT type 0 and the local address, as shadPS4 does before the server
+// reported one. The functions shadPS4 leaves as stubs are stubs here too (end of file).
+
 #include "ps4_netctl.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <pthread.h>
+#include "ps4_hle_stub.h"
+#include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <net/if_dl.h>
-#include <arpa/inet.h>
+#include <net/route.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
 
-#define MAX_NETCTL_CALLBACKS 8
-
-static inline void *guest_to_host(const GuestContext *ctx, uint64_t addr) {
-    if (!addr) return NULL;
-    if (ctx && ctx->mem_base && addr < ctx->mem_size) {
-        return (void *)(ctx->mem_base + addr);
-    }
-    return (void *)addr;
-}
-
-typedef struct CallbackSlot {
-    OrbisNetCtlCallback func;
-    void *arg;
-    bool active;
-} CallbackSlot;
-
-typedef struct ToolkitCallbackSlot {
-    OrbisNetCtlCallbackForNpToolkit func;
-    void *arg;
-    bool active;
-} ToolkitCallbackSlot;
+typedef struct NetCtlCallbackSlot {
+    uint64_t func; // guest address, 0 for a free slot
+    uint64_t arg;
+    int32_t last_event;
+} NetCtlCallbackSlot;
 
 static pthread_mutex_t g_netctl_mutex = PTHREAD_MUTEX_INITIALIZER;
-static bool g_netctl_initialized = false;
-static CallbackSlot g_callbacks[MAX_NETCTL_CALLBACKS];
-static ToolkitCallbackSlot g_toolkit_callbacks[MAX_NETCTL_CALLBACKS];
+static NetCtlCallbackSlot g_callbacks[ORBIS_NET_CTL_CALLBACK_SLOTS] = {
+    [0 ... ORBIS_NET_CTL_CALLBACK_SLOTS - 1] = {0, 0, -1}};
+static NetCtlCallbackSlot g_toolkit_callbacks[ORBIS_NET_CTL_CALLBACK_SLOTS] = {
+    [0 ... ORBIS_NET_CTL_CALLBACK_SLOTS - 1] = {0, 0, -1}};
 
-static void query_local_network(char *ip_out, char *netmask_out, uint8_t *mac_out) {
-    if (ip_out) strcpy(ip_out, "127.0.0.1");
-    if (netmask_out) strcpy(netmask_out, "255.255.255.0");
-    if (mac_out) {
-        mac_out[0] = 0x00; mac_out[1] = 0xD9; mac_out[2] = 0xD1;
-        mac_out[3] = 0x12; mac_out[4] = 0x34; mac_out[5] = 0x56;
-    }
+static pthread_once_t g_connected_once = PTHREAD_ONCE_INIT;
+static bool g_connected;
 
+static void read_connected(void) {
+    const char *v = getenv("PS4_NETWORK");
+    g_connected = v && strcmp(v, "1") == 0;
+}
+
+bool ps4_netctl_connected(void) {
+    pthread_once(&g_connected_once, read_connected);
+    return g_connected;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Host network information (shadPS4 NetUtilInternal)
+
+// The local address the host uses to reach the Internet (shadPS4 RetrieveIp connects a TCP
+// socket to 1.1.1.1:80; a UDP socket picks the same route without sending anything).
+static bool local_ip(struct in_addr *out) {
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return false;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_len = sizeof(sa);
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(80);
+    sa.sin_addr.s_addr = inet_addr("1.1.1.1");
+    socklen_t len = sizeof(sa);
+    const bool ok = connect(fd, (const struct sockaddr *)&sa, sizeof(sa)) == 0 &&
+                    getsockname(fd, (struct sockaddr *)&sa, &len) == 0 && sa.sin_addr.s_addr != 0;
+    close(fd);
+    if (ok) *out = sa.sin_addr;
+    return ok;
+}
+
+// The netmask and hardware address of the interface that holds `ip`.
+static bool interface_of(struct in_addr ip, struct in_addr *netmask, uint8_t mac[ORBIS_NET_ETHER_ADDR_LEN]) {
     struct ifaddrs *ifap = NULL;
-    if (getifaddrs(&ifap) != 0 || !ifap) {
-        return;
-    }
-
-    // Pass 1: Look for active non-loopback IPv4 interface
-    char active_if_name[IFNAMSIZ] = {0};
-    for (struct ifaddrs *ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
-        if (!ifa->ifa_addr) continue;
-        if ((ifa->ifa_flags & IFF_LOOPBACK) || !(ifa->ifa_flags & IFF_UP)) continue;
-
-        if (ifa->ifa_addr->sa_family == AF_INET) {
-            struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
-            if (ip_out) {
-                inet_ntop(AF_INET, &sa->sin_addr, ip_out, ORBIS_NET_CTL_IPV4_ADDR_STR_LEN);
-            }
-            if (ifa->ifa_netmask && netmask_out) {
-                struct sockaddr_in *nm = (struct sockaddr_in *)ifa->ifa_netmask;
-                inet_ntop(AF_INET, &nm->sin_addr, netmask_out, ORBIS_NET_CTL_IPV4_ADDR_STR_LEN);
-            }
-            strncpy(active_if_name, ifa->ifa_name, sizeof(active_if_name) - 1);
+    if (getifaddrs(&ifap) != 0) return false;
+    const char *name = NULL;
+    for (struct ifaddrs *p = ifap; p; p = p->ifa_next) {
+        if (p->ifa_addr && p->ifa_addr->sa_family == AF_INET &&
+            ((const struct sockaddr_in *)p->ifa_addr)->sin_addr.s_addr == ip.s_addr) {
+            name = p->ifa_name;
+            if (netmask && p->ifa_netmask) *netmask = ((const struct sockaddr_in *)p->ifa_netmask)->sin_addr;
             break;
         }
     }
-
-    // Pass 2: Look for MAC address of the active interface
-    if (mac_out && active_if_name[0] != '\0') {
-        for (struct ifaddrs *ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
-            if (!ifa->ifa_addr) continue;
-            if (ifa->ifa_addr->sa_family == AF_LINK && strcmp(ifa->ifa_name, active_if_name) == 0) {
-                struct sockaddr_dl *sdl = (struct sockaddr_dl *)ifa->ifa_addr;
-                if (sdl->sdl_alen >= ORBIS_NET_ETHER_ADDR_LEN) {
-                    memcpy(mac_out, LLADDR(sdl), ORBIS_NET_ETHER_ADDR_LEN);
-                    break;
+    bool found = name != NULL;
+    if (found && mac) {
+        found = false;
+        for (struct ifaddrs *p = ifap; p; p = p->ifa_next) {
+            if (p->ifa_addr && p->ifa_addr->sa_family == AF_LINK && strcmp(p->ifa_name, name) == 0) {
+                const struct sockaddr_dl *sdl = (const struct sockaddr_dl *)p->ifa_addr;
+                if (sdl->sdl_alen == ORBIS_NET_ETHER_ADDR_LEN) {
+                    memcpy(mac, LLADDR(sdl), ORBIS_NET_ETHER_ADDR_LEN);
+                    found = true;
                 }
+                break;
             }
         }
     }
-
     freeifaddrs(ifap);
+    return found;
 }
 
-int32_t sceNetCtlInit(void) {
-    pthread_mutex_lock(&g_netctl_mutex);
-    g_netctl_initialized = true;
-    pthread_mutex_unlock(&g_netctl_mutex);
+// The IPv4 default gateway, asked from the routing socket (shadPS4 RetrieveDefaultGateway on
+// macOS: RTM_GET for 0.0.0.0/0, the RTA_GATEWAY address of the answer).
+static bool default_gateway(struct in_addr *out) {
+    const int fd = socket(PF_ROUTE, SOCK_RAW, AF_INET);
+    if (fd < 0) return false;
+    const struct timeval timeout = {1, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    struct {
+        struct rt_msghdr h;
+        char space[512];
+    } m;
+    memset(&m, 0, sizeof(m));
+    struct sockaddr_in *dst = (struct sockaddr_in *)(void *)m.space;
+    dst[0].sin_len = dst[1].sin_len = sizeof(struct sockaddr_in);
+    dst[0].sin_family = dst[1].sin_family = AF_INET; // destination and netmask 0.0.0.0
+    static int seq;
+    const int my_seq = __atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED);
+    const pid_t pid = getpid();
+    m.h.rtm_msglen = sizeof(m.h) + 2 * sizeof(struct sockaddr_in);
+    m.h.rtm_version = RTM_VERSION;
+    m.h.rtm_type = RTM_GET;
+    m.h.rtm_addrs = RTA_DST | RTA_NETMASK;
+    m.h.rtm_flags = RTF_UP | RTF_GATEWAY;
+    m.h.rtm_pid = pid;
+    m.h.rtm_seq = my_seq;
+    if (write(fd, &m, m.h.rtm_msglen) < 0) {
+        close(fd);
+        return false;
+    }
+    ssize_t n;
+    do {
+        n = read(fd, &m, sizeof(m));
+    } while (n > 0 && (m.h.rtm_pid != pid || m.h.rtm_seq != my_seq));
+    close(fd);
+    if (n < (ssize_t)sizeof(m.h) || m.h.rtm_errno != 0) return false;
+
+    const char *p = m.space;
+    const char *end = (const char *)&m + n;
+    for (int bit = 0; bit < RTAX_MAX && p < end; bit++) {
+        if (!(m.h.rtm_addrs & (1 << bit))) continue;
+        const struct sockaddr *sa = (const struct sockaddr *)(const void *)p;
+        if (bit == RTAX_GATEWAY) {
+            if (sa->sa_family != AF_INET || p + sizeof(struct sockaddr_in) > end) return false;
+            *out = ((const struct sockaddr_in *)(const void *)sa)->sin_addr;
+            return true;
+        }
+        // sockaddrs in a routing message are padded to 4 bytes
+        p += sa->sa_len ? (size_t)((sa->sa_len + 3) & ~3) : sizeof(uint32_t);
+    }
+    return false;
+}
+
+static void put_addr(char dst[ORBIS_NET_CTL_IPV4_ADDR_STR_LEN], struct in_addr a) {
+    inet_ntop(AF_INET, &a, dst, ORBIS_NET_CTL_IPV4_ADDR_STR_LEN);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Library logic
+
+int32_t sceNetCtlGetState(int32_t *state) {
+    // shadPS4 writes without a check; a null pointer is answered as the other queries do.
+    if (!state) return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
+    *state = ps4_netctl_connected() ? ORBIS_NET_CTL_STATE_IPOBTAINED : ORBIS_NET_CTL_STATE_DISCONNECTED;
     return ORBIS_OK;
 }
 
-int32_t sceNetCtlTerm(void) {
-    pthread_mutex_lock(&g_netctl_mutex);
-    g_netctl_initialized = false;
-    memset(g_callbacks, 0, sizeof(g_callbacks));
-    memset(g_toolkit_callbacks, 0, sizeof(g_toolkit_callbacks));
-    pthread_mutex_unlock(&g_netctl_mutex);
-    return ORBIS_OK;
-}
-
-// int sceNetCtlGetResult(int eventType, int *errorCode)
-//
-// The error code of the last connection event of the given type (the callback's event type:
-// connected, disconnected, ...). This runtime reports IPOBTAINED from sceNetCtlGetState and
-// never has a failed connection event, so the last result is always "no error". Behaviour
-// as in shadPS4 (libraries/network/netctl.cpp sceNetCtlGetResult): a NULL output is
-// INVALID_ADDR, otherwise *errorCode = 0 and SCE_OK.
+// The error code of the last connection event of the type: never a failed one.
 int32_t sceNetCtlGetResult(int32_t eventType, int32_t *errorCode) {
     (void)eventType;
-    if (!errorCode) {
-        return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
-    }
+    if (!errorCode) return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
     *errorCode = 0;
     return ORBIS_OK;
 }
 
-int32_t sceNetCtlGetState(int32_t *state) {
-    if (!state) {
-        return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
-    }
-    *state = ORBIS_NET_CTL_STATE_IPOBTAINED;
-    return ORBIS_OK;
-}
-
 int32_t sceNetCtlGetInfo(int32_t code, OrbisNetCtlInfo *info) {
-    if (!info) {
-        return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
-    }
-
-    char local_ip[ORBIS_NET_CTL_IPV4_ADDR_STR_LEN] = {0};
-    char local_netmask[ORBIS_NET_CTL_IPV4_ADDR_STR_LEN] = {0};
-    uint8_t local_mac[ORBIS_NET_ETHER_ADDR_LEN] = {0};
-
+    if (!ps4_netctl_connected()) return (int32_t)ORBIS_NET_CTL_ERROR_NOT_CONNECTED;
+    // shadPS4 writes without a check
+    if (!info) return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
+    struct in_addr ip, a;
     switch (code) {
     case ORBIS_NET_CTL_INFO_DEVICE:
         info->device = ORBIS_NET_CTL_DEVICE_WIRED;
         break;
-    case ORBIS_NET_CTL_INFO_ETHER_ADDR:
-        query_local_network(NULL, NULL, local_mac);
-        memcpy(info->ether_addr.data, local_mac, ORBIS_NET_ETHER_ADDR_LEN);
+    case ORBIS_NET_CTL_INFO_ETHER_ADDR: {
+        uint8_t mac[ORBIS_NET_ETHER_ADDR_LEN];
+        if (local_ip(&ip) && interface_of(ip, NULL, mac)) {
+            memcpy(info->ether_addr.data, mac, ORBIS_NET_ETHER_ADDR_LEN);
+        } else {
+            fprintf(stderr, "[ps4-netctl] hardware address: failed to retrieve\n");
+        }
         break;
+    }
     case ORBIS_NET_CTL_INFO_MTU:
         info->mtu = 1500;
         break;
@@ -150,35 +207,35 @@ int32_t sceNetCtlGetInfo(int32_t code, OrbisNetCtlInfo *info) {
         info->link = ORBIS_NET_CTL_LINK_CONNECTED;
         break;
     case ORBIS_NET_CTL_INFO_IP_ADDRESS:
-        query_local_network(local_ip, NULL, NULL);
-        strncpy(info->ip_address, local_ip, sizeof(info->ip_address) - 1);
-        info->ip_address[sizeof(info->ip_address) - 1] = '\0';
-        break;
-    case ORBIS_NET_CTL_INFO_NETMASK:
-        query_local_network(NULL, local_netmask, NULL);
-        strncpy(info->netmask, local_netmask, sizeof(info->netmask) - 1);
-        info->netmask[sizeof(info->netmask) - 1] = '\0';
-        break;
-    case ORBIS_NET_CTL_INFO_DEFAULT_ROUTE: {
-        query_local_network(local_ip, NULL, NULL);
-        // Estimate gateway as x.x.x.1
-        strncpy(info->default_route, local_ip, sizeof(info->default_route) - 1);
-        char *last_dot = strrchr(info->default_route, '.');
-        if (last_dot) {
-            strcpy(last_dot + 1, "1");
+        strcpy(info->ip_address, "127.0.0.1"); // when the address cannot be found
+        if (local_ip(&ip)) {
+            put_addr(info->ip_address, ip);
         } else {
-            strcpy(info->default_route, "192.168.1.1");
+            fprintf(stderr, "[ps4-netctl] local ip: failed to retrieve\n");
         }
         break;
-    }
+    case ORBIS_NET_CTL_INFO_NETMASK:
+        if (local_ip(&ip) && interface_of(ip, &a, NULL)) {
+            put_addr(info->netmask, a);
+        } else {
+            fprintf(stderr, "[ps4-netctl] netmask: failed to retrieve\n");
+        }
+        break;
+    case ORBIS_NET_CTL_INFO_DEFAULT_ROUTE:
+        if (default_gateway(&a)) {
+            put_addr(info->default_route, a);
+        } else {
+            fprintf(stderr, "[ps4-netctl] default gateway: failed to retrieve\n");
+        }
+        break;
+    case ORBIS_NET_CTL_INFO_HTTP_PROXY_CONFIG:
+        info->http_proxy_config = 0; // off
+        break;
     case ORBIS_NET_CTL_INFO_PRIMARY_DNS:
         strcpy(info->primary_dns, "1.1.1.1");
         break;
     case ORBIS_NET_CTL_INFO_SECONDARY_DNS:
-        strcpy(info->secondary_dns, "8.8.8.8");
-        break;
-    case ORBIS_NET_CTL_INFO_HTTP_PROXY_CONFIG:
-        info->http_proxy_config = 0; // off
+        strcpy(info->secondary_dns, "1.1.1.1");
         break;
     case ORBIS_NET_CTL_INFO_HTTP_PROXY_SERVER:
         info->http_proxy_server[0] = '\0';
@@ -187,179 +244,243 @@ int32_t sceNetCtlGetInfo(int32_t code, OrbisNetCtlInfo *info) {
         info->http_proxy_port = 0;
         break;
     case ORBIS_NET_CTL_INFO_IP_CONFIG:
-        info->ip_config = 1; // static / manual or DHCP obtained
+        info->ip_config = 1; // static
         break;
     case ORBIS_NET_CTL_INFO_DHCP_HOSTNAME:
-        info->dhcp_hostname[0] = '\0';
-        break;
+        break; // none, nothing written
     default:
-        return (int32_t)ORBIS_NET_CTL_ERROR_NOT_AVAIL;
+        fprintf(stderr, "[ps4-netctl] sceNetCtlGetInfo: %d unsupported code\n", code);
+        break;
     }
-
     return ORBIS_OK;
 }
 
 int32_t sceNetCtlGetNatInfo(OrbisNetCtlNatInfo *nat_info) {
-    if (!nat_info) {
-        return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
-    }
-    if (nat_info->size != sizeof(OrbisNetCtlNatInfo)) {
-        return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_SIZE;
-    }
-
-    char local_ip[ORBIS_NET_CTL_IPV4_ADDR_STR_LEN] = {0};
-    query_local_network(local_ip, NULL, NULL);
-
-    nat_info->stun_status = 1; // Success
-    nat_info->nat_type = 2;    // Type 2 (Moderate / Console standard behind router)
-    nat_info->mapped_addr = (uint32_t)inet_addr(local_ip);
+    if (!nat_info) return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
+    if (nat_info->size != sizeof(OrbisNetCtlNatInfo)) return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_SIZE;
+    // No signaling server reported an external address: STUN failed, the local address.
+    nat_info->nat_type = 0;
+    nat_info->stun_status = 0;
+    struct in_addr ip;
+    nat_info->mapped_addr = local_ip(&ip) ? ip.s_addr : inet_addr("127.0.0.1");
     return ORBIS_OK;
 }
 
-int32_t sceNetCtlRegisterCallback(OrbisNetCtlCallback func, void *arg, int32_t *cid) {
-    if (!func || !cid) {
-        return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
-    }
-
+static int32_t register_callback(NetCtlCallbackSlot *slots, uint64_t func, uint64_t arg, int32_t *cid) {
+    if (!func || !cid) return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
     pthread_mutex_lock(&g_netctl_mutex);
-    for (int i = 0; i < MAX_NETCTL_CALLBACKS; i++) {
-        if (!g_callbacks[i].active) {
-            g_callbacks[i].func = func;
-            g_callbacks[i].arg = arg;
-            g_callbacks[i].active = true;
-            *cid = i + 1;
+    for (int32_t i = 0; i < ORBIS_NET_CTL_CALLBACK_SLOTS; i++) {
+        if (slots[i].func == 0) {
+            slots[i] = (NetCtlCallbackSlot){func, arg, -1};
             pthread_mutex_unlock(&g_netctl_mutex);
+            *cid = i;
             return ORBIS_OK;
         }
     }
     pthread_mutex_unlock(&g_netctl_mutex);
     return (int32_t)ORBIS_NET_CTL_ERROR_CALLBACK_MAX;
+}
+
+static int32_t unregister_callback(NetCtlCallbackSlot *slots, int32_t cid) {
+    if (cid < 0 || cid >= ORBIS_NET_CTL_CALLBACK_SLOTS) return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ID;
+    pthread_mutex_lock(&g_netctl_mutex);
+    int32_t rc = ORBIS_OK;
+    if (slots[cid].func == 0) {
+        rc = (int32_t)ORBIS_NET_CTL_ERROR_ID_NOT_FOUND;
+    } else {
+        slots[cid] = (NetCtlCallbackSlot){0, 0, -1};
+    }
+    pthread_mutex_unlock(&g_netctl_mutex);
+    return rc;
+}
+
+int32_t sceNetCtlRegisterCallback(uint64_t func, uint64_t arg, int32_t *cid) {
+    return register_callback(g_callbacks, func, arg, cid);
 }
 
 int32_t sceNetCtlUnregisterCallback(int32_t cid) {
-    pthread_mutex_lock(&g_netctl_mutex);
-    int idx = cid - 1;
-    if (idx >= 0 && idx < MAX_NETCTL_CALLBACKS && g_callbacks[idx].active) {
-        g_callbacks[idx].active = false;
-        g_callbacks[idx].func = NULL;
-        g_callbacks[idx].arg = NULL;
-        pthread_mutex_unlock(&g_netctl_mutex);
-        return ORBIS_OK;
-    }
-    pthread_mutex_unlock(&g_netctl_mutex);
-    return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ID;
+    return unregister_callback(g_callbacks, cid);
 }
 
-int32_t sceNetCtlCheckCallback(void) {
-    return ORBIS_OK;
-}
-
-int32_t sceNetCtlRegisterCallbackForNpToolkit(OrbisNetCtlCallbackForNpToolkit func, void *arg, int32_t *cid) {
-    if (!func || !cid) {
-        return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ADDR;
-    }
-
-    pthread_mutex_lock(&g_netctl_mutex);
-    for (int i = 0; i < MAX_NETCTL_CALLBACKS; i++) {
-        if (!g_toolkit_callbacks[i].active) {
-            g_toolkit_callbacks[i].func = func;
-            g_toolkit_callbacks[i].arg = arg;
-            g_toolkit_callbacks[i].active = true;
-            *cid = i + 1;
-            pthread_mutex_unlock(&g_netctl_mutex);
-            return ORBIS_OK;
-        }
-    }
-    pthread_mutex_unlock(&g_netctl_mutex);
-    return (int32_t)ORBIS_NET_CTL_ERROR_CALLBACK_MAX;
+int32_t sceNetCtlRegisterCallbackForNpToolkit(uint64_t func, uint64_t arg, int32_t *cid) {
+    return register_callback(g_toolkit_callbacks, func, arg, cid);
 }
 
 int32_t sceNetCtlUnregisterCallbackForNpToolkit(int32_t cid) {
-    pthread_mutex_lock(&g_netctl_mutex);
-    int idx = cid - 1;
-    if (idx >= 0 && idx < MAX_NETCTL_CALLBACKS && g_toolkit_callbacks[idx].active) {
-        g_toolkit_callbacks[idx].active = false;
-        g_toolkit_callbacks[idx].func = NULL;
-        g_toolkit_callbacks[idx].arg = NULL;
-        pthread_mutex_unlock(&g_netctl_mutex);
-        return ORBIS_OK;
-    }
-    pthread_mutex_unlock(&g_netctl_mutex);
-    return (int32_t)ORBIS_NET_CTL_ERROR_INVALID_ID;
+    return unregister_callback(g_toolkit_callbacks, cid);
 }
 
-int32_t sceNetCtlCheckCallbackForNpToolkit(void) {
+// Calls `callback(event, arg)` for every registered callback that has not seen the current
+// event yet (shadPS4 NetCtlInternal::CheckCallback). The callbacks run on the calling thread,
+// outside the lock, so they may register and unregister callbacks.
+static void check_callbacks(GuestContext *ctx, NetCtlCallbackSlot *slots) {
+    const int32_t event =
+        ps4_netctl_connected() ? ORBIS_NET_CTL_EVENT_TYPE_IPOBTAINED : ORBIS_NET_CTL_EVENT_TYPE_DISCONNECTED;
+    NetCtlCallbackSlot due[ORBIS_NET_CTL_CALLBACK_SLOTS];
+    int n = 0;
+    pthread_mutex_lock(&g_netctl_mutex);
+    for (int i = 0; i < ORBIS_NET_CTL_CALLBACK_SLOTS; i++) {
+        if (slots[i].func != 0 && slots[i].last_event != event) {
+            slots[i].last_event = event;
+            due[n++] = slots[i];
+        }
+    }
+    pthread_mutex_unlock(&g_netctl_mutex);
+    for (int i = 0; i < n; i++) {
+        GuestContext sub = *ctx;
+        sub.rsp = (sub.rsp - 128) & ~(uint64_t)15; // below the caller's red zone
+        sub.rdi = (uint64_t)(int64_t)event;
+        sub.rsi = due[i].arg;
+        recomp_call_guest(&sub, due[i].func);
+    }
+}
+
+int32_t sceNetCtlCheckCallback(GuestContext *ctx) {
+    check_callbacks(ctx, g_callbacks);
     return ORBIS_OK;
 }
 
-// Shims
-void shim_sceNetCtlInit(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNetCtlInit();
-    SHIM_RETURN();
+int32_t sceNetCtlCheckCallbackForNpToolkit(GuestContext *ctx) {
+    check_callbacks(ctx, g_toolkit_callbacks);
+    return ORBIS_OK;
 }
 
-void shim_sceNetCtlTerm(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNetCtlTerm();
-    SHIM_RETURN();
+// ---------------------------------------------------------------------------------------------
+// Shims
+
+static void *guest_ptr(const GuestContext *ctx, uint64_t addr) {
+    return addr ? (void *)(ctx->mem_base + addr) : NULL;
 }
+
+#define RET(v)                                                                                     \
+    do {                                                                                           \
+        ctx->rax = (uint64_t)(int64_t)(int32_t)(v);                                                \
+        SHIM_RETURN();                                                                             \
+    } while (0)
 
 void shim_sceNetCtlGetState(GuestContext *ctx) {
-    int32_t *state = (int32_t *)guest_to_host(ctx, ctx->rdi);
-    ctx->rax = (uint64_t)sceNetCtlGetState(state);
-    SHIM_RETURN();
+    RET(sceNetCtlGetState((int32_t *)guest_ptr(ctx, ctx->rdi)));
 }
 
 void shim_sceNetCtlGetResult(GuestContext *ctx) {
-    int32_t *err = (int32_t *)guest_to_host(ctx, ctx->rsi);
-    ctx->rax = (uint64_t)(int64_t)sceNetCtlGetResult((int32_t)ctx->rdi, err);
-    SHIM_RETURN();
+    RET(sceNetCtlGetResult((int32_t)ctx->rdi, (int32_t *)guest_ptr(ctx, ctx->rsi)));
 }
 
 void shim_sceNetCtlGetInfo(GuestContext *ctx) {
-    int32_t code = (int32_t)ctx->rdi;
-    OrbisNetCtlInfo *info = (OrbisNetCtlInfo *)guest_to_host(ctx, ctx->rsi);
-    ctx->rax = (uint64_t)sceNetCtlGetInfo(code, info);
-    SHIM_RETURN();
+    RET(sceNetCtlGetInfo((int32_t)ctx->rdi, (OrbisNetCtlInfo *)guest_ptr(ctx, ctx->rsi)));
 }
 
 void shim_sceNetCtlGetNatInfo(GuestContext *ctx) {
-    OrbisNetCtlNatInfo *nat_info = (OrbisNetCtlNatInfo *)guest_to_host(ctx, ctx->rdi);
-    ctx->rax = (uint64_t)sceNetCtlGetNatInfo(nat_info);
-    SHIM_RETURN();
+    RET(sceNetCtlGetNatInfo((OrbisNetCtlNatInfo *)guest_ptr(ctx, ctx->rdi)));
 }
 
 void shim_sceNetCtlRegisterCallback(GuestContext *ctx) {
-    OrbisNetCtlCallback func = (OrbisNetCtlCallback)guest_to_host(ctx, ctx->rdi);
-    void *arg = (void *)guest_to_host(ctx, ctx->rsi);
-    int32_t *cid = (int32_t *)guest_to_host(ctx, ctx->rdx);
-    ctx->rax = (uint64_t)sceNetCtlRegisterCallback(func, arg, cid);
-    SHIM_RETURN();
+    RET(sceNetCtlRegisterCallback(ctx->rdi, ctx->rsi, (int32_t *)guest_ptr(ctx, ctx->rdx)));
 }
 
 void shim_sceNetCtlUnregisterCallback(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNetCtlUnregisterCallback((int32_t)ctx->rdi);
-    SHIM_RETURN();
+    RET(sceNetCtlUnregisterCallback((int32_t)ctx->rdi));
 }
 
 void shim_sceNetCtlCheckCallback(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNetCtlCheckCallback();
-    SHIM_RETURN();
+    RET(sceNetCtlCheckCallback(ctx));
 }
 
 void shim_sceNetCtlRegisterCallbackForNpToolkit(GuestContext *ctx) {
-    OrbisNetCtlCallbackForNpToolkit func = (OrbisNetCtlCallbackForNpToolkit)guest_to_host(ctx, ctx->rdi);
-    void *arg = (void *)guest_to_host(ctx, ctx->rsi);
-    int32_t *cid = (int32_t *)guest_to_host(ctx, ctx->rdx);
-    ctx->rax = (uint64_t)sceNetCtlRegisterCallbackForNpToolkit(func, arg, cid);
-    SHIM_RETURN();
+    RET(sceNetCtlRegisterCallbackForNpToolkit(ctx->rdi, ctx->rsi, (int32_t *)guest_ptr(ctx, ctx->rdx)));
 }
 
 void shim_sceNetCtlUnregisterCallbackForNpToolkit(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNetCtlUnregisterCallbackForNpToolkit((int32_t)ctx->rdi);
-    SHIM_RETURN();
+    RET(sceNetCtlUnregisterCallbackForNpToolkit((int32_t)ctx->rdi));
 }
 
 void shim_sceNetCtlCheckCallbackForNpToolkit(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNetCtlCheckCallbackForNpToolkit();
-    SHIM_RETURN();
+    RET(sceNetCtlCheckCallbackForNpToolkit(ctx));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Stubs in shadPS4 ("(STUBBED) called", SCE_OK)
+
+PS4_HLE_STUB(sceNetBweCheckCallbackIpcInt)
+PS4_HLE_STUB(sceNetBweClearEventIpcInt)
+PS4_HLE_STUB(sceNetBweFinishInternetConnectionTestIpcInt)
+PS4_HLE_STUB(sceNetBweGetInfoIpcInt)
+PS4_HLE_STUB(sceNetBweRegisterCallbackIpcInt)
+PS4_HLE_STUB(sceNetBweSetInternetConnectionTestResultIpcInt)
+PS4_HLE_STUB(sceNetBweStartInternetConnectionTestBandwidthTestIpcInt)
+PS4_HLE_STUB(sceNetBweStartInternetConnectionTestIpcInt)
+PS4_HLE_STUB(sceNetBweUnregisterCallbackIpcInt)
+PS4_HLE_STUB(sceNetCtlGetInfoV6)
+PS4_HLE_STUB(sceNetCtlGetResultV6)
+PS4_HLE_STUB(sceNetCtlGetStateV6)
+PS4_HLE_STUB(sceNetCtlRegisterCallbackV6)
+PS4_HLE_STUB(sceNetCtlUnregisterCallbackV6)
+PS4_HLE_STUB(sceNetCtlCheckCallbackForLibIpcInt)
+PS4_HLE_STUB(sceNetCtlClearEventForLibIpcInt)
+PS4_HLE_STUB(sceNetCtlClearEventIpcInt)
+PS4_HLE_STUB(sceNetCtlConnectConfIpcInt)
+PS4_HLE_STUB(sceNetCtlConnectIpcInt)
+PS4_HLE_STUB(sceNetCtlConnectWithRetryIpcInt)
+PS4_HLE_STUB(sceNetCtlDisableBandwidthManagementIpcInt)
+PS4_HLE_STUB(sceNetCtlDisconnectIpcInt)
+PS4_HLE_STUB(sceNetCtlEnableBandwidthManagementIpcInt)
+PS4_HLE_STUB(sceNetCtlGetBandwidthInfoIpcInt)
+PS4_HLE_STUB(sceNetCtlGetEtherLinkMode)
+PS4_HLE_STUB(sceNetCtlGetIfStat)
+PS4_HLE_STUB(sceNetCtlGetInfoIpcInt)
+PS4_HLE_STUB(sceNetCtlGetInfoV6IpcInt)
+PS4_HLE_STUB(sceNetCtlGetNatInfoIpcInt)
+PS4_HLE_STUB(sceNetCtlGetNetEvConfigInfoIpcInt)
+PS4_HLE_STUB(sceNetCtlGetResultIpcInt)
+PS4_HLE_STUB(sceNetCtlGetResultV6IpcInt)
+PS4_HLE_STUB(sceNetCtlGetScanInfoBssidForSsidListScanIpcInt)
+PS4_HLE_STUB(sceNetCtlGetScanInfoBssidIpcInt)
+PS4_HLE_STUB(sceNetCtlGetScanInfoByBssidIpcInt)
+PS4_HLE_STUB(sceNetCtlGetScanInfoForSsidListScanIpcInt)
+PS4_HLE_STUB(sceNetCtlGetScanInfoForSsidScanIpcInt)
+PS4_HLE_STUB(sceNetCtlGetState2IpcInt)
+PS4_HLE_STUB(sceNetCtlGetStateIpcInt)
+PS4_HLE_STUB(sceNetCtlGetStateV6IpcInt)
+PS4_HLE_STUB(sceNetCtlGetWifiType)
+PS4_HLE_STUB(sceNetCtlInit)
+PS4_HLE_STUB(sceNetCtlIsBandwidthManagementEnabledIpcInt)
+PS4_HLE_STUB(sceNetCtlRegisterCallbackForLibIpcInt)
+PS4_HLE_STUB(sceNetCtlRegisterCallbackIpcInt)
+PS4_HLE_STUB(sceNetCtlRegisterCallbackV6IpcInt)
+PS4_HLE_STUB(sceNetCtlScanIpcInt)
+PS4_HLE_STUB(sceNetCtlSetErrorNotificationEnabledIpcInt)
+PS4_HLE_STUB(sceNetCtlSetStunWithPaddingFlagIpcInt)
+PS4_HLE_STUB(sceNetCtlTerm)
+PS4_HLE_STUB(sceNetCtlUnregisterCallbackForLibIpcInt)
+PS4_HLE_STUB(sceNetCtlUnregisterCallbackIpcInt)
+PS4_HLE_STUB(sceNetCtlUnregisterCallbackV6IpcInt)
+PS4_HLE_STUB(sceNetCtlUnsetStunWithPaddingFlagIpcInt)
+PS4_HLE_STUB(Func_D8DCB6973537A3DC)
+PS4_HLE_STUB(sceNetCtlClearEventForNpToolkit)
+PS4_HLE_STUB(sceNetCtlApCheckCallback)
+PS4_HLE_STUB(sceNetCtlApClearEvent)
+PS4_HLE_STUB(sceNetCtlApGetConnectInfo)
+PS4_HLE_STUB(sceNetCtlApGetInfo)
+PS4_HLE_STUB(sceNetCtlApGetResult)
+PS4_HLE_STUB(sceNetCtlApGetState)
+PS4_HLE_STUB(sceNetCtlApInit)
+PS4_HLE_STUB(sceNetCtlApRegisterCallback)
+PS4_HLE_STUB(sceNetCtlApStop)
+PS4_HLE_STUB(sceNetCtlApTerm)
+PS4_HLE_STUB(sceNetCtlApUnregisterCallback)
+PS4_HLE_STUB(sceNetCtlApAppInitWpaKey)
+PS4_HLE_STUB(sceNetCtlApAppInitWpaKeyForQa)
+PS4_HLE_STUB(sceNetCtlApAppStartWithRetry)
+PS4_HLE_STUB(sceNetCtlApAppStartWithRetryPid)
+PS4_HLE_STUB(sceNetCtlApRestart)
+PS4_HLE_STUB(sceNetCtlApRpCheckCallback)
+PS4_HLE_STUB(sceNetCtlApRpClearEvent)
+PS4_HLE_STUB(sceNetCtlApRpGetInfo)
+PS4_HLE_STUB(sceNetCtlApRpGetResult)
+PS4_HLE_STUB(sceNetCtlApRpGetState)
+PS4_HLE_STUB(sceNetCtlApRpRegisterCallback)
+PS4_HLE_STUB(sceNetCtlApRpStart)
+PS4_HLE_STUB(sceNetCtlApRpStartConf)
+PS4_HLE_STUB(sceNetCtlApRpStartWithRetry)
+PS4_HLE_STUB(sceNetCtlApRpStop)
+PS4_HLE_STUB(sceNetCtlApRpUnregisterCallback)

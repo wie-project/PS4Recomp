@@ -3,6 +3,9 @@
 // drawn with point mip filtering at LOD 0 (4x4 target) and LOD 2 (1x1 target); the bias moves
 // the level that is read. The biased LODs (1.25) lie inside a level: GPUs may round or truncate
 // a LOD that falls exactly on a level boundary when picking the nearest mip.
+// GPUs that ignore MTLSamplerDescriptor.lodBias (Apple7, M1) must be detected by
+// SamplerAppliesLodBias, which makes the shaders add the bias (gcn_profile::needs_sampler_lod_bias,
+// covered by sampler_lod_bias_shader.c); here the bias as a shader operand must then move the level.
 #include "ps4_gnm_resources.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,8 +39,9 @@ static MTLSamplerDescriptor* SamplerWithBias(float bias) {
 }
 
 // Returns the level (0 red, 1 green, 2 blue, -1 other) read at the center of a size x size target.
+// shader_bias is the sample instruction's bias operand.
 static int LevelRead(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTLRenderPipelineState> pso, id<MTLTexture> tex,
-                     MTLSamplerDescriptor* sampler, uint32_t size) {
+                     MTLSamplerDescriptor* sampler, uint32_t size, float shader_bias) {
     id<MTLSamplerState> smp = [dev newSamplerStateWithDescriptor:sampler];
     Check(smp != nil, "create Metal sampler");
     MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -54,6 +58,7 @@ static int LevelRead(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTLRenderPipel
     [re setRenderPipelineState:pso];
     [re setFragmentTexture:tex atIndex:0];
     [re setFragmentSamplerState:smp atIndex:0];
+    [re setFragmentBytes:&shader_bias length:sizeof(shader_bias) atIndex:0];
     [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
     [re endEncoding];
     [cb commit];
@@ -101,8 +106,9 @@ vertex V vs(uint i [[vertex_id]]) {
     float2 xy[3] = {float2(-1, -1), float2(3, -1), float2(-1, 3)};
     return {float4(xy[i], 0, 1), xy[i] * float2(0.5, -0.5) + 0.5};
 }
-fragment float4 fs(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
-    return t.sample(s, v.uv);
+fragment float4 fs(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]],
+                   constant float& b [[buffer(0)]]) {
+    return t.sample(s, v.uv, bias(b));
 }
 )" options:nil error:&error];
         Check(lib != nil, "compile the regression shaders");
@@ -124,30 +130,36 @@ fragment float4 fs(V v [[stage_in]], texture2d<float> t [[texture(0)]], sampler 
             [tex replaceRegion:MTLRegionMake2D(0, 0, n, n) mipmapLevel:level withBytes:texels bytesPerRow:n * 4];
         }
         id<MTLCommandQueue> q = [dev newCommandQueue];
-        bool biasIgnored = false;
+        const bool applied = ps4gnm::SamplerAppliesLodBias(dev);
+        bool ignored = false;
         for (const auto& c : cases) {
             const uint32_t size = 4u >> c.lod;
-            const int got = LevelRead(dev, q, pso, tex, SamplerWithBias(c.bias), size);
-            if (got == c.level) continue;
-
-            // Skip only when the hosted virtual GPU also ignores a directly configured Metal sampler.
-            if (c.bias != 0.f && got == (int)c.lod && [dev.name isEqualToString:@"Apple Paravirtual device"]) {
-                MTLSamplerDescriptor* control = [MTLSamplerDescriptor new];
-                control.mipFilter = MTLSamplerMipFilterNearest;
-                control.lodMaxClamp = 2.f;
-                control.supportArgumentBuffers = YES;
-                if (@available(macOS 26.0, *)) control.lodBias = c.bias;
-                if (LevelRead(dev, q, pso, tex, control, size) == got) {
-                    biasIgnored = true;
-                    continue;
-                }
+            const int got = LevelRead(dev, q, pso, tex, SamplerWithBias(c.bias), size, 0.f);
+            if (c.bias != 0.f && !applied) {
+                // the probe found the bias ignored: the sampler state must indeed read the unbiased level
+                if (got != (int)c.lod) fprintf(stderr, "read level %d\n", got);
+                Check(got == (int)c.lod, "SamplerAppliesLodBias: a GPU that applies the bias was taken for one that ignores it");
+                ignored = true;
+                // the shaders add the bias instead: the instruction's bias operand reaches the level
+                uint32_t ss[4];
+                Sharp(c.bias, ss);
+                ps4gnm::SamplerDesc sd;
+                Check(ps4gnm::DecodeSampler(ss, &sd), "decode the S#");
+                const float shader_bias = sd.lod_bias;
+                sd.lod_bias = 0.f; // as GetSampler with needs_sampler_lod_bias
+                const int shader_got = LevelRead(dev, q, pso, tex, ps4gnm::MakeSamplerDescriptor(sd, false), size,
+                                                 shader_bias);
+                if (shader_got != c.level) fprintf(stderr, "shader bias read level %d\n", shader_got);
+                Check(shader_got == c.level, c.name);
+                continue;
             }
-            fprintf(stderr, "read level %d\n", got);
-            Check(false, c.name);
+            if (got != c.level) fprintf(stderr, "read level %d\n", got);
+            Check(got == c.level, c.name);
         }
-        if (biasIgnored) {
-            fprintf(stderr, "Apple Paravirtual device ignores lodBias even on a directly configured Metal sampler\n");
-            return 77;
+        if (ignored) {
+            printf("sampler LOD bias: %s ignores the sampler state bias; as a shader operand it moves the levels\n",
+                   dev.name.UTF8String);
+            return 0;
         }
         printf("sampler LOD bias: levels move with the S# bias\n");
     }

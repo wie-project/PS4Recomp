@@ -4288,6 +4288,8 @@ id<MTLSamplerState> GetSampler(const uint32_t ss[4], bool compare) {
     if (it != S.samplers.end()) return it->second;
     SamplerDesc sd;
     DecodeSampler(ss, &sd);
+    // the shaders add the bias where the sampler state cannot (gcn_profile::needs_sampler_lod_bias)
+    if (S.profile.needs_sampler_lod_bias) sd.lod_bias = 0.f;
     MTLSamplerDescriptor* d = MakeSamplerDescriptor(sd, compare);
     id<MTLSamplerState> st = [S.dev newSamplerStateWithDescriptor:d];
     S.samplers[h] = st;
@@ -9500,6 +9502,9 @@ bool Init(GuestContext* ctx) {
         S.be->MakeResident(S.dummy, GnmResidencyClass::Builtin);
         if (S.gds_buf != S.dummy) S.be->MakeResident(S.gds_buf, GnmResidencyClass::Builtin);
         gcn_profile_default_metal(&S.profile);
+        S.profile.needs_sampler_lod_bias = !SamplerAppliesLodBias(S.dev);
+        if (S.profile.needs_sampler_lod_bias)
+            fprintf(stderr, "[gnm-draw] the GPU ignores the sampler LOD bias: the shaders apply it\n");
         // PS4_GNM_QUIT_AFTER_S=<s> (benchmarks): quit through the normal quit path after <s>
         // seconds, so the caches are saved as when the player quits (a killed process loses the
         // pipeline archive additions since its last save).

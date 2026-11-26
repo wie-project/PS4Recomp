@@ -167,10 +167,11 @@ When playing without a physical controller, built-in keyboard emulation is activ
 | **Motion: Shake Controller** | `N`                        | —                          | Emulate SixAxis shake (1g at 6 Hz)    |
 | **Quit Application**         | `Cmd + Q`                  | —                          | Cleanly terminate runtime             |
 
-### Mouse and Microphone
+### Mouse, Microphone and Network
 
 - **Mouse (`libSceMouse`)**: off by default, as in shadPS4 (`use_mice_as_mice`). Run with `PS4_MOUSE=1` to use the host mouse as a PS4 mouse: once the game initializes the library, the cursor is hidden and captured in the game window, and motion, the five buttons and the wheel reach the game. Without it, games see a disconnected mouse.
 - **Microphone (`libSceAudioIn`)**: input ports capture the default macOS input device (macOS asks for microphone permission on first use). Run with `PS4_AUDIO_IN=none` to disable capture; ports then deliver silence and report no device.
+- **Network state (`libSceNetCtl`)**: disconnected by default, as in shadPS4 (`isConnectedToNetwork`): games see no connection and `sceNetCtlGetInfo` answers `NOT_CONNECTED`. Run with `PS4_NETWORK=1` to report the host connected: the state is IP-obtained and the address, netmask, gateway and hardware address are those of the host interface that routes to the Internet. There is no signaling server, so the NAT information has no STUN result either way.
 
 ### Licenses
 

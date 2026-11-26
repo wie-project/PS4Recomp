@@ -76,6 +76,9 @@ struct FMaskSpecialization {
 struct SamplerSpecialization {
     u8 force_unnormalized : 1;
     u8 force_degamma : 1;
+    // PS4Recomp: the raw S# LOD_BIAS field, with Profile::needs_sampler_lod_bias only (the
+    // shader adds it then); 0 otherwise, so other hosts do not specialize on it
+    u16 lod_bias;
 
     bool operator==(const SamplerSpecialization&) const = default;
 };
@@ -169,9 +172,11 @@ struct StageSpecialization {
                          spec.height = sharp.height;
                      });
         ForEachSharp(samplers, info->samplers,
-                     [](auto& spec, const auto& desc, AmdGpu::Sampler sharp) {
+                     [&profile_](auto& spec, const auto& desc, AmdGpu::Sampler sharp) {
                          spec.force_unnormalized = sharp.force_unnormalized;
                          spec.force_degamma = sharp.force_degamma;
+                         spec.lod_bias =
+                             profile_.needs_sampler_lod_bias ? u16(sharp.lod_bias.Value()) : 0;
                      });
         for (const auto& table : info->image_tables) {
             for (u32 i = 0; i < table.num_bounds; ++i) {

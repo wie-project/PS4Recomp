@@ -52,6 +52,9 @@ struct Profile {
     bool needs_buffer_bounds_checks{}; // PS4Recomp: no robust buffer access (Metal)
     bool needs_unorm_fixup{};
     bool needs_clip_distance_emulation{};
+    // PS4Recomp: the host sampler does not apply a LOD bias (MTLSamplerDescriptor.lodBias is
+    // ignored on Apple7 GPUs and absent before macOS 26): sample instructions add the S# bias
+    bool needs_sampler_lod_bias{};
     bool supports_shader_stencil_export{};
     bool wave64_force_fallback{}; // PS4Recomp: testing only (GCN_COMPILE_WAVE64_FALLBACK)
 

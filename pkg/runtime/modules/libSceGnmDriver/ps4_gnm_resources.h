@@ -468,6 +468,9 @@ bool DecodeSampler(const uint32_t dwords[4], SamplerDesc* out);
 MTLTextureSwizzleChannels ToMTLSwizzle(CompMapping m);
 // compare: set compareFunction (only for samplers used with depth-compare instructions)
 MTLSamplerDescriptor* MakeSamplerDescriptor(const SamplerDesc& s, bool compare);
+// Whether the GPU applies MTLSamplerDescriptor.lodBias (probed with one draw). When it does not,
+// the shaders add the S# LOD bias instead (gcn_profile::needs_sampler_lod_bias).
+bool SamplerAppliesLodBias(id<MTLDevice> dev);
 #endif
 
 // =====================================================================================

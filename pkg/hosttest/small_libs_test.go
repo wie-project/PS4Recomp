@@ -185,3 +185,25 @@ func TestVideoRecordingRudp(t *testing.T) {
 		"rudp",
 	})
 }
+
+// TestHmd runs testdata/hmd/main.c: libSceHmd on a host without a PlayStation VR headset, as
+// in shadPS4 (state machine, firmware 4.50 answers, memory requirements as return values).
+func TestHmd(t *testing.T) {
+	bin := buildHostC(t, "hmd", "../runtime/modules/libSceHmd/ps4_hmd.c")
+	runHostCases(t, bin, []string{
+		"state-machine",
+		"queries",
+		"shims",
+	})
+}
+
+// TestNetCtl runs testdata/netctl/main.c: libSceNetCtl as in shadPS4, disconnected by default
+// and connected with PS4_NETWORK=1 (host address, netmask, gateway), callback ids and the state
+// delivered once per change by sceNetCtlCheckCallback.
+func TestNetCtl(t *testing.T) {
+	bin := buildHostC(t, "netctl", "../runtime/modules/libSceNetCtl/ps4_netctl.c")
+	runHostCases(t, bin, []string{
+		"disconnected",
+		"connected",
+	})
+}

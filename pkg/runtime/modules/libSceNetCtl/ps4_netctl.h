@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 #ifndef PS4_NETCTL_H
 #define PS4_NETCTL_H
 
@@ -111,36 +113,25 @@ typedef struct OrbisNetCtlNatInfo {
     uint32_t mapped_addr;
 } OrbisNetCtlNatInfo;
 
-typedef void (*OrbisNetCtlCallback)(int32_t eventType, void *arg);
-typedef void (*OrbisNetCtlCallbackForNpToolkit)(int32_t eventType, void *arg);
+_Static_assert(sizeof(OrbisNetCtlNatInfo) == 0x10, "OrbisNetCtlNatInfo");
 
-// C API
-int32_t sceNetCtlInit(void);
-int32_t sceNetCtlTerm(void);
+// Callback slots per kind (shadPS4 NetCtlInternal); the callback id is the slot index.
+#define ORBIS_NET_CTL_CALLBACK_SLOTS 8
+
+// Whether the host reports itself connected (PS4_NETWORK=1; shadPS4 isConnectedToNetwork).
+bool ps4_netctl_connected(void);
+
+// C API. Callbacks (void (*)(int event, void *arg)) and their arguments are guest addresses.
 int32_t sceNetCtlGetState(int32_t *state);
+int32_t sceNetCtlGetResult(int32_t eventType, int32_t *errorCode);
 int32_t sceNetCtlGetInfo(int32_t code, OrbisNetCtlInfo *info);
 int32_t sceNetCtlGetNatInfo(OrbisNetCtlNatInfo *nat_info);
-int32_t sceNetCtlRegisterCallback(OrbisNetCtlCallback func, void *arg, int32_t *cid);
+int32_t sceNetCtlRegisterCallback(uint64_t func, uint64_t arg, int32_t *cid);
 int32_t sceNetCtlUnregisterCallback(int32_t cid);
-int32_t sceNetCtlCheckCallback(void);
-int32_t sceNetCtlRegisterCallbackForNpToolkit(OrbisNetCtlCallbackForNpToolkit func, void *arg, int32_t *cid);
+int32_t sceNetCtlCheckCallback(GuestContext *ctx);
+int32_t sceNetCtlRegisterCallbackForNpToolkit(uint64_t func, uint64_t arg, int32_t *cid);
 int32_t sceNetCtlUnregisterCallbackForNpToolkit(int32_t cid);
-int32_t sceNetCtlCheckCallbackForNpToolkit(void);
-
-// Shims
-void shim_sceNetCtlInit(GuestContext *ctx);
-void shim_sceNetCtlTerm(GuestContext *ctx);
-void shim_sceNetCtlGetState(GuestContext *ctx);
-void shim_sceNetCtlGetInfo(GuestContext *ctx);
-void shim_sceNetCtlGetNatInfo(GuestContext *ctx);
-void shim_sceNetCtlRegisterCallback(GuestContext *ctx);
-void shim_sceNetCtlUnregisterCallback(GuestContext *ctx);
-void shim_sceNetCtlCheckCallback(GuestContext *ctx);
-void shim_sceNetCtlRegisterCallbackForNpToolkit(GuestContext *ctx);
-void shim_sceNetCtlUnregisterCallbackForNpToolkit(GuestContext *ctx);
-void shim_sceNetCtlCheckCallbackForNpToolkit(GuestContext *ctx);
-void shim_sceNetCtlGetResult(GuestContext *ctx);
-int32_t sceNetCtlGetResult(int32_t eventType, int32_t *errorCode);
+int32_t sceNetCtlCheckCallbackForNpToolkit(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

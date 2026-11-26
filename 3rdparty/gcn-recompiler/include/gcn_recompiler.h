@@ -130,6 +130,9 @@ typedef struct gcn_profile {
     bool needs_unorm_fixup;                           /* true  (as shadPS4 on Metal/KosmicKrisp) */
     bool needs_clip_distance_emulation;               /* false */
     bool lower_left_origin_mode;                      /* false */
+    bool needs_sampler_lod_bias;                      /* false; true when the Metal sampler state
+                                                         ignores lodBias: sample instructions add
+                                                         the S# LOD_BIAS (and specialize on it) */
 } gcn_profile;
 
 GCN_API void gcn_profile_default_metal(gcn_profile* out);

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <optional>
@@ -1790,7 +1791,7 @@ void PatchBufferArgs(IR::Inst& inst, Info& info) {
 }
 
 void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image_res,
-                          const AmdGpu::Image& image) {
+                          const AmdGpu::Image& image, const Profile& profile) {
     const auto handle = inst.Arg(0);
     const auto& sampler_res = info.samplers[(handle.U32() >> 16) & 0xFFFF];
     const auto sampler = sampler_res.GetSharp(info);
@@ -1863,8 +1864,31 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
             UNREACHABLE();
         }
     }();
-    const IR::F32 bias = inst_info.has_bias ? get_addr_reg(addr_reg++) : IR::F32{};
+    // PS4Recomp: on a host whose sampler applies no LOD bias (Profile::needs_sampler_lod_bias) the
+    // instruction adds the S# LOD_BIAS, where shadPS4 sets VkSamplerCreateInfo::mipLodBias: Vulkan
+    // adds it to the implicit LOD and to an explicit one. Derivatives are scaled by 2^bias, which
+    // moves the LOD they give by the bias; a gather reads one level and is not affected. The bias
+    // is part of the specialization (SamplerSpecialization::lod_bias).
+    const float sampler_bias = profile.needs_sampler_lod_bias ? sampler.LodBias() : 0.f;
+    const IR::F32 instr_bias = inst_info.has_bias ? get_addr_reg(addr_reg++) : IR::F32{};
     const IR::F32 dref = inst_info.is_depth ? get_addr_reg(addr_reg++) : IR::F32{};
+    const auto add_sampler_bias = [&](const IR::F32& value) -> IR::F32 {
+        if (sampler_bias == 0.f || inst_info.is_gather) {
+            return value;
+        }
+        if (value.IsEmpty()) {
+            return ir.Imm32(sampler_bias);
+        }
+        return IR::F32{ir.FPAdd(value, ir.Imm32(sampler_bias))};
+    };
+    const float derivative_scale = std::exp2(sampler_bias);
+    const auto get_derivative = [&](u32 index) -> IR::F32 {
+        const IR::F32 d = get_addr_reg(index);
+        if (derivative_scale == 1.f) {
+            return d;
+        }
+        return IR::F32{ir.FPMul(d, ir.Imm32(derivative_scale))};
+    };
     const auto [derivatives_dx, derivatives_dy] = [&] -> std::pair<IR::Value, IR::Value> {
         if (!inst_info.has_derivatives) {
             return {};
@@ -1875,25 +1899,25 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
             // du/dx, du/dy
             addr_reg = addr_reg + 2;
             if (as_2d) {
-                return {ir.CompositeConstruct(get_addr_reg(addr_reg - 2), ir.Imm32(0.f)),
-                        ir.CompositeConstruct(get_addr_reg(addr_reg - 1), ir.Imm32(0.f))};
+                return {ir.CompositeConstruct(get_derivative(addr_reg - 2), ir.Imm32(0.f)),
+                        ir.CompositeConstruct(get_derivative(addr_reg - 1), ir.Imm32(0.f))};
             }
-            return {get_addr_reg(addr_reg - 2), get_addr_reg(addr_reg - 1)};
+            return {get_derivative(addr_reg - 2), get_derivative(addr_reg - 1)};
         case AmdGpu::ImageType::Color2D:
         case AmdGpu::ImageType::Color2DMsaa:
         case AmdGpu::ImageType::Color2DArray:
         case AmdGpu::ImageType::Cube:
             // (du/dx, dv/dx), (du/dy, dv/dy)
             addr_reg = addr_reg + 4;
-            return {ir.CompositeConstruct(get_addr_reg(addr_reg - 4), get_addr_reg(addr_reg - 3)),
-                    ir.CompositeConstruct(get_addr_reg(addr_reg - 2), get_addr_reg(addr_reg - 1))};
+            return {ir.CompositeConstruct(get_derivative(addr_reg - 4), get_derivative(addr_reg - 3)),
+                    ir.CompositeConstruct(get_derivative(addr_reg - 2), get_derivative(addr_reg - 1))};
         case AmdGpu::ImageType::Color3D:
             // (du/dx, dv/dx, dw/dx), (du/dy, dv/dy, dw/dy)
             addr_reg = addr_reg + 6;
-            return {ir.CompositeConstruct(get_addr_reg(addr_reg - 6), get_addr_reg(addr_reg - 5),
-                                          get_addr_reg(addr_reg - 4)),
-                    ir.CompositeConstruct(get_addr_reg(addr_reg - 3), get_addr_reg(addr_reg - 2),
-                                          get_addr_reg(addr_reg - 1))};
+            return {ir.CompositeConstruct(get_derivative(addr_reg - 6), get_derivative(addr_reg - 5),
+                                          get_derivative(addr_reg - 4)),
+                    ir.CompositeConstruct(get_derivative(addr_reg - 3), get_derivative(addr_reg - 2),
+                                          get_derivative(addr_reg - 1))};
         default:
             UNREACHABLE();
         }
@@ -1967,9 +1991,12 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
 
     ASSERT(!inst_info.has_lod || !inst_info.has_lod_clamp);
     const bool explicit_lod = inst_info.has_lod || inst_info.force_level0;
-    const IR::F32 lod = inst_info.has_lod        ? get_addr_reg(addr_reg++)
-                        : inst_info.force_level0 ? ir.Imm32(0.0f)
-                                                 : IR::F32{};
+    const IR::F32 lod = add_sampler_bias(inst_info.has_lod        ? get_addr_reg(addr_reg++)
+                                         : inst_info.force_level0 ? ir.Imm32(0.0f)
+                                                                  : IR::F32{});
+    // the implicit LOD of a sample without derivatives (with derivatives the scale applies)
+    const IR::F32 bias = explicit_lod || inst_info.has_derivatives ? instr_bias
+                                                                   : add_sampler_bias(instr_bias);
     const IR::F32 lod_clamp = inst_info.has_lod_clamp ? get_addr_reg(addr_reg++) : IR::F32{};
 
     auto texel = [&] -> IR::Value {
@@ -2005,7 +2032,7 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
     inst.ReplaceUsesWith(converted);
 }
 
-void PatchImageArgs(IR::Inst& inst, Info& info) {
+void PatchImageArgs(IR::Inst& inst, Info& info, const Profile& profile) {
     const auto image_handle = inst.Arg(0);
     const auto binding_index = image_handle.U32() & 0xFFFF;
     const auto& image_res = info.images[binding_index];
@@ -2032,7 +2059,7 @@ void PatchImageArgs(IR::Inst& inst, Info& info) {
 
     // Sample instructions must be handled separately using address register data.
     if (inst.GetOpcode() == IR::Opcode::ImageSampleRaw) {
-        return PatchImageSampleArgs(inst, info, image_res, image);
+        return PatchImageSampleArgs(inst, info, image_res, image, profile);
     }
 
     IR::IREmitter ir{*inst.GetParent(), IR::Block::InstructionList::s_iterator_to(inst)};
@@ -2189,13 +2216,13 @@ void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& resou
         if (IsBufferInstruction(inst)) {
             PatchBufferArgs(inst, info);
         } else if (IsImageInstruction(inst)) {
-            PatchImageArgs(inst, info);
+            PatchImageArgs(inst, info, profile);
         } else if (IsDataRingInstruction(inst)) {
             PatchGlobalDataShareAccess(inst, info, descriptors, profile);
         }
     }
     for (IR::Inst* clone : table_clones) {
-        PatchImageArgs(*clone, info);
+        PatchImageArgs(*clone, info, profile);
     }
 }
 

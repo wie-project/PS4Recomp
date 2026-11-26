@@ -246,3 +246,20 @@ Any future changes, opcode implementations, or pass modifications in `3rdparty/g
   - `EmitFetch` translates the fetch shader of an LS or ES inline (as for a V# Metal's vertex fetch cannot read): its buffer loads read the vertex buffers with GCN's stride, offsets, bounds and number formats, so the kernel has no vertex attributes.
   - `TakeStageInRegionFromBuffer` replaces the `[[grid_origin]]` / `[[grid_size]]` entry point arguments of every TessVertex kernel with `const device uint* spvStageInRegion [[buffer(GCN_TESS_STAGE_IN_REGION_SLOT)]]` (origin x, y, z, size x, y, z, the `MTLStageInRegionIndirectArguments` layout) and locals of the same names; conversion fails if a `[[stage_in]]` input is left.
   - The renderer binds those six words for each LS / ES dispatch (direct draws: bytes; indirect geometry draws: the words `bb_gs_prep` writes), on both backends; `GnmBackend::SetStageInRegion` / `SetStageInRegionIndirect` and the compute stage input descriptors are gone.
+
+### 6.5 Sampler LOD Bias in the Shader
+- **Files**:
+  - `3rdparty/gcn-recompiler/include/gcn_recompiler.h` (`gcn_profile::needs_sampler_lod_bias`)
+  - `3rdparty/gcn-recompiler/src/shader_recompiler/profile.h` (`Profile::needs_sampler_lod_bias`)
+  - `3rdparty/gcn-recompiler/src/shader_recompiler/specialization.h` (`SamplerSpecialization::lod_bias`)
+  - `3rdparty/gcn-recompiler/src/shader_recompiler/ir/passes/resource_patching_pass.cpp` (`PatchImageSampleArgs`, `PatchImageArgs`)
+  - `3rdparty/gcn-recompiler/src/api/gcn_recompiler.cpp` (`ToProfile`, `SpecHash`)
+  - `3rdparty/gcn-recompiler/src/api/gcn_shader_cache.cpp` (format version 13)
+  - `pkg/runtime/modules/libSceGnmDriver/ps4_gnm_resources.mm` (`SamplerAppliesLodBias`)
+  - `pkg/runtime/modules/libSceGnmDriver/ps4_gnm_draw.mm` (renderer init, `GetSampler`)
+  - `tests/gnm_metal_test/sampler_lod_bias.mm`, `tests/gnm_metal_test/sampler_lod_bias_shader.mm`
+- **Rationale**: shadPS4 passes the S# `LOD_BIAS` to `VkSamplerCreateInfo::mipLodBias`. The Metal equivalent, `MTLSamplerDescriptor.lodBias`, exists from macOS 26 only, and Apple7 GPUs (M1) accept it and ignore it: a sampler with bias +1.25 still reads level 0. Titles bias detail textures and blurred reflections through the S#, so on those hosts the textures were sampled at the wrong level.
+- **Implementation**:
+  - At renderer start `SamplerAppliesLodBias` draws one pixel with a sampler whose `lodBias` is 1 and checks that level 1 is read. When it is not (or before macOS 26), the renderer sets `gcn_profile::needs_sampler_lod_bias` and clears the bias of the sampler states it creates, so the bias is applied once.
+  - With the flag, `PatchImageSampleArgs` adds the S# bias the way Vulkan adds `mipLodBias`: an implicit-LOD sample gets it as (or added to) its bias operand, an explicit LOD (`_L`, `_LZ`) is offset by it, and the derivatives of a `_D` sample are scaled by `2^bias`, which moves their LOD by the bias. Gathers read one level and are unchanged.
+  - `SamplerSpecialization::lod_bias` holds the raw S# field when the flag is set (0 otherwise), so draws with another bias get their own permutation only on those hosts; `SpecHash` and the shader cache format (version 13) include it. The flag is part of `gcn_profile`, which the runtime shader cache key already hashes.

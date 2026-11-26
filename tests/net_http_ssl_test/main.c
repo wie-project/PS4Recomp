@@ -3,61 +3,14 @@
 #include <string.h>
 #include <assert.h>
 
-#include "modules/libSceNetCtl/ps4_netctl.h"
 #include "modules/libSceNet/ps4_net.h"
 #include "modules/libSceHttp/ps4_http.h"
 #include "modules/libSceSsl/ps4_ssl.h"
 
-static int g_toolkit_cb_count = 0;
-static void test_toolkit_callback(int32_t eventType, void *arg) {
-    (void)arg;
-    if (eventType == ORBIS_NET_CTL_EVENT_TYPE_IPOBTAINED) {
-        g_toolkit_cb_count++;
-    }
-}
-
 int main(void) {
-    printf("[TEST] Starting Pack 4 (Net, NetCtl, Http, Ssl) verification...\n");
+    printf("[TEST] Starting Pack 4 (Net, Http, Ssl) verification...\n");
 
-    // 1. NetCtl Test
-    assert(sceNetCtlInit() == ORBIS_OK);
-
-    int32_t state = 0;
-    assert(sceNetCtlGetState(&state) == ORBIS_OK);
-    assert(state == ORBIS_NET_CTL_STATE_IPOBTAINED);
-
-    OrbisNetCtlInfo info;
-    assert(sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_DEVICE, &info) == ORBIS_OK);
-    assert(info.device == ORBIS_NET_CTL_DEVICE_WIRED || info.device == ORBIS_NET_CTL_DEVICE_WIRELESS);
-
-    assert(sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_MTU, &info) == ORBIS_OK);
-    assert(info.mtu == 1500);
-
-    assert(sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_LINK, &info) == ORBIS_OK);
-    assert(info.link == ORBIS_NET_CTL_LINK_CONNECTED);
-
-    assert(sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_IP_ADDRESS, &info) == ORBIS_OK);
-    printf("[TEST] IP address: %s\n", info.ip_address);
-    assert(strlen(info.ip_address) > 0);
-
-    assert(sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_PRIMARY_DNS, &info) == ORBIS_OK);
-    assert(strcmp(info.primary_dns, "1.1.1.1") == 0);
-
-    OrbisNetCtlNatInfo nat_info;
-    memset(&nat_info, 0, sizeof(nat_info));
-    nat_info.size = sizeof(OrbisNetCtlNatInfo);
-    assert(sceNetCtlGetNatInfo(&nat_info) == ORBIS_OK);
-    assert(nat_info.stun_status == 1);
-    assert(nat_info.nat_type == 2);
-    printf("[TEST] NAT type: %d, STUN status: %d, Mapped addr: 0x%08x\n",
-           nat_info.nat_type, nat_info.stun_status, nat_info.mapped_addr);
-
-    int32_t cid = 0;
-    assert(sceNetCtlRegisterCallbackForNpToolkit(test_toolkit_callback, NULL, &cid) == ORBIS_OK);
-    assert(cid > 0);
-    assert(sceNetCtlCheckCallbackForNpToolkit() == ORBIS_OK);
-    assert(g_toolkit_cb_count == 1);
-    assert(sceNetCtlUnregisterCallbackForNpToolkit(cid) == ORBIS_OK);
+    // libSceNetCtl is covered by pkg/hosttest (TestNetCtl).
 
     // 2. Net & Epoll & Resolver Test
     GuestContext ctx;
