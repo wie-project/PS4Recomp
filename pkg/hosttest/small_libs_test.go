@@ -167,7 +167,7 @@ func TestWebBrowserDialog(t *testing.T) {
 // and the stack overflow check on a switch.
 func TestFiber(t *testing.T) {
 	bin := buildHostCFlags(t, "fiber",
-		[]string{"-I../runtime/kernel/threading"},
+		[]string{threadingInclude},
 		"../runtime/modules/libSceFiber/ps4_fiber.c",
 	)
 	runHostCases(t, bin, []string{

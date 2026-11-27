@@ -78,9 +78,13 @@ extern "C" {
 #define ORBIS_NET_CTL_AUTH_NAME_LEN (127 + 1)
 #define ORBIS_NET_CTL_IPV4_ADDR_STR_LEN 16
 
+// Shared with libSceNet (ps4_net_types.h).
+#ifndef PS4_ORBIS_NET_ETHER_ADDR_DEFINED
+#define PS4_ORBIS_NET_ETHER_ADDR_DEFINED
 typedef struct OrbisNetEtherAddr {
-    uint8_t data[ORBIS_NET_ETHER_ADDR_LEN];
+    uint8_t data[6];
 } OrbisNetEtherAddr;
+#endif
 
 typedef union OrbisNetCtlInfo {
     uint32_t device;
@@ -120,6 +124,9 @@ _Static_assert(sizeof(OrbisNetCtlNatInfo) == 0x10, "OrbisNetCtlNatInfo");
 
 // Whether the host reports itself connected (PS4_NETWORK=1; shadPS4 isConnectedToNetwork).
 bool ps4_netctl_connected(void);
+// The hardware address of the host interface that routes to the Internet (what
+// sceNetCtlGetInfo(ETHER_ADDR) reports); false when it cannot be retrieved.
+bool ps4_netctl_host_ether_addr(uint8_t mac[6]);
 
 // C API. Callbacks (void (*)(int event, void *arg)) and their arguments are guest addresses.
 int32_t sceNetCtlGetState(int32_t *state);

@@ -182,6 +182,11 @@ int32_t sceNetCtlGetResult(int32_t eventType, int32_t *errorCode) {
     return ORBIS_OK;
 }
 
+bool ps4_netctl_host_ether_addr(uint8_t mac[6]) {
+    struct in_addr ip;
+    return local_ip(&ip) && interface_of(ip, NULL, mac);
+}
+
 int32_t sceNetCtlGetInfo(int32_t code, OrbisNetCtlInfo *info) {
     if (!ps4_netctl_connected()) return (int32_t)ORBIS_NET_CTL_ERROR_NOT_CONNECTED;
     // shadPS4 writes without a check
@@ -193,7 +198,7 @@ int32_t sceNetCtlGetInfo(int32_t code, OrbisNetCtlInfo *info) {
         break;
     case ORBIS_NET_CTL_INFO_ETHER_ADDR: {
         uint8_t mac[ORBIS_NET_ETHER_ADDR_LEN];
-        if (local_ip(&ip) && interface_of(ip, NULL, mac)) {
+        if (ps4_netctl_host_ether_addr(mac)) {
             memcpy(info->ether_addr.data, mac, ORBIS_NET_ETHER_ADDR_LEN);
         } else {
             fprintf(stderr, "[ps4-netctl] hardware address: failed to retrieve\n");

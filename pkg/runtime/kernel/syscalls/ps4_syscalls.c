@@ -1,6 +1,8 @@
 #include "ps4_syscalls.h"
 #include "ps4_kernel_sys.h"
 #include "ps4_hitch.h"
+#include "ps4_net.h"
+#include "ps4_net_core.h"
 #include "ps4_vfs.h"
 #include "recomp_runtime.h"
 #include <dirent.h>
@@ -27,6 +29,14 @@ static inline uint64_t sce_kernel_error(int err) {
   return (uint64_t)(int64_t)(int32_t)(0x80020000 | (uint32_t)err);
 }
 
+// The guest errno libSceNet's kernel integration left (FreeBSD values).
+static inline int net_kernel_errno(GuestContext *ctx) {
+  return *(const int *)(ctx->mem_base + ctx->fs_base + RECOMP_TCB_ERRNO_SLOT);
+}
+
+// shadPS4 KernelFstat: a net object is a socket with no size.
+static int net_kernel_fstat(GuestContext *ctx, int fd, uint64_t statbuf_addr);
+
 // PS4 specific: sceKernelUsleep sleeps for microseconds
 void shim_sceKernelUsleep(GuestContext *ctx) {
   uint32_t usec = (uint32_t)ctx->rdi;
@@ -42,6 +52,10 @@ void shim_write(GuestContext *ctx) {
   size_t count = (size_t)ctx->rdx;
 
   const void *host_ptr = ctx->mem_base + buf_addr;
+  if (ps4_net_kernel_owns(fd)) {
+    ctx->rax = (uint64_t)ps4_net_kernel_write(ctx, fd, host_ptr, count);
+    SHIM_RETURN();
+  }
   ssize_t ret = write(fd, host_ptr, count);
   if (ret < 0) {
     set_guest_errno(ctx, errno);
@@ -92,6 +106,11 @@ void shim_sceKernelWrite(GuestContext *ctx) {
   size_t count = (size_t)ctx->rdx;
 
   const void *host_ptr = ctx->mem_base + buf_addr;
+  if (ps4_net_kernel_owns(fd)) {
+    const int64_t r = ps4_net_kernel_write(ctx, fd, host_ptr, count);
+    ctx->rax = r < 0 ? sce_kernel_error(net_kernel_errno(ctx)) : (uint64_t)r;
+    SHIM_RETURN();
+  }
   ssize_t ret = write(fd, host_ptr, count);
   if (ret < 0) {
     int err = errno;
@@ -351,6 +370,10 @@ void shim_read(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
   uint64_t buf_addr = ctx->rsi;
   size_t count = (size_t)ctx->rdx;
+  if (ps4_net_kernel_owns(fd)) {
+    ctx->rax = (uint64_t)ps4_net_kernel_read(ctx, fd, ctx->mem_base + buf_addr, count);
+    SHIM_RETURN();
+  }
   ssize_t ret;
   PS4_HITCH_TIMED(PS4_HITCH_IO,
                   ret = ps4_vfs_read(fd, ctx->mem_base + buf_addr, count));
@@ -395,6 +418,11 @@ void shim_sceKernelRead(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
   uint64_t buf_addr = ctx->rsi;
   size_t count = (size_t)ctx->rdx;
+  if (ps4_net_kernel_owns(fd)) {
+    const int64_t r = ps4_net_kernel_read(ctx, fd, ctx->mem_base + buf_addr, count);
+    ctx->rax = r < 0 ? sce_kernel_error(net_kernel_errno(ctx)) : (uint64_t)r;
+    SHIM_RETURN();
+  }
   ssize_t ret;
   PS4_HITCH_TIMED(PS4_HITCH_IO,
                   ret = ps4_vfs_read(fd, ctx->mem_base + buf_addr, count));
@@ -583,6 +611,10 @@ void shim_fcntl(GuestContext *ctx) {
   int cmd = (int)ctx->rsi;
   uint64_t arg = ctx->rdx;
   int ret;
+  if (ps4_net_kernel_owns(fd)) {
+    ctx->rax = (uint64_t)(int64_t)ps4_net_kernel_fcntl(ctx, fd, cmd, (int64_t)arg);
+    SHIM_RETURN();
+  }
   if (cmd == F_SETFL) {
     bool is_direct = false;
     int host_flags = ps4_open_flags_to_host((int)arg, &is_direct);
@@ -633,6 +665,10 @@ void shim_open(GuestContext *ctx) {
 // close
 void shim_close(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
+  if (ps4_net_kernel_owns(fd)) {
+    ctx->rax = (uint64_t)(int64_t)ps4_net_kernel_close(ctx, fd);
+    SHIM_RETURN();
+  }
   guest_dir_cache_drop_fd(fd);
   int ret = ps4_vfs_close(fd);
   if (ret < 0) {
@@ -713,6 +749,10 @@ void shim_sceKernelCheckReachability(GuestContext *ctx) {
 // sceKernelClose
 void shim_sceKernelClose(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
+  if (ps4_net_kernel_owns(fd)) {
+    ctx->rax = ps4_net_kernel_close(ctx, fd) < 0 ? sce_kernel_error(net_kernel_errno(ctx)) : 0;
+    SHIM_RETURN();
+  }
   guest_dir_cache_drop_fd(fd);
   int ret = ps4_vfs_close(fd);
   if (ret < 0) {
@@ -767,6 +807,23 @@ struct ps4_stat {
 };
 _Static_assert(sizeof(struct ps4_stat) == 120,
                "ps4_stat must be exactly 120 bytes");
+
+static int net_kernel_fstat(GuestContext *ctx, int fd, uint64_t statbuf_addr) {
+  if (!statbuf_addr) {
+    set_guest_errno(ctx, EFAULT);
+    return -1;
+  }
+  if (ps4_net_object_kind(fd) == PS4_NET_OBJ_NONE) { // closed, still in use by a blocked call
+    set_guest_errno(ctx, EBADF);
+    return -1;
+  }
+  struct ps4_stat *gst = (struct ps4_stat *)(ctx->mem_base + statbuf_addr);
+  memset(gst, 0, sizeof(*gst));
+  gst->st_mode = 0140000u | 0777u; // S_IFSOCK
+  gst->st_nlink = 1;
+  gst->st_blksize = 4096;
+  return 0;
+}
 
 static void fill_ps4_stat(struct ps4_stat *gst, const struct stat *st) {
   memset(gst, 0, sizeof(struct ps4_stat));
@@ -824,6 +881,10 @@ void shim_stat(GuestContext *ctx) {
 void shim_fstat(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
   uint64_t statbuf_addr = ctx->rsi;
+  if (ps4_net_kernel_owns(fd)) {
+    ctx->rax = (uint64_t)(int64_t)net_kernel_fstat(ctx, fd, statbuf_addr);
+    SHIM_RETURN();
+  }
   struct stat st;
   int ret = ps4_vfs_fstat(fd, &st);
   if (ret == 0) {
@@ -860,6 +921,10 @@ void shim_sceKernelStat(GuestContext *ctx) {
 void shim_sceKernelFstat(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
   uint64_t statbuf_addr = ctx->rsi;
+  if (ps4_net_kernel_owns(fd)) {
+    ctx->rax = net_kernel_fstat(ctx, fd, statbuf_addr) < 0 ? sce_kernel_error(net_kernel_errno(ctx)) : 0;
+    SHIM_RETURN();
+  }
   struct stat st;
   int ret = ps4_vfs_fstat(fd, &st);
   if (ret == 0) {

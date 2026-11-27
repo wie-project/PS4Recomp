@@ -10,7 +10,7 @@ import "testing"
 // and sceNpJoinThread, and callout contexts running guest handlers in deadline order.
 func TestNpCommon(t *testing.T) {
 	bin := buildHostCFlags(t, "np_common",
-		[]string{"-I../runtime/kernel/sync", "-I../runtime/kernel/threading", kernelInclude},
+		[]string{syncInclude, threadingInclude, kernelInclude},
 		"../runtime/modules/libSceNp/ps4_np_common.c",
 	)
 	runHostCases(t, bin, []string{"id-helpers", "mutex", "thread", "callout"})

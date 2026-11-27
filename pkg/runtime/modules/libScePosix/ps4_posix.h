@@ -7,25 +7,8 @@
 extern "C" {
 #endif
 
-// BSD Sockets
-void shim_socket(GuestContext *ctx);
-void shim_connect(GuestContext *ctx);
-void shim_bind(GuestContext *ctx);
-void shim_listen(GuestContext *ctx);
-void shim_accept(GuestContext *ctx);
-void shim_send(GuestContext *ctx);
-void shim_recv(GuestContext *ctx);
-void shim_sendto(GuestContext *ctx);
-void shim_recvfrom(GuestContext *ctx);
-void shim_sendmsg(GuestContext *ctx);
-void shim_recvmsg(GuestContext *ctx);
-void shim_setsockopt(GuestContext *ctx);
-void shim_getsockopt(GuestContext *ctx);
-void shim_getsockname(GuestContext *ctx);
-void shim_getpeername(GuestContext *ctx);
-void shim_shutdown(GuestContext *ctx);
+// select (the socket calls are in libSceNet, ps4_net.h)
 void shim_select(GuestContext *ctx);
-void shim_inet_pton(GuestContext *ctx);
 
 // POSIX System & Threading
 void shim_usleep(GuestContext *ctx);

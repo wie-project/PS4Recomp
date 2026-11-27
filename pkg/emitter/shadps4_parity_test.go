@@ -40,6 +40,9 @@ var auditedShadPS4Libraries = []string{
 	"keyboard",
 	"libpng",
 	"mouse",
+	// The P2P transport (net_p2p*.cpp, core/net/p2p_*) is not ported yet: P2P sockets fail
+	// with ENETDOWN (libSceNet/ps4_net.h).
+	"net",
 	"network/http.cpp",
 	"network/http2.cpp",
 	"network/netctl.cpp",
@@ -85,14 +88,6 @@ var auditedShadPS4Libraries = []string{
 	"vr_tracker",
 	"web_browser_dialog",
 	"zlib",
-	"net",
-	"np/np_score",
-	"np/np_signaling",
-	"np/np_matching2",
-	"np/np_tus",
-	"np/np_web_api",
-	"np/np_web_api2",
-	"np/np_trophy.cpp",
 }
 
 var libFunctionRe = regexp.MustCompile(`LIB_FUNCTION\(\s*"([^"]+)",\s*"([^"]+)",\s*\d+,\s*"[^"]+",\s*([A-Za-z0-9_]+)`)

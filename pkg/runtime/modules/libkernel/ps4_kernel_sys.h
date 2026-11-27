@@ -55,6 +55,8 @@ typedef struct OrbisPthreadAttr {
 } OrbisPthreadAttr;
 
 // High-resolution process timers
+// Microseconds since the process started.
+uint64_t sceKernelGetProcessTime(void);
 uint64_t sceKernelGetProcessTimeCounter(void);
 uint64_t sceKernelGetProcessTimeCounterFrequency(void);
 uint64_t sceKernelGetProcessTime(void);

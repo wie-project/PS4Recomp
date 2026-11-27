@@ -208,9 +208,13 @@ _Static_assert(sizeof(xmm_reg_t) == 16 && sizeof(((GuestContext *)0)->fpu_stack[
     return;                                                                    \
   } while (0)
 
+// Per-thread guest ints in the TCB: the kernel's errno and libSceNet's own (sceNetErrnoLoc).
+#define RECOMP_TCB_ERRNO_SLOT 0x100ULL
+#define RECOMP_TCB_NET_ERRNO_SLOT 0x104ULL
+
 static inline void set_guest_errno(GuestContext *ctx, int err) {
   if (ctx && ctx->fs_base) {
-    *(int *)(ctx->mem_base + ctx->fs_base + 0x100ULL) = err;
+    *(int *)(ctx->mem_base + ctx->fs_base + RECOMP_TCB_ERRNO_SLOT) = err;
   }
 }
 

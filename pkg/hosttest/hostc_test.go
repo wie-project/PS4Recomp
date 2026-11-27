@@ -19,6 +19,12 @@ const userServiceInclude = "-I../runtime/modules/libSceUserService"
 // kernelInclude puts the libkernel headers (ps4_kernel_sys.h) on the include path.
 const kernelInclude = "-I../runtime/modules/libkernel"
 
+// threadingInclude and syncInclude add the kernel threading and sync headers.
+const (
+	threadingInclude = "-I../runtime/kernel/threading"
+	syncInclude      = "-I../runtime/kernel/sync"
+)
+
 // linkZlib links the system zlib.
 const linkZlib = "-lz"
 
