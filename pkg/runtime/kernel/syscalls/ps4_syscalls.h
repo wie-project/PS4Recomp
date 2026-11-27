@@ -38,6 +38,7 @@ void shim_fstat(GuestContext *ctx);
 void shim_sceKernelFstat(GuestContext *ctx);
 void shim_sceKernelWrite(GuestContext *ctx);
 void shim_sceKernelWritev(GuestContext *ctx);
+void shim_sceKernelDebugOutText(GuestContext *ctx);
 void shim_chmod(GuestContext *ctx);
 void shim_fchmod(GuestContext *ctx);
 void shim_utimes(GuestContext *ctx);

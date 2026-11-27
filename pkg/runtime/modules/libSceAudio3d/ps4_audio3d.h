@@ -110,6 +110,8 @@ int32_t ps4_audio3d_initialize(int64_t reserved);
 int32_t ps4_audio3d_terminate(void);
 int32_t ps4_audio3d_get_default_open_parameters(void *params);
 int32_t ps4_audio3d_port_open(int32_t user_id, const void *params, uint32_t *port_id);
+int32_t ps4_audio3d_port_create(uint32_t granularity, uint32_t rate, int64_t reserved,
+                                uint32_t *port_id);
 int32_t ps4_audio3d_port_close(uint32_t port_id);
 int32_t ps4_audio3d_port_set_attribute(uint32_t port_id, uint32_t attribute_id, const void *value,
                                        uint64_t size);
@@ -122,6 +124,9 @@ int32_t ps4_audio3d_object_reserve(uint32_t port_id, uint32_t *object_id);
 int32_t ps4_audio3d_object_unreserve(uint32_t port_id, uint32_t object_id);
 int32_t ps4_audio3d_object_set_attributes(uint32_t port_id, uint32_t object_id, uint64_t num,
                                           const Ps4Audio3dAttribute *attrs, uintptr_t base);
+int32_t ps4_audio3d_object_set_attribute(uint32_t port_id, uint32_t object_id,
+                                         uint32_t attribute_id, uint64_t value, uint64_t size,
+                                         uintptr_t base);
 int32_t ps4_audio3d_bed_write(uint32_t port_id, uint32_t num_channels, uint32_t format,
                               const void *buffer, uint32_t num_samples);
 int32_t ps4_audio3d_audioout_open(uint32_t port_id, int32_t user_id, int32_t type, int32_t index,
@@ -129,6 +134,7 @@ int32_t ps4_audio3d_audioout_open(uint32_t port_id, int32_t user_id, int32_t typ
 int32_t ps4_audio3d_audioout_close(int32_t handle);
 int32_t ps4_audio3d_audioout_outputs(const Ps4Audio3dAudioOutParam *params, uint32_t num,
                                      uintptr_t base);
+int32_t ps4_audio3d_audioout_output(int32_t handle, uint64_t ptr, uintptr_t base);
 int32_t ps4_audio3d_port_get_levels(uint32_t port_id, Ps4Audio3dLevels *out);
 
 // Guest shims
@@ -151,6 +157,25 @@ void shim_sceAudio3dBedWrite2(GuestContext *ctx);
 void shim_sceAudio3dAudioOutOpen(GuestContext *ctx);
 void shim_sceAudio3dAudioOutClose(GuestContext *ctx);
 void shim_sceAudio3dAudioOutOutputs(GuestContext *ctx);
+void shim_sceAudio3dAudioOutOutput(GuestContext *ctx);
+void shim_sceAudio3dObjectSetAttribute(GuestContext *ctx);
+void shim_sceAudio3dPortCreate(GuestContext *ctx);
+void shim_sceAudio3dCreateSpeakerArray(GuestContext *ctx);
+void shim_sceAudio3dDeleteSpeakerArray(GuestContext *ctx);
+void shim_sceAudio3dGetSpeakerArrayMemorySize(GuestContext *ctx);
+void shim_sceAudio3dGetSpeakerArrayMixCoefficients(GuestContext *ctx);
+void shim_sceAudio3dGetSpeakerArrayMixCoefficients2(GuestContext *ctx);
+void shim_sceAudio3dPortDestroy(GuestContext *ctx);
+void shim_sceAudio3dPortFreeState(GuestContext *ctx);
+void shim_sceAudio3dPortGetList(GuestContext *ctx);
+void shim_sceAudio3dPortGetParameters(GuestContext *ctx);
+void shim_sceAudio3dPortGetState(GuestContext *ctx);
+void shim_sceAudio3dPortGetStatus(GuestContext *ctx);
+void shim_sceAudio3dPortQueryDebug(GuestContext *ctx);
+void shim_sceAudio3dReportRegisterHandler(GuestContext *ctx);
+void shim_sceAudio3dReportUnregisterHandler(GuestContext *ctx);
+void shim_sceAudio3dSetGpuRenderer(GuestContext *ctx);
+void shim_sceAudio3dStrError(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

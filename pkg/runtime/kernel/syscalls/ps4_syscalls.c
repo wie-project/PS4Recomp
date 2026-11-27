@@ -135,6 +135,17 @@ void shim_sceKernelWritev(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+// void sceKernelDebugOutText(void *unk, char *text): as shadPS4 (kernel/debug.cpp), the text
+// goes to sceKernelWrite on fd 1. It returns nothing; a failed write only sets the guest errno.
+void shim_sceKernelDebugOutText(GuestContext *ctx) {
+  if (ctx->rsi) {
+    const char *text = (const char *)(ctx->mem_base + ctx->rsi);
+    ssize_t ret = write(1, text, strlen(text));
+    if (ret < 0) set_guest_errno(ctx, errno);
+  }
+  SHIM_RETURN();
+}
+
 // Exit (does not return). Through ps4_host_quit, as the host's own quit paths:
 // the pipeline archive is saved and the log drained, and no static destructors
 // run while game threads and Metal completion handlers still use global state.

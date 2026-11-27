@@ -1,4 +1,5 @@
 #include "ps4_system_service.h"
+#include "ps4_music_player_service.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -209,8 +210,9 @@ int32_t sceSystemServiceIsAppSuspended(void) {
     return 0;
 }
 
+// As shadPS4: whether libSceMusicPlayerService is playing (or paused on) background music.
 int32_t sceSystemServiceIsBgmPlaying(void) {
-    return 0;
+    return ps4_music_player_is_bgm_playing() ? 1 : 0;
 }
 
 int32_t sceSystemServiceNavigateToGoHome(void) {

@@ -10,11 +10,14 @@ import "testing"
 // EntitlementUpdate system service event, add-on mounting and temporary data, as in shadPS4.
 func TestAppContent(t *testing.T) {
 	bin := buildHostCFlags(t, "app_content",
-		[]string{kernelInclude},
+		[]string{kernelInclude, frameworkFlag, "AudioToolbox", frameworkFlag, coreFoundation},
 		"../runtime/core/ps4_sfo.c",
 		"../runtime/modules/libSceAppContent/ps4_app_content.c",
 		"../runtime/modules/libSceNpEntitlementAccess/ps4_np_entitlement_access.c",
 		"../runtime/modules/libSceSystemService/ps4_system_service.c",
+		// sceSystemServiceIsBgmPlaying asks the music player.
+		"../runtime/modules/libSceMusicPlayerService/ps4_music_player_service.c",
+		"../runtime/modules/libSceMusicPlayerService/ps4_music_player_audio.c",
 	)
 	runHostCases(t, bin, []string{"not-initialized", "addcont", "temp-data"})
 }

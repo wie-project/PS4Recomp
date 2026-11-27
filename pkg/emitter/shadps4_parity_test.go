@@ -18,6 +18,7 @@ const shadps4Libraries = "../../tools/shadps4/src/core/libraries"
 // function by function: every function shadPS4 registers has a shim.
 var auditedShadPS4Libraries = []string{
 	"app_content",
+	"audio3d/audio3d.cpp",
 	"audio/audioin.cpp",
 	"camera",
 	"companion",
@@ -35,6 +36,7 @@ var auditedShadPS4Libraries = []string{
 	"invitation_dialog",
 	"jpeg",
 	"kernel/coredump",
+	"kernel/debug.cpp",
 	"keyboard",
 	"libpng",
 	"mouse",
@@ -44,6 +46,7 @@ var auditedShadPS4Libraries = []string{
 	// shadPS4 loads libSceSsl from ssl2.cpp; its ssl.cpp is not registered (libs.cpp).
 	"network/ssl2.cpp",
 	"move",
+	"music",
 	"np/np_auth",
 	"np/np_commerce",
 	"np/np_common.cpp",
@@ -82,6 +85,14 @@ var auditedShadPS4Libraries = []string{
 	"vr_tracker",
 	"web_browser_dialog",
 	"zlib",
+	"net",
+	"np/np_score",
+	"np/np_signaling",
+	"np/np_matching2",
+	"np/np_tus",
+	"np/np_web_api",
+	"np/np_web_api2",
+	"np/np_trophy.cpp",
 }
 
 var libFunctionRe = regexp.MustCompile(`LIB_FUNCTION\(\s*"([^"]+)",\s*"([^"]+)",\s*\d+,\s*"[^"]+",\s*([A-Za-z0-9_]+)`)

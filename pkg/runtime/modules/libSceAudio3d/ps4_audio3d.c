@@ -111,6 +111,7 @@
 #include "ps4_audio3d.h"
 #include "ps4_audio3d_mix.h"
 #include "ps4_audioout_internal.h"
+#include "ps4_hle_stub.h"
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -427,6 +428,19 @@ int32_t ps4_audio3d_port_open(int32_t user_id, const void *params, uint32_t *por
           "num_beds=%u\n",
           id, gran, max_obj, depth, mode, beds);
   return 0;
+}
+
+// sceAudio3dPortCreate (shadPS4): the old entry point, PortOpen for the system user with
+// 0x10-byte parameters (granularity and rate; the rest takes the defaults of that size).
+int32_t ps4_audio3d_port_create(uint32_t granularity, uint32_t rate, int64_t reserved,
+                                uint32_t *port_id) {
+  if (!port_id || reserved != 0) return PS4_AUDIO3D_ERROR_INVALID_PARAMETER;
+  Ps4Audio3dOpenParameters params;
+  memset(&params, 0, sizeof(params));
+  params.size_this = 0x10;
+  params.granularity = granularity;
+  params.rate = rate;
+  return ps4_audio3d_port_open(0xFF, &params, port_id);
 }
 
 // Lock held; closes the AudioOut ports, waits for blocked pushes, frees.
@@ -1028,6 +1042,23 @@ int32_t ps4_audio3d_object_set_attributes(uint32_t port_id, uint32_t object_id, 
   return r;
 }
 
+// sceAudio3dObjectSetAttribute: one attribute, the value given directly. shadPS4 rejects an
+// empty value for every attribute but RESET_STATE before looking at the attribute; the rest of
+// the checks and the effect are those of ObjectSetAttributes with a single entry.
+int32_t ps4_audio3d_object_set_attribute(uint32_t port_id, uint32_t object_id,
+                                         uint32_t attribute_id, uint64_t value, uint64_t size,
+                                         uintptr_t base) {
+  if (size == 0 && attribute_id != PS4_AUDIO3D_ATTR_RESET_STATE) {
+    pthread_mutex_lock(&g_lock);
+    const bool port_ok = port_get(port_id) != NULL;
+    pthread_mutex_unlock(&g_lock);
+    return port_ok ? PS4_AUDIO3D_ERROR_INVALID_PARAMETER : PS4_AUDIO3D_ERROR_INVALID_PORT;
+  }
+  const Ps4Audio3dAttribute attr = {
+      .attribute_id = attribute_id, .value = value, .value_size = size};
+  return ps4_audio3d_object_set_attributes(port_id, object_id, 1, &attr, base);
+}
+
 // ---------------------------------------------------------------- beds
 
 int32_t ps4_audio3d_bed_write(uint32_t port_id, uint32_t num_channels, uint32_t format,
@@ -1220,6 +1251,23 @@ int32_t ps4_audio3d_audioout_outputs(const Ps4Audio3dAudioOutParam *params, uint
   return r;
 }
 
+// sceAudio3dAudioOutOutput (shadPS4 audio3d.cpp): queues one grain of an associated AudioOut
+// port like a single AudioOutOutputs entry, but the buffer is required and the call returns the
+// sample count of a grain (len * channels), as sceAudioOutOutput reports what it sent.
+int32_t ps4_audio3d_audioout_output(int32_t handle, uint64_t ptr, uintptr_t base) {
+  if (!ptr) return PS4_AUDIO3D_ERROR_INVALID_PARAMETER;
+  const Ps4Audio3dAudioOutParam param = {.handle = handle, .ptr = ptr};
+  int32_t r = ps4_audio3d_audioout_outputs(&param, 1, base);
+  if (r != 0) return r;
+  pthread_mutex_lock(&g_lock);
+  A3dPort *p = NULL;
+  const A3dAssoc *a = assoc_find(handle, &p);
+  // The handle can be closed by another thread right after the grain was queued.
+  r = a ? (int32_t)(a->bytes / (a->is_float ? 4u : 2u)) : PS4_AUDIO3D_ERROR_INVALID_PORT;
+  pthread_mutex_unlock(&g_lock);
+  return r;
+}
+
 int32_t ps4_audio3d_port_get_levels(uint32_t port_id, Ps4Audio3dLevels *out) {
   if (!out) return PS4_AUDIO3D_ERROR_INVALID_PARAMETER;
   atomic_store_explicit(&g_levels_on, true, memory_order_relaxed);
@@ -1381,3 +1429,43 @@ void shim_sceAudio3dAudioOutOutputs(GuestContext *ctx) {
   A3D_RET(ctx, r);
   SHIM_RETURN();
 }
+
+// void *ptr is optional only for AudioOutOutputs; here it is required (see the host function).
+void shim_sceAudio3dAudioOutOutput(GuestContext *ctx) {
+  A3D_RET(ctx, ps4_audio3d_audioout_output((int32_t)ctx->rdi, ctx->rsi, (uintptr_t)ctx->mem_base));
+  SHIM_RETURN();
+}
+
+// (port_id, object_id, attribute_id, const void *attribute, u64 attribute_size)
+void shim_sceAudio3dObjectSetAttribute(GuestContext *ctx) {
+  A3D_RET(ctx, ps4_audio3d_object_set_attribute((uint32_t)ctx->rdi, (uint32_t)ctx->rsi,
+                                                (uint32_t)ctx->rdx, ctx->rcx, ctx->r8,
+                                                (uintptr_t)ctx->mem_base));
+  SHIM_RETURN();
+}
+
+// (u32 granularity, u32 rate, s64 reserved, OrbisAudio3dPortId *port_id)
+void shim_sceAudio3dPortCreate(GuestContext *ctx) {
+  A3D_RET(ctx, ps4_audio3d_port_create((uint32_t)ctx->rdi, (uint32_t)ctx->rsi, (int64_t)ctx->rdx,
+                                       (uint32_t *)GPTR(ctx, ctx->rcx)));
+  SHIM_RETURN();
+}
+
+// shadPS4 (audio3d.cpp, the default backend) stubs these: speaker arrays, port queries and
+// debugging, report handlers and the GPU renderer.
+PS4_HLE_STUB(sceAudio3dCreateSpeakerArray)
+PS4_HLE_STUB(sceAudio3dDeleteSpeakerArray)
+PS4_HLE_STUB(sceAudio3dGetSpeakerArrayMemorySize)
+PS4_HLE_STUB(sceAudio3dGetSpeakerArrayMixCoefficients)
+PS4_HLE_STUB(sceAudio3dGetSpeakerArrayMixCoefficients2)
+PS4_HLE_STUB(sceAudio3dPortDestroy)
+PS4_HLE_STUB(sceAudio3dPortFreeState)
+PS4_HLE_STUB(sceAudio3dPortGetList)
+PS4_HLE_STUB(sceAudio3dPortGetParameters)
+PS4_HLE_STUB(sceAudio3dPortGetState)
+PS4_HLE_STUB(sceAudio3dPortGetStatus)
+PS4_HLE_STUB(sceAudio3dPortQueryDebug)
+PS4_HLE_STUB(sceAudio3dReportRegisterHandler)
+PS4_HLE_STUB(sceAudio3dReportUnregisterHandler)
+PS4_HLE_STUB(sceAudio3dSetGpuRenderer)
+PS4_HLE_STUB(sceAudio3dStrError)
