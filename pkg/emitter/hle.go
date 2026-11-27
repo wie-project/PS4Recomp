@@ -161,7 +161,7 @@ func NewHLEReport(loaded *elfloader.LoadedELF, modules []GuestModule) *HLEReport
 					if nid := elfloader.NIDPrefix(rel.SymName); nid != "" && canon == "" {
 						canon, _ = elfloader.ResolveNID(nid)
 					}
-					if rel.SymName == "__stack_chk_guard" || canon == "__stack_chk_guard" {
+					if elfloader.IsHostDataSymbol(rel.SymName) || elfloader.IsHostDataSymbol(canon) {
 						ent.Class = ImportDefined
 					} else if rel.ResolvesToNull() {
 						ent.Class = ImportWeakNull

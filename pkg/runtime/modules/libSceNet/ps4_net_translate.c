@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Guest <-> host translation: shadPS4 libraries/net/net_translate.cpp (the P2P address forms
-// belong to the P2P transport and are not here).
+// Guest <-> host translation: shadPS4 libraries/net/net_translate.cpp.
 
 #include "ps4_net_translate.h"
 #include "ps4_net_host.h"
@@ -277,6 +276,45 @@ bool ps4_net_to_host_option(int level, int name, Ps4NetHostOption *out) {
 bool ps4_net_is_reserved_port(uint16_t port) {
     return (port >= 1 && port <= 1023) || port == 5353 || (port >= 8540 && port <= 8579) ||
            (port >= 9293 && port <= 9310) || port >= 40000;
+}
+
+bool ps4_net_is_reserved_p2p_vport(uint16_t vport) {
+    return vport == 5353 || vport >= 32768;
+}
+
+int ps4_net_to_p2p_address(const OrbisNetSockaddr *addr, uint32_t addrlen, bool stream, Ps4P2PEndpoint *endpoint,
+                           uint16_t *port) {
+    if (!addr) return ORBIS_NET_EFAULT;
+    if (addrlen != sizeof(OrbisNetSockaddrIn)) return ORBIS_NET_EINVAL;
+    if (addr->sa_family != ORBIS_NET_AF_INET) return ORBIS_NET_EAFNOSUPPORT;
+    OrbisNetSockaddrIn in;
+    memcpy(&in, addr, sizeof(in));
+    endpoint->addr = in.sin_addr;
+    if (!stream) {
+        endpoint->port = in.sin_port;
+        *port = ntohs(in.sin_vport);
+    } else {
+        endpoint->port = in.sin_vport != 0 ? in.sin_vport : htons(PS4_NET_DEFAULT_P2P_UDP_PORT);
+        *port = ntohs(in.sin_port);
+    }
+    return 0;
+}
+
+void ps4_net_to_orbis_p2p_address(const Ps4P2PEndpoint *endpoint, uint16_t port, bool stream, OrbisNetSockaddr *out,
+                                  uint32_t *addrlen) {
+    OrbisNetSockaddrIn in;
+    memset(&in, 0, sizeof(in));
+    in.sin_len = sizeof(in);
+    in.sin_family = ORBIS_NET_AF_INET;
+    in.sin_addr = endpoint->addr;
+    if (!stream) {
+        in.sin_port = endpoint->port;
+        in.sin_vport = htons(port);
+    } else {
+        in.sin_port = htons(port);
+        in.sin_vport = endpoint->port;
+    }
+    copy_out(&in, sizeof(in), out, addrlen);
 }
 
 int32_t ps4_net_default_send_buffer(int host_type) {

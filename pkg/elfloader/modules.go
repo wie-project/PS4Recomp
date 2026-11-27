@@ -321,8 +321,8 @@ func (l *LoadedELF) ApplyBias(delta uint64) error {
 	l.MaxVAddr += delta
 	l.OrigMinVAddr += delta
 	l.OrigMaxVAddr += delta
-	if l.CanaryAddr != 0 {
-		l.CanaryAddr += delta
+	if l.HostDataAddr != 0 {
+		l.HostDataAddr += delta
 	}
 	l.Seg0Addr = shift(l.Seg0Addr)
 	l.TLSVaddr = shift(l.TLSVaddr)
@@ -402,11 +402,8 @@ func (l *LoadedELF) ApplyBias(delta uint64) error {
 				binary.LittleEndian.PutUint64(l.MemoryImage[rel.Offset:rel.Offset+8], rel.PltAddr)
 			}
 		case R_X86_64_64, R_X86_64_GLOB_DAT:
-			canonSym, _ := ResolveNID(rel.SymName)
-			if (rel.SymName == "__stack_chk_guard" || canonSym == "__stack_chk_guard") && l.CanaryAddr != 0 {
-				if rel.Offset+8 <= uint64(len(l.MemoryImage)) {
-					binary.LittleEndian.PutUint64(l.MemoryImage[rel.Offset:rel.Offset+8], l.CanaryAddr)
-				}
+			if l.HostDataAddr != 0 && bindHostDataSlot(l.MemoryImage, l.HostDataAddr, rel.Offset, rel.SymName, rel.Addend) {
+				// Points into the shifted host data page.
 			} else if int(rel.SymIdx) < len(l.DynSymbols) {
 				sym := l.DynSymbols[rel.SymIdx]
 				if sym.Address != 0 && rel.Offset+8 <= uint64(len(l.MemoryImage)) {
@@ -458,20 +455,17 @@ func MergeImages(dst, src *LoadedELF) error {
 	dst.DataRanges = mergeRanges(append(dst.DataRanges, src.DataRanges...))
 	dst.Relocations = append(dst.Relocations, src.Relocations...)
 
-	canaryTarget := dst.CanaryAddr
-	if canaryTarget == 0 {
-		canaryTarget = src.CanaryAddr
-		dst.CanaryAddr = src.CanaryAddr
+	// One host data page per process: the first module's, and every slot points into it.
+	page := dst.HostDataAddr
+	if page == 0 {
+		page = src.HostDataAddr
+		dst.HostDataAddr = src.HostDataAddr
 	}
-	if canaryTarget != 0 {
-		const canaryValue = uint64(0x595e9fbd94fda766)
-		if canaryTarget+8 <= uint64(len(dst.MemoryImage)) {
-			binary.LittleEndian.PutUint64(dst.MemoryImage[canaryTarget:canaryTarget+8], canaryValue)
-		}
+	if page != 0 {
+		writeHostData(dst.MemoryImage, page)
 		for _, rel := range dst.Relocations {
-			canonSym, _ := ResolveNID(rel.SymName)
-			if (rel.SymName == "__stack_chk_guard" || canonSym == "__stack_chk_guard") && rel.Offset+8 <= uint64(len(dst.MemoryImage)) {
-				binary.LittleEndian.PutUint64(dst.MemoryImage[rel.Offset:rel.Offset+8], canaryTarget)
+			if rel.Type == R_X86_64_GLOB_DAT || rel.Type == R_X86_64_64 {
+				bindHostDataSlot(dst.MemoryImage, page, rel.Offset, rel.SymName, rel.Addend)
 			}
 		}
 	}
@@ -594,9 +588,8 @@ func ResolveModuleRelocations(main *LoadedELF, companionExports []Symbol) error 
 				continue
 			}
 
-			canonSym, _ := ResolveNID(rel.SymName)
-			if (rel.SymName == "__stack_chk_guard" || canonSym == "__stack_chk_guard") && main.CanaryAddr != 0 {
-				binary.LittleEndian.PutUint64(main.MemoryImage[rel.Offset:rel.Offset+8], main.CanaryAddr)
+			if rel.Type != R_X86_64_JUMP_SLOT && main.HostDataAddr != 0 &&
+				bindHostDataSlot(main.MemoryImage, main.HostDataAddr, rel.Offset, rel.SymName, rel.Addend) {
 				continue
 			}
 

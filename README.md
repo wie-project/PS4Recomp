@@ -64,6 +64,8 @@ cd PS4Recomp
 
 `scripts/build.sh` automatically checks submodules, builds required C/C++ static libraries (`gcn-recompiler`, `spirv-cross`, `libatrac9`), embeds runtime assets, and produces a single self-contained executable at `bin/ps4-recomp`.
 
+Debug symbols: `./scripts/build.sh --debug` (or `PS4RECOMP_DEBUG=1`) keeps the symbols of `bin/ps4-recomp` and builds `gcn-recompiler` with debug info. A recompiled game gets debug symbols from `ps4-recomp -g`: the runtime and the generated code are compiled with `-g`, local symbols stay in the binary, and `<App>.app.dSYM` is written next to the bundle for lldb, Instruments and crash reports.
+
 ---
 
 ## Usage
@@ -113,6 +115,7 @@ Once built, launch the game by double-clicking `<GameName>.app` in Finder, or ru
 | `--tso`                 | x86 Total Store Order memory model (acquire/release semantics)                | `true`        |
 | `--app-dir <dir>`       | Host directory mapping to `/app0` for game assets                             | Auto-detected |
 | `--asan`                | Compile runtime with AddressSanitizer and LeakSanitizer                       | `false`       |
+| `-g`, `--debug`         | Debug symbols: clang `-g`, local symbols kept, `<App>.app.dSYM` written       | `false`       |
 | `--patches <xml>`       | shadPS4-format patch XML applied to the executable before analysis            | —             |
 | `--patch <name>`        | Name (`Metadata Name`) of a patch set in `--patches` to apply; repeatable     | —             |
 
@@ -174,6 +177,7 @@ When playing without a physical controller, built-in keyboard emulation is activ
 - **Microphone (`libSceAudioIn`)**: input ports capture the default macOS input device (macOS asks for microphone permission on first use). Run with `PS4_AUDIO_IN=none` to disable capture; ports then deliver silence and report no device.
 - **Camera (`libSceCamera`)**: no camera by default, as in shadPS4 (`camera_id` -1): `sceCameraIsAttached` reports none and hardware calls answer `NOT_CONNECTED`. Run with `PS4_CAMERA=<index>` to use a macOS video capture device (0 is the first, built-in cameras before external ones) as the PlayStation Camera; frames are captured with AVFoundation at 1280x800 and delivered as YUV422, RAW16 or RAW8 per the game's config (macOS asks for camera permission on first use).
 - **Network state (`libSceNetCtl`)**: disconnected by default, as in shadPS4 (`isConnectedToNetwork`): games see no connection and `sceNetCtlGetInfo` answers `NOT_CONNECTED`. Run with `PS4_NETWORK=1` to report the host connected: the state is IP-obtained and the address, netmask, gateway and hardware address are those of the host interface that routes to the Internet. There is no signaling server, so the NAT information has no STUN result either way.
+- **P2P sockets (`libSceNet`)**: `SOCK_DGRAM_P2P` and `SOCK_STREAM_P2P` sockets share one UDP socket, as in shadPS4: datagrams with virtual ports, TCP over UDP, and the keys, AES-CFB encryption and HMAC-SHA1 signatures NP installs. It starts with the first P2P socket on UDP port `PS4_P2P_PORT` (shadPS4's `p2p_port`: default 3658, the PS4's; 0 for any free port), or one of the next 16 ports when that one is taken.
 - **HTTP (`libSceHttp`, `libSceHttp2`)**: as in shadPS4, requests go out only with `PS4_NETWORK=1` (through the system libcurl); disconnected, every request fails as a name resolution failure. `PS4_HTTPS_DISABLED=1` turns off server certificate verification (shadPS4's forced-HTTPS-disabled setting). Host overrides send chosen endpoints elsewhere, e.g. to a private server: a JSON object such as `{"api.example.com": "http://localhost:8080", "*": "http://localhost:8080"}` (keys `scheme://host:port`, `host:port`, `host` or `*`) in `host_overrides/<TITLE_ID>.json` for one game or `host_overrides.json` for all, under `~/Library/Application Support/PS4Recomp` (`$PS4RECOMP_DATA_DIR`), or at the path in `PS4_HTTP_HOST_OVERRIDES_JSON`. `PS4_HTTP_LOG=1` logs the library's calls.
 
 ### Licenses

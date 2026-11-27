@@ -146,7 +146,7 @@ func TestNinjaBuildPathsWithSpace(t *testing.T) {
 	inc := filepath.Join(root, "engine", "3rdparty", "it's lib")
 	src := filepath.Join(outDir, "src a", "x.c")
 	touch(t, src, 0o644)
-	if err := generateNinjaBuild([]string{src}, outDir, []string{inc}, filepath.Join(outDir, "ps4 app"), "2", false); err != nil {
+	if err := generateNinjaBuild([]string{src}, outDir, []string{inc}, filepath.Join(outDir, "ps4 app"), "2", false, false); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(outDir, "build.ninja"))

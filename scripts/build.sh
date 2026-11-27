@@ -4,8 +4,33 @@
 # Standalone build script for PS4Recomp.
 # Automatically updates submodules, compiles required 3rdparty static libraries,
 # stages assets, and builds a completely autonomous ps4-recomp binary.
+#
+# Usage: scripts/build.sh [--debug]
+#   --debug (or PS4RECOMP_DEBUG=1) keeps debug symbols: ps4-recomp is linked without -s -w and
+#   gcn-recompiler is built as RelWithDebInfo. Games get debug symbols from `ps4-recomp -g`.
 
 set -euo pipefail
+
+DEBUG="${PS4RECOMP_DEBUG:-0}"
+for arg in "$@"; do
+    case "$arg" in
+    --debug) DEBUG=1 ;;
+    -h | --help)
+        sed -n '4,10p' "$0"
+        exit 0
+        ;;
+    *)
+        echo "unknown option: $arg (see --help)" >&2
+        exit 2
+        ;;
+    esac
+done
+GCN_BUILD_TYPE=Release
+GO_LDFLAGS="-s -w"
+if [ "$DEBUG" = 1 ]; then
+    GCN_BUILD_TYPE=RelWithDebInfo
+    GO_LDFLAGS=""
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -54,7 +79,7 @@ CMAKE_GEN=()
 if command -v ninja &>/dev/null; then
     CMAKE_GEN=(-G Ninja)
 fi
-cmake -B "$GCN_BUILD_DIR" "${CMAKE_GEN[@]}" -DCMAKE_BUILD_TYPE=Release -DGCN_BUILD_TOOLS=OFF 3rdparty/gcn-recompiler
+cmake -B "$GCN_BUILD_DIR" "${CMAKE_GEN[@]}" -DCMAKE_BUILD_TYPE="$GCN_BUILD_TYPE" -DGCN_BUILD_TOOLS=OFF 3rdparty/gcn-recompiler
 cmake --build "$GCN_BUILD_DIR" --target gcn_recompiler -j"$NCPU"
 cp "$GCN_BUILD_DIR/libgcn_recompiler.a" 3rdparty/gcn-recompiler/libgcn_recompiler.a
 
@@ -78,7 +103,7 @@ cp 3rdparty/minimp3/minimp3.h "$STAGING_DIR/minimp3/"
 
 echo "=== [ps4-recomp] 4/5: Compiling standalone binary ==="
 mkdir -p bin
-go build -ldflags="-s -w" -o bin/ps4-recomp ./cmd/ps4-recomp
+go build -ldflags="$GO_LDFLAGS" -o bin/ps4-recomp ./cmd/ps4-recomp
 
 echo "=== [ps4-recomp] 5/5: Cleaning temporary staging area ==="
 # Clean staged files, preserving .gitkeep

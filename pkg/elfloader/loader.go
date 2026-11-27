@@ -118,8 +118,9 @@ type LoadedELF struct {
 	// ProcParamAddr and ProcParamSize store the guest virtual address and extent of PT_SCE_PROCPARAM.
 	ProcParamAddr uint64
 	ProcParamSize uint64
-	// CanaryAddr tracks the guest virtual address allocated for the stack canary value.
-	CanaryAddr uint64
+	// HostDataAddr is the guest address of the host data page (hostdata.go): the stack canary
+	// and the data symbols the HLE libraries export. 0 until an import needs it.
+	HostDataAddr uint64
 
 	// TLSVaddr, TLSFilesz, TLSMemsz, and TLSAlign store this image's own PT_TLS template.
 	TLSVaddr  uint64
@@ -502,9 +503,8 @@ func applyRelaTable(loaded *LoadedELF, relData []byte, isPlt bool) {
 			}
 		}
 
-		canonSym, _ := ResolveNID(symName)
-		if (relType == R_X86_64_GLOB_DAT || relType == R_X86_64_64) && (symName == "__stack_chk_guard" || canonSym == "__stack_chk_guard") {
-			applyStackCanary(loaded, offset)
+		if (relType == R_X86_64_GLOB_DAT || relType == R_X86_64_64) && IsHostDataSymbol(symName) {
+			bindHostDataSlot(loaded.MemoryImage, ensureHostDataPage(loaded), offset, symName, addend)
 		}
 
 		if relType == R_X86_64_64 && int(symIdx) < len(loaded.DynSymbols) {
@@ -518,32 +518,31 @@ func applyRelaTable(loaded *LoadedELF, relData []byte, isPlt bool) {
 	}
 }
 
-func applyStackCanary(loaded *LoadedELF, gotOffset uint64) {
-	guardAddr := loaded.CanaryAddr
-	if guardAddr == 0 {
-		guardAddr = (loaded.MaxVAddr + 4095) &^ 4095
-		if uint64(len(loaded.MemoryImage)) < guardAddr+4096 {
-			newImg := make([]byte, guardAddr+4096)
-			copy(newImg, loaded.MemoryImage)
-			loaded.MemoryImage = newImg
-			loaded.MaxVAddr = guardAddr + 4096
-			for _, seg := range loaded.Segments {
-				end := seg.Vaddr + seg.Memsz
-				if end > uint64(len(loaded.MemoryImage)) {
-					end = uint64(len(loaded.MemoryImage))
-				}
-				if seg.Vaddr < end {
-					seg.Data = loaded.MemoryImage[seg.Vaddr:end]
-				}
+// ensureHostDataPage allocates the host data page after the image on first use and returns its
+// guest address.
+func ensureHostDataPage(loaded *LoadedELF) uint64 {
+	if loaded.HostDataAddr != 0 {
+		return loaded.HostDataAddr
+	}
+	page := (loaded.MaxVAddr + 4095) &^ 4095
+	if uint64(len(loaded.MemoryImage)) < page+hostDataPageSize {
+		newImg := make([]byte, page+hostDataPageSize)
+		copy(newImg, loaded.MemoryImage)
+		loaded.MemoryImage = newImg
+		loaded.MaxVAddr = page + hostDataPageSize
+		for _, seg := range loaded.Segments {
+			end := seg.Vaddr + seg.Memsz
+			if end > uint64(len(loaded.MemoryImage)) {
+				end = uint64(len(loaded.MemoryImage))
+			}
+			if seg.Vaddr < end {
+				seg.Data = loaded.MemoryImage[seg.Vaddr:end]
 			}
 		}
-		const canaryValue = uint64(0x595e9fbd94fda766)
-		binary.LittleEndian.PutUint64(loaded.MemoryImage[guardAddr:guardAddr+8], canaryValue)
-		loaded.CanaryAddr = guardAddr
 	}
-	if gotOffset+8 <= uint64(len(loaded.MemoryImage)) {
-		binary.LittleEndian.PutUint64(loaded.MemoryImage[gotOffset:gotOffset+8], guardAddr)
-	}
+	writeHostData(loaded.MemoryImage, page)
+	loaded.HostDataAddr = page
+	return page
 }
 
 func parseInitArray(loaded *LoadedELF) {

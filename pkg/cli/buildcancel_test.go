@@ -103,7 +103,7 @@ func TestCompileParallelCancelStopsClang(t *testing.T) {
 	defer cancel()
 	errc := make(chan error, 1)
 	go func() {
-		errc <- compileParallel(ctx, []string{src}, out, nil, filepath.Join(out, "ps4_app"), 1, "0", false, nil)
+		errc <- compileParallel(ctx, []string{src}, out, nil, filepath.Join(out, "ps4_app"), 1, "0", false, false, nil)
 	}()
 	pid := waitPid(t, pidfile)
 	cancel()

@@ -61,8 +61,8 @@ func TestHogwartsImportLibNames(t *testing.T) {
 	if loaded.ProcParamAddr != 0x9800000 {
 		t.Errorf("expected ProcParamAddr 0x9800000, got 0x%x", loaded.ProcParamAddr)
 	}
-	if loaded.CanaryAddr == 0 {
-		t.Errorf("expected CanaryAddr to be allocated")
+	if loaded.HostDataAddr == 0 {
+		t.Errorf("expected HostDataAddr to be allocated")
 	}
 }
 
@@ -99,10 +99,10 @@ func TestHogwartsCanaryResolution(t *testing.T) {
 	}
 	t.Logf("fios canaryRelocOffset = 0x%x", canaryRelocOffset)
 	val := binary.LittleEndian.Uint64(main.MemoryImage[canaryRelocOffset : canaryRelocOffset+8])
-	t.Logf("main.CanaryAddr = 0x%x", main.CanaryAddr)
+	t.Logf("main.HostDataAddr = 0x%x", main.HostDataAddr)
 	t.Logf("GOT entry at 0x%x = 0x%x", canaryRelocOffset, val)
-	if val != main.CanaryAddr {
-		t.Fatalf("expected 0x%x to point to main.CanaryAddr (0x%x), got 0x%x", canaryRelocOffset, main.CanaryAddr, val)
+	if val != main.HostDataAddr {
+		t.Fatalf("expected 0x%x to point to main.HostDataAddr (0x%x), got 0x%x", canaryRelocOffset, main.HostDataAddr, val)
 	}
 	canaryInMem := binary.LittleEndian.Uint64(main.MemoryImage[val : val+8])
 	t.Logf("Canary value at 0x%x = 0x%x", val, canaryInMem)
@@ -147,9 +147,9 @@ func TestHogwartsFullCanaryInGuestImage(t *testing.T) {
 		}
 	}
 	val := binary.LittleEndian.Uint64(main.MemoryImage[0xa3203a8:0xa3203b0])
-	t.Logf("Full merge: len=%d, main.CanaryAddr = 0x%x, [0xa3203a8] = 0x%x", len(main.MemoryImage), main.CanaryAddr, val)
-	if val != main.CanaryAddr {
-		t.Fatalf("expected 0xa3203a8 to point to 0x%x, got 0x%x", main.CanaryAddr, val)
+	t.Logf("Full merge: len=%d, main.HostDataAddr = 0x%x, [0xa3203a8] = 0x%x", len(main.MemoryImage), main.HostDataAddr, val)
+	if val != main.HostDataAddr {
+		t.Fatalf("expected 0xa3203a8 to point to 0x%x, got 0x%x", main.HostDataAddr, val)
 	}
 	if target := os.Getenv("UPDATE_GUEST_IMAGE_PATH"); target != "" {
 		if err := os.WriteFile(target, main.MemoryImage, 0o644); err != nil {

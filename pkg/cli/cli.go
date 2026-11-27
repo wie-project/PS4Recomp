@@ -50,6 +50,8 @@ type Config struct {
 	AppDir        string
 	CopyResources bool
 	Asan          bool
+	// Debug compiles with debug info (-g), keeps local symbols in the link and writes a .dSYM.
+	Debug bool
 	// TSO: acquire loads and release stores for non-stack guest memory (x86 memory ordering).
 	TSO bool
 	// JSON emits progress as JSON lines on stdout; the human log goes to stderr.
@@ -97,6 +99,7 @@ Options:
   -k, -chunk-size <num>   Number of functions per emitted assembly chunk file (default: 250)
   -v, -verbose            Enable verbose output and detailed timing breakdown (default: false)
       -asan               Compile with AddressSanitizer and LeakSanitizer (default: false)
+  -g, -debug              Debug symbols: clang -g, local symbols kept, .dSYM next to the binary (default: false)
       -json               Emit progress as JSON lines on stdout (the log goes to stderr)
       -tso                x86 memory ordering: acquire/release for non-stack guest memory (default: true)
       -patches <xml>      shadPS4-format patch XML to apply to the executable before analysis
@@ -177,6 +180,8 @@ func ParseArgs(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.CopyResources, "copy-resources", false, "Copy all game assets/resources into macOS .app bundle SharedSupport/")
 	fs.BoolVar(&cfg.CopyResources, "bundle-resources", false, "Copy all game assets/resources into macOS .app bundle SharedSupport/ (alias)")
 	fs.BoolVar(&cfg.Asan, "asan", false, "Compile with AddressSanitizer and LeakSanitizer")
+	fs.BoolVar(&cfg.Debug, "debug", false, "Compile with debug symbols and write a .dSYM")
+	fs.BoolVar(&cfg.Debug, "g", false, "Compile with debug symbols (short)")
 	fs.BoolVar(&cfg.TSO, "tso", cfg.TSO, "x86 memory ordering: acquire/release for non-stack guest memory")
 	fs.BoolVar(&cfg.JSON, "json", false, "Emit progress as JSON lines on stdout")
 	fs.StringVar(&cfg.PatchFile, "patches", "", "shadPS4-format patch XML applied before analysis")
@@ -627,9 +632,13 @@ func Execute(args []string) (err error) {
 	if cfg.Compile {
 		stepStart = time.Now()
 		ev.Progress("compile", 0, int64(len(cFiles)), "files", "compiling")
-		logf("[ps4-recomp] [4/4] Compiling native ARM64 binary with clang (-O%s, %d workers)...\n",
-			cfg.OptLevel, cfg.Jobs)
-		if err := compileParallel(ctx, cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.Jobs, cfg.OptLevel, cfg.Asan, func(done, total int64) {
+		debugNote := ""
+		if cfg.Debug {
+			debugNote = ", -g"
+		}
+		logf("[ps4-recomp] [4/4] Compiling native ARM64 binary with clang (-O%s%s, %d workers)...\n",
+			cfg.OptLevel, debugNote, cfg.Jobs)
+		if err := compileParallel(ctx, cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.Jobs, cfg.OptLevel, cfg.Asan, cfg.Debug, func(done, total int64) {
 			ev.Progress("compile", done, total, "files", "compiling")
 		}); err != nil {
 			return fmt.Errorf("compilation failed: %w", err)
@@ -650,9 +659,12 @@ func Execute(args []string) (err error) {
 			logf("             Packaged macOS App Bundle: %s\n", bundleDir)
 			appBundle = bundleDir
 		}
+		if cfg.Debug && runtime.GOOS == "darwin" {
+			writeDsym(ctx, targetBin, appBundle)
+		}
 	} else {
 		logln("[ps4-recomp] [4/4] Clang compilation skipped (--compile=false). Generating build.ninja...")
-		if err := generateNinjaBuild(cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.OptLevel, cfg.Asan); err != nil {
+		if err := generateNinjaBuild(cFiles, cfg.OutDir, runtimeIncludeDirs, targetBin, cfg.OptLevel, cfg.Asan, cfg.Debug); err != nil {
 			logf("             Warning: failed to generate build.ninja: %v\n", err)
 		} else {
 			logf("             Generated %s\n", filepath.Join(cfg.OutDir, "build.ninja"))
@@ -684,7 +696,7 @@ func finishBuild(ctx context.Context, ev *events.Writer, cfg *Config, targetBin,
 	return nil
 }
 
-func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, targetBin string, optLevel string, asan bool) error {
+func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, targetBin string, optLevel string, asan, debug bool) error {
 	ftCflags, ftLibs := findFreeType()
 	ffCflags, ffLibs := findFFmpeg()
 
@@ -717,6 +729,9 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 	cflags := []string{"-O" + optLevel, "-ffp-contract=off", "-fvisibility=hidden", "-Wno-parentheses-equality"}
 	if asan {
 		cflags = append(cflags, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
+	}
+	if debug {
+		cflags = append(cflags, debugCFlags...)
 	}
 	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 		darwinFlags := []string{"-target", "arm64-apple-darwin", "-mcpu=apple-m1"}
@@ -763,10 +778,18 @@ func generateNinjaBuild(cFiles []string, outDir string, includeDirs []string, ta
 		ldflags = append(ldflags, "-fsanitize=address,undefined")
 	}
 	if runtime.GOOS == "darwin" {
-		ldflags = append(ldflags, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
+		ldflags = append(ldflags, "-target", "arm64-apple-darwin", "-Wl,-dead_strip")
+		if !debug {
+			ldflags = append(ldflags, "-Wl,-x")
+		}
+		ldflags = append(ldflags,
 			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "AVFoundation", "-lz", "-lcurl")
 	} else {
-		ldflags = append(ldflags, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
+		ldflags = append(ldflags, "-Wl,--gc-sections")
+		if !debug {
+			ldflags = append(ldflags, "-Wl,-s")
+		}
+		ldflags = append(ldflags, "-lpthread", "-lm")
 	}
 	var staticLibs []string // the link's implicit inputs: a rebuilt library relinks the game
 	if _, gcnLib := findGcnRecompiler(); gcnLib != "" {
@@ -927,7 +950,7 @@ func ninjaLinkBuild(target string, objs, libs []string) string {
 // compileParallel compiles cFiles and links targetBin. progress, when non-nil, is called with
 // the number of files compiled so far and the total, as files complete. When ctx ends, the
 // running ninja or clang process groups are stopped and errBuildCancelled is returned.
-func compileParallel(ctx context.Context, cFiles []string, outDir string, includeDirs []string, targetBin string, numWorkers int, optLevel string, asan bool, progress func(done, total int64)) error {
+func compileParallel(ctx context.Context, cFiles []string, outDir string, includeDirs []string, targetBin string, numWorkers int, optLevel string, asan, debug bool, progress func(done, total int64)) error {
 	ftCflags, ftLibs := findFreeType()
 	if len(ftCflags)+len(ftLibs) == 0 {
 		logln("             FreeType: not found")
@@ -943,7 +966,7 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 	// Try building with Ninja first if available
 	if ninjaPath := findNinja(); ninjaPath != "" {
 		logf("             ninja: %s\n", ninjaPath)
-		if err := generateNinjaBuild(cFiles, outDir, includeDirs, targetBin, optLevel, asan); err != nil {
+		if err := generateNinjaBuild(cFiles, outDir, includeDirs, targetBin, optLevel, asan, debug); err != nil {
 			logf("             ninja: cannot write build.ninja (%v); compiling with clang directly\n", err)
 		} else {
 			err := runNinja(ctx, ninjaPath, outDir, numWorkers, progress)
@@ -970,6 +993,12 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 	flagsKey.WriteString(optLevel)
 	if asan {
 		flagsKey.WriteString(" -fsanitize=address,undefined")
+	}
+	if debug {
+		for _, f := range debugCFlags {
+			flagsKey.WriteByte(' ')
+			flagsKey.WriteString(f)
+		}
 	}
 	for _, inc := range includeDirs {
 		flagsKey.WriteByte(' ')
@@ -1029,6 +1058,9 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 				if asan {
 					clangArgs = append(clangArgs, "-fsanitize=address,undefined", "-fno-omit-frame-pointer")
 				}
+				if debug {
+					clangArgs = append(clangArgs, debugCFlags...)
+				}
 				compilerBin := "clang"
 				switch ext {
 				case ".m":
@@ -1080,10 +1112,18 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 		linkArgs = append(linkArgs, "-fsanitize=address,undefined")
 	}
 	if runtime.GOOS == "darwin" {
-		linkArgs = append(linkArgs, "-target", "arm64-apple-darwin", "-Wl,-dead_strip", "-Wl,-x",
+		linkArgs = append(linkArgs, "-target", "arm64-apple-darwin", "-Wl,-dead_strip")
+		if !debug {
+			linkArgs = append(linkArgs, "-Wl,-x")
+		}
+		linkArgs = append(linkArgs,
 			"-framework", "Metal", "-framework", "Cocoa", "-framework", "QuartzCore", "-framework", "GameController", "-framework", "AudioToolbox", "-framework", "ImageIO", "-framework", "MetalFX", "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "AVFoundation", "-lz", "-lcurl")
 	} else {
-		linkArgs = append(linkArgs, "-Wl,--gc-sections", "-Wl,-s", "-lpthread", "-lm")
+		linkArgs = append(linkArgs, "-Wl,--gc-sections")
+		if !debug {
+			linkArgs = append(linkArgs, "-Wl,-s")
+		}
+		linkArgs = append(linkArgs, "-lpthread", "-lm")
 	}
 	if _, gcnLib := findGcnRecompiler(); gcnLib != "" {
 		linkArgs = append(linkArgs, gcnLib)
@@ -1105,6 +1145,29 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 		return cancelledOr(ctx, fmt.Errorf("link error: %w\n%s", err, string(out)))
 	}
 	return nil
+}
+
+// debugCFlags are the compile flags of --debug: full debug info, and frame pointers kept for
+// profilers and crash backtraces.
+var debugCFlags = []string{"-g", "-fno-omit-frame-pointer"}
+
+// writeDsym collects the debug info of a --debug build into a .dSYM. Without one, the debug
+// info stays in the object files under the output directory, which a copied or moved binary no
+// longer finds. A bundled game gets <App>.app.dSYM next to the bundle, where lldb and crash
+// reports look for it; a bare binary gets <binary>.dSYM.
+func writeDsym(ctx context.Context, compiledBin, appBundle string) {
+	target := compiledBin + ".dSYM"
+	if appBundle != "" {
+		target = appBundle + ".dSYM"
+	}
+	start := time.Now()
+	_ = os.RemoveAll(target)
+	out, err := groupCommand(ctx, "xcrun", "dsymutil", compiledBin, "-o", target).CombinedOutput()
+	if err != nil {
+		logf("             Warning: dsymutil failed (%v), debug info stays in the object files:\n%s\n", err, out)
+		return
+	}
+	logf("             Debug symbols: %s | Time: %v\n", target, time.Since(start).Round(time.Millisecond))
 }
 
 // runBinary runs the built game for --run; ending ctx kills it.

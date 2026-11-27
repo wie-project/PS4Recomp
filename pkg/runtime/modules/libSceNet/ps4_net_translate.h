@@ -6,6 +6,7 @@
 #define PS4_NET_TRANSLATE_H
 
 #include "ps4_net_types.h"
+#include "ps4_net_p2p_transport.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -61,6 +62,18 @@ typedef struct Ps4NetHostOption {
 // Returns false when the option has no host equivalent.
 bool ps4_net_to_host_option(int level, int name, Ps4NetHostOption *out);
 bool ps4_net_is_reserved_port(uint16_t port);
+// P2P vports at or above 32768 belong to the system (and 5353).
+bool ps4_net_is_reserved_p2p_vport(uint16_t vport);
+
+// P2P addresses (shadPS4 ToP2PAddress / ToOrbisP2PAddress). A DGRAM_P2P address is the peer's
+// UDP port in sin_port and the vport in sin_vport; a STREAM_P2P address is the TCP port in
+// sin_port and the UDP port in sin_vport (0 = PS4_NET_DEFAULT_P2P_UDP_PORT). port is the vport
+// or TCP port, host order. Returns 0 or the guest errno.
+#define PS4_NET_DEFAULT_P2P_UDP_PORT 3658
+int ps4_net_to_p2p_address(const OrbisNetSockaddr *addr, uint32_t addrlen, bool stream, Ps4P2PEndpoint *endpoint,
+                           uint16_t *port);
+void ps4_net_to_orbis_p2p_address(const Ps4P2PEndpoint *endpoint, uint16_t port, bool stream, OrbisNetSockaddr *out,
+                                  uint32_t *addrlen);
 int32_t ps4_net_default_send_buffer(int host_type);    // TCP 32768, UDP and RAW 9216
 int32_t ps4_net_default_receive_buffer(int host_type); // TCP 65536, UDP and RAW 40960
 uint32_t ps4_net_to_host_epoll_events(uint32_t orbis_events);

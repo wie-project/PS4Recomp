@@ -11,6 +11,7 @@
 
 #include "ps4_net.h"
 #include "ps4_net_core.h"
+#include "ps4_net_p2p.h"
 #include "ps4_threading.h"
 #include <arpa/inet.h>
 #include <errno.h>
@@ -296,7 +297,7 @@ static int test_basics(void) {
     CHECK((uint64_t)callt(1, shim_sceNetErrnoLoc, 0, 0, 0, 0, 0, 0, 0) == TCB_WORKER + RECOMP_TCB_NET_ERRNO_SLOT);
 
     // Socket kinds: EPROTONOSUPPORT for AF_INET6 and unknown types, EPROTOTYPE for a wrong
-    // protocol, ENAMETOOLONG for a 32-character name, ENETDOWN for P2P without its transport.
+    // protocol (P2P sockets take none), ENAMETOOLONG for a 32-character name.
     clear_errnos(0);
     CHECK(CALL(shim_sceNetSocket, 0, ORBIS_NET_AF_INET6, ORBIS_NET_SOCK_STREAM, 0) == ERR(ORBIS_NET_EPROTONOSUPPORT));
     CHECK(net_errno(0) == ORBIS_NET_EPROTONOSUPPORT && kernel_errno(0) == ORBIS_NET_EPROTONOSUPPORT);
@@ -305,11 +306,12 @@ static int test_basics(void) {
           ERR(ORBIS_NET_EPROTOTYPE));
     CHECK(CALL(shim_sceNetSocket, str(STRINGS, "0123456789abcdef0123456789abcdef"), ORBIS_NET_AF_INET,
                ORBIS_NET_SOCK_DGRAM, 0) == ERR(ORBIS_NET_ENAMETOOLONG));
-    CHECK(CALL(shim_sceNetSocket, 0, ORBIS_NET_AF_INET, ORBIS_NET_SOCK_DGRAM_P2P, 0) == ERR(ORBIS_NET_ENETDOWN));
+    CHECK(CALL(shim_sceNetSocket, 0, ORBIS_NET_AF_INET, ORBIS_NET_SOCK_DGRAM_P2P, ORBIS_NET_IPPROTO_UDP) ==
+          ERR(ORBIS_NET_EPROTOTYPE));
     // Errors land in the calling thread's slot only.
     clear_errnos(1);
     CHECK((int32_t)callt(1, shim_sceNetSocketClose, 12345, 0, 0, 0, 0, 0, 0) == ERR(ORBIS_NET_EBADF));
-    CHECK(net_errno(1) == ORBIS_NET_EBADF && net_errno(0) == ORBIS_NET_ENETDOWN);
+    CHECK(net_errno(1) == ORBIS_NET_EBADF && net_errno(0) == ORBIS_NET_EPROTOTYPE);
 
     // Byte order and addresses.
     CHECK((uint16_t)CALL(shim_sceNetHtons, 0x1234) == 0x3412);
@@ -883,6 +885,264 @@ static int test_thread(void) {
     return 0;
 }
 
+// A P2P address: for DGRAM_P2P port is the UDP port and vport the virtual port; for
+// STREAM_P2P port is the TCP port and vport the UDP port.
+static uint64_t p2p_addr_at(uint64_t g, uint32_t addr_host_order, uint16_t port, uint16_t vport) {
+    sockaddr_in_at(g, addr_host_order, port);
+    ((OrbisNetSockaddrIn *)at(g))->sin_vport = htons(vport);
+    return g;
+}
+
+static uint16_t vport_of(uint64_t g) {
+    return ntohs(((OrbisNetSockaddrIn *)at(g))->sin_vport);
+}
+
+typedef struct Transfer {
+    int thread;
+    int32_t s;
+    uint64_t buf;
+    uint32_t len;
+    int32_t result;
+} Transfer;
+
+static void *blocking_send(void *p) {
+    Transfer *t = p;
+    t->result = (int32_t)callt(t->thread, shim_sceNetSend, (uint64_t)t->s, t->buf, t->len, 0, 0, 0, 0);
+    return NULL;
+}
+
+static void fill_pattern(uint64_t g, uint32_t len, uint32_t seed) {
+    for (uint32_t i = 0; i < len; i++) ((uint8_t *)at(g))[i] = (uint8_t)(i * 131u + seed + (i >> 9));
+}
+
+// Sends len bytes from `from` (thread 1, blocking) while the main thread receives them whole
+// (MSG_WAITALL), and checks them.
+static void p2p_transfer(int32_t from, int32_t to, uint32_t len, uint32_t seed) {
+    const uint64_t src = 0x100000, dst = 0x180000;
+    CHECK(len <= 0x80000);
+    fill_pattern(src, len, seed);
+    memset(at(dst), 0, len);
+    Transfer t = {1, from, src, len, 0};
+    pthread_t th;
+    pthread_create(&th, NULL, blocking_send, &t);
+    CHECK(CALL(shim_sceNetRecv, (uint64_t)to, dst, len, ORBIS_NET_MSG_WAITALL) == (int32_t)len);
+    pthread_join(th, NULL);
+    CHECK(t.result == (int32_t)len);
+    CHECK(memcmp(at(src), at(dst), len) == 0);
+}
+
+static int32_t p2p_ioctl(int32_t s, uint32_t cmd, uint64_t data) {
+    return CALL(shim_sceNetIoctl, (uint64_t)s, cmd, data);
+}
+
+static int test_p2p(void) {
+    setenv("PS4_P2P_PORT", "0", 1); // any free UDP port for the transport
+    const uint32_t lo = 0x7f000001;
+
+    // ---- DGRAM_P2P
+    const int32_t a = CALL(shim_sceNetSocket, str(STRINGS, "p2p-a"), ORBIS_NET_AF_INET, ORBIS_NET_SOCK_DGRAM_P2P, 0);
+    const int32_t b = CALL(shim_sceNetSocket, 0, ORBIS_NET_AF_INET, ORBIS_NET_SOCK_DGRAM_P2P, 0);
+    CHECK(a >= 0 && b >= 0 && ps4_net_p2p_transport_is_ready());
+    int32_t v = 0;
+    CHECK(get_int_opt(a, ORBIS_NET_SOL_SOCKET, ORBIS_NET_SO_TYPE, &v) == 0 && v == ORBIS_NET_SOCK_DGRAM_P2P);
+    // An unbound datagram socket cannot connect; binds need a UDP port, a unicast address and a
+    // vport below the system range; vports are exclusive.
+    CHECK(CALL(shim_sceNetConnect, (uint64_t)b, p2p_addr_at(VARS, lo, 3658, 1000), 16) == ERR(ORBIS_NET_EINVAL));
+    CHECK(CALL(shim_sceNetBind, (uint64_t)a, p2p_addr_at(VARS, 0, 0, 1000), 16) == ERR(ORBIS_NET_EADDRNOTAVAIL));
+    CHECK(CALL(shim_sceNetBind, (uint64_t)a, p2p_addr_at(VARS, 0xe0000001, 3658, 1000), 16) ==
+          ERR(ORBIS_NET_EADDRNOTAVAIL));
+    CHECK(CALL(shim_sceNetBind, (uint64_t)a, p2p_addr_at(VARS, 0, 3658, 40000), 16) == ERR(ORBIS_NET_EACCES));
+    CHECK(CALL(shim_sceNetBind, (uint64_t)a, p2p_addr_at(VARS, 0, 3658, 1000), 8) == ERR(ORBIS_NET_EINVAL));
+    CHECK(CALL(shim_sceNetBind, (uint64_t)a, p2p_addr_at(VARS, 0, 3658, 1000), 16) == 0);
+    CHECK(CALL(shim_sceNetBind, (uint64_t)b, p2p_addr_at(VARS, 0, 3658, 1000), 16) == ERR(ORBIS_NET_EADDRINUSE));
+    CHECK(CALL(shim_sceNetBind, (uint64_t)b, p2p_addr_at(VARS, 0, 3658, 1001), 16) == 0);
+    *u32(VARS + 0x40) = 16;
+    CHECK(CALL(shim_sceNetGetsockname, (uint64_t)a, VARS + 0x20, VARS + 0x40) == 0);
+    const uint16_t udp = port_of(VARS + 0x20);
+    CHECK(udp != 0 && udp == ps4_net_p2p_bound_port() && vport_of(VARS + 0x20) == 1000);
+    // Host-socket options do not apply.
+    CHECK(set_int_opt(a, ORBIS_NET_IPPROTO_IP, ORBIS_NET_IP_ADD_MEMBERSHIP, 0) == ERR(ORBIS_NET_EPROCUNAVAIL));
+    CHECK(CALL(shim_sceNetIoctl, (uint64_t)a, 0x4004667f, VARS) == ERR(ORBIS_NET_EINVAL)); // FIONREAD
+
+    // b -> a over the transport's UDP socket.
+    memcpy(at(BUFS), "hello p2p", 9);
+    CHECK(CALL(shim_sceNetSendto, (uint64_t)b, BUFS, 9, 0, p2p_addr_at(VARS, lo, udp, 1000), 16) == 9);
+    CHECK(CALL(shim_sceNetSendto, (uint64_t)b, BUFS, 9, 0, p2p_addr_at(VARS, lo, udp, 0), 16) ==
+          ERR(ORBIS_NET_EADDRNOTAVAIL));
+    *u32(VARS + 0x40) = 16;
+    memset(at(BUFS + 0x100), 0, 64);
+    CHECK(CALL(shim_sceNetRecvfrom, (uint64_t)a, BUFS + 0x100, 64, 0, VARS + 0x20, VARS + 0x40) == 9);
+    CHECK(memcmp(at(BUFS + 0x100), "hello p2p", 9) == 0);
+    CHECK(((OrbisNetSockaddrIn *)at(VARS + 0x20))->sin_addr == htonl(lo) && port_of(VARS + 0x20) == udp &&
+          vport_of(VARS + 0x20) == 1001);
+    CHECK(CALL(shim_sceNetRecvfrom, (uint64_t)a, BUFS + 0x100, 64, ORBIS_NET_MSG_DONTWAIT, 0, 0) ==
+          ERR(ORBIS_NET_EAGAIN));
+
+    // Epoll: readable once a datagram is queued; a datagram socket is always writable.
+    const int32_t eid = CALL(shim_sceNetEpollCreate, str(STRINGS, "p2p-ep"), 0);
+    OrbisNetEpollEvent *out = at(VARS + 0x300);
+    CHECK(epoll_ctl(eid, ORBIS_NET_EPOLL_CTL_ADD, a, ORBIS_NET_EPOLLIN, 0xa) == 0);
+    CHECK(CALL(shim_sceNetEpollWait, (uint64_t)eid, VARS + 0x300, 4, 0) == 0);
+    CHECK(CALL(shim_sceNetSendto, (uint64_t)b, BUFS, 3, 0, p2p_addr_at(VARS, lo, udp, 1000), 16) == 3);
+    CHECK(CALL(shim_sceNetEpollWait, (uint64_t)eid, VARS + 0x300, 4, 1000000) == 1);
+    CHECK(out[0].events == ORBIS_NET_EPOLLIN && out[0].ident == (uint64_t)a && out[0].data == 0xa);
+    CHECK(CALL(shim_sceNetRecv, (uint64_t)a, BUFS + 0x100, 64, 0) == 3);
+    CHECK(CALL(shim_sceNetEpollWait, (uint64_t)eid, VARS + 0x300, 4, 0) == 0);
+    CHECK(epoll_ctl(eid, ORBIS_NET_EPOLL_CTL_MOD, a, ORBIS_NET_EPOLLOUT, 0xb) == 0);
+    CHECK(CALL(shim_sceNetEpollWait, (uint64_t)eid, VARS + 0x300, 4, 0) == 1 && out[0].events == ORBIS_NET_EPOLLOUT);
+    CHECK(epoll_ctl(eid, ORBIS_NET_EPOLL_CTL_DEL, a, 0, 0) == 0);
+
+    // A connected datagram socket: its peer only, and no address on send.
+    CHECK(CALL(shim_sceNetConnect, (uint64_t)b, p2p_addr_at(VARS, lo, udp, 1000), 16) == 0);
+    CHECK(CALL(shim_sceNetConnect, (uint64_t)b, p2p_addr_at(VARS, lo, udp, 1000), 16) == ERR(ORBIS_NET_EISCONN));
+    CHECK(CALL(shim_sceNetSendto, (uint64_t)b, BUFS, 9, 0, p2p_addr_at(VARS, lo, udp, 1000), 16) ==
+          ERR(ORBIS_NET_EISCONN));
+    *u32(VARS + 0x40) = 16;
+    CHECK(CALL(shim_sceNetGetpeername, (uint64_t)b, VARS + 0x20, VARS + 0x40) == 0 && vport_of(VARS + 0x20) == 1000);
+    *u32(VARS + 0x40) = 16;
+    CHECK(CALL(shim_sceNetGetpeername, (uint64_t)a, VARS + 0x20, VARS + 0x40) == ERR(ORBIS_NET_ENOTCONN));
+    CHECK(CALL(shim_sceNetSend, (uint64_t)b, BUFS, 9, 0) == 9);
+    CHECK(CALL(shim_sceNetRecv, (uint64_t)a, BUFS + 0x100, 4, 0) == 4); // the rest of the datagram is dropped
+    CHECK(CALL(shim_sceNetRecv, (uint64_t)a, BUFS + 0x100, 64, ORBIS_NET_MSG_DONTWAIT) == ERR(ORBIS_NET_EAGAIN));
+
+    // Keys (net_p2p_ioctl): a record is the peer address, the 16-byte key, the local port,
+    // flags and the key id.
+    uint8_t *rec = at(VARS + 0x200);
+    memset(rec, 0, 36);
+    for (int i = 0; i < 16; i++) rec[16 + i] = (uint8_t)(0xa0 + i);
+    rec[35] = 7; // id
+    CHECK(p2p_ioctl(a, 0x802450cd, VARS + 0x200) == 0); // wildcard key
+    memset(rec + 16, 0, 16);
+    CHECK(p2p_ioctl(a, 0xc02450ce, VARS + 0x200) == 0 && rec[16] == 0xa0 && rec[31] == 0xaf);
+    CHECK(p2p_ioctl(a, 0x400250cf, VARS + 0x200) == 0 && *(uint16_t *)rec == htons(udp)); // the NP port
+    CHECK(p2p_ioctl(a, 0x200050c8, 0) == 0);                                              // enable
+    CHECK(p2p_ioctl(a, 0x802450cb, 0) == ERR(ORBIS_NET_EFAULT));
+    CHECK(p2p_ioctl(a, 0x802450ff, VARS + 0x200) == ERR(ORBIS_NET_EINVAL));
+    CHECK(p2p_ioctl(a, 0x8024661f, VARS + 0x200) == ERR(ORBIS_NET_EINVAL));
+    p2p_addr_at(VARS + 0x200, lo, udp, 0);
+    CHECK(p2p_ioctl(a, 0x802450cc, VARS + 0x200) == ERR(ORBIS_NET_ENOENT)); // not installed
+    // Crypto and signature, per socket and per message: a decrypts with the same keys.
+    CHECK(set_int_opt(b, ORBIS_NET_SOL_SOCKET, ORBIS_NET_SO_USECRYPTO, 1) == 0);
+    CHECK(get_int_opt(b, ORBIS_NET_SOL_SOCKET, ORBIS_NET_SO_USECRYPTO, &v) == 0 && v == 1);
+    CHECK(get_int_opt(b, ORBIS_NET_SOL_SOCKET, ORBIS_NET_SO_USESIGNATURE, &v) == 0 && v == 0);
+    CHECK(set_int_opt(b, ORBIS_NET_IPPROTO_UDP, ORBIS_NET_UDP_SND_ON_SUSPEND, 1) == ERR(ORBIS_NET_EPROCUNAVAIL));
+    fill_pattern(BUFS + 0x1000, 1000, 3);
+    CHECK(CALL(shim_sceNetSend, (uint64_t)b, BUFS + 0x1000, 1000, ORBIS_NET_MSG_USESIGNATURE) == 1000);
+    memset(at(BUFS + 0x2000), 0, 1000);
+    CHECK(CALL(shim_sceNetRecv, (uint64_t)a, BUFS + 0x2000, 2000, 0) == 1000);
+    CHECK(memcmp(at(BUFS + 0x1000), at(BUFS + 0x2000), 1000) == 0);
+    // The communication ID (ioctl 0xd8) adds a digest that receivers check; 0xd9 clears it.
+    for (int i = 0; i < 16; i++) rec[i] = (uint8_t)i;
+    CHECK(p2p_ioctl(a, 0x801050d8, VARS + 0x200) == 0);
+    CHECK(CALL(shim_sceNetSend, (uint64_t)b, BUFS + 0x1000, 100, 0) == 100);
+    CHECK(CALL(shim_sceNetRecv, (uint64_t)a, BUFS + 0x2000, 2000, 0) == 100);
+    CHECK(p2p_ioctl(a, 0x200050d9, 0) == 0);
+    CHECK(set_int_opt(b, ORBIS_NET_SOL_SOCKET, ORBIS_NET_SO_USECRYPTO, 0) == 0);
+
+    // SockInfo reports the transport port and the vports.
+    OrbisNetSockInfo *info = at(VARS + 0x400);
+    CHECK(CALL(shim_sceNetGetSockInfo, (uint64_t)b, VARS + 0x400, 1, 0) == 1);
+    CHECK(info->socket_type == ORBIS_NET_SOCK_DGRAM_P2P && info->local_port == htons(udp) &&
+          info->local_vport == htons(1001) && info->remote_vport == htons(1000) &&
+          info->state == ORBIS_NET_SOCKINFO_STATE_ESTABLISHED);
+
+    // A blocked P2P receive is cut short by sceNetSocketAbort.
+    Blocked bl = {1, a, 0, BUFS + 0x3000};
+    pthread_t th;
+    pthread_create(&th, NULL, blocked_recv, &bl);
+    usleep(50000);
+    CHECK(CALL(shim_sceNetSocketAbort, (uint64_t)a, 0) == 0);
+    pthread_join(th, NULL);
+    CHECK(bl.result == ERR(ORBIS_NET_EINTR));
+    CHECK(CALL(shim_sceNetSocketClose, (uint64_t)a) == 0);
+    CHECK(CALL(shim_sceNetSocketClose, (uint64_t)b) == 0);
+
+    // ---- STREAM_P2P: TCP over the transport.
+    const int32_t l = CALL(shim_sceNetSocket, str(STRINGS, "p2p-l"), ORBIS_NET_AF_INET, ORBIS_NET_SOCK_STREAM_P2P, 0);
+    const int32_t c = CALL(shim_sceNetSocket, 0, ORBIS_NET_AF_INET, ORBIS_NET_SOCK_STREAM_P2P, 0);
+    CHECK(l >= 0 && c >= 0);
+    CHECK(CALL(shim_sceNetListen, (uint64_t)l, 4) == ERR(ORBIS_NET_EINVAL)); // listeners must be bound
+    CHECK(CALL(shim_sceNetBind, (uint64_t)l, p2p_addr_at(VARS, 0, 2000, 1234), 16) == ERR(ORBIS_NET_EINVAL));
+    CHECK(CALL(shim_sceNetBind, (uint64_t)l, p2p_addr_at(VARS, 0, 80, 0), 16) == ERR(ORBIS_NET_EACCES));
+    CHECK(CALL(shim_sceNetBind, (uint64_t)l, p2p_addr_at(VARS, 0, 2000, 0), 16) == 0);
+    CHECK(CALL(shim_sceNetListen, (uint64_t)l, 4) == 0);
+    CHECK(get_int_opt(c, ORBIS_NET_IPPROTO_TCP, ORBIS_NET_TCP_NODELAY, &v) == 0 && v == 1);
+    CHECK(get_int_opt(c, ORBIS_NET_IPPROTO_TCP, ORBIS_NET_TCP_MAXSEG, &v) == 0 && v == 1200);
+    // No address of the UDP port in sin_vport means the PS4's 3658; here the transport's.
+    CHECK(CALL(shim_sceNetConnect, (uint64_t)c, p2p_addr_at(VARS, lo, 0, udp), 16) == ERR(ORBIS_NET_EADDRNOTAVAIL));
+    CHECK(CALL(shim_sceNetConnect, (uint64_t)c, p2p_addr_at(VARS, lo, 2000, udp), 16) == 0); // blocking connect
+    CHECK(CALL(shim_sceNetConnect, (uint64_t)c, p2p_addr_at(VARS, lo, 2000, udp), 16) == ERR(ORBIS_NET_EISCONN));
+    *u32(VARS + 0x60) = 16;
+    const int32_t s2 = CALL(shim_sceNetAccept, (uint64_t)l, VARS + 0x48, VARS + 0x60);
+    CHECK(s2 >= 0 && *u32(VARS + 0x60) == 16 && vport_of(VARS + 0x48) == udp && port_of(VARS + 0x48) >= 49152);
+    *u32(VARS + 0x40) = 16;
+    CHECK(CALL(shim_sceNetGetpeername, (uint64_t)c, VARS + 0x20, VARS + 0x40) == 0 && port_of(VARS + 0x20) == 2000 &&
+          vport_of(VARS + 0x20) == udp);
+    CHECK(get_int_opt(c, ORBIS_NET_SOL_SOCKET, ORBIS_NET_SO_ERROR, &v) == 0 && v == 0);
+    // A bound listener port cannot connect out (EPROTO).
+    const int32_t c2 = CALL(shim_sceNetSocket, 0, ORBIS_NET_AF_INET, ORBIS_NET_SOCK_STREAM_P2P, 0);
+    CHECK(CALL(shim_sceNetBind, (uint64_t)c2, p2p_addr_at(VARS, 0, 2001, 0), 16) == 0);
+    CHECK(CALL(shim_sceNetConnect, (uint64_t)c2, p2p_addr_at(VARS, lo, 2000, udp), 16) == ERR(ORBIS_NET_EPROTO));
+    CHECK(CALL(shim_sceNetSocketClose, (uint64_t)c2) == 0);
+
+    // Bulk data both ways: flow control (32 KiB send buffer, 64 KiB window) with blocking sends.
+    p2p_transfer(c, s2, 300000, 1);
+    p2p_transfer(s2, c, 100000, 2);
+    // Lossy: retransmission, fast retransmit and recovery.
+    Ps4P2PTransport *transport = ps4_net_p2p_acquire_transport();
+    CHECK(transport);
+    ps4_p2p_transport_set_outgoing_loss(transport, 0.1);
+    p2p_transfer(c, s2, 60000, 3);
+    ps4_p2p_transport_set_outgoing_loss(transport, 0);
+    ps4_p2p_transport_release(transport);
+
+    // Epoll on a stream: readable with data, EPOLLOUT-only waits do not see incoming data.
+    CHECK(epoll_ctl(eid, ORBIS_NET_EPOLL_CTL_ADD, s2, ORBIS_NET_EPOLLIN, 0x5) == 0);
+    CHECK(epoll_ctl(eid, ORBIS_NET_EPOLL_CTL_ADD, l, ORBIS_NET_EPOLLIN, 0x6) == 0);
+    CHECK(CALL(shim_sceNetEpollWait, (uint64_t)eid, VARS + 0x300, 4, 0) == 0);
+    CHECK(CALL(shim_sceNetSend, (uint64_t)c, BUFS, 5, 0) == 5);
+    CHECK(CALL(shim_sceNetEpollWait, (uint64_t)eid, VARS + 0x300, 4, 1000000) == 1);
+    CHECK(out[0].events == ORBIS_NET_EPOLLIN && out[0].ident == (uint64_t)s2 && out[0].data == 0x5);
+    CHECK(epoll_ctl(eid, ORBIS_NET_EPOLL_CTL_MOD, s2, ORBIS_NET_EPOLLOUT, 0x7) == 0);
+    CHECK(CALL(shim_sceNetEpollWait, (uint64_t)eid, VARS + 0x300, 4, 0) == 1 && out[0].events == ORBIS_NET_EPOLLOUT);
+    CHECK(epoll_ctl(eid, ORBIS_NET_EPOLL_CTL_DEL, s2, 0, 0) == 0);
+    // The kernel's read/write reach P2P streams too.
+    GuestContext *ctx = ctx_for(0);
+    char buf[16];
+    CHECK(ps4_net_kernel_read(ctx, s2, buf, sizeof buf) == 5);
+    CHECK(ps4_net_kernel_write(ctx, s2, "pong", 4) == 4);
+    CHECK(ps4_net_kernel_read(ctx, c, buf, sizeof buf) == 4 && memcmp(buf, "pong", 4) == 0);
+
+    // A second connection shows up on the listener's epoll registration.
+    const int32_t c3 = CALL(shim_sceNetSocket, 0, ORBIS_NET_AF_INET, ORBIS_NET_SOCK_STREAM_P2P, 0);
+    CHECK(set_int_opt(c3, ORBIS_NET_SOL_SOCKET, ORBIS_NET_SO_NBIO, 1) == 0);
+    CHECK(CALL(shim_sceNetConnect, (uint64_t)c3, p2p_addr_at(VARS, lo, 2000, udp), 16) == ERR(ORBIS_NET_EINPROGRESS));
+    CHECK(CALL(shim_sceNetEpollWait, (uint64_t)eid, VARS + 0x300, 4, 1000000) == 1);
+    CHECK(out[0].events == ORBIS_NET_EPOLLIN && out[0].ident == (uint64_t)l);
+    const int32_t s3 = CALL(shim_sceNetAccept, (uint64_t)l, 0, 0);
+    CHECK(s3 >= 0);
+    CHECK(CALL(shim_sceNetRecv, (uint64_t)s3, BUFS, 16, ORBIS_NET_MSG_DONTWAIT) == ERR(ORBIS_NET_EAGAIN));
+
+    // Shutdown(WR): the peer reads EOF after the data.
+    CHECK(CALL(shim_sceNetSend, (uint64_t)c, BUFS, 3, 0) == 3);
+    CHECK(CALL(shim_sceNetShutdown, (uint64_t)c, ORBIS_NET_SHUT_WR) == 0);
+    CHECK(CALL(shim_sceNetSend, (uint64_t)c, BUFS, 3, 0) == ERR(ORBIS_NET_EPIPE));
+    CHECK(CALL(shim_sceNetRecv, (uint64_t)s2, BUFS, 16, ORBIS_NET_MSG_WAITALL) == 3);
+    CHECK(CALL(shim_sceNetRecv, (uint64_t)s2, BUFS, 16, 0) == 0);
+
+    // Nobody listening: the transport answers the SYN with a RST.
+    const int32_t c4 = CALL(shim_sceNetSocket, 0, ORBIS_NET_AF_INET, ORBIS_NET_SOCK_STREAM_P2P, 0);
+    CHECK(CALL(shim_sceNetConnect, (uint64_t)c4, p2p_addr_at(VARS, lo, 2999, udp), 16) == ERR(ORBIS_NET_ECONNREFUSED));
+
+    CHECK(CALL(shim_sceNetEpollDestroy, (uint64_t)eid) == 0);
+    for (int i = 0; i < 6; i++) {
+        const int32_t ids[6] = {c, s2, c3, s3, c4, l};
+        CHECK(CALL(shim_sceNetSocketClose, (uint64_t)ids[i]) == 0);
+    }
+    ps4_net_p2p_stop();
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
     mem = mmap(NULL, MEM_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -896,6 +1156,7 @@ int main(int argc, char **argv) {
     else if (strcmp(argv[1], "resolver") == 0) rc = test_resolver();
     else if (strcmp(argv[1], "kernel") == 0) rc = test_kernel();
     else if (strcmp(argv[1], "thread") == 0) rc = test_thread();
+    else if (strcmp(argv[1], "p2p") == 0) rc = test_p2p();
     if (rc == 0) printf("PASS %s\n", argv[1]);
     return rc;
 }

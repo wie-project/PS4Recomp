@@ -6,6 +6,7 @@
 #include "ps4_hle_stub.h"
 #include "ps4_kernel_sys.h"
 #include "ps4_net_core.h"
+#include "ps4_net_p2p.h"
 #include "ps4_net_host.h"
 #include "ps4_net_resolver.h"
 #include "ps4_net_translate.h"
@@ -261,6 +262,7 @@ static int32_t stored_option(int32_t s, int32_t level, int32_t name, const Ps4Ne
         return value;
     }
     if (level == ORBIS_NET_IPPROTO_TCP && name == ORBIS_NET_TCP_NODELAY) return info->p2p ? 1 : 0; // on for STREAM_P2P
+    if (level == ORBIS_NET_IPPROTO_TCP && name == ORBIS_NET_TCP_MAXSEG && info->p2p) return ps4_p2p_tcp_default_config.mss;
     if (level == ORBIS_NET_IPPROTO_IP && name == ORBIS_NET_IP_TTL) return 64; // shadPS4: the FreeBSD default
     if (level == ORBIS_NET_IPPROTO_IP && (name == ORBIS_NET_IP_MULTICAST_TTL || name == ORBIS_NET_IP_MULTICAST_LOOP)) {
         return 1;
@@ -282,6 +284,18 @@ static void store_update(Ps4NetSocketAttributes *a, void *arg) {
 static int32_t store_option(GuestContext *ctx, int32_t s, int32_t level, int32_t name, int32_t value) {
     StoreArg arg = {level, name, value};
     return ret(ctx, ps4_net_socket_update_attributes(s, store_update, &arg));
+}
+
+typedef struct LingerArg {
+    int32_t onoff;
+    int32_t seconds;
+} LingerArg;
+
+// P2P SO_LINGER: on/off under the option, the seconds under LINGER_SECONDS_KEY.
+static void linger_update(Ps4NetSocketAttributes *a, void *arg) {
+    const LingerArg *l = (const LingerArg *)arg;
+    ps4_net_attr_store(a, ORBIS_NET_SOL_SOCKET, ORBIS_NET_SO_LINGER, l->onoff);
+    ps4_net_attr_store(a, ORBIS_NET_SOL_SOCKET, LINGER_SECONDS_KEY, l->seconds);
 }
 
 // FreeBSD timeval on the PS4: two 8-byte fields.
@@ -454,9 +468,18 @@ int32_t ps4_sceNetSetsockopt(GuestContext *ctx, int32_t s, int32_t level, int32_
             if (!info.p2p) ps4_net_socket_set_reuse_port(s, value != 0);
             return store_option(ctx, s, level, optname, value);
         case ORBIS_NET_SO_USECRYPTO:
-        case ORBIS_NET_SO_USESIGNATURE:
-            // Only P2P sockets reach here, and those need the P2P transport (ps4_net.h).
-            return set_errno(ctx, ORBIS_NET_EINVAL);
+        case ORBIS_NET_SO_USESIGNATURE: {
+            if (!has_int) return set_errno(ctx, ORBIS_NET_EINVAL);
+            bool crypto = false;
+            bool signature = false;
+            ps4_net_p2p_socket_get_protection(s, &crypto, &signature);
+            if (optname == ORBIS_NET_SO_USECRYPTO) {
+                crypto = value != 0;
+            } else {
+                signature = value != 0;
+            }
+            return ret(ctx, ps4_net_p2p_socket_set_protection(s, crypto, signature));
+        }
         case ORBIS_NET_SO_SNDBUF:
         case ORBIS_NET_SO_RCVBUF: {
             if (!has_int || value <= 0) return set_errno(ctx, ORBIS_NET_EINVAL);
@@ -503,6 +526,14 @@ int32_t ps4_sceNetSetsockopt(GuestContext *ctx, int32_t s, int32_t level, int32_
         if (!has_int || (value != 0 && value < 216)) return set_errno(ctx, ORBIS_NET_EINVAL);
     }
 
+    if (level == ORBIS_NET_SOL_SOCKET && optname == ORBIS_NET_SO_LINGER && info.p2p) {
+        // Stored whole so getsockopt can return it (as shadPS4, not applied on a P2P close).
+        if (optlen < sizeof(OrbisNetLinger)) return set_errno(ctx, ORBIS_NET_EINVAL);
+        OrbisNetLinger guest;
+        memcpy(&guest, optval, sizeof(guest));
+        LingerArg arg = {guest.l_onoff, guest.l_linger};
+        return ret(ctx, ps4_net_socket_update_attributes(s, linger_update, &arg));
+    }
     Ps4NetHostOption option;
     const bool has_option = ps4_net_to_host_option(level, optname, &option);
     if (info.p2p || !has_option || rule->stored) {
@@ -588,9 +619,12 @@ int32_t ps4_sceNetGetsockopt(GuestContext *ctx, int32_t s, int32_t level, int32_
         case ORBIS_NET_SO_PRIORITY:
             return write_int(ctx, attributes.priority, optval, optlen);
         case ORBIS_NET_SO_USECRYPTO:
-        case ORBIS_NET_SO_USESIGNATURE:
-            // Only P2P sockets reach here (ps4_net.h).
-            return write_int(ctx, 0, optval, optlen);
+        case ORBIS_NET_SO_USESIGNATURE: {
+            bool crypto = false;
+            bool signature = false;
+            ps4_net_p2p_socket_get_protection(s, &crypto, &signature);
+            return write_int(ctx, (optname == ORBIS_NET_SO_USECRYPTO ? crypto : signature) ? 1 : 0, optval, optlen);
+        }
         default:
             break;
         }
@@ -604,6 +638,14 @@ int32_t ps4_sceNetGetsockopt(GuestContext *ctx, int32_t s, int32_t level, int32_
         value.onoff = stored_option(s, level, optname, &info);
         memcpy(optval, &value, sizeof(value));
         *optlen = sizeof(value);
+        return 0;
+    }
+    if (level == ORBIS_NET_SOL_SOCKET && optname == ORBIS_NET_SO_LINGER && info.p2p) {
+        if (*optlen < sizeof(OrbisNetLinger)) return set_errno(ctx, ORBIS_NET_EINVAL);
+        const OrbisNetLinger guest = {stored_option(s, level, optname, &info),
+                                      stored_option(s, level, LINGER_SECONDS_KEY, &info)};
+        memcpy(optval, &guest, sizeof(guest));
+        *optlen = sizeof(guest);
         return 0;
     }
     Ps4NetHostOption option;
@@ -658,9 +700,9 @@ int32_t ps4_sceNetSocket(GuestContext *ctx, const char *name, int32_t family, in
     if (e != 0) return set_errno(ctx, e);
     // Names over 31 characters are ENAMETOOLONG, not truncated.
     if (name_too_long(name)) return set_errno(ctx, ORBIS_NET_ENAMETOOLONG);
-    // The P2P transport is not ported (ps4_net.h): shadPS4's P2PSocketCreate without a transport.
-    if (kind.p2p) return set_errno(ctx, ORBIS_NET_ENETDOWN);
-    const int64_t r = ps4_net_socket_create(kind.family, kind.type, kind.protocol);
+    if (kind.p2p && !ps4_net_p2p_ensure_transport()) return set_errno(ctx, ORBIS_NET_EADDRINUSE); // the P2P port is taken
+    const int64_t r = kind.p2p ? ps4_net_p2p_socket_create(kind.type == SOCK_STREAM)
+                               : ps4_net_socket_create(kind.family, kind.type, kind.protocol);
     if (r >= 0 && name) {
         NameArg arg = {name, strnlen(name, ORBIS_NET_DEBUG_NAME_LEN_MAX)};
         ps4_net_socket_update_attributes((int32_t)r, name_update, &arg);
@@ -676,10 +718,94 @@ int32_t ps4_sceNetSocketAbort(GuestContext *ctx, int32_t s, int32_t flags) {
     return ret(ctx, ps4_net_socket_abort(s, (uint32_t)flags));
 }
 
+// ---------------------------------------------------------------------------------------------
+// P2P addresses (shadPS4 net.cpp)
+
+static bool p2p_stream(const Ps4NetSocketInfo *info) {
+    return info->type == SOCK_STREAM;
+}
+
+static int check_p2p_bind_address(const OrbisNetSockaddr *addr, bool stream) {
+    OrbisNetSockaddrIn in;
+    memcpy(&in, addr, sizeof(in)); // the caller checked the length
+    if ((ntohl(in.sin_addr) & 0xf0000000u) == 0xe0000000u) return ORBIS_NET_EADDRNOTAVAIL;
+    if (!stream) return in.sin_port == 0 ? ORBIS_NET_EADDRNOTAVAIL : 0;
+    // shadPS4's TODO: the PS4 only accepts 3658; the configured port is accepted too, for tests
+    // and setups that change it.
+    const uint16_t udp_port = ntohs(in.sin_vport);
+    const bool ok = udp_port == 0 || udp_port == PS4_NET_DEFAULT_P2P_UDP_PORT || udp_port == ps4_net_p2p_bound_port() ||
+                    udp_port == ps4_net_p2p_configured_port();
+    return ok ? 0 : ORBIS_NET_EINVAL;
+}
+
+static bool is_complete_p2p_address(const OrbisNetSockaddr *addr, bool stream) {
+    OrbisNetSockaddrIn in;
+    memcpy(&in, addr, sizeof(in));
+    return in.sin_addr != 0 && in.sin_port != 0 && (stream || in.sin_vport != 0);
+}
+
+static bool is_p2p_bound(int32_t s) {
+    uint16_t udp_port = 0;
+    uint16_t vport = 0;
+    return ps4_net_p2p_socket_getname(s, &udp_port, &vport) == 0 && vport != 0;
+}
+
+static void p2p_port_bound_update(Ps4NetSocketAttributes *a, void *arg) {
+    (void)arg;
+    a->p2p_tcp_port_bound = true;
+}
+
+static int32_t p2p_bind(GuestContext *ctx, int32_t s, const Ps4NetSocketInfo *info, const OrbisNetSockaddr *addr,
+                        uint32_t addrlen) {
+    const bool stream = p2p_stream(info);
+    Ps4P2PEndpoint udp;
+    uint16_t port = 0;
+    int e = ps4_net_to_p2p_address(addr, addrlen, stream, &udp, &port);
+    if (e != 0) return set_errno(ctx, e);
+    // sa_len is not checked: games leave it 0 (shadPS4 saw it binding DGRAM_P2P during boot).
+    e = check_p2p_bind_address(addr, stream);
+    if (e != 0) return set_errno(ctx, e);
+    // P2P sockets share the transport: no UDP port is bound here.
+    const bool reserved = stream ? ps4_net_is_reserved_port(port) : ps4_net_is_reserved_p2p_vport(port);
+    if (port != 0 && reserved) return set_errno(ctx, ORBIS_NET_EACCES);
+    const int64_t r = ps4_net_p2p_socket_bind(s, port);
+    // A listener port: connecting from it is EPROTO.
+    if (r == 0 && stream && port != 0) ps4_net_socket_update_attributes(s, p2p_port_bound_update, NULL);
+    return ret(ctx, r);
+}
+
+static int32_t p2p_connect(GuestContext *ctx, int32_t s, const Ps4NetSocketInfo *info, const OrbisNetSockaddr *addr,
+                           uint32_t addrlen) {
+    const bool stream = p2p_stream(info);
+    const bool bound = is_p2p_bound(s);
+    if (!bound && !stream) return set_errno(ctx, ORBIS_NET_EINVAL);
+    Ps4P2PEndpoint peer;
+    uint16_t port = 0;
+    const int e = ps4_net_to_p2p_address(addr, addrlen, stream, &peer, &port);
+    if (e != 0) return set_errno(ctx, e);
+    if (!is_complete_p2p_address(addr, stream)) return set_errno(ctx, ORBIS_NET_EADDRNOTAVAIL);
+    if (info->listening) return set_errno(ctx, ORBIS_NET_EOPNOTSUPP);
+    if (stream) {
+        Ps4NetSocketAttributes attributes;
+        ps4_net_socket_get_attributes(s, &attributes);
+        if (attributes.p2p_tcp_port_bound) return set_errno(ctx, ORBIS_NET_EPROTO);
+        if (!bound) {
+            const int64_t b = ps4_net_p2p_socket_bind(s, 0); // bound implicitly
+            if (b < 0) return ret(ctx, b);
+        }
+    } else {
+        Ps4P2PEndpoint current;
+        uint16_t current_vport = 0;
+        if (ps4_net_p2p_socket_getpeername(s, &current, &current_vport) == 0) return set_errno(ctx, ORBIS_NET_EISCONN);
+    }
+    return ret(ctx, ps4_net_p2p_socket_connect(s, &peer, port));
+}
+
 int32_t ps4_sceNetBind(GuestContext *ctx, int32_t s, const OrbisNetSockaddr *addr, uint32_t addrlen) {
     Ps4NetSocketInfo info;
     const int64_t r = ps4_net_socket_get_info(s, &info);
     if (r < 0) return ret(ctx, r);
+    if (info.p2p) return p2p_bind(ctx, s, &info, addr, addrlen);
     struct sockaddr_storage host;
     socklen_t host_len = 0;
     const int e = ps4_net_to_host_sockaddr(addr, addrlen, &host, &host_len);
@@ -700,11 +826,22 @@ int32_t ps4_sceNetListen(GuestContext *ctx, int32_t s, int32_t backlog) {
     Ps4NetSocketInfo info;
     const int64_t r = ps4_net_socket_get_info(s, &info);
     if (r < 0) return ret(ctx, r);
+    if (info.p2p && !is_p2p_bound(s)) return set_errno(ctx, ORBIS_NET_EINVAL); // P2P listeners must be bound
     return ret(ctx, ps4_net_socket_listen(s, backlog));
 }
 
 int32_t ps4_sceNetAccept(GuestContext *ctx, int32_t s, OrbisNetSockaddr *addr, uint32_t *paddrlen) {
     if (addr && !paddrlen) return set_errno(ctx, ORBIS_NET_EFAULT);
+    Ps4NetSocketInfo info;
+    const int64_t i = ps4_net_socket_get_info(s, &info);
+    if (i < 0) return ret(ctx, i);
+    if (info.p2p) {
+        Ps4P2PEndpoint peer = {0, 0};
+        uint16_t peer_vport = 0;
+        const int64_t r = ps4_net_p2p_socket_accept(s, &peer, &peer_vport);
+        if (r >= 0 && addr) ps4_net_to_orbis_p2p_address(&peer, peer_vport, true, addr, paddrlen);
+        return ret(ctx, r);
+    }
     struct sockaddr_storage host;
     socklen_t host_len = sizeof(host);
     memset(&host, 0, sizeof(host));
@@ -717,6 +854,7 @@ int32_t ps4_sceNetConnect(GuestContext *ctx, int32_t s, const OrbisNetSockaddr *
     Ps4NetSocketInfo info;
     const int64_t r = ps4_net_socket_get_info(s, &info);
     if (r < 0) return ret(ctx, r);
+    if (info.p2p) return p2p_connect(ctx, s, &info, addr, addrlen);
     struct sockaddr_storage host;
     socklen_t host_len = 0;
     const int e = ps4_net_to_host_sockaddr(addr, addrlen, &host, &host_len);
@@ -752,6 +890,20 @@ int32_t ps4_sceNetSendto(GuestContext *ctx, int32_t s, const void *buf, uint64_t
         addr = NULL;
         addrlen = 0;
     }
+    if (info.p2p) {
+        Ps4P2PEndpoint to = {0, 0};
+        uint16_t to_vport = 0;
+        if (addr) {
+            const int e = ps4_net_to_p2p_address(addr, addrlen, p2p_stream(&info), &to, &to_vport);
+            if (e != 0) return set_errno(ctx, e);
+            if (info.type == SOCK_DGRAM && !is_complete_p2p_address(addr, false)) {
+                return set_errno(ctx, ORBIS_NET_EADDRNOTAVAIL);
+            }
+        }
+        // A stream's protection is fixed per connection (shadPS4 ignores per-message flags there).
+        return ret(ctx, ps4_net_p2p_socket_sendto(s, buf, (size_t)len, msg.dontwait, addr ? &to : NULL, to_vport,
+                                                  msg.crypto, msg.signature));
+    }
     struct sockaddr_storage host;
     socklen_t host_len = 0;
     if (addr) {
@@ -781,6 +933,14 @@ int32_t ps4_sceNetRecvfrom(GuestContext *ctx, int32_t s, void *buf, uint64_t len
     Ps4NetSocketInfo info;
     const int64_t i = ps4_net_socket_get_info(s, &info);
     if (i < 0) return ret(ctx, i);
+    if (info.p2p) {
+        Ps4P2PEndpoint from = {0, 0};
+        uint16_t from_vport = 0;
+        const int64_t r = ps4_net_p2p_socket_recvfrom(s, buf, (size_t)len, msg.peek, msg.dontwait, addr ? &from : NULL,
+                                                      addr ? &from_vport : NULL, msg.waitall);
+        if (r >= 0 && addr) ps4_net_to_orbis_p2p_address(&from, from_vport, p2p_stream(&info), addr, paddrlen);
+        return ret(ctx, r);
+    }
     struct sockaddr_storage host;
     socklen_t host_len = sizeof(host);
     memset(&host, 0, sizeof(host));
@@ -860,6 +1020,20 @@ int32_t ps4_sceNetShutdown(GuestContext *ctx, int32_t s, int32_t how) {
 
 int32_t ps4_sceNetGetsockname(GuestContext *ctx, int32_t s, OrbisNetSockaddr *addr, uint32_t *paddrlen) {
     if (!addr || !paddrlen) return set_errno(ctx, ORBIS_NET_EFAULT);
+    Ps4NetSocketInfo info;
+    const int64_t i = ps4_net_socket_get_info(s, &info);
+    if (i < 0) return ret(ctx, i);
+    if (info.p2p) {
+        uint16_t udp_port = 0;
+        uint16_t vport = 0;
+        const int64_t r = ps4_net_p2p_socket_getname(s, &udp_port, &vport);
+        if (r == 0) {
+            // As shadPS4: INADDR_ANY (its TODO: maybe the advertised NAT address).
+            const Ps4P2PEndpoint local = {htonl(INADDR_ANY), htons(udp_port)};
+            ps4_net_to_orbis_p2p_address(&local, vport, p2p_stream(&info), addr, paddrlen);
+        }
+        return ret(ctx, r);
+    }
     struct sockaddr_storage host;
     socklen_t host_len = sizeof(host);
     memset(&host, 0, sizeof(host));
@@ -870,6 +1044,16 @@ int32_t ps4_sceNetGetsockname(GuestContext *ctx, int32_t s, OrbisNetSockaddr *ad
 
 int32_t ps4_sceNetGetpeername(GuestContext *ctx, int32_t s, OrbisNetSockaddr *addr, uint32_t *paddrlen) {
     if (!addr || !paddrlen) return set_errno(ctx, ORBIS_NET_EFAULT);
+    Ps4NetSocketInfo info;
+    const int64_t i = ps4_net_socket_get_info(s, &info);
+    if (i < 0) return ret(ctx, i);
+    if (info.p2p) {
+        Ps4P2PEndpoint peer = {0, 0};
+        uint16_t vport = 0;
+        const int64_t r = ps4_net_p2p_socket_getpeername(s, &peer, &vport);
+        if (r == 0) ps4_net_to_orbis_p2p_address(&peer, vport, p2p_stream(&info), addr, paddrlen);
+        return ret(ctx, r);
+    }
     struct sockaddr_storage host;
     socklen_t host_len = sizeof(host);
     memset(&host, 0, sizeof(host));
@@ -882,7 +1066,14 @@ int32_t ps4_sceNetIoctl(GuestContext *ctx, int32_t s, uint64_t cmd, void *data) 
     Ps4NetSocketInfo info;
     const int64_t r = ps4_net_socket_get_info(s, &info);
     if (r < 0) return ret(ctx, r);
-    // P2P key ioctls need the P2P transport (ps4_net.h); no P2P socket exists without it.
+    if (info.p2p) {
+        const int e = ps4_net_p2p_key_ioctl(htons(ps4_net_p2p_bound_port()), cmd, data);
+        if (e != 0) {
+            fprintf(stderr, "[ps4-net] P2P ioctl 0x%llx failed: %d\n", (unsigned long long)cmd, e);
+            return set_errno(ctx, e);
+        }
+        return 0;
+    }
     switch ((uint32_t)cmd) {
     case ORBIS_NET_FIONBIO:
         if (!data) return set_errno(ctx, ORBIS_NET_EFAULT);
@@ -918,6 +1109,27 @@ static bool fill_sock_info(int32_t id, OrbisNetSockInfo *out) {
     // As shadPS4: TCP state, queues and bandwidth are not tracked. OPENED, or ESTABLISHED once
     // there is a peer.
     record.state = ORBIS_NET_SOCKINFO_STATE_OPENED;
+    if (info.p2p) {
+        uint16_t udp_port = 0;
+        uint16_t vport = 0;
+        if (ps4_net_p2p_socket_getname(id, &udp_port, &vport) == 0) {
+            record.local_port = htons(udp_port);
+            record.local_vport = htons(vport);
+        }
+        Ps4P2PEndpoint peer;
+        uint16_t peer_vport = 0;
+        if (ps4_net_p2p_socket_getpeername(id, &peer, &peer_vport) == 0) {
+            OrbisNetSockaddrIn in;
+            uint32_t in_len = sizeof(in);
+            ps4_net_to_orbis_p2p_address(&peer, peer_vport, info.type == SOCK_STREAM, (OrbisNetSockaddr *)&in, &in_len);
+            record.remote_adr.inaddr_addr = in.sin_addr;
+            record.remote_port = in.sin_port;
+            record.remote_vport = in.sin_vport;
+            record.state = ORBIS_NET_SOCKINFO_STATE_ESTABLISHED;
+        }
+        memcpy(out, &record, sizeof(record));
+        return true;
+    }
     struct sockaddr_storage host;
     socklen_t len = sizeof(host);
     if (ps4_net_socket_getname(id, (struct sockaddr *)&host, &len) == 0 && host.ss_family == AF_INET) {

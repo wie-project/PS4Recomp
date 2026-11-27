@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"ps4-recomp/pkg/elfloader"
 )
 
 // shadps4Libraries is the shadPS4 reference tree (tools/shadps4) the runtime modules follow.
@@ -40,8 +42,7 @@ var auditedShadPS4Libraries = []string{
 	"keyboard",
 	"libpng",
 	"mouse",
-	// The P2P transport (net_p2p*.cpp, core/net/p2p_*) is not ported yet: P2P sockets fail
-	// with ENETDOWN (libSceNet/ps4_net.h).
+	// Its LIB_OBJ data exports (in6addr_*) are served by the host data page.
 	"net",
 	"network/http.cpp",
 	"network/http2.cpp",
@@ -92,8 +93,12 @@ var auditedShadPS4Libraries = []string{
 
 var libFunctionRe = regexp.MustCompile(`LIB_FUNCTION\(\s*"([^"]+)",\s*"([^"]+)",\s*\d+,\s*"[^"]+",\s*([A-Za-z0-9_]+)`)
 
+// libObjRe matches a data export (LIB_OBJ): those are served by the host data page.
+var libObjRe = regexp.MustCompile(`LIB_OBJ\(\s*"([^"]+)",\s*"([^"]+)",\s*\d+,\s*"[^"]+",\s*&?([A-Za-z0-9_]+)`)
+
 // TestAuditedLibrariesCoverShadPS4 reads the LIB_FUNCTION registrations of the audited
-// shadPS4 libraries and checks that each NID resolves to a runtime shim.
+// shadPS4 libraries and checks that each NID resolves to a runtime shim, and that each LIB_OBJ
+// data export is in the host data page (elfloader/hostdata.go).
 func TestAuditedLibrariesCoverShadPS4(t *testing.T) {
 	if _, err := os.Stat(shadps4Libraries); err != nil {
 		t.Skipf("shadPS4 reference tree not present: %v", err)
@@ -118,6 +123,11 @@ func TestAuditedLibrariesCoverShadPS4(t *testing.T) {
 				nid := string(m[1])
 				if _, ok := LookupShim(nid + "#A#A"); !ok {
 					t.Errorf("%s: %s (%s, %s) has no shim", lib, m[3], nid, m[2])
+				}
+			}
+			for _, m := range libObjRe.FindAllSubmatch(src, -1) {
+				if nid := string(m[1]); !elfloader.IsHostDataSymbol(nid + "#A#A") {
+					t.Errorf("%s: data export %s (%s, %s) is not in the host data page", lib, m[3], nid, m[2])
 				}
 			}
 		}

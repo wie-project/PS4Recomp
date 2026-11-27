@@ -159,10 +159,10 @@ func TestApplyBiasCanary(t *testing.T) {
 	binary.LittleEndian.PutUint64(img[gotOffset:gotOffset+8], origCanaryAddr)
 
 	loaded := &LoadedELF{
-		MinVAddr:    0x1000,
-		MaxVAddr:    0x6000,
-		CanaryAddr:  origCanaryAddr,
-		MemoryImage: img,
+		MinVAddr:     0x1000,
+		MaxVAddr:     0x6000,
+		HostDataAddr: origCanaryAddr,
+		MemoryImage:  img,
 		Relocations: []Relocation{
 			{Offset: gotOffset, Type: R_X86_64_GLOB_DAT, SymName: "f7uOxY9mM1U#D#D"},
 		},
@@ -173,14 +173,14 @@ func TestApplyBiasCanary(t *testing.T) {
 		t.Fatalf("ApplyBias failed: %v", err)
 	}
 
-	if loaded.CanaryAddr != origCanaryAddr+delta {
-		t.Fatalf("expected CanaryAddr 0x%x, got 0x%x", origCanaryAddr+delta, loaded.CanaryAddr)
+	if loaded.HostDataAddr != origCanaryAddr+delta {
+		t.Fatalf("expected HostDataAddr 0x%x, got 0x%x", origCanaryAddr+delta, loaded.HostDataAddr)
 	}
 
 	newGotOffset := gotOffset + delta
 	gotPtr := binary.LittleEndian.Uint64(loaded.MemoryImage[newGotOffset : newGotOffset+8])
-	if gotPtr != loaded.CanaryAddr {
-		t.Fatalf("expected GOT entry to point to shifted canary 0x%x, got 0x%x", loaded.CanaryAddr, gotPtr)
+	if gotPtr != loaded.HostDataAddr {
+		t.Fatalf("expected GOT entry to point to shifted canary 0x%x, got 0x%x", loaded.HostDataAddr, gotPtr)
 	}
 }
 
@@ -191,11 +191,11 @@ func TestMergeImagesCanary(t *testing.T) {
 	dstImg := make([]byte, 0x9000)
 	binary.LittleEndian.PutUint64(dstImg[dstCanaryAddr:dstCanaryAddr+8], canaryVal)
 	dst := &LoadedELF{
-		FileName:    "main",
-		MinVAddr:    0x1000,
-		MaxVAddr:    0x9000,
-		CanaryAddr:  dstCanaryAddr,
-		MemoryImage: dstImg,
+		FileName:     "main",
+		MinVAddr:     0x1000,
+		MaxVAddr:     0x9000,
+		HostDataAddr: dstCanaryAddr,
+		MemoryImage:  dstImg,
 	}
 
 	const srcCanaryAddr = 0x15000
@@ -204,11 +204,11 @@ func TestMergeImagesCanary(t *testing.T) {
 	binary.LittleEndian.PutUint64(srcImg[srcCanaryAddr:srcCanaryAddr+8], canaryVal)
 	binary.LittleEndian.PutUint64(srcImg[srcGotOffset:srcGotOffset+8], srcCanaryAddr)
 	src := &LoadedELF{
-		FileName:    "companion.prx",
-		MinVAddr:    0x10000,
-		MaxVAddr:    0x16000,
-		CanaryAddr:  srcCanaryAddr,
-		MemoryImage: srcImg,
+		FileName:     "companion.prx",
+		MinVAddr:     0x10000,
+		MaxVAddr:     0x16000,
+		HostDataAddr: srcCanaryAddr,
+		MemoryImage:  srcImg,
 		Relocations: []Relocation{
 			{Offset: srcGotOffset, Type: R_X86_64_GLOB_DAT, SymName: "__stack_chk_guard"},
 		},
@@ -218,8 +218,8 @@ func TestMergeImagesCanary(t *testing.T) {
 		t.Fatalf("MergeImages failed: %v", err)
 	}
 
-	if dst.CanaryAddr != dstCanaryAddr {
-		t.Fatalf("expected dst CanaryAddr 0x%x, got 0x%x", dstCanaryAddr, dst.CanaryAddr)
+	if dst.HostDataAddr != dstCanaryAddr {
+		t.Fatalf("expected dst HostDataAddr 0x%x, got 0x%x", dstCanaryAddr, dst.HostDataAddr)
 	}
 
 	gotPtr := binary.LittleEndian.Uint64(dst.MemoryImage[srcGotOffset : srcGotOffset+8])

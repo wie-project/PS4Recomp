@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Guest network objects: shadPS4 core/net/guest_net.cpp without the P2P transport.
+// Guest network objects: shadPS4 core/net/guest_net.cpp.
+//
+// A P2P socket has no host socket of its own: it lives in the P2P transport
+// (ps4_net_p2p_transport.c), and its id is the descriptor of its readable flag. Blocking calls
+// and epolls wait on its readable and writable flags instead of a socket.
 //
 // Objects are reference counted. The table holds one reference per id; a blocking call holds
 // another while it waits, so closing an object wakes its waiters and the host descriptor is
@@ -9,6 +13,7 @@
 
 #include "ps4_net_core.h"
 #include "ps4_net_host.h"
+#include "ps4_net_p2p.h"
 #include "ps4_net_types.h"
 
 #include <arpa/inet.h>
@@ -65,8 +70,9 @@ typedef struct EpollList {
 
 typedef struct NetSocket {
     NetObject hdr;
-    int native;
-    int type;
+    int native;           // a P2P socket's readable flag
+    int type;             // P2P sockets report their base type
+    Ps4P2PSocket *p2p;    // NULL for host sockets
     atomic_bool nonblocking;
     atomic_bool reuse_addr;
     atomic_bool reuse_port;
@@ -104,7 +110,14 @@ typedef struct NetReg {
     bool external;
     bool armed;
     bool reported;
+    // A P2P socket: its flags' descriptors only signal a change, the events come from its
+    // state. The writable flag is tagged with P2P_WRITABLE_TAG.
+    bool p2p;
+    bool has_readable;
+    bool has_writable;
 } NetReg;
+
+#define P2P_WRITABLE_TAG (1ull << 31)
 
 typedef struct HupEntry {
     int32_t id;
@@ -374,19 +387,39 @@ static void epoll_erase_reg(NetEpoll *ep, NetReg *reg) {
     *reg = ep->regs[--ep->reg_count];
 }
 
+// Removes the socket's descriptors from the kqueue. A P2P socket's flags may outlive it (a
+// closing stream keeps them in the transport), so they must go explicitly.
+static int epoll_unregister(NetEpoll *ep, const NetReg *reg, const NetSocket *s) {
+    if (!reg->p2p) return ps4_net_host_epoll_remove(&ep->host, reg->native);
+    if (reg->has_readable) ps4_net_host_epoll_remove(&ep->host, ps4_p2p_socket_readable_fd(s->p2p));
+    if (reg->has_writable) ps4_net_host_epoll_remove(&ep->host, ps4_p2p_socket_writable_fd(s->p2p));
+    return 0;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Objects
 
+// Closes what the socket owns: the host socket, or the P2P socket (whose flags close with it;
+// a P2P stream still finishes gracefully, FIN and TIME-WAIT, inside the transport).
+static void socket_close_native(NetSocket *s) {
+    if (s->p2p) {
+        ps4_p2p_socket_destroy(s->p2p);
+        s->p2p = NULL;
+        return;
+    }
+    close(s->native);
+}
+
 static void socket_destroy(NetObject *o) {
     NetSocket *s = (NetSocket *)o;
-    if (s->type == SOCK_STREAM) ps4_net_host_prepare_close(s->native, !atomic_load(&s->nonblocking));
+    if (!s->p2p && s->type == SOCK_STREAM) ps4_net_host_prepare_close(s->native, !atomic_load(&s->nonblocking));
     epoll_list_release(&s->epolls);
     free(s->pending_memberships);
     pthread_mutex_destroy(&s->attr_mutex);
     pthread_mutex_destroy(&s->wait_mutex);
     pthread_mutex_destroy(&s->reg_mutex);
     table_unreserve(s->native);
-    close(s->native);
+    socket_close_native(s);
     free(s);
 }
 
@@ -408,7 +441,7 @@ static NetSocket *socket_new(int native, int type) {
 
 // Frees a socket that never made it into the table.
 static void socket_discard(NetSocket *s) {
-    close(s->native);
+    socket_close_native(s);
     pthread_mutex_destroy(&s->attr_mutex);
     pthread_mutex_destroy(&s->wait_mutex);
     pthread_mutex_destroy(&s->reg_mutex);
@@ -586,6 +619,17 @@ static void interrupt_waiters(NetSocket *s, bool blocked[2]) {
     }
 }
 
+// What a blocking call waits on: the host socket, or the P2P socket's readable or writable
+// flag (each a descriptor that is readable while the flag is set).
+static int wait_target(const NetSocket *s, uint32_t interest, uint32_t *wait_interest) {
+    if (!s->p2p) {
+        *wait_interest = interest;
+        return s->native;
+    }
+    *wait_interest = PS4_NET_READABLE;
+    return (interest & PS4_NET_WRITABLE) ? ps4_p2p_socket_writable_fd(s->p2p) : ps4_p2p_socket_readable_fd(s->p2p);
+}
+
 typedef int64_t (*NetOp)(void *arg);
 
 static int64_t run_blocking(NetSocket *s, int side, uint32_t interest, int64_t deadline_ns, bool blocking, NetOp op,
@@ -605,7 +649,9 @@ static int64_t run_blocking(NetSocket *s, int side, uint32_t interest, int64_t d
         }
         result = op(arg);
         if (result != -ORBIS_NET_EWOULDBLOCK) break;
-        const Ps4NetWaitResult w = ps4_net_host_wait_one(s->native, interest, scope.waiter.wake, deadline_ns);
+        uint32_t wait_interest;
+        const int fd = wait_target(s, interest, &wait_interest);
+        const Ps4NetWaitResult w = ps4_net_host_wait_one(fd, wait_interest, scope.waiter.wake, deadline_ns);
         if (w == PS4_NET_WAIT_READY || w == PS4_NET_WAIT_WOKEN) continue;
         // BSD: an expired SO_RCVTIMEO/SO_SNDTIMEO is EAGAIN, not ETIMEDOUT.
         result = w == PS4_NET_WAIT_TIMED_OUT ? -ORBIS_NET_EWOULDBLOCK : -ps4_net_host_last_error();
@@ -668,7 +714,8 @@ int64_t ps4_net_socket_create_pair(int family, int type, int protocol, int32_t i
 int64_t ps4_net_socket_bind(int32_t id, const struct sockaddr *addr, socklen_t len) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
-    int e = ps4_net_host_prepare_bind(s->native, atomic_load(&s->reuse_addr), atomic_load(&s->reuse_port));
+    int e = s->p2p ? ORBIS_NET_EINVAL // ps4_net_p2p_socket_bind
+                   : ps4_net_host_prepare_bind(s->native, atomic_load(&s->reuse_addr), atomic_load(&s->reuse_port));
     if (e == 0) e = bind(s->native, addr, len) == 0 ? 0 : ps4_net_host_last_error();
     obj_release(&s->hdr);
     return -e;
@@ -677,7 +724,9 @@ int64_t ps4_net_socket_bind(int32_t id, const struct sockaddr *addr, socklen_t l
 int64_t ps4_net_socket_listen(int32_t id, int backlog) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
-    const int e = listen(s->native, backlog) == 0 ? 0 : ps4_net_host_last_error();
+    const int e = s->p2p                         ? ps4_p2p_socket_listen(s->p2p, backlog)
+                  : listen(s->native, backlog) == 0 ? 0
+                                                    : ps4_net_host_last_error();
     if (e == 0) atomic_store(&s->listening, true);
     obj_release(&s->hdr);
     return -e;
@@ -742,7 +791,7 @@ static int64_t socket_connect(NetSocket *s, const struct sockaddr *addr, socklen
 int64_t ps4_net_socket_connect(int32_t id, const struct sockaddr *addr, socklen_t len) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
-    const int64_t r = socket_connect(s, addr, len);
+    const int64_t r = s->p2p ? -ORBIS_NET_EINVAL : socket_connect(s, addr, len); // ps4_net_p2p_socket_connect
     obj_release(&s->hdr);
     return r;
 }
@@ -763,6 +812,10 @@ static int64_t accept_op(void *arg) {
 int64_t ps4_net_socket_accept(int32_t id, struct sockaddr *addr, socklen_t *len) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
+    if (s->p2p) {
+        obj_release(&s->hdr);
+        return -ORBIS_NET_EINVAL; // ps4_net_p2p_socket_accept
+    }
     AcceptOp op = {s, addr, len, -1};
     int64_t r = run_blocking(s, SIDE_RECV, PS4_NET_READABLE, socket_deadline(&s->accept_timeout_us),
                              !atomic_load(&s->nonblocking), accept_op, &op);
@@ -825,6 +878,10 @@ int64_t ps4_net_socket_sendto(int32_t id, const void *buf, size_t len, int host_
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
     int64_t result;
+    if (s->p2p) {
+        obj_release(&s->hdr);
+        return -ORBIS_NET_EINVAL; // ps4_net_p2p_socket_sendto
+    }
     if (s->type != SOCK_STREAM) {
         // UDP/RAW sends never block on the PS4: a full buffer silently drops the datagram.
         if (consume_pending_abort(s, SIDE_SEND)) {
@@ -894,6 +951,10 @@ int64_t ps4_net_socket_recvfrom(int32_t id, void *buf, size_t len, int host_flag
                                 struct sockaddr *addr, socklen_t *addr_len) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
+    if (s->p2p) {
+        obj_release(&s->hdr);
+        return -ORBIS_NET_EINVAL; // ps4_net_p2p_socket_recvfrom
+    }
     const bool blocking = !dontwait && !atomic_load(&s->nonblocking);
     const bool waitall = (host_flags & MSG_WAITALL) != 0 && blocking && s->type == SOCK_STREAM;
     const int64_t deadline = socket_deadline(&s->rcv_timeout_us);
@@ -921,7 +982,9 @@ int64_t ps4_net_socket_recvfrom(int32_t id, void *buf, size_t len, int host_flag
 int64_t ps4_net_socket_shutdown(int32_t id, int how) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
-    const int e = shutdown(s->native, how) == 0 ? 0 : ps4_net_host_last_error();
+    const int e = s->p2p                         ? ps4_p2p_socket_shutdown(s->p2p, how)
+                  : shutdown(s->native, how) == 0 ? 0
+                                                  : ps4_net_host_last_error();
     obj_release(&s->hdr);
     return -e;
 }
@@ -929,7 +992,9 @@ int64_t ps4_net_socket_shutdown(int32_t id, int how) {
 int64_t ps4_net_socket_getname(int32_t id, struct sockaddr *addr, socklen_t *len) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
-    const int e = getsockname(s->native, addr, len) == 0 ? 0 : ps4_net_host_last_error();
+    const int e = s->p2p                                  ? ORBIS_NET_EINVAL // ps4_net_p2p_socket_getname
+                  : getsockname(s->native, addr, len) == 0 ? 0
+                                                           : ps4_net_host_last_error();
     obj_release(&s->hdr);
     return -e;
 }
@@ -937,7 +1002,9 @@ int64_t ps4_net_socket_getname(int32_t id, struct sockaddr *addr, socklen_t *len
 int64_t ps4_net_socket_getpeername(int32_t id, struct sockaddr *addr, socklen_t *len) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
-    const int e = getpeername(s->native, addr, len) == 0 ? 0 : ps4_net_host_last_error();
+    const int e = s->p2p                                  ? ORBIS_NET_EINVAL // ps4_net_p2p_socket_getpeername
+                  : getpeername(s->native, addr, len) == 0 ? 0
+                                                           : ps4_net_host_last_error();
     obj_release(&s->hdr);
     return -e;
 }
@@ -945,7 +1012,9 @@ int64_t ps4_net_socket_getpeername(int32_t id, struct sockaddr *addr, socklen_t 
 int64_t ps4_net_socket_set_host_option(int32_t id, int level, int name, const void *value, socklen_t len) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
-    const int e = setsockopt(s->native, level, name, value, len) == 0 ? 0 : ps4_net_host_last_error();
+    const int e = s->p2p                                                ? ORBIS_NET_ENOPROTOOPT
+                  : setsockopt(s->native, level, name, value, len) == 0 ? 0
+                                                                        : ps4_net_host_last_error();
     obj_release(&s->hdr);
     return -e;
 }
@@ -953,7 +1022,9 @@ int64_t ps4_net_socket_set_host_option(int32_t id, int level, int name, const vo
 int64_t ps4_net_socket_get_host_option(int32_t id, int level, int name, void *value, socklen_t *len) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
-    const int e = getsockopt(s->native, level, name, value, len) == 0 ? 0 : ps4_net_host_last_error();
+    const int e = s->p2p                                                ? ORBIS_NET_ENOPROTOOPT
+                  : getsockopt(s->native, level, name, value, len) == 0 ? 0
+                                                                        : ps4_net_host_last_error();
     obj_release(&s->hdr);
     return -e;
 }
@@ -962,7 +1033,7 @@ int64_t ps4_net_socket_get_info(int32_t id, Ps4NetSocketInfo *info) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
     info->type = s->type;
-    info->p2p = false;
+    info->p2p = s->p2p != NULL;
     info->nonblocking = atomic_load(&s->nonblocking);
     info->reuse_addr = atomic_load(&s->reuse_addr);
     info->rcv_timeout_us = atomic_load(&s->rcv_timeout_us);
@@ -971,7 +1042,15 @@ int64_t ps4_net_socket_get_info(int32_t id, Ps4NetSocketInfo *info) {
     info->accept_timeout_us = atomic_load(&s->accept_timeout_us);
     info->connected = atomic_load(&s->connected);
     info->listening = atomic_load(&s->listening);
-    info->pending_error = ps4_net_host_pending_error(s->native);
+    if (s->p2p && ps4_p2p_socket_is_stream(s->p2p)) {
+        // Never cleared, as shadPS4.
+        const int e = ps4_p2p_socket_connect_result(s->p2p);
+        info->pending_error = e == ORBIS_NET_EINPROGRESS || e == ORBIS_NET_ENOTCONN ? 0 : e;
+    } else if (s->p2p) {
+        info->pending_error = 0;
+    } else {
+        info->pending_error = ps4_net_host_pending_error(s->native);
+    }
     obj_release(&s->hdr);
     return 0;
 }
@@ -1063,6 +1142,10 @@ int64_t ps4_net_socket_drop_pending_membership(int32_t id, const uint8_t request
 void ps4_net_socket_apply_pending_memberships(int32_t id) {
     NetSocket *s = get_socket(id);
     if (!s) return;
+    if (s->p2p) {
+        obj_release(&s->hdr);
+        return;
+    }
     pthread_mutex_lock(&s->attr_mutex);
     uint8_t(*pending)[8] = s->pending_memberships;
     const int count = s->pending_count;
@@ -1082,7 +1165,7 @@ int64_t ps4_net_socket_bytes_readable(int32_t id) {
     NetSocket *s = get_socket(id);
     if (!s) return -ORBIS_NET_EBADF;
     int64_t n = 0;
-    const int e = ps4_net_host_bytes_readable(s->native, &n);
+    const int e = s->p2p ? ORBIS_NET_EINVAL : ps4_net_host_bytes_readable(s->native, &n);
     obj_release(&s->hdr);
     return e ? -e : n;
 }
@@ -1188,7 +1271,7 @@ int64_t ps4_net_socket_close(int32_t id) {
         pthread_mutex_lock(&ep->mutex);
         NetReg *reg = epoll_find(ep, id);
         if (reg && reg->generation == s->hdr.generation) {
-            ps4_net_host_epoll_remove(&ep->host, reg->native);
+            epoll_unregister(ep, reg, s);
             epoll_erase_reg(ep, reg);
         }
         pthread_mutex_unlock(&ep->mutex);
@@ -1196,6 +1279,280 @@ int64_t ps4_net_socket_close(int32_t id) {
     epoll_list_release(&epolls);
     obj_release(&s->hdr);
     return 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// P2P sockets (shadPS4 P2PSocket*)
+
+int64_t ps4_net_p2p_socket_create(bool stream) {
+    Ps4P2PTransport *t = ps4_net_p2p_acquire_transport();
+    if (!t) return -ORBIS_NET_ENETDOWN; // shadPS4's TODO: a real error when P2P is down
+    Ps4P2PSocket *p2p = ps4_p2p_socket_create(t, stream);
+    ps4_p2p_transport_release(t); // the socket holds its own reference
+    if (!p2p) return -ORBIS_NET_ENOBUFS;
+    NetSocket *s = socket_new(ps4_p2p_socket_readable_fd(p2p), stream ? SOCK_STREAM : SOCK_DGRAM);
+    if (!s) {
+        ps4_p2p_socket_destroy(p2p);
+        return -ORBIS_NET_ENOMEM;
+    }
+    s->p2p = p2p;
+    return socket_insert(s);
+}
+
+// A reference to the P2P socket with that id; EBADF for no socket, EINVAL for a host socket.
+static NetSocket *get_p2p_socket(int32_t id, int64_t *error) {
+    NetSocket *s = get_socket(id);
+    if (!s) {
+        *error = -ORBIS_NET_EBADF;
+    } else if (!s->p2p) {
+        obj_release(&s->hdr);
+        s = NULL;
+        *error = -ORBIS_NET_EINVAL;
+    }
+    return s;
+}
+
+int64_t ps4_net_p2p_socket_set_protection(int32_t id, bool crypto, bool signature) {
+    int64_t r = 0;
+    NetSocket *s = get_p2p_socket(id, &r);
+    if (!s) return r;
+    ps4_p2p_socket_set_protection(s->p2p, (Ps4P2PProtection){crypto, signature});
+    obj_release(&s->hdr);
+    return 0;
+}
+
+int64_t ps4_net_p2p_socket_get_protection(int32_t id, bool *crypto, bool *signature) {
+    int64_t r = 0;
+    NetSocket *s = get_p2p_socket(id, &r);
+    if (!s) return r;
+    const Ps4P2PProtection p = ps4_p2p_socket_get_protection(s->p2p);
+    *crypto = p.crypto;
+    *signature = p.signature;
+    obj_release(&s->hdr);
+    return 0;
+}
+
+int64_t ps4_net_p2p_socket_bind(int32_t id, uint16_t vport) {
+    int64_t r = 0;
+    NetSocket *s = get_p2p_socket(id, &r);
+    if (!s) return r;
+    r = -ps4_p2p_socket_bind(s->p2p, vport);
+    obj_release(&s->hdr);
+    return r;
+}
+
+static int64_t p2p_connect(NetSocket *s, const Ps4P2PEndpoint *peer, uint16_t peer_vport) {
+    if (!ps4_p2p_socket_is_stream(s->p2p)) {
+        const int e = ps4_p2p_socket_connect(s->p2p, peer, peer_vport); // sets the peer
+        if (e == 0) atomic_store(&s->connected, true);
+        return -e;
+    }
+    if (atomic_load(&s->listening)) return -ORBIS_NET_EOPNOTSUPP;
+    if (atomic_load(&s->nonblocking)) {
+        if (consume_pending_abort(s, SIDE_SEND)) return -ABORTED_ERROR;
+        const int e = ps4_p2p_socket_connect(s->p2p, peer, peer_vport);
+        if (e == 0 || e == ORBIS_NET_EINPROGRESS) atomic_store(&s->connected, true);
+        return -e;
+    }
+    WaitScope scope;
+    wait_scope_enter(&scope, s, SIDE_SEND);
+    if (scope.entry_error != 0) return -scope.entry_error;
+    int64_t result;
+    const int started = ps4_p2p_socket_connect(s->p2p, peer, peer_vport);
+    if (started == 0 || started == ORBIS_NET_EINPROGRESS) atomic_store(&s->connected, true);
+    if (started != ORBIS_NET_EINPROGRESS) {
+        result = -started;
+    } else {
+        // The writable flag is set on success and on failure. A timed out or aborted connect
+        // keeps going in the background, as on BSD.
+        const int fd = ps4_p2p_socket_writable_fd(s->p2p);
+        const int64_t deadline = socket_deadline(&s->connect_timeout_us);
+        for (;;) {
+            if (wait_scope_interrupted(&scope)) {
+                result = -ABORTED_ERROR;
+                break;
+            }
+            const int e = ps4_p2p_socket_connect_result(s->p2p);
+            if (e != ORBIS_NET_EINPROGRESS) {
+                result = -e;
+                break;
+            }
+            const Ps4NetWaitResult w = ps4_net_host_wait_one(fd, PS4_NET_READABLE, scope.waiter.wake, deadline);
+            if (w == PS4_NET_WAIT_FAILED) {
+                result = -ps4_net_host_last_error();
+                break;
+            }
+            if (w == PS4_NET_WAIT_TIMED_OUT) {
+                result = -ORBIS_NET_EWOULDBLOCK;
+                break;
+            }
+        }
+    }
+    wait_scope_leave(&scope);
+    return result;
+}
+
+int64_t ps4_net_p2p_socket_connect(int32_t id, const Ps4P2PEndpoint *peer, uint16_t peer_vport) {
+    int64_t r = 0;
+    NetSocket *s = get_p2p_socket(id, &r);
+    if (!s) return r;
+    r = p2p_connect(s, peer, peer_vport);
+    obj_release(&s->hdr);
+    return r;
+}
+
+typedef struct P2PAcceptOp {
+    NetSocket *s;
+    Ps4P2PEndpoint *peer;
+    uint16_t *peer_vport;
+    Ps4P2PSocket *child;
+} P2PAcceptOp;
+
+static int64_t p2p_accept_op(void *arg) {
+    P2PAcceptOp *a = (P2PAcceptOp *)arg;
+    int e = 0;
+    a->child = ps4_p2p_socket_accept(a->s->p2p, a->peer, a->peer_vport, &e);
+    return a->child ? 0 : -e;
+}
+
+int64_t ps4_net_p2p_socket_accept(int32_t id, Ps4P2PEndpoint *peer, uint16_t *peer_vport) {
+    int64_t r = 0;
+    NetSocket *s = get_p2p_socket(id, &r);
+    if (!s) return r;
+    if (!ps4_p2p_socket_is_stream(s->p2p)) {
+        obj_release(&s->hdr);
+        return -ORBIS_NET_EOPNOTSUPP;
+    }
+    P2PAcceptOp op = {s, peer, peer_vport, NULL};
+    r = run_blocking(s, SIDE_RECV, PS4_NET_READABLE, socket_deadline(&s->accept_timeout_us),
+                     !atomic_load(&s->nonblocking), p2p_accept_op, &op);
+    if (r == 0) {
+        NetSocket *c = socket_new(ps4_p2p_socket_readable_fd(op.child), SOCK_STREAM);
+        if (!c) {
+            ps4_p2p_socket_destroy(op.child);
+            r = -ORBIS_NET_ENOMEM;
+        } else {
+            c->p2p = op.child;
+            atomic_store(&c->nonblocking, atomic_load(&s->nonblocking));
+            atomic_store(&c->connected, true);
+            pthread_mutex_lock(&s->attr_mutex);
+            c->attributes = s->attributes;
+            pthread_mutex_unlock(&s->attr_mutex);
+            r = socket_insert(c);
+        }
+    }
+    obj_release(&s->hdr);
+    return r;
+}
+
+typedef struct P2PSendOp {
+    NetSocket *s;
+    const uint8_t *bytes;
+    size_t len;
+    size_t sent;
+    const Ps4P2PEndpoint *peer;
+    uint16_t peer_vport;
+    Ps4P2PProtection protection;
+} P2PSendOp;
+
+static int64_t p2p_send_op(void *arg) {
+    P2PSendOp *o = (P2PSendOp *)arg;
+    return ps4_p2p_socket_send(o->s->p2p, o->bytes + o->sent, o->len - o->sent, o->peer, o->peer_vport,
+                               o->protection);
+}
+
+int64_t ps4_net_p2p_socket_sendto(int32_t id, const void *buf, size_t len, bool dontwait, const Ps4P2PEndpoint *peer,
+                                  uint16_t peer_vport, bool crypto, bool signature) {
+    int64_t result = 0;
+    NetSocket *s = get_p2p_socket(id, &result);
+    if (!s) return result;
+    // shadPS4 SendAll: a blocking stream send goes out whole.
+    const bool blocking = !dontwait && !atomic_load(&s->nonblocking);
+    const bool stream = ps4_p2p_socket_is_stream(s->p2p);
+    const int64_t deadline = socket_deadline(&s->snd_timeout_us);
+    P2PSendOp op = {s, (const uint8_t *)buf, len, 0, peer, peer_vport, {crypto, signature}};
+    for (;;) {
+        const int64_t r = run_blocking(s, SIDE_SEND, PS4_NET_WRITABLE, deadline, blocking, p2p_send_op, &op);
+        if (r < 0) {
+            if (r == -ABORTED_ERROR) {
+                pthread_mutex_lock(&s->wait_mutex);
+                if (s->send_again && op.sent > 0) s->pending_abort[SIDE_SEND] = true;
+                s->send_again = false;
+                pthread_mutex_unlock(&s->wait_mutex);
+            }
+            result = op.sent > 0 ? (int64_t)op.sent : r;
+            break;
+        }
+        op.sent += (size_t)r;
+        if (!blocking || !stream || op.sent >= len) {
+            result = (int64_t)op.sent;
+            break;
+        }
+    }
+    obj_release(&s->hdr);
+    return result;
+}
+
+typedef struct P2PRecvOp {
+    NetSocket *s;
+    uint8_t *bytes;
+    size_t len;
+    size_t got;
+    bool peek;
+    Ps4P2PEndpoint *from;
+    uint16_t *from_vport;
+} P2PRecvOp;
+
+static int64_t p2p_recv_op(void *arg) {
+    P2PRecvOp *o = (P2PRecvOp *)arg;
+    return ps4_p2p_socket_recv(o->s->p2p, o->bytes + o->got, o->len - o->got, o->peek, o->from, o->from_vport);
+}
+
+int64_t ps4_net_p2p_socket_recvfrom(int32_t id, void *buf, size_t len, bool peek, bool dontwait,
+                                    Ps4P2PEndpoint *from, uint16_t *from_vport, bool waitall) {
+    int64_t result = 0;
+    NetSocket *s = get_p2p_socket(id, &result);
+    if (!s) return result;
+    const bool blocking = !dontwait && !atomic_load(&s->nonblocking);
+    const int64_t deadline = socket_deadline(&s->rcv_timeout_us);
+    const bool loop = blocking && waitall && !peek && ps4_p2p_socket_is_stream(s->p2p);
+    P2PRecvOp op = {s, (uint8_t *)buf, len, 0, peek, from, from_vport};
+    if (!loop) {
+        result = run_blocking(s, SIDE_RECV, PS4_NET_READABLE, deadline, blocking, p2p_recv_op, &op);
+    } else {
+        result = 0;
+        while (op.got < len) {
+            const int64_t r = run_blocking(s, SIDE_RECV, PS4_NET_READABLE, deadline, blocking, p2p_recv_op, &op);
+            if (r < 0) {
+                result = op.got > 0 ? (int64_t)op.got : r;
+                break;
+            }
+            if (r == 0) break; // FIN
+            op.got += (size_t)r;
+        }
+        if (result >= 0) result = (int64_t)op.got;
+    }
+    obj_release(&s->hdr);
+    return result;
+}
+
+int64_t ps4_net_p2p_socket_getname(int32_t id, uint16_t *udp_port, uint16_t *vport) {
+    int64_t r = 0;
+    NetSocket *s = get_p2p_socket(id, &r);
+    if (!s) return r;
+    *vport = ps4_p2p_socket_bound_vport(s->p2p);
+    *udp_port = ps4_p2p_socket_transport_port(s->p2p);
+    obj_release(&s->hdr);
+    return 0;
+}
+
+int64_t ps4_net_p2p_socket_getpeername(int32_t id, Ps4P2PEndpoint *peer, uint16_t *peer_vport) {
+    int64_t r = 0;
+    NetSocket *s = get_p2p_socket(id, &r);
+    if (!s) return r;
+    r = ps4_p2p_socket_get_peer(s->p2p, peer, peer_vport) ? 0 : -ORBIS_NET_ENOTCONN;
+    obj_release(&s->hdr);
+    return r;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1232,7 +1589,7 @@ static int64_t external_epoll_control(NetEpoll *ep, int32_t id, NetExternal *x, 
         r = -ORBIS_NET_EBADF;
     } else if (op == PS4_NET_EPOLL_ADD) {
         const bool arm = (events & PS4_NET_EV_IN) != 0;
-        NetReg added = {id, x->hdr.generation, data, events, x->done.read_fd, true, arm, false};
+        NetReg added = {id, x->hdr.generation, data, events, x->done.read_fd, true, arm, false, false, false, false};
         if (reg) {
             r = -ORBIS_NET_EEXIST;
         } else if (arm && (r = -ps4_net_host_epoll_set(&ep->host, x->done.read_fd, make_tag(id, x->hdr.generation),
@@ -1271,6 +1628,38 @@ static int64_t external_epoll_control(NetEpoll *ep, int32_t id, NetExternal *x, 
     return r;
 }
 
+// A P2P socket is watched through its flags (shadPS4 HostRegister / HostModify). shadPS4 always
+// watches the readable flag; here each flag is watched only while its direction is wanted, so an
+// EPOLLOUT-only wait does not spin on incoming data. Errors and hangups set both flags, so they
+// still wake either. Return 0 or an errno.
+static int p2p_watch(NetEpoll *ep, int fd, uint64_t tag, bool want, bool *has) {
+    if (want == *has) return 0;
+    if (want) {
+        const int e = ps4_net_host_epoll_set(&ep->host, fd, tag, PS4_NET_EV_IN);
+        if (e != 0) return e;
+    } else {
+        ps4_net_host_epoll_remove(&ep->host, fd);
+    }
+    *has = want;
+    return 0;
+}
+
+static int p2p_modify(NetEpoll *ep, int32_t id, const NetSocket *s, uint32_t events, NetReg *reg) {
+    const uint64_t tag = make_tag(id, s->hdr.generation);
+    const bool want_write = (events & PS4_NET_EV_OUT) != 0;
+    const bool want_read = (events & PS4_NET_EV_IN) != 0 || !want_write;
+    const bool had_read = reg->has_readable;
+    int e = p2p_watch(ep, ps4_p2p_socket_readable_fd(s->p2p), tag, want_read, &reg->has_readable);
+    if (e == 0) e = p2p_watch(ep, ps4_p2p_socket_writable_fd(s->p2p), tag | P2P_WRITABLE_TAG, want_write,
+                              &reg->has_writable);
+    if (e != 0) p2p_watch(ep, ps4_p2p_socket_readable_fd(s->p2p), tag, had_read, &reg->has_readable);
+    return e;
+}
+
+static int p2p_register(NetEpoll *ep, int32_t id, const NetSocket *s, uint32_t events, NetReg *reg) {
+    return p2p_modify(ep, id, s, events, reg);
+}
+
 // Also used by select, with an epoll that has no id.
 static int64_t epoll_control_on(NetEpoll *ep, Ps4NetEpollOp op, int32_t id, uint32_t events, uint64_t data) {
     NetExternal *x = get_external(id);
@@ -1291,15 +1680,18 @@ static int64_t epoll_control_on(NetEpoll *ep, Ps4NetEpollOp op, int32_t id, uint
         if (reg) {
             r = -ORBIS_NET_EEXIST;
         } else {
-            r = -ps4_net_host_epoll_set(&ep->host, s->native, make_tag(id, s->hdr.generation), events);
-            const NetReg added = {id, s->hdr.generation, data, events, s->native, false, false, false};
+            NetReg added = {id, s->hdr.generation, data, events, s->native, false, false, false, s->p2p != NULL, false,
+                            false};
+            r = s->p2p ? -p2p_register(ep, id, s, events, &added)
+                       : -ps4_net_host_epoll_set(&ep->host, s->native, make_tag(id, s->hdr.generation), events);
             if (r == 0 && (!epoll_add_reg(ep, &added) || !epoll_list_add(&s->epolls, ep))) r = -ORBIS_NET_ENOMEM;
         }
     } else if (op == PS4_NET_EPOLL_MODIFY) {
         if (!reg) {
             r = -ORBIS_NET_ENOENT;
         } else {
-            r = -ps4_net_host_epoll_set(&ep->host, s->native, make_tag(id, s->hdr.generation), events);
+            r = s->p2p ? -p2p_modify(ep, id, s, events, reg)
+                       : -ps4_net_host_epoll_set(&ep->host, s->native, make_tag(id, s->hdr.generation), events);
             if (r == 0) {
                 reg->data = data;
                 reg->events = events;
@@ -1309,7 +1701,7 @@ static int64_t epoll_control_on(NetEpoll *ep, Ps4NetEpollOp op, int32_t id, uint
         if (!reg) {
             r = -ORBIS_NET_ENOENT;
         } else {
-            r = -ps4_net_host_epoll_remove(&ep->host, s->native);
+            r = -epoll_unregister(ep, reg, s);
             epoll_erase_reg(ep, reg);
             epoll_list_remove(&s->epolls, ep);
         }
@@ -1426,7 +1818,17 @@ static int64_t epoll_wait_on(NetEpoll *ep, Ps4NetGuestEpollEvent *out, int cap, 
                 // EPOLLIN | EPOLLDESCID, plus EPOLLHUP if the lookup was aborted.
                 events = PS4_NET_EV_IN | PS4_NET_EV_DESCID | (atomic_load(&x->hangup) ? PS4_NET_EV_HUP : 0u);
                 obj_release(&x->hdr);
-            } else if (events & (PS4_NET_EV_ERR | PS4_NET_EV_HUP)) {
+            } else if (reg->p2p) {
+                // The flag only signals a change: recompute the state.
+                NetSocket *s = get_socket(id);
+                if (!s || s->hdr.generation != generation || !s->p2p) {
+                    if (s) obj_release(&s->hdr);
+                    continue;
+                }
+                events = ps4_p2p_socket_events(s->p2p) & (reg->events | PS4_NET_EV_ERR | PS4_NET_EV_HUP);
+                obj_release(&s->hdr);
+            }
+            if (!reg->external && (events & (PS4_NET_EV_ERR | PS4_NET_EV_HUP))) {
                 // An error or hangup is reported as the registered directions.
                 events = (events & ~(uint32_t)(PS4_NET_EV_ERR | PS4_NET_EV_HUP)) |
                          (reg->events & (PS4_NET_EV_IN | PS4_NET_EV_OUT));
@@ -1568,7 +1970,7 @@ int64_t ps4_net_socket_select(Ps4NetSelectEntry *entries, int count, int64_t tim
 
     int64_t result = 0;
     int registered = 0;
-    Ps4NetGuestEpollEvent *out = (Ps4NetGuestEpollEvent *)malloc((size_t)count * sizeof(*out));
+    Ps4NetGuestEpollEvent *out = (Ps4NetGuestEpollEvent *)calloc((size_t)count, sizeof(*out));
     if (!out) {
         result = -ORBIS_NET_ENOMEM;
         goto done;

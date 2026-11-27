@@ -7,10 +7,11 @@
 // errno in the thread's sceNetErrnoLoc slot and the kernel errno (shadPS4's kernel errno hook).
 // Pointer arguments are host pointers into guest memory.
 //
-// Not ported yet: the P2P transport (shadPS4 core/net/p2p_*, libraries/net/net_p2p*): a
-// SOCK_DGRAM_P2P / SOCK_STREAM_P2P socket fails with ENETDOWN, as shadPS4's P2PSocketCreate does
-// without a transport. The libSceNet data exports (in6addr_any & co., shadPS4 LIB_OBJ) need data
-// symbol support in the loader and are not provided.
+// P2P sockets (SOCK_DGRAM_P2P, SOCK_STREAM_P2P) run on the P2P transport (ps4_net_p2p.h, after
+// shadPS4 libraries/net/net_p2p*.cpp and core/net/p2p_*). The data exports (in6addr_any & co.,
+// shadPS4 LIB_OBJ) live in the host data page the loader places after the image
+// (pkg/elfloader/hostdata.go). Not here: shadPS4's UPnP client and device discovery responder,
+// which belong to NP Matching2 and to emulator settings rather than to libSceNet's exports.
 
 #ifndef PS4_NET_H
 #define PS4_NET_H

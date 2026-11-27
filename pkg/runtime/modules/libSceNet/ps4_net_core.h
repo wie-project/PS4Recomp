@@ -13,6 +13,8 @@
 #ifndef PS4_NET_CORE_H
 #define PS4_NET_CORE_H
 
+#include "ps4_net_p2p_transport.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/socket.h>
@@ -128,6 +130,25 @@ int64_t ps4_net_socket_set_accept_timeout(int32_t id, int64_t us);
 #define PS4_NET_ABORT_PRESERVE_SEND_AGAIN 0x4u
 int64_t ps4_net_socket_abort(int32_t id, uint32_t flags);
 int64_t ps4_net_socket_close(int32_t id);
+
+// P2P sockets (shadPS4 P2PSocket*): DGRAM_P2P and STREAM_P2P sockets in the process's P2P
+// transport (ps4_net_p2p.h). The host-socket calls above give EINVAL for them (bind, connect,
+// accept, send, receive, names) or ENOPROTOOPT (host options); listen, shutdown, abort, close,
+// the attributes and the epolls work on both.
+int64_t ps4_net_p2p_socket_create(bool stream); // ENETDOWN without a transport
+int64_t ps4_net_p2p_socket_set_protection(int32_t id, bool crypto, bool signature);
+int64_t ps4_net_p2p_socket_get_protection(int32_t id, bool *crypto, bool *signature);
+int64_t ps4_net_p2p_socket_bind(int32_t id, uint16_t vport); // 0 = any free vport
+// A datagram socket gets its peer; a stream connects (blocking or EINPROGRESS).
+int64_t ps4_net_p2p_socket_connect(int32_t id, const Ps4P2PEndpoint *peer, uint16_t peer_vport);
+int64_t ps4_net_p2p_socket_accept(int32_t id, Ps4P2PEndpoint *peer, uint16_t *peer_vport);
+int64_t ps4_net_p2p_socket_sendto(int32_t id, const void *buf, size_t len, bool dontwait, const Ps4P2PEndpoint *peer,
+                                  uint16_t peer_vport, bool crypto, bool signature);
+int64_t ps4_net_p2p_socket_recvfrom(int32_t id, void *buf, size_t len, bool peek, bool dontwait,
+                                    Ps4P2PEndpoint *from, uint16_t *from_vport, bool waitall);
+// udp_port is the transport's (host order); vport host order.
+int64_t ps4_net_p2p_socket_getname(int32_t id, uint16_t *udp_port, uint16_t *vport);
+int64_t ps4_net_p2p_socket_getpeername(int32_t id, Ps4P2PEndpoint *peer, uint16_t *peer_vport);
 
 typedef enum Ps4NetEpollOp {
     PS4_NET_EPOLL_ADD,
