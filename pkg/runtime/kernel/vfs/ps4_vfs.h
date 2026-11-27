@@ -14,8 +14,9 @@ extern "C" {
 // Base threshold for virtual archive file descriptors
 #define PS4_VFS_VIRTUAL_FD_BASE 10000
 
-// Initialize VFS with host directory path corresponding to /app0
-void ps4_vfs_init(const char *app_root);
+// Initialize VFS with host directory path corresponding to /app0.
+// force_hint selects the compile-time app root before macOS bundle candidates.
+void ps4_vfs_init(const char *app_root, bool force_hint);
 
 // Returns the current app root path
 const char *ps4_vfs_get_app_root(void);

@@ -68,13 +68,14 @@ func uniqueModuleNames(fileName string, aliases []string) []string {
 
 // AsmEmitter emits Apple Silicon ARM64 assembly (.s) files from disassembled functions.
 type AsmEmitter struct {
-	elf       *elfloader.LoadedELF
-	disasm    *disasm.Disassembler
-	lifter    *lifter.Arm64Lifter
-	shimMap   map[uint64]string
-	AppDir    string
-	Modules   []GuestModule
-	ChunkSize int
+	elf           *elfloader.LoadedELF
+	disasm        *disasm.Disassembler
+	lifter        *lifter.Arm64Lifter
+	shimMap       map[uint64]string
+	AppDir        string
+	CopyResources bool
+	Modules       []GuestModule
+	ChunkSize     int
 	// Workers bounds the goroutines that emit chunks in parallel. Zero uses NumCPU.
 	Workers int
 	Funcs   []disasm.ReachableFunc
@@ -675,6 +676,7 @@ func (e *AsmEmitter) EmitMainRunner(path string) error {
 	if e.AppDir != "" {
 		vfsInitArg = fmt.Sprintf("%q", e.AppDir)
 	}
+	forceHint := !e.CopyResources
 
 	content := fmt.Sprintf(`#include "recomp_runtime.h"
 #include "ps4_vfs.h"
@@ -695,7 +697,7 @@ static void *guest_main(void *p) {
     int argc = a->argc;
     char **argv = a->argv;
     printf("[ps4-recomp] Initializing runtime (ARM64 Assembly Backend)...\n");
-    ps4_vfs_init(%s);
+    ps4_vfs_init(%s, %t);
     recomp_init_dispatch_table();
     recomp_register_guest_modules();
 
@@ -737,7 +739,7 @@ int main(int argc, char **argv) {
     pthread_attr_setstacksize(&attr, 64 * 1024 * 1024);
     // Startup settings (language, PS4 Pro mode, upscaling, FPS HUD) are resolved before the
     // guest starts; the dialog needs the application directory for the language list.
-    ps4_vfs_init(%s);
+    ps4_vfs_init(%s, %t);
     ps4_host_settings_init();
     pthread_t guest_thread;
     if (pthread_create(&guest_thread, &attr, guest_main, &args) != 0) {
@@ -748,7 +750,7 @@ int main(int argc, char **argv) {
     ps4_host_run_main_loop();
     return 0;
 }
-`, vfsInitArg, tlsInitSource(e.elf.TLSModules), e.elf.ProcParamAddr, entryAddr, entryName, entryAddr, entryAddr, entryAddr, vfsInitArg)
+`, vfsInitArg, forceHint, tlsInitSource(e.elf.TLSModules), e.elf.ProcParamAddr, entryAddr, entryName, entryAddr, entryAddr, entryAddr, vfsInitArg, forceHint)
 
 	return writeFileIfChanged(path, []byte(content))
 }
