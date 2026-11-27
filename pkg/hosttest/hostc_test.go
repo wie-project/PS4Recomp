@@ -25,6 +25,22 @@ const (
 	syncInclude      = "-I../runtime/kernel/sync"
 )
 
+// shadNetInclude puts the shadNet client headers on the include path.
+const shadNetInclude = "-I../runtime/modules/shadnet"
+
+// npHandlerSources are what libSceNp/ps4_np_handler.c (which libSceNpManager uses) links
+// against: the shadNet client, the generated protobuf tables and its codec, the JSON reader of
+// its configuration and the param.sfo reader (the title it logs in with; a test program
+// defines ps4_vfs_resolve and ps4_vfs_get_app_root).
+var npHandlerSources = []string{
+	"../runtime/modules/libSceNp/ps4_np_handler.c",
+	"../runtime/modules/shadnet/shadnet_client.c",
+	"../runtime/modules/shadnet/shadnet_codec.c",
+	"../runtime/modules/shadnet/shadnet_pb.c",
+	"../runtime/core/ps4_json_object.c",
+	"../runtime/core/ps4_sfo.c",
+}
+
 // linkZlib links the system zlib.
 const linkZlib = "-lz"
 

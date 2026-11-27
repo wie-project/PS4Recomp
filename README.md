@@ -192,7 +192,28 @@ When playing without a physical controller, built-in keyboard emulation is activ
 
 ### User
 
-The runtime logs in one user, the initial user on player 1, as shadPS4 does with one controller. Its name is the macOS account name, and libSceUserService reports its login once when the game starts. NP libraries (`libSceNpManager`, `libSceNpAuth` and the dialogs below) behave as shadPS4 without a shadNet sign-in: the player is signed out. Once the game has read the login event, `sceNpCheckCallback` reports the signed-out state to its NP state callbacks, as shadPS4 does.
+The runtime logs in one user, the initial user on player 1, as shadPS4 does with one controller. Its name is the macOS account name, and libSceUserService reports its login once when the game starts.
+
+### shadNet (online)
+
+As in shadPS4, the user can sign in to a shadNet server (shadPS4's replacement for PSN). Put the account in `~/Library/Application Support/PS4Recomp/shadnet.json` (`$PS4RECOMP_DATA_DIR/shadnet.json`, or the file `PS4_SHADNET_CONFIG` names):
+
+```json
+{
+  "enabled": true,
+  "server": "shadnet.example.org:31313",
+  "npid": "MyOnlineId",
+  "password": "...",
+  "token": "",
+  "appear_offline": false,
+  "np_country": "us",
+  "np_language": "en",
+  "np_age": 13,
+  "np_date_of_birth": "2000-01-01"
+}
+```
+
+The NP handler probes the server, signs the user in when the game first uses `libSceNpManager` and keeps the session (reconnecting after a dropped connection). `libSceNpManager` then reports the user signed in, with the account's NP id and account id, PS Plus granted, and the profile values above (shadPS4's defaults when missing). Without the file, with `"enabled": false`, or when the server is unreachable or speaks another protocol version, everything behaves as shadPS4 without a shadNet sign-in: the player is signed out, and `sceNpCheckCallback` reports the signed-out state to the NP state callbacks once the game has read the login event. The server requests of `libSceNpAuth`, `libSceNpScore` and `libSceNpUtility` (authorization codes, rankings, scores, game data, online id lookups) are not connected to the shadNet session yet: they complete with `SCE_NP_ERROR_SIGNED_OUT`. The client and its protobuf tables follow shadPS4's `src/shadnet` (`go run ./cmd/shadnet-protogen` regenerates `pkg/runtime/modules/shadnet/shadnet_pb.{h,c}` from `tools/shadps4/src/shadnet/shadnet.proto`). shadPS4's on-screen shadNet notifications (friend requests, a full matchmaking service) are written to the log.
 
 ### Store dialog
 
@@ -200,7 +221,7 @@ The runtime logs in one user, the initial user on player 1, as shadPS4 does with
 
 ### Invitation and profile dialogs
 
-`libSceInvitationDialog` and `libSceNpProfileDialog` open native windows like shadPS4's. The runtime is never signed in to an NP server, so these windows show what shadPS4 shows without a shadNet sign-in. The invitation dialog has no friends to pick and no pending invitations, and its Send delivers nothing. The profile dialog shows the target player with "This player's profile could not be loaded." and a Close button.
+`libSceInvitationDialog` and `libSceNpProfileDialog` open native windows like shadPS4's. They do not use the shadNet session yet, so these windows show what shadPS4 shows without a shadNet sign-in. The invitation dialog has no friends to pick and no pending invitations, and its Send delivers nothing. The profile dialog shows the target player with "This player's profile could not be loaded." and a Close button.
 
 ---
 

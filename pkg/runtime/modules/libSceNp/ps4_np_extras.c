@@ -424,66 +424,6 @@ void shim_sceNpSignalingGetLocalNetInfo(GuestContext *ctx) {
 }
 
 //=============================================================================
-// Additional libSceNpScore
-//=============================================================================
-
-void shim_sceNpScoreAbortRequest(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreCensorComment(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreSanitizeComment(GuestContext *ctx) {
-    const char *comment = (const char *)NPX_GPTR(ctx, ctx->rsi);
-    char *sanitized = (char *)NPX_GPTR(ctx, ctx->rdx);
-    if (sanitized && comment) {
-        strncpy(sanitized, comment, 63);
-        sanitized[63] = '\0';
-    }
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreSetPlayerCharacterId(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetRankingByNpIdPcId(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetRankingByRange(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetBoardInfo(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreRecordGameData(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetGameData(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreRecordScore(GuestContext *ctx) {
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-//=============================================================================
 // Additional libSceNpWebApi
 //=============================================================================
 
@@ -663,62 +603,8 @@ void shim_sceNpWebApiGetErrorCode(GuestContext *ctx) {
 }
 
 //=============================================================================
-// Catherine / Offline NpScore, NpMatching2, NpTus additions
+// Catherine / Offline NpMatching2, NpTus additions
 //=============================================================================
-
-void shim_sceNpScoreRecordGameDataAsync(GuestContext *ctx) {
-    (void)ctx->rdi;
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreRecordScoreAsync(GuestContext *ctx) {
-    (void)ctx->rdi;
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetRankingByAccountId(GuestContext *ctx) {
-    (void)ctx->rdi;
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetGameDataByAccountId(GuestContext *ctx) {
-    (void)ctx->rdi;
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetRankingByRangeA(GuestContext *ctx) {
-    (void)ctx->rdi;
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetGameDataByAccountIdAsync(GuestContext *ctx) {
-    (void)ctx->rdi;
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetRankingByAccountIdAsync(GuestContext *ctx) {
-    (void)ctx->rdi;
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetFriendsRankingA(GuestContext *ctx) {
-    (void)ctx->rdi;
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetRankingByRangeAAsync(GuestContext *ctx) {
-    (void)ctx->rdi;
-    ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    SHIM_RETURN();
-}
 
 void shim_sceNpMatching2RegisterLobbyMessageCallback(GuestContext *ctx) {
     (void)ctx->rdi;

@@ -39,7 +39,7 @@ extern "C" {
 #define ORBIS_NP_SIGNALING_ERROR_NOT_INITIALIZED 0x80552701
 #define ORBIS_NP_SIGNALING_ERROR_INVALID_ARGUMENT 0x80552715
 
-// NP Community / Score error codes
+// NP Community error codes
 #define ORBIS_NP_COMMUNITY_ERROR_NOT_INITIALIZED 0x80550702
 #define ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT 0x80550704
 #define ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN        0x80550705
@@ -104,24 +104,6 @@ typedef struct OrbisNpCreateAsyncRequestParameter {
     uint8_t padding[4];
 } OrbisNpCreateAsyncRequestParameter;
 
-typedef struct OrbisNpScoreBoardInfo {
-    uint32_t rankLimit;
-    uint32_t updateMode;
-    uint32_t sortMode;
-    uint32_t uploadNumLimit;
-    uint64_t uploadSizeLimit;
-} OrbisNpScoreBoardInfo;
-
-typedef struct OrbisNpScoreComment {
-    char utf8Comment[64];
-} OrbisNpScoreComment;
-
-typedef struct OrbisNpScoreGameInfo {
-    uint64_t infoSize;
-    uint8_t data[189];
-    uint8_t pad2[3];
-} OrbisNpScoreGameInfo;
-
 // C APIs
 
 
@@ -148,13 +130,6 @@ int32_t sceNpWebApiSendRequest(int64_t requestId, const void* pData, uint64_t da
 int32_t sceNpWebApiSendRequest2(int64_t requestId, const void* pData, uint64_t dataSize, void* pRespInfoOption);
 int32_t sceNpWebApiDeleteRequest(int64_t requestId);
 
-int32_t sceNpScoreCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel, const OrbisNpId* selfNpId);
-int32_t sceNpScoreCreateNpTitleCtxA(OrbisNpServiceLabel npServiceLabel, int32_t selfId);
-int32_t sceNpScoreDeleteNpTitleCtx(int32_t titleCtxId);
-int32_t sceNpScoreCreateRequest(int32_t titleCtxId);
-int32_t sceNpScoreDeleteRequest(int32_t reqId);
-int32_t sceNpScorePollAsync(int32_t reqId, int32_t* result);
-int32_t sceNpScoreWaitAsync(int32_t reqId, int32_t* result);
 
 int32_t sceNpTusCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel, OrbisNpId* npId);
 int32_t sceNpTusCreateNpTitleCtxA(OrbisNpServiceLabel serviceLabel, int32_t userId);
@@ -205,25 +180,6 @@ void shim_sceNpWebApiSendRequest2(GuestContext *ctx);
 void shim_sceNpWebApiDeleteRequest(GuestContext *ctx);
 void shim_sceNpWebApiGetErrorCode(GuestContext *ctx);
 
-void shim_sceNpScoreCreateNpTitleCtx(GuestContext *ctx);
-void shim_sceNpScoreCreateNpTitleCtxA(GuestContext *ctx);
-void shim_sceNpScoreDeleteNpTitleCtx(GuestContext *ctx);
-void shim_sceNpScoreCreateRequest(GuestContext *ctx);
-void shim_sceNpScoreDeleteRequest(GuestContext *ctx);
-void shim_sceNpScorePollAsync(GuestContext *ctx);
-void shim_sceNpScoreWaitAsync(GuestContext *ctx);
-void shim_sceNpScoreCensorCommentAsync(GuestContext *ctx);
-void shim_sceNpScoreGetFriendsRanking(GuestContext *ctx);
-void shim_sceNpScoreGetRankingByNpId(GuestContext *ctx);
-void shim_sceNpScoreRecordGameDataAsync(GuestContext *ctx);
-void shim_sceNpScoreRecordScoreAsync(GuestContext *ctx);
-void shim_sceNpScoreGetRankingByAccountId(GuestContext *ctx);
-void shim_sceNpScoreGetGameDataByAccountId(GuestContext *ctx);
-void shim_sceNpScoreGetRankingByRangeA(GuestContext *ctx);
-void shim_sceNpScoreGetGameDataByAccountIdAsync(GuestContext *ctx);
-void shim_sceNpScoreGetRankingByAccountIdAsync(GuestContext *ctx);
-void shim_sceNpScoreGetFriendsRankingA(GuestContext *ctx);
-void shim_sceNpScoreGetRankingByRangeAAsync(GuestContext *ctx);
 
 void shim_sceNpMatching2GetRoomDataExternalList(GuestContext *ctx);
 void shim_sceNpMatching2GetRoomMemberDataInternal(GuestContext *ctx);
@@ -264,10 +220,6 @@ void shim_sceNpTusDeleteMultiSlotData(GuestContext *ctx);
 void shim_sceNpTusDeleteMultiSlotDataVUser(GuestContext *ctx);
 void shim_sceNpTusAddAndGetVariable(GuestContext *ctx);
 void shim_sceNpTusAddAndGetVariableVUser(GuestContext *ctx);
-void shim_sceNpScoreGetGameDataAsync(GuestContext *ctx);
-void shim_sceNpScoreGetRankingByNpIdAsync(GuestContext *ctx);
-void shim_sceNpScoreGetRankingByRangeAsync(GuestContext *ctx);
-void shim_sceNpScoreGetFriendsRankingAsync(GuestContext *ctx);
 void shim_sceNpTusGetDataAAsync(GuestContext *ctx);
 
 

@@ -7,10 +7,9 @@
 // asynchronous completion through PollAsync / WaitAsync, and the timeouts SetTimeout records.
 //
 // sceNpLookupNpId resolves an online id through shadPS4's NpHandler, which needs a shadNet
-// session for the searching user. This runtime is never signed in to an NP server (see
-// libSceNp/ps4_np_manager.c), so the resolution completes with ORBIS_NP_ERROR_SIGNED_OUT, as
-// NpHandler::ResolveOnlineId does for a user without a session. For the same reason no user
-// has an NP id: a title context created from one belongs to user -1 (GetUserIdByOnlineId) and
+// session for the searching user. This library is not connected to the NP handler's shadNet sessions (libSceNp/ps4_np_handler.c) yet, so
+// the resolution completes with ORBIS_NP_ERROR_SIGNED_OUT, as NpHandler::ResolveOnlineId does
+// for a user without a session. For the same reason no user has an NP id here: a title context created from one belongs to user -1 (GetUserIdByOnlineId) and
 // the A variants record an empty NP id (GetNpId).
 //
 // Word filtering is local in shadPS4 (no shadNet command yet): CensorComment accepts the

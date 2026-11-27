@@ -34,7 +34,6 @@ static int np_log_all(void) {
 })
 
 
-static int32_t g_score_req_counter = 1;
 static int32_t g_tus_req_counter = 1;
 static int32_t g_matching_ctx_counter = 1;
 static _Atomic int32_t g_signaling_ctx_counter = 1;
@@ -430,105 +429,6 @@ void shim_sceNpWebApiDeleteRequest(GuestContext *ctx) {
 }
 
 //=============================================================================
-// libSceNpScore
-//=============================================================================
-
-int32_t sceNpScoreCreateNpTitleCtx(OrbisNpServiceLabel serviceLabel, const OrbisNpId* selfNpId) {
-    (void)serviceLabel;
-    (void)selfNpId;
-    NP_LOG("sceNpScoreCreateNpTitleCtx -> SIGNED_OUT");
-    return ORBIS_NP_ERROR_SIGNED_OUT;
-}
-
-int32_t sceNpScoreCreateNpTitleCtxA(OrbisNpServiceLabel npServiceLabel, int32_t selfId) {
-    (void)npServiceLabel;
-    (void)selfId;
-    NP_LOG("sceNpScoreCreateNpTitleCtxA(selfId=%d) -> SIGNED_OUT", selfId);
-    return ORBIS_NP_ERROR_SIGNED_OUT;
-}
-
-int32_t sceNpScoreDeleteNpTitleCtx(int32_t titleCtxId) {
-    NP_LOG("sceNpScoreDeleteNpTitleCtx(titleCtxId=%d)", titleCtxId);
-    return 0;
-}
-
-int32_t sceNpScoreCreateRequest(int32_t titleCtxId) {
-    (void)titleCtxId;
-    int32_t id = g_score_req_counter++;
-    NP_LOG("sceNpScoreCreateRequest(titleCtxId=%d) -> reqId=%d", titleCtxId, id);
-    return id;
-}
-
-int32_t sceNpScoreDeleteRequest(int32_t reqId) {
-    NP_LOG("sceNpScoreDeleteRequest(reqId=%d)", reqId);
-    return 0;
-}
-
-int32_t sceNpScorePollAsync(int32_t reqId, int32_t* result) {
-    (void)reqId;
-    if (!result) return ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
-    *result = ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    return 0;
-}
-
-int32_t sceNpScoreWaitAsync(int32_t reqId, int32_t* result) {
-    (void)reqId;
-    if (!result) return ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
-    *result = ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
-    return 0;
-}
-
-void shim_sceNpScoreCreateNpTitleCtx(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpScoreCreateNpTitleCtx((OrbisNpServiceLabel)ctx->rdi, (const OrbisNpId*)NP_GPTR(ctx, ctx->rsi));
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreCreateNpTitleCtxA(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpScoreCreateNpTitleCtxA((OrbisNpServiceLabel)ctx->rdi, (int32_t)ctx->rsi);
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreDeleteNpTitleCtx(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpScoreDeleteNpTitleCtx((int32_t)ctx->rdi);
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreCreateRequest(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpScoreCreateRequest((int32_t)ctx->rdi);
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreDeleteRequest(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpScoreDeleteRequest((int32_t)ctx->rdi);
-    SHIM_RETURN();
-}
-
-void shim_sceNpScorePollAsync(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpScorePollAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreWaitAsync(GuestContext *ctx) {
-    ctx->rax = (uint64_t)sceNpScoreWaitAsync((int32_t)ctx->rdi, (int32_t*)NP_GPTR(ctx, ctx->rsi));
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreCensorCommentAsync(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetFriendsRanking(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceNpScoreGetRankingByNpId(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-//=============================================================================
 // libSceNpTus
 //=============================================================================
 
@@ -662,10 +562,10 @@ void shim_sceNpTusGetDataAsync(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-// Synchronous TUS/TSS data and variable transfers and asynchronous score ranking queries are NP
-// server requests. Without a signed-in user they fail with SCE_NP_ERROR_SIGNED_OUT: shadPS4's
-// NpHandler (np_handler_tus.cpp, np_handler_score.cpp) returns it for every such request when no
-// client is signed in, and the libSceNpTus/libSceNpScore entry points pass it to the caller.
+// Synchronous TUS/TSS data and variable transfers are NP server requests. Without a signed-in
+// user they fail with SCE_NP_ERROR_SIGNED_OUT: shadPS4's NpHandler (np_handler_tus.cpp) returns
+// it for every such request when no client is signed in, and the libSceNpTus entry points pass
+// it to the caller.
 static void np_server_request_signed_out(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)(int32_t)ORBIS_NP_ERROR_SIGNED_OUT;
     SHIM_RETURN();
@@ -731,28 +631,8 @@ void shim_sceNpTusAddAndGetVariableVUser(GuestContext *ctx) {
     np_server_request_signed_out(ctx);
 }
 
-void shim_sceNpScoreGetGameDataAsync(GuestContext *ctx) {
-    NP_LOG("sceNpScoreGetGameDataAsync -> SIGNED_OUT");
-    np_server_request_signed_out(ctx);
-}
-
 void shim_sceNpTssGetData(GuestContext *ctx) {
     NP_LOG("sceNpTssGetData -> SIGNED_OUT");
-    np_server_request_signed_out(ctx);
-}
-
-void shim_sceNpScoreGetRankingByNpIdAsync(GuestContext *ctx) {
-    NP_LOG("sceNpScoreGetRankingByNpIdAsync -> SIGNED_OUT");
-    np_server_request_signed_out(ctx);
-}
-
-void shim_sceNpScoreGetRankingByRangeAsync(GuestContext *ctx) {
-    NP_LOG("sceNpScoreGetRankingByRangeAsync -> SIGNED_OUT");
-    np_server_request_signed_out(ctx);
-}
-
-void shim_sceNpScoreGetFriendsRankingAsync(GuestContext *ctx) {
-    NP_LOG("sceNpScoreGetFriendsRankingAsync -> SIGNED_OUT");
     np_server_request_signed_out(ctx);
 }
 

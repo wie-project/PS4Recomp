@@ -195,8 +195,19 @@ static int case_callbacks(void) {
     return 0;
 }
 
+// ps4_sfo_find_and_load (linked for the NP handler): no application.
+const char *ps4_vfs_get_app_root(void) { return NULL; }
+int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz) {
+    (void)guest_path;
+    (void)host_path;
+    (void)host_path_sz;
+    return -1;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
+    // libSceNpManager follows the login events: with shadNet off.
+    setenv("PS4_SHADNET_CONFIG", "/nonexistent/shadnet.json", 1);
     if (strcmp(argv[1], "events") == 0) return case_events();
     if (strcmp(argv[1], "users") == 0) return case_users();
     if (strcmp(argv[1], "callbacks") == 0) return case_callbacks();

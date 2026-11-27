@@ -5,8 +5,8 @@
 // (ps4_invitation_dialog_ui.m) instead of shadPS4's ImGui layer.
 //
 // shadPS4 fills the dialog from its NpHandler: the friend list for the USERENABLE recipient
-// picker, the pending invitations for RECV mode, and the shadNet WebAPI for sending. This runtime
-// is never signed in to an NP server (sceNpGetState reports SignedOut), which is the state in
+// picker, the pending invitations for RECV mode, and the shadNet WebAPI for sending. This dialog
+// is not connected to the NP handler's shadNet sessions (libSceNp/ps4_np_handler.c) yet: it shows the state in
 // which shadPS4's NpHandler has an empty friend list, no pending invitations and fails every
 // SendSessionInvitation. So the picker has nobody to choose, RECV mode lists nothing to accept,
 // and Send finishes with OK and no recipients reported as sent.

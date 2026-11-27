@@ -6,8 +6,8 @@
 //
 // shadPS4's window loads the target's profile card from its NpHandler (the shadNet WebAPI) and,
 // once it has loaded, offers the mode's action (send or accept a friend request, block, report).
-// This runtime is never signed in to an NP server (sceNpGetState reports SignedOut), the state in
-// which shadPS4's NpHandler fails every profile lookup: the window then shows the target with
+// This dialog is not connected to the NP handler's shadNet sessions (libSceNp/ps4_np_handler.c) yet: it shows the state in which
+// shadPS4's NpHandler fails every profile lookup: the window then shows the target with
 // "This player's profile could not be loaded." and only Close, which finishes with
 // USER_CANCELED. The operating user's own online ID is empty and account ID 0, as NpHandler
 // reports for a user without an NP client, which decides the grief-report self check below.

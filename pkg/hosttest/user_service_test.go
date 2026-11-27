@@ -9,10 +9,12 @@ import "testing"
 // color, and event callbacks registered, deduplicated, called and removed as shadPS4 does.
 func TestUserService(t *testing.T) {
 	bin := buildHostCFlags(t, "user_service",
-		[]string{kernelInclude},
-		"../runtime/modules/libSceUserService/ps4_user_service.c",
-		"../runtime/modules/libSceNp/ps4_np_manager.c",
-		"../runtime/modules/libSceUserService/ps4_user_service_stubs.c",
+		[]string{kernelInclude, shadNetInclude, "-I../runtime/modules/libSceNp"},
+		append([]string{
+			"../runtime/modules/libSceUserService/ps4_user_service.c",
+			"../runtime/modules/libSceNp/ps4_np_manager.c",
+			"../runtime/modules/libSceUserService/ps4_user_service_stubs.c",
+		}, npHandlerSources...)...,
 	)
 	runHostCases(t, bin, []string{"events", "users", "callbacks"})
 }

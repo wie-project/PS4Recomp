@@ -59,6 +59,7 @@ var auditedShadPS4Libraries = []string{
 	"np/np_party.cpp",
 	"np/np_partner.cpp",
 	"np/np_profile_dialog",
+	"np/np_score",
 	"np/np_sns_facebook_dialog.cpp",
 	"np/np_utility",
 	"playgo",

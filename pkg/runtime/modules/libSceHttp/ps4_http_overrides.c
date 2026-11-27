@@ -19,6 +19,7 @@
 // otherwise PS4_HTTP_HOST_OVERRIDES_JSON or <data>/host_overrides.json, where <data> is
 // PS4RECOMP_DATA_DIR or ~/Library/Application Support/PS4Recomp. It is read once.
 #include "ps4_http.h"
+#include "ps4_json_object.h"
 #include <ctype.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -36,125 +37,6 @@ typedef struct HostOverride {
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static HostOverride *g_entries;
 static size_t g_entry_count;
-
-// ---------------------------------------------------------------------------------------------
-// Minimal JSON reader: the top-level object's string members; other values are skipped.
-
-typedef struct Json {
-    const char *p;
-    const char *end;
-} Json;
-
-static void json_ws(Json *j) {
-    while (j->p < j->end && (*j->p == ' ' || *j->p == '\t' || *j->p == '\n' || *j->p == '\r')) j->p++;
-}
-
-static int hex4(const char *s) {
-    int v = 0;
-    for (int i = 0; i < 4; i++) {
-        const char c = s[i];
-        v <<= 4;
-        if (c >= '0' && c <= '9') v |= c - '0';
-        else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
-        else return -1;
-    }
-    return v;
-}
-
-// Reads a string (at '"'); *out is a heap copy (UTF-8) when out is not NULL.
-static bool json_string(Json *j, char **out) {
-    if (j->p >= j->end || *j->p != '"') return false;
-    j->p++;
-    const size_t cap = (size_t)(j->end - j->p) + 1;
-    char *s = out ? malloc(cap) : NULL;
-    if (out && !s) return false;
-    size_t n = 0;
-    while (j->p < j->end && *j->p != '"') {
-        char c = *j->p++;
-        if (c == '\\') {
-            if (j->p >= j->end) break;
-            c = *j->p++;
-            switch (c) {
-            case 'b': c = '\b'; break;
-            case 'f': c = '\f'; break;
-            case 'n': c = '\n'; break;
-            case 'r': c = '\r'; break;
-            case 't': c = '\t'; break;
-            case 'u': {
-                if (j->end - j->p < 4) goto fail;
-                const int cp = hex4(j->p);
-                if (cp < 0) goto fail;
-                j->p += 4;
-                if (s) {
-                    if (cp < 0x80) {
-                        s[n++] = (char)cp;
-                    } else if (cp < 0x800) {
-                        s[n++] = (char)(0xC0 | (cp >> 6));
-                        s[n++] = (char)(0x80 | (cp & 0x3F));
-                    } else {
-                        s[n++] = (char)(0xE0 | (cp >> 12));
-                        s[n++] = (char)(0x80 | ((cp >> 6) & 0x3F));
-                        s[n++] = (char)(0x80 | (cp & 0x3F));
-                    }
-                }
-                continue;
-            }
-            default: break; // '"', '\\', '/'
-            }
-        }
-        if (s) s[n++] = c;
-    }
-    if (j->p >= j->end) goto fail;
-    j->p++;
-    if (s) {
-        s[n] = 0;
-        *out = s;
-    }
-    return true;
-fail:
-    free(s);
-    return false;
-}
-
-static bool json_skip_value(Json *j, int depth) {
-    json_ws(j);
-    if (j->p >= j->end || depth > 64) return false;
-    const char c = *j->p;
-    if (c == '"') return json_string(j, NULL);
-    if (c == '{' || c == '[') {
-        const char close = c == '{' ? '}' : ']';
-        j->p++;
-        json_ws(j);
-        if (j->p < j->end && *j->p == close) {
-            j->p++;
-            return true;
-        }
-        for (;;) {
-            if (c == '{') {
-                json_ws(j);
-                if (!json_string(j, NULL)) return false;
-                json_ws(j);
-                if (j->p >= j->end || *j->p != ':') return false;
-                j->p++;
-            }
-            if (!json_skip_value(j, depth + 1)) return false;
-            json_ws(j);
-            if (j->p >= j->end) return false;
-            if (*j->p == ',') {
-                j->p++;
-                continue;
-            }
-            if (*j->p != close) return false;
-            j->p++;
-            return true;
-        }
-    }
-    // A number, true, false or null.
-    const char *start = j->p;
-    while (j->p < j->end && (isalnum((unsigned char)*j->p) || *j->p == '-' || *j->p == '+' || *j->p == '.')) j->p++;
-    return j->p > start;
-}
 
 // ---------------------------------------------------------------------------------------------
 
@@ -195,49 +77,14 @@ static void add_entry(const char *key, const char *value) {
     g_entries[g_entry_count++] = e;
 }
 
+static void override_member(void *user, const char *key, Ps4JsonKind kind, const char *value) {
+    (void)user;
+    if (kind == PS4_JSON_STRING && key[0] != '_' && value[0]) add_entry(key, value);
+}
+
 static void parse_overrides(const char *text, size_t len, const char *source) {
-    Json j = {text, text + len};
-    json_ws(&j);
-    if (j.p >= j.end || *j.p != '{') {
-        fprintf(stderr, "[libSceHttp] %s: host overrides must be a JSON object\n", source);
-        return;
-    }
-    j.p++;
-    json_ws(&j);
-    if (j.p < j.end && *j.p == '}') return;
-    for (;;) {
-        char *key = NULL;
-        json_ws(&j);
-        if (!json_string(&j, &key)) break;
-        json_ws(&j);
-        if (j.p >= j.end || *j.p != ':') {
-            free(key);
-            break;
-        }
-        j.p++;
-        json_ws(&j);
-        if (j.p < j.end && *j.p == '"') {
-            char *value = NULL;
-            if (!json_string(&j, &value)) {
-                free(key);
-                break;
-            }
-            if (key[0] != '_' && value[0]) add_entry(key, value);
-            free(value);
-        } else if (!json_skip_value(&j, 0)) {
-            free(key);
-            break;
-        }
-        free(key);
-        json_ws(&j);
-        if (j.p < j.end && *j.p == ',') {
-            j.p++;
-            continue;
-        }
-        if (j.p < j.end && *j.p == '}') return;
-        break;
-    }
-    fprintf(stderr, "[libSceHttp] %s: malformed JSON, %zu host overrides read\n", source, g_entry_count);
+    const int n = ps4_json_object_members(text, len, override_member, NULL);
+    if (n < 0) fprintf(stderr, "[libSceHttp] %s: malformed JSON object, %zu host overrides read\n", source, g_entry_count);
 }
 
 static void data_dir(char *out, size_t size) {

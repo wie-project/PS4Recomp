@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 // libSceNpAuth after shadPS4 src/core/libraries/np/np_auth/np_auth.cpp, on its path without a
-// shadNet sign-in: the runtime is never signed in to an NP server (README). Requests are
+// shadNet sign-in: this library is not connected to the NP handler's shadNet sessions (libSceNp/ps4_np_handler.c) yet (README). Requests are
 // tracked as in shadPS4 (at most 16, ids from 0x10000001, the lowest free one first). A started
 // request ends at once with ORBIS_NP_ERROR_SIGNED_OUT: a synchronous request returns it, an
 // asynchronous one reports it through sceNpAuthPollAsync / sceNpAuthWaitAsync. The calls that

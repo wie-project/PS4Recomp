@@ -32,6 +32,17 @@ uint32_t ps4_compiled_sdk_version(const GuestContext *ctx) {
     } while (0)
 
 #include "../host_guest_mem.h"
+#include "../shadnet_fake_server.h"
+#include "ps4_np_handler.h"
+
+// ps4_sfo_find_and_load (the title id and name the handler logs in with): no application.
+const char *ps4_vfs_get_app_root(void) { return NULL; }
+int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz) {
+    (void)guest_path;
+    (void)host_path;
+    (void)host_path_sz;
+    return -1;
+}
 #define USER ORBIS_USER_SERVICE_INITIAL_USER_ID
 #define BAD_USER ((uint64_t)(int64_t)-1)
 #define FIRST ((uint64_t)(ORBIS_NP_MANAGER_REQUEST_ID_OFFSET + 1))
@@ -331,8 +342,138 @@ static int case_state_callbacks(void) {
     return 0;
 }
 
+// The legacy callback of the online case: the NP id it is passed.
+static OrbisNpId g_legacy_np_id;
+static uint64_t g_legacy_np_id_addr;
+static void cb_legacy_np_id(GuestContext *ctx) {
+    g_calls[g_ncalls].kind = 'N';
+    g_calls[g_ncalls].user = (int32_t)ctx->rdi;
+    g_calls[g_ncalls].state = (uint32_t)ctx->rsi;
+    g_calls[g_ncalls].arg3 = ctx->rcx;
+    g_ncalls++;
+    g_legacy_np_id_addr = ctx->rdx;
+    if (ctx->rdx) memcpy(&g_legacy_np_id, ctx->mem_base + ctx->rdx, sizeof(g_legacy_np_id));
+    SHIM_RETURN();
+}
+#define F_LEGACY_NP_ID 0x500500ull
+
+// Signed in to a local shadNet server through the NP handler.
+static int case_online(void) {
+    FakeShadNet server = {.account_id = 0x1234};
+    CHECK(fake_shadnet_start(&server) == 0);
+    char path[] = "/tmp/ps4recomp_np_manager_XXXXXX";
+    const int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    char json[512];
+    const int n = snprintf(json, sizeof(json),
+                           "{\"enabled\": true, \"server\": \"127.0.0.1:%u\", \"npid\": \"Player1\", "
+                           "\"password\": \"pw\", \"np_country\": \"de\", \"np_age\": 20, "
+                           "\"np_date_of_birth\": \"1999-12-31\"}",
+                           (unsigned)server.port);
+    CHECK(write(fd, json, (size_t)n) == n);
+    close(fd);
+    setenv("PS4_SHADNET_CONFIG", path, 1);
+
+    register_entry(F_LEGACY_NP_ID, cb_legacy_np_id);
+    register_entry(F_REACH, cb_reach);
+    CHECK(C2(shim_sceNpRegisterStateCallback, F_LEGACY_NP_ID, 11) == 0);
+    CHECK(C2(shim_sceNpRegisterNpReachabilityStateCallback, F_REACH, 41) == 0);
+
+    // The first query signs the user in (shadPS4 does it when the library loads).
+    int32_t st = -1;
+    CHECK(C2(shim_sceNpGetState, USER, A(&st)) == 0 && st == ORBIS_NP_STATE_SIGNED_IN);
+    CHECK(server.sessions == 1 && strcmp(server.login_npid, "Player1") == 0);
+    CHECK(C2(shim_sceNpGetState, USER + 1, A(&st)) == 0 && st == ORBIS_NP_STATE_SIGNED_OUT);
+
+    // SignedIn reaches the legacy callback with the NP id, then the reachability callback.
+    CHECK(C0(shim_sceNpCheckCallback) == 0);
+    CHECK(g_ncalls == 2 && g_calls[0].kind == 'N' && g_calls[0].state == ORBIS_NP_STATE_SIGNED_IN);
+    CHECK(g_calls[0].arg3 == 11 && g_legacy_np_id_addr != 0 && strcmp(g_legacy_np_id.handle.data, "Player1") == 0);
+    CHECK(g_calls[1].kind == 'R' && g_calls[1].state == ORBIS_NP_REACHABILITY_STATE_REACHABLE);
+    // The game's own login event finds the user connected: nothing new.
+    OrbisUserServiceEvent ev;
+    CHECK(sceUserServiceGetEvent(&ev) == 0 && ev.eventType == ORBIS_USER_SERVICE_EVENT_TYPE_LOGIN);
+    CHECK(C0(shim_sceNpCheckCallback) == 0 && g_ncalls == 2 && server.sessions == 1);
+
+    // Identity.
+    OrbisNpId npid;
+    OrbisNpOnlineId oid;
+    uint64_t acc = 0;
+    int32_t uid = 0;
+    CHECK(C2(shim_sceNpGetNpId, USER, A(&npid)) == 0 && strcmp(npid.handle.data, "Player1") == 0);
+    CHECK(C2(shim_sceNpGetOnlineId, USER, A(&oid)) == 0 && strcmp(oid.data, "Player1") == 0);
+    CHECK(C2(shim_sceNpGetAccountIdA, USER, A(&acc)) == 0 && acc == 0x1234);
+    acc = 0;
+    CHECK(C2(shim_sceNpGetAccountId, A(&oid), A(&acc)) == 0 && acc == 0x1234);
+    CHECK(C2(shim_sceNpGetUserIdByOnlineId, A(&oid), A(&uid)) == 0 && uid == USER);
+    uid = 0;
+    CHECK(C2(shim_sceNpGetUserIdByAccountId, 0x1234, A(&uid)) == 0 && uid == USER);
+    CHECK(C2(shim_sceNpGetUserIdByAccountId, 0x9999, A(&uid)) == E(SIGNED_OUT));
+    OrbisNpOnlineId other;
+    memset(&other, 0, sizeof(other));
+    memcpy(other.data, "Nobody", 6);
+    CHECK(C2(shim_sceNpGetAccountId, A(&other), A(&acc)) == E(USER_NOT_FOUND) && acc == 0);
+    bool b = false;
+    CHECK(C2(shim_sceNpHasSignedUp, USER, A(&b)) == 0 && b);
+
+    // Profile answers.
+    OrbisNpCountryCode cc;
+    OrbisNpDate dob;
+    CHECK(C2(shim_sceNpGetAccountCountryA, USER, A(&cc)) == 0 && memcmp(cc.country_code, "de", 2) == 0 && cc.end == 0);
+    CHECK(C2(shim_sceNpGetAccountDateOfBirth, A(&oid), A(&dob)) == 0);
+    CHECK(dob.year == 1999 && dob.month == 12 && dob.day == 31);
+    CHECK(C2(shim_sceNpGetGamePresenceStatus, A(&oid), A(&st)) == 0 && st == ORBIS_NP_GAME_PRESENCE_STATUS_ONLINE);
+    CHECK(C2(shim_sceNpGetNpReachabilityState, USER, A(&st)) == 0 && st == ORBIS_NP_REACHABILITY_STATE_REACHABLE);
+
+    // Requests complete with their answers.
+    OrbisNpCreateAsyncRequestParameter ap = {sizeof(ap), 0, 0, {0}};
+    const int32_t req = C0(shim_sceNpCreateRequest);
+    CHECK(C2(shim_sceNpCheckNpAvailabilityA, (uint64_t)req, USER) == 0);
+    const int32_t as = C1(shim_sceNpCreateAsyncRequest, A(&ap));
+    OrbisNpLanguageCode lang;
+    int32_t result = -1;
+    CHECK(C3(shim_sceNpGetAccountLanguageA, (uint64_t)as, USER, A(&lang)) == 0);
+    CHECK(C2(shim_sceNpPollAsync, (uint64_t)as, A(&result)) == 0 && result == 0 && strcmp(lang.code, "en") == 0);
+    OrbisNpCheckPlusParameter p;
+    OrbisNpCheckPlusResult r;
+    memset(&p, 0, sizeof(p));
+    memset(&r, 0, sizeof(r));
+    p.size = sizeof(p);
+    p.user_id = USER;
+    p.features = 1;
+    const int32_t plus = C0(shim_sceNpCreateRequest);
+    CHECK(C3(shim_sceNpCheckPlus, (uint64_t)plus, A(&p), A(&r)) == 0 && r.authorized);
+    int8_t age = 0;
+    OrbisNpParentalControlInfo pci;
+    memset(&pci, 0xFF, sizeof(pci));
+    const int32_t pc = C0(shim_sceNpCreateRequest);
+    CHECK(C4(shim_sceNpGetParentalControlInfo, (uint64_t)pc, A(&oid), A(&age), A(&pci)) == 0);
+    CHECK(age == 20 && !pci.content_restriction && !pci.chat_restriction);
+    // Another user is signed out.
+    const int32_t other_req = C0(shim_sceNpCreateRequest);
+    CHECK(C2(shim_sceNpCheckNpReachability, (uint64_t)other_req, USER + 1) == E(SIGNED_OUT));
+
+    // Signing out: SignedOut without an NP id, the reachability back to Unavailable.
+    g_ncalls = 0;
+    ps4_np_handler_shutdown();
+    CHECK(C2(shim_sceNpGetState, USER, A(&st)) == 0 && st == ORBIS_NP_STATE_SIGNED_OUT);
+    CHECK(C0(shim_sceNpCheckCallback) == 0);
+    CHECK(g_ncalls == 2 && g_calls[0].state == ORBIS_NP_STATE_SIGNED_OUT && g_legacy_np_id_addr == 0);
+    CHECK(g_calls[1].kind == 'R' && g_calls[1].state == ORBIS_NP_REACHABILITY_STATE_UNAVAILABLE);
+    CHECK(C2(shim_sceNpGetAccountIdA, USER, A(&acc)) == E(SIGNED_OUT) && acc == 0);
+
+    fake_shadnet_stop(&server);
+    unlink(path);
+    CHECK(server.failures == 0);
+    printf("PASS online\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
+    if (strcmp(argv[1], "online") == 0) return case_online();
+    // The other cases run with shadNet off.
+    setenv("PS4_SHADNET_CONFIG", "/nonexistent/shadnet.json", 1);
     if (strcmp(argv[1], "requests") == 0) return case_requests();
     if (strcmp(argv[1], "queries") == 0) return case_queries();
     if (strcmp(argv[1], "state-callbacks") == 0) return case_state_callbacks();

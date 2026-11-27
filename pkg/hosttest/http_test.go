@@ -16,6 +16,7 @@ func TestHttp(t *testing.T) {
 		"../runtime/modules/libSceHttp/ps4_http_parse.c",
 		"../runtime/modules/libSceHttp/ps4_http_transport.c",
 		"../runtime/modules/libSceHttp/ps4_http_overrides.c",
+		"../runtime/core/ps4_json_object.c",
 		"../runtime/modules/libSceHttp/ps4_http2.c",
 		"../runtime/modules/libSceNetCtl/ps4_netctl.c",
 	)
