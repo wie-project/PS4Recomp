@@ -36,7 +36,7 @@ typedef struct {
 static VirtualPakFile g_vfiles[MAX_VIRTUAL_FILES];
 static pthread_mutex_t g_vfile_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static char *discover_app_root(const char *hint) {
+static char *discover_app_root(const char *hint, bool force_hint) {
   // 1. Environment variable override
   const char *env = getenv("PS4_APP_DIR");
   if (env && *env && access(env, F_OK) == 0) {
@@ -45,6 +45,12 @@ static char *discover_app_root(const char *hint) {
       return strdup(resolved);
     }
     return strdup(env);
+  } else if (hint && *hint && access(hint, F_OK) == 0 && force_hint == true) {
+    char resolved[1024];
+    if (realpath(hint, resolved) != NULL) {
+      return strdup(resolved);
+    }
+    return strdup(hint);
   }
 
 #if defined(__APPLE__)
@@ -176,14 +182,14 @@ typedef struct {
 static VfsMount g_mounts[MAX_VFS_MOUNTS];
 static int g_mount_count = 0;
 
-void ps4_vfs_init(const char *app_root) {
+void ps4_vfs_init(const char *app_root, bool force_hint) {
   pthread_mutex_lock(&g_vfs_mutex);
   if (g_app_root) {
     free(g_app_root);
     g_app_root = NULL;
   }
 
-  g_app_root = discover_app_root(app_root);
+  g_app_root = discover_app_root(app_root, force_hint);
 
   // Strip trailing slash if present
   if (g_app_root) {

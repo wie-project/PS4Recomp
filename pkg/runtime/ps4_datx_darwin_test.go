@@ -37,7 +37,7 @@ func TestDriveClubDATXFilesThroughVFS(t *testing.T) {
 
 int main(int argc, char **argv) {
     if (argc < 2) return 1;
-    ps4_vfs_init(argv[1]);
+    ps4_vfs_init(argv[1], true);
 
     if (argc == 5 && strcmp(argv[2], "--extract") == 0) {
         int fd = ps4_vfs_open(argv[3], O_RDONLY, 0);

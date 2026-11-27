@@ -568,6 +568,7 @@ func Execute(args []string) (err error) {
 	l.SetTSO(cfg.TSO)
 	em := emitter.NewAsmEmitter(loaded, d, l)
 	em.AppDir = cfg.AppDir
+	em.CopyResources = cfg.CopyResources
 	em.Modules = moduleInfos
 	em.ChunkSize = cfg.ChunkSize
 	em.Workers = cfg.Jobs
