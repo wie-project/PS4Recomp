@@ -10,10 +10,24 @@
 #include "ps4_np_score.h"
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "../host_guest_mem.h"
+#include "../shadnet_fake_server.h"
+#include "ps4_np_handler.h"
+#include "ps4_npbind.h"
+#include "ps4_user_service.h"
+
+// ps4_vfs_resolve: /app0/sce_sys/npbind.dat is g_npbind_path when set (the online case).
+static const char *g_npbind_path;
+const char *ps4_vfs_get_app_root(void) { return NULL; }
+int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz) {
+    if (!g_npbind_path || strcmp(guest_path, "/app0/sce_sys/npbind.dat") != 0) return -1;
+    snprintf(host_path, host_path_sz, "%s", g_npbind_path);
+    return 0;
+}
 
 // Runtime symbols the sources link against.
 recomp_fn_t **g_dispatch_l1[DISPATCH_LEVEL_SIZE];
@@ -70,7 +84,7 @@ static const uint8_t g_np_id[NP_SCORE_NP_ID_SIZE] = {'p', 'l', 'a', 'y', 'e', 'r
 
 static NpScoreRankOut rank_out(void *rank, uint64_t rank_size, void *comment, uint64_t comment_size, void *info,
                                uint64_t info_size, uint64_t num) {
-    NpScoreRankOut o = {rank, rank_size, comment, comment_size, info, info_size, num};
+    NpScoreRankOut o = {rank, rank_size, comment, comment_size, info, info_size, num, NULL, NULL};
     return o;
 }
 
@@ -517,8 +531,266 @@ static int case_shims(void) {
     return 0;
 }
 
+// Guest layouts the online case reads (shadPS4 np_score.h).
+typedef struct {
+    OrbisNpId np_id;
+    uint8_t reserved[52];
+    int32_t pc_id;
+    uint32_t serial_rank, rank, highest_rank;
+    int32_t has_game_data;
+    uint8_t pad1[4];
+    int64_t score_value;
+    uint64_t record_date;
+} RankData;
+typedef struct {
+    OrbisNpOnlineId online_id;
+    uint8_t reserved[68];
+    int32_t pc_id;
+    uint32_t serial_rank, rank, highest_rank;
+    int32_t has_game_data;
+    uint8_t pad1[4];
+    int64_t score_value;
+    uint64_t record_date;
+    uint64_t account_id;
+    uint8_t pad2[8];
+} RankDataA;
+typedef struct {
+    int32_t has_data;
+    uint8_t pad[4];
+    RankData d;
+} PlayerRankData;
+typedef struct {
+    int32_t has_data;
+    uint8_t pad[4];
+    RankDataA d;
+} PlayerRankDataA;
+typedef struct {
+    uint64_t info_size;
+    uint8_t data[192];
+} GameInfo;
+typedef struct {
+    uint32_t rank_limit, update_mode, sort_mode, upload_num_limit;
+    uint64_t upload_size_limit;
+} BoardInfo;
+_Static_assert(sizeof(RankData) == NP_SCORE_RANK_DATA_SIZE && sizeof(RankDataA) == NP_SCORE_RANK_DATA_A_SIZE &&
+                   sizeof(PlayerRankData) == NP_SCORE_PLAYER_RANK_DATA_SIZE &&
+                   sizeof(PlayerRankDataA) == NP_SCORE_PLAYER_RANK_DATA_A_SIZE &&
+                   sizeof(GameInfo) == NP_SCORE_GAME_INFO_SIZE && sizeof(BoardInfo) == NP_SCORE_BOARD_INFO_SIZE,
+               "layouts");
+
+// An npbind.dat with entries (NULL: an empty communication id record); returns its size.
+static size_t make_npbind(uint8_t *out, const char *const *ids, int n) {
+    memset(out, 0, 0x80);
+    const uint8_t magic[4] = {0xD2, 0x94, 0xA0, 0x18};
+    memcpy(out, magic, 4);
+    out[31] = (uint8_t)n;
+    size_t at = 0x80;
+    static const uint16_t sizes[4] = {12, 12, 176, 16};
+    for (int i = 0; i < n; i++) {
+        for (int e = 0; e < 4; e++) {
+            const uint16_t len = (e == 0 && !ids[i]) ? 0 : sizes[e];
+            out[at] = 0;
+            out[at + 1] = (uint8_t)(0x10 + e);
+            out[at + 2] = (uint8_t)(len >> 8);
+            out[at + 3] = (uint8_t)len;
+            memset(out + at + 4, 0, len);
+            if (e == 0 && ids[i]) memcpy(out + at + 4, ids[i], 12);
+            at += 4 + len;
+        }
+        memset(out + at, 0, 0x98);
+        at += 0x98;
+    }
+    return at;
+}
+
+static NpScoreRankOut rank_outs(void *rank, uint64_t entry, void *comment, void *info, uint64_t n, uint64_t *sort_date,
+                                uint32_t *total) {
+    NpScoreRankOut o = {rank,     n * entry, comment, comment ? n * NP_SCORE_COMMENT_SIZE : 0, info,
+                        info ? n * NP_SCORE_GAME_INFO_SIZE : 0, n, sort_date, total};
+    return o;
+}
+
+// Signed in as Player1 (account 0x1234) to a local shadNet server, for a title whose npbind.dat
+// lists NPWR12345_00.
+static int case_online(void) {
+    // npbind.dat parsing: the ids in order, empty ones skipped, truncated files rejected.
+    static uint8_t bind[4096];
+    const char *two[] = {"NPWR11111_00", NULL, "NPWR22222_00"};
+    const size_t two_len = make_npbind(bind, two, 3);
+    char ids[4][PS4_NPBIND_COMM_ID_LEN];
+    CHECK(ps4_npbind_comm_ids(bind, two_len, ids, 4) == 2);
+    CHECK(memcmp(ids[0], "NPWR11111_00", 12) == 0 && memcmp(ids[1], "NPWR22222_00", 12) == 0);
+    CHECK(ps4_npbind_comm_ids(bind, two_len, ids, 1) == 2);
+    CHECK(ps4_npbind_comm_ids(bind, 0x80 + 100, ids, 4) == -1);
+    bind[0] = 0;
+    CHECK(ps4_npbind_comm_ids(bind, two_len, ids, 4) == -1);
+
+    FakeShadNet server = {.account_id = 0x1234};
+    CHECK(fake_shadnet_start(&server) == 0);
+    static char bind_path[] = "/tmp/ps4recomp_npbind_XXXXXX"; // g_npbind_path refers to it
+    int fd = mkstemp(bind_path);
+    CHECK(fd >= 0);
+    const char *one[] = {"NPWR12345_00"};
+    const size_t one_len = make_npbind(bind, one, 1);
+    CHECK(write(fd, bind, one_len) == (ssize_t)one_len);
+    close(fd);
+    g_npbind_path = bind_path;
+    char path[] = "/tmp/ps4recomp_np_score_XXXXXX";
+    fd = mkstemp(path);
+    CHECK(fd >= 0);
+    char json[256];
+    const int n = snprintf(json, sizeof(json),
+                           "{\"enabled\": true, \"server\": \"127.0.0.1:%u\", \"npid\": \"Player1\", "
+                           "\"password\": \"pw\"}",
+                           (unsigned)server.port);
+    CHECK(write(fd, json, (size_t)n) == n);
+    close(fd);
+    setenv("PS4_SHADNET_CONFIG", path, 1);
+
+    // Title contexts: from the signed-in NP id (signing in), or by user id when signed in.
+    OrbisNpId self;
+    memset(&self, 0, sizeof(self));
+    memcpy(self.handle.data, "Player1", 7);
+    const int32_t ctx = ps4_np_score_create_np_title_ctx(5, &self);
+    CHECK(ctx > 0 && server.sessions == 1);
+    const int32_t user = ORBIS_USER_SERVICE_INITIAL_USER_ID;
+    CHECK(ps4_np_score_create_np_title_ctx_a(0, user + 1) == NP_SCORE_ERROR_SIGNED_OUT);
+    CHECK(ps4_np_score_create_np_title_ctx_a(NP_SCORE_INVALID_SERVICE_LABEL, user) == NP_COMMUNITY_ERROR_INVALID_ARGUMENT);
+    const int32_t ctx_a = ps4_np_score_create_np_title_ctx_a(0, user);
+    CHECK(ctx_a > 0);
+    // The player character id set on the title context is inherited by its requests.
+    CHECK(ps4_np_score_set_player_character_id(ctx, 3) == 0);
+    const int32_t req = ps4_np_score_create_request(ctx);
+
+    // Board info; the request carries the communication id (service label 5 falls back to the
+    // only entry).
+    BoardInfo bi;
+    memset(&bi, 0xEE, sizeof(bi));
+    CHECK(ps4_np_score_get_board_info(req, 7, &bi, NULL, g_sdk, false) == 0);
+    CHECK(bi.rank_limit == 100 && bi.update_mode == 1 && bi.sort_mode == 0 && bi.upload_num_limit == 10 &&
+          bi.upload_size_limit == 1024);
+    CHECK(strcmp(server.score_comm_id, "NPWR12345_00") == 0);
+    CHECK(ps4_np_score_get_board_info(req, 99, &bi, NULL, g_sdk, false) ==
+          NP_COMMUNITY_SERVER_ERROR_RANKING_BOARD_MASTER_NOT_FOUND);
+
+    // An empty friends ranking: 0 entries, lastSortDate and totalRecord untouched.
+    RankData plain[2];
+    uint64_t sort_date = 0xEE;
+    uint32_t total = 0xEE;
+    NpScoreRankOut out = rank_outs(plain, sizeof(RankData), NULL, NULL, 2, &sort_date, &total);
+    CHECK(ps4_np_score_get_friends_ranking(req, 7, 1, &out, false, NULL, NULL, false) == 0);
+    CHECK(sort_date == 0xEE && total == 0xEE);
+    // An empty range is GAME_RANKING_NOT_FOUND.
+    CHECK(ps4_np_score_get_ranking_by_range(req, 7, 1, &out, false, NULL, false) ==
+          NP_COMMUNITY_SERVER_ERROR_GAME_RANKING_NOT_FOUND);
+
+    // RecordScore with a comment and game info: the temporary rank; a lower score is not best.
+    char comment[NP_SCORE_COMMENT_SIZE] = "best run";
+    GameInfo info;
+    memset(&info, 0, sizeof(info));
+    info.info_size = 3;
+    memcpy(info.data, "abc", 3);
+    uint32_t tmp_rank = 0;
+    CHECK(ps4_np_score_record_score(req, 7, 500, comment, &info, &tmp_rank, NULL, NULL, false) == 0);
+    CHECK(tmp_rank == 1 && server.best_score == 500 && server.score_pc_id == 3);
+    CHECK(strcmp(server.score_comment, "best run") == 0 && server.score_info_len == 3);
+    CHECK(ps4_np_score_record_score(req, 7, 400, NULL, NULL, NULL, NULL, NULL, false) ==
+          NP_COMMUNITY_SERVER_ERROR_NOT_BEST_SCORE);
+
+    // Range with comments and game info.
+    char comments[2][NP_SCORE_COMMENT_SIZE];
+    GameInfo infos[2];
+    out = rank_outs(plain, sizeof(RankData), comments, infos, 2, &sort_date, &total);
+    CHECK(ps4_np_score_get_ranking_by_range(req, 7, 1, &out, false, NULL, false) == 1);
+    CHECK(strcmp(plain[0].np_id.handle.data, "Player1") == 0 && plain[0].pc_id == 3 && plain[0].serial_rank == 1);
+    CHECK(plain[0].rank == 1 && plain[0].highest_rank == 1 && plain[0].score_value == 500 &&
+          plain[0].record_date == 1234 && plain[0].has_game_data == 0);
+    CHECK(plain[1].np_id.handle.data[0] == 0 && sort_date == 5678 && total == 1);
+    CHECK(strcmp(comments[0], "best run") == 0 && infos[0].info_size == 3 && memcmp(infos[0].data, "abc", 3) == 0);
+
+    // The A variant, asynchronously: the account id too.
+    RankDataA a_ranks[1];
+    out = rank_outs(a_ranks, sizeof(RankDataA), NULL, NULL, 1, NULL, NULL);
+    const int32_t async_req = ps4_np_score_create_request(ctx_a);
+    CHECK(ps4_np_score_get_ranking_by_range(async_req, 7, 1, &out, true, NULL, true) == 0);
+    int32_t result = -1;
+    CHECK(ps4_np_score_wait_async(async_req, &result) == 0 && result == 1);
+    CHECK(strcmp(a_ranks[0].online_id.data, "Player1") == 0 && a_ranks[0].account_id == 0x1234);
+
+    // By NP id: one slot per id, hasData where the board has a score.
+    OrbisNpId who[2];
+    memset(who, 0, sizeof(who));
+    memcpy(who[0].handle.data, "Nobody", 6);
+    memcpy(who[1].handle.data, "Player1", 7);
+    PlayerRankData players[2];
+    out = rank_outs(players, sizeof(PlayerRankData), NULL, NULL, 2, &sort_date, &total);
+    CHECK(ps4_np_score_get_ranking_by_np_id(req, 7, who, sizeof(who), &out, NULL, false) == 1);
+    CHECK(players[0].has_data == 0 && players[1].has_data == 1 && players[1].d.score_value == 500);
+    // By account id and pc id.
+    const uint64_t acc_pc[2] = {0x1234, 3};
+    PlayerRankDataA players_a[1];
+    out = rank_outs(players_a, sizeof(PlayerRankDataA), NULL, NULL, 1, NULL, NULL);
+    CHECK(ps4_np_score_get_ranking_by_account_id_pc_id(req, 7, acc_pc, sizeof(acc_pc), &out, NULL, false) == 1);
+    CHECK(players_a[0].has_data == 1 && players_a[0].d.account_id == 0x1234);
+    // Friends with self.
+    out = rank_outs(plain, sizeof(RankData), NULL, NULL, 2, NULL, NULL);
+    CHECK(ps4_np_score_get_friends_ranking(req, 7, 1, &out, false, NULL, NULL, false) == 1);
+
+    // RecordGameData in two chunks: the first is buffered, the second sends the blob.
+    CHECK(ps4_np_score_record_game_data(req, 7, 500, 10, 6, "012345", NULL, false) == 0);
+    CHECK(server.game_data_len == 0);
+    CHECK(ps4_np_score_record_game_data(req, 7, 500, 10, 4, "6789", NULL, false) == 0);
+    CHECK(server.game_data_len == 10 && memcmp(server.game_data, "0123456789", 10) == 0);
+
+    // GetGameData in 6-byte pieces: the server's blob, then the rest from the request's cache.
+    char data[8];
+    uint64_t total_size = 0;
+    memset(data, 0, sizeof(data));
+    CHECK(ps4_np_score_get_game_data(req, 7, &self, &total_size, 6, data, NULL, false) == 6);
+    CHECK(total_size == 10 && memcmp(data, "012345", 6) == 0);
+    const int sessions = server.sessions;
+    memset(data, 0, sizeof(data));
+    CHECK(ps4_np_score_get_game_data(req, 7, &self, &total_size, 6, data, NULL, false) == 4);
+    CHECK(memcmp(data, "6789", 4) == 0 && server.sessions == sessions);
+    // By account id, all at once; another player's has none.
+    char whole[16];
+    CHECK(ps4_np_score_get_game_data_by_account_id(req, 7, 0x1234, &total_size, sizeof(whole), whole, NULL, false) ==
+          10);
+    CHECK(memcmp(whole, "0123456789", 10) == 0);
+    CHECK(ps4_np_score_get_game_data(req, 7, &who[0], &total_size, 6, data, NULL, false) ==
+          NP_COMMUNITY_SERVER_ERROR_RANKING_GAME_DATA_MASTER_NOT_FOUND);
+
+    // A title context of a user without a session is signed out.
+    OrbisNpId stranger;
+    memset(&stranger, 0, sizeof(stranger));
+    memcpy(stranger.handle.data, "Stranger", 8);
+    const int32_t other = ps4_np_score_create_request(ps4_np_score_create_np_title_ctx(0, &stranger));
+    CHECK(ps4_np_score_get_board_info(other, 7, &bi, NULL, g_sdk, false) == NP_SCORE_ERROR_SIGNED_OUT);
+    CHECK(ps4_np_score_poll_async(other, &result) == 0 && result == NP_SCORE_ERROR_SIGNED_OUT);
+
+    // An operation in flight when the session ends completes signed out.
+    server.hold_replies = true;
+    const int32_t pending = ps4_np_score_create_request(ctx);
+    CHECK(ps4_np_score_get_board_info(pending, 7, &bi, NULL, g_sdk, true) == 0);
+    CHECK(ps4_np_score_poll_async(pending, &result) == NP_SCORE_POLL_ASYNC_RUNNING);
+    ps4_np_handler_shutdown();
+    server.hold_replies = false;
+    CHECK(ps4_np_score_wait_async(pending, &result) == 0 && result == NP_SCORE_ERROR_SIGNED_OUT);
+
+    fake_shadnet_stop(&server);
+    unlink(path);
+    unlink(bind_path);
+    g_npbind_path = NULL;
+    CHECK(server.failures == 0);
+    printf("PASS online\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
+    if (strcmp(argv[1], "online") == 0) return case_online();
+    // The other cases run with shadNet off.
+    setenv("PS4_SHADNET_CONFIG", "/nonexistent/shadnet.json", 1);
     if (strcmp(argv[1], "contexts") == 0) return case_contexts();
     if (strcmp(argv[1], "operations") == 0) return case_operations();
     if (strcmp(argv[1], "game-data") == 0) return case_game_data();

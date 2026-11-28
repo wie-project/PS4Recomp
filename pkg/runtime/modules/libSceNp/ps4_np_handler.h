@@ -60,6 +60,10 @@ void ps4_np_handler_load_config(Ps4ShadNetConfig *out);
 // the server and connects every logged-in user that has an account. Runs once; later calls
 // return at once. Blocks until the connections are established or have failed.
 void ps4_np_handler_initialize(const Ps4ShadNetConfig *config);
+// The runtime's NpHandler::Initialize (shadPS4 runs it when the NP libraries load): the first
+// NP library call that needs the handler runs Initialize from the configuration file; every
+// caller blocks until it finished. A no-op after an explicit Initialize.
+void ps4_np_handler_start(void);
 // shadPS4 NpHandler::Shutdown: signs every user out and stops the worker.
 void ps4_np_handler_shutdown(void);
 // libSceUserService login / logout of a user.
@@ -113,6 +117,37 @@ void ps4_np_handler_unregister_state_callback(int32_t handle);
 typedef void (*Ps4NpLookupResult)(void *user, int32_t result, uint64_t account_id, const char *canonical_online_id);
 void ps4_np_handler_resolve_online_id(int32_t user_id, const char *online_id, Ps4NpLookupResult on_result,
                                       void *user);
+
+// A library's server request (shadPS4's PendingAuthRequest / PendingScoreRequest and their
+// On*Reply handlers). Exactly one of the two functions runs, once:
+//   on_reply: the reply arrived, on the client's reader thread; error is the shadNet
+//             ErrorType byte and body what follows it (a u32-prefixed protobuf blob);
+//   on_fail:  no reply will come, because the user's session ended (shadPS4
+//             FailPendingRequests, error ORBIS_NP_ERROR_SIGNED_OUT).
+typedef struct Ps4NpReplyHandler {
+    void (*on_reply)(void *user, int32_t user_id, uint8_t error, const uint8_t *body, size_t len);
+    void (*on_fail)(void *user, int32_t error);
+} Ps4NpReplyHandler;
+
+struct ShadPbMessageDesc;
+// The user's session: 0 when it is authenticated, ORBIS_NP_ERROR_SIGNED_OUT without one,
+// ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN while it is not authenticated.
+int32_t ps4_np_handler_session_status(int32_t user_id);
+// Sends the request cmd (payload: prefix, then msg encoded with desc and its u32 size) on the
+// user's session. Returns 0 when it was sent, after which handler gets the outcome; otherwise
+// the session status error, or ORBIS_NP_ERROR_OUT_OF_MEMORY when it could not be queued.
+// Neither function of handler runs on failure.
+int32_t ps4_np_handler_send_request(int32_t user_id, uint16_t cmd, const void *prefix, size_t prefix_len,
+                                    const struct ShadPbMessageDesc *desc, const void *msg,
+                                    const Ps4NpReplyHandler *handler, void *user);
+// As ps4_np_handler_send_request, with the payload as given.
+int32_t ps4_np_handler_send_raw(int32_t user_id, uint16_t cmd, const uint8_t *payload, size_t len,
+                                const Ps4NpReplyHandler *handler, void *user);
+
+// shadPS4 NpHandler::GetNpCommId / IsValidNpCommId: the NP communication id the service label
+// selects among the title's npbind.dat entries (out of range: the first), 12 bytes. False when
+// the title has none or it is blank.
+bool ps4_np_handler_np_comm_id(int32_t service_label, char out[12]);
 
 #ifdef __cplusplus
 }

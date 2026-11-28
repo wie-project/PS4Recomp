@@ -10,14 +10,17 @@
 // other result is dropped). The first result an operation gets is final (SetResult); PollAsync
 // and WaitAsync report it, and the synchronous variants wait for it.
 //
-// Ranking, board, score and game data operations go to the shadNet server through NpHandler,
-// which needs a shadNet session for the request's user. This library is
-// not connected to the NP handler's shadNet sessions (libSceNp/ps4_np_handler.c) yet, so those operations complete with
-// ORBIS_NP_ERROR_SIGNED_OUT as NpHandler returns it for a user without a session, and
-// sceNpScoreCreateNpTitleCtxA fails with it as well (NpHandler::IsPsnSignedIn). For the same
-// reason no user has an NP id: a title context created from one belongs to user -1
-// (GetUserIdByOnlineId). The game data receive cache of shadPS4's ScoreRequestCtx is filled only
-// by server replies, so it is always empty here and GetGameData goes straight to the server.
+// Ranking, board, score and game data operations go to the shadNet server through the NP
+// handler (libSceNp/ps4_np_handler.c; shadPS4 np_handler_score.cpp): the request's user needs
+// an authenticated shadNet session (else ORBIS_NP_ERROR_SIGNED_OUT or
+// ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN) and the title an NP communication id for the title
+// context's service label in npbind.dat (else ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT). The
+// reply fills the caller's outputs and completes the operation, on the client's reader thread;
+// an operation still waiting when the session ends completes with ORBIS_NP_ERROR_SIGNED_OUT.
+// A title context created from an NP id belongs to the signed-in user with that online id, or
+// to user -1 (NpHandler::GetUserIdByOnlineId); sceNpScoreCreateNpTitleCtxA needs a signed-in
+// user. GetGameData keeps a received blob on the request when the caller's buffer was filled,
+// and serves the next calls for the same board and player from it.
 //
 // RecordGameData buffers the chunks of a transfer on the request until totalSize bytes have
 // arrived (each partial chunk completes with ORBIS_OK) and only then sends the whole blob.
@@ -30,6 +33,10 @@
 #include "ps4_np_score.h"
 #include "ps4_hle_stub.h"
 #include "ps4_kernel_sys.h"
+#include "ps4_np_handler.h"
+#include "ps4_npbind.h"
+#include "shadnet_client.h"
+#include "shadnet_pb.h"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -58,6 +65,12 @@ typedef struct {
     uint8_t *send_buf;
     uint64_t send_len;
     uint64_t send_total;
+    // GetGameData receive cache (shadPS4 gameDataRecv*): the blob of recv_key, served from
+    // recv_offset on; recv_offset 0 means no transfer in progress.
+    uint8_t *recv_cache;
+    uint64_t recv_len;
+    uint64_t recv_offset;
+    char recv_key[64];
 } NpScoreRequest;
 
 // The live-request limit is NP_SCORE_MAX_CTX_NUM; the extra slots hold deleted requests that
@@ -114,7 +127,18 @@ static bool req_begin_op(NpScoreRequest *q) {
 
 static void req_clear(NpScoreRequest *q) {
     free(q->send_buf);
+    free(q->recv_cache);
     memset(q, 0, sizeof(*q));
+}
+
+// Lock held. A request by id, deleted or not: a reply still reaches a deleted request that has
+// waiters (ids are never reused).
+static NpScoreRequest *req_find_any(int32_t id) {
+    if (id == 0) return NULL;
+    for (int i = 0; i < NP_SCORE_REQUEST_SLOTS; i++) {
+        if (g_score.req[i].id == id) return &g_score.req[i];
+    }
+    return NULL;
 }
 
 // Lock held. Removes a request from the id space; its slot is reused once no thread waits on it.
@@ -151,26 +175,392 @@ static int32_t req_start(int32_t req_id, NpScoreRequest **out) {
     return 0;
 }
 
-// Lock held. Sends the operation to the shadNet server through NpHandler (RecordScore,
-// GetRankingBy*, GetFriendsRanking*, GetBoardInfo, GetGameData*, RecordGameData). The request's
-// user has no shadNet session, so NpHandler refuses it with ORBIS_NP_ERROR_SIGNED_OUT; the
-// request completes with that error and the entry point returns it, as in shadPS4.
-static int32_t req_dispatch(NpScoreRequest *q) {
-    static bool logged;
-    if (!logged) {
-        logged = true;
-        fprintf(stderr, "[libSceNpScore] server request for user %d: not signed in to shadNet -> SIGNED_OUT\n",
-                q->user_id);
-    }
-    req_set_result(q, NP_SCORE_ERROR_SIGNED_OUT);
-    return NP_SCORE_ERROR_SIGNED_OUT;
+//=============================================================================
+// Server requests (shadPS4 np_handler_score.cpp)
+//=============================================================================
+
+// Guest structures the replies fill (shadPS4 np_score.h).
+typedef struct {
+    OrbisNpId np_id;
+    uint8_t reserved[49];
+    uint8_t pad0[3];
+    int32_t pc_id;
+    uint32_t serial_rank;
+    uint32_t rank;
+    uint32_t highest_rank;
+    int32_t has_game_data;
+    uint8_t pad1[4];
+    int64_t score_value;
+    uint64_t record_date;
+} ScoreRankData;
+
+typedef struct {
+    OrbisNpOnlineId online_id;
+    uint8_t reserved0[16];
+    uint8_t reserved[49];
+    uint8_t pad0[3];
+    int32_t pc_id;
+    uint32_t serial_rank;
+    uint32_t rank;
+    uint32_t highest_rank;
+    int32_t has_game_data;
+    uint8_t pad1[4];
+    int64_t score_value;
+    uint64_t record_date;
+    uint64_t account_id;
+    uint8_t pad2[8];
+} ScoreRankDataA;
+
+typedef struct {
+    int32_t has_data;
+    uint8_t pad0[4];
+    ScoreRankData rank_data;
+} ScorePlayerRankData;
+
+typedef struct {
+    int32_t has_data;
+    uint8_t pad0[4];
+    ScoreRankDataA rank_data;
+} ScorePlayerRankDataA;
+
+typedef struct {
+    char utf8_comment[NP_SCORE_COMMENT_MAXLEN + 1];
+} ScoreComment;
+
+typedef struct {
+    uint64_t info_size;
+    uint8_t data[NP_SCORE_GAMEINFO_MAXSIZE];
+    uint8_t pad2[3];
+} ScoreGameInfo;
+
+typedef struct {
+    uint32_t rank_limit;
+    uint32_t update_mode;
+    uint32_t sort_mode;
+    uint32_t upload_num_limit;
+    uint64_t upload_size_limit;
+} ScoreBoardInfo;
+
+typedef struct {
+    OrbisNpId np_id;
+    int32_t pc_id;
+    uint8_t pad[4];
+} ScoreNpIdPcId;
+
+typedef struct {
+    uint64_t account_id;
+    int32_t pc_id;
+    uint8_t pad[4];
+} ScoreAccountIdPcId;
+
+_Static_assert(sizeof(ScoreRankData) == NP_SCORE_RANK_DATA_SIZE, "OrbisNpScoreRankData");
+_Static_assert(sizeof(ScoreRankDataA) == NP_SCORE_RANK_DATA_A_SIZE, "OrbisNpScoreRankDataA");
+_Static_assert(sizeof(ScorePlayerRankData) == NP_SCORE_PLAYER_RANK_DATA_SIZE, "OrbisNpScorePlayerRankData");
+_Static_assert(sizeof(ScorePlayerRankDataA) == NP_SCORE_PLAYER_RANK_DATA_A_SIZE, "OrbisNpScorePlayerRankDataA");
+_Static_assert(sizeof(ScoreComment) == NP_SCORE_COMMENT_SIZE, "OrbisNpScoreComment");
+_Static_assert(sizeof(ScoreGameInfo) == NP_SCORE_GAME_INFO_SIZE, "OrbisNpScoreGameInfo");
+_Static_assert(sizeof(ScoreBoardInfo) == NP_SCORE_BOARD_INFO_SIZE, "OrbisNpScoreBoardInfo");
+_Static_assert(sizeof(ScoreNpIdPcId) == NP_SCORE_NP_ID_PC_ID_SIZE, "OrbisNpScoreNpIdPcId");
+_Static_assert(sizeof(ScoreAccountIdPcId) == NP_SCORE_ACCOUNT_ID_PC_ID_SIZE, "OrbisNpScoreAccountIdPcId");
+
+// The kind of rank array a ranking reply fills.
+enum {
+    RANK_PLAIN,    // OrbisNpScoreRankData (GetRankingByRange, GetFriendsRanking)
+    RANK_A,        // OrbisNpScoreRankDataA (their A variants)
+    RANK_PLAYER,   // OrbisNpScorePlayerRankData, one per requested NP id
+    RANK_PLAYER_A, // OrbisNpScorePlayerRankDataA, one per requested account id
+};
+
+// An operation waiting for its reply (shadPS4 PendingScoreRequest): the outputs the reply fills.
+typedef struct ScoreOp {
+    int32_t req_id;
+    uint16_t cmd;
+    uint32_t *tmp_rank; // RecordScore
+    int rank_kind;
+    void *rank;
+    ScoreComment *comment;
+    ScoreGameInfo *info;
+    uint64_t *last_sort_date;
+    uint32_t *total_record;
+    uint64_t array_num;
+    ScoreBoardInfo *board_info;
+    void *data_out; // GetGameData*
+    uint64_t recv_size;
+    uint64_t *total_size_out;
+} ScoreOp;
+
+static uint32_t le32(const uint8_t *p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
-// The end of every operation that reached the server: dispatch, then for the synchronous
-// variants wait for the result (a failed dispatch returns its error at once).
-static int32_t req_run(NpScoreRequest *q, bool is_async) {
-    const int32_t r = req_dispatch(q);
-    if (r != 0) return r;
+static size_t min_size(size_t a, size_t b) {
+    return a < b ? a : b;
+}
+
+// The comment and game info of response entry i into output slot out_i.
+static void fill_comment_info(const ScoreOp *op, const ShadPb_GetScoreResponse *resp, uint32_t i, uint32_t out_i) {
+    if (op->comment && i < resp->commentArray_count) {
+        const ShadPbBytes c = resp->commentArray[i];
+        memcpy(op->comment[out_i].utf8_comment, c.data, min_size(c.len, sizeof(op->comment[out_i].utf8_comment) - 1));
+    }
+    if (op->info && i < resp->infoArray_count) {
+        const ShadPbBytes g = resp->infoArray[i].data;
+        const size_t n = min_size(g.len, sizeof(op->info[out_i].data));
+        op->info[out_i].info_size = n;
+        memcpy(op->info[out_i].data, g.data, n);
+    }
+}
+
+// The rank fields common to every rank data layout.
+#define FILL_RANK_FIELDS(out, r)                                         \
+    do {                                                                 \
+        (out).pc_id = (r)->pcId;                                         \
+        (out).serial_rank = (r)->rank;                                   \
+        (out).rank = (r)->sharedRank != 0 ? (r)->sharedRank : (r)->rank; \
+        (out).highest_rank = (out).rank;                                 \
+        (out).has_game_data = (r)->hasGameData ? 1 : 0;                  \
+        (out).score_value = (r)->score;                                  \
+        (out).record_date = (r)->recordDate;                             \
+    } while (0)
+
+static void copy_online_id(OrbisNpOnlineId *dst, ShadPbBytes npid) {
+    memcpy(dst->data, npid.data, min_size(npid.len, sizeof(dst->data)));
+    dst->term = 0;
+}
+
+// FillPlainRankArray[A]FromProto: the entries with an NP id, packed from slot 0, at most
+// array_num. FillRankArrayFromProto / FillPlayerRankArrayAFromProto: entry i goes to slot i
+// (hasData set) for the first min(response, requested) entries. Returns the entries found.
+static uint32_t fill_rank_array(const ScoreOp *op, const ShadPb_GetScoreResponse *resp) {
+    const bool packed = op->rank_kind == RANK_PLAIN || op->rank_kind == RANK_A;
+    const uint64_t n = packed ? resp->rankArray_count : min_size(resp->rankArray_count, (size_t)op->array_num);
+    uint32_t found = 0;
+    for (uint32_t i = 0; i < n && (!packed || found < op->array_num); i++) {
+        const ShadPb_ScoreRankData *r = &resp->rankArray[i];
+        if (r->npId.len == 0) continue; // no score for this entry
+        const uint32_t slot = packed ? found : i;
+        switch (op->rank_kind) {
+        case RANK_PLAIN: {
+            ScoreRankData *out = &((ScoreRankData *)op->rank)[slot];
+            copy_online_id(&out->np_id.handle, r->npId);
+            FILL_RANK_FIELDS(*out, r);
+            break;
+        }
+        case RANK_A: {
+            ScoreRankDataA *out = &((ScoreRankDataA *)op->rank)[slot];
+            copy_online_id(&out->online_id, r->npId);
+            FILL_RANK_FIELDS(*out, r);
+            out->account_id = (uint64_t)r->accountId;
+            break;
+        }
+        case RANK_PLAYER: {
+            ScorePlayerRankData *out = &((ScorePlayerRankData *)op->rank)[slot];
+            out->has_data = 1;
+            copy_online_id(&out->rank_data.np_id.handle, r->npId);
+            FILL_RANK_FIELDS(out->rank_data, r);
+            break;
+        }
+        default: {
+            ScorePlayerRankDataA *out = &((ScorePlayerRankDataA *)op->rank)[slot];
+            out->has_data = 1;
+            copy_online_id(&out->rank_data.online_id, r->npId);
+            FILL_RANK_FIELDS(out->rank_data, r);
+            out->rank_data.account_id = (uint64_t)r->accountId;
+            break;
+        }
+        }
+        fill_comment_info(op, resp, i, slot);
+        found++;
+    }
+    return found;
+}
+
+// The ORBIS error for a shadNet error reply.
+static int32_t score_error_from_reply(uint16_t cmd, uint8_t error) {
+    switch (error) {
+    case SHADNET_ERR_SCORE_NOT_BEST: return NP_COMMUNITY_SERVER_ERROR_NOT_BEST_SCORE;
+    case SHADNET_ERR_SCORE_INVALID: return NP_COMMUNITY_SERVER_ERROR_INVALID_SCORE;
+    case SHADNET_ERR_SCORE_HAS_DATA: return NP_COMMUNITY_SERVER_ERROR_GAME_DATA_ALREADY_EXISTS;
+    case SHADNET_ERR_TOO_LARGE: return NP_COMMUNITY_SERVER_ERROR_TOO_LARGE_DATA;
+    case SHADNET_ERR_COND_FAIL: return NP_COMMUNITY_SERVER_ERROR_CONDITIONS_NOT_SATISFIED;
+    case SHADNET_ERR_NOT_FOUND:
+        if (cmd == SHADNET_CMD_GET_SCORE_DATA || cmd == SHADNET_CMD_GET_SCORE_GAME_DATA_BY_ACC_ID) {
+            return NP_COMMUNITY_SERVER_ERROR_RANKING_GAME_DATA_MASTER_NOT_FOUND;
+        }
+        if (cmd == SHADNET_CMD_RECORD_SCORE_DATA) return NP_COMMUNITY_SERVER_ERROR_RANKING_STORE_NOT_FOUND;
+        return NP_COMMUNITY_SERVER_ERROR_RANKING_BOARD_MASTER_NOT_FOUND;
+    case SHADNET_ERR_UNAUTHORIZED: return NP_COMMUNITY_SERVER_ERROR_FORBIDDEN;
+    case SHADNET_ERR_DB_FAIL: return NP_COMMUNITY_SERVER_ERROR_INTERNAL_SERVER_ERROR;
+    default: return NP_COMMUNITY_ERROR_BAD_RESPONSE;
+    }
+}
+
+// Decodes a u32-prefixed protobuf reply body; false when it is short or malformed.
+static bool decode_body(const uint8_t *body, size_t len, const ShadPbMessageDesc *desc, void *msg, ShadPbArena *a) {
+    if (len < 4) return false;
+    const uint32_t n = le32(body);
+    return 4 + (size_t)n <= len && shadpb_decode(desc, body + 4, n, msg, a);
+}
+
+// Lock held. The request an operation belongs to, if it still exists.
+static void op_complete(const ScoreOp *op, int32_t result) {
+    NpScoreRequest *q = req_find_any(op->req_id);
+    if (q) req_set_result(q, result);
+}
+
+// GetScoreData / GetScoreGameDataByAccId: the blob into the caller's buffer, and onto the
+// request when the buffer was filled (the next calls read the rest from it).
+static void on_game_data_reply(const ScoreOp *op, const uint8_t *body, size_t len) {
+    if (len < 4 || 4 + (uint64_t)le32(body) > len) {
+        pthread_mutex_lock(&g_score.mutex);
+        op_complete(op, NP_COMMUNITY_ERROR_BAD_RESPONSE);
+        pthread_mutex_unlock(&g_score.mutex);
+        return;
+    }
+    const uint32_t stored = le32(body);
+    if (op->total_size_out) *op->total_size_out = stored;
+    uint64_t copy_n = 0;
+    if (op->data_out && op->recv_size > 0) {
+        copy_n = stored < op->recv_size ? stored : op->recv_size;
+        memcpy(op->data_out, body + 4, (size_t)copy_n);
+    }
+    pthread_mutex_lock(&g_score.mutex);
+    NpScoreRequest *q = req_find_any(op->req_id);
+    if (q) {
+        free(q->recv_cache);
+        q->recv_cache = NULL;
+        q->recv_len = 0;
+        q->recv_offset = 0;
+        if (copy_n >= op->recv_size && (q->recv_cache = malloc(stored ? stored : 1)) != NULL) {
+            memcpy(q->recv_cache, body + 4, stored);
+            q->recv_len = stored;
+            q->recv_offset = copy_n;
+        }
+        req_set_result(q, (int32_t)copy_n);
+    }
+    pthread_mutex_unlock(&g_score.mutex);
+}
+
+// NpHandler::OnScoreReply.
+static void on_score_reply(void *user, int32_t user_id, uint8_t error, const uint8_t *body, size_t len) {
+    (void)user_id;
+    ScoreOp *op = user;
+    int32_t result = 0;
+    ShadPbArena arena = {0};
+    if (error != SHADNET_ERR_NO_ERROR) {
+        result = score_error_from_reply(op->cmd, error);
+    } else if (op->cmd == SHADNET_CMD_RECORD_SCORE) {
+        if (op->tmp_rank && len >= 4) *op->tmp_rank = le32(body); // the temporary rank
+    } else if (op->cmd == SHADNET_CMD_GET_SCORE_DATA || op->cmd == SHADNET_CMD_GET_SCORE_GAME_DATA_BY_ACC_ID) {
+        on_game_data_reply(op, body, len);
+        free(op);
+        return;
+    } else if (op->cmd == SHADNET_CMD_GET_BOARD_INFOS) {
+        ShadPb_BoardInfo bi;
+        if (!decode_body(body, len, &shadpb_BoardInfo_desc, &bi, &arena)) {
+            result = NP_COMMUNITY_ERROR_BAD_RESPONSE;
+        } else if (op->board_info) {
+            op->board_info->rank_limit = bi.rankLimit;
+            op->board_info->update_mode = bi.updateMode;
+            op->board_info->sort_mode = bi.sortMode;
+            op->board_info->upload_num_limit = bi.uploadNumLimit;
+            op->board_info->upload_size_limit = bi.uploadSizeLimit;
+        }
+    } else if (op->cmd != SHADNET_CMD_RECORD_SCORE_DATA) {
+        // A ranking: GetScoreNpId, GetScoreAccountId, GetScoreRange, GetScoreFriends.
+        ShadPb_GetScoreResponse resp;
+        if (!decode_body(body, len, &shadpb_GetScoreResponse_desc, &resp, &arena)) {
+            result = NP_COMMUNITY_ERROR_BAD_RESPONSE;
+        } else {
+            const uint32_t found = fill_rank_array(op, &resp);
+            const bool friends = op->cmd == SHADNET_CMD_GET_SCORE_FRIENDS;
+            // An empty friends ranking leaves lastSortDate and totalRecord alone and is no error.
+            if (!friends || found > 0) {
+                if (op->last_sort_date) *op->last_sort_date = resp.lastSortDate;
+                if (op->total_record) *op->total_record = resp.totalRecord;
+            }
+            result = found > 0 || friends ? (int32_t)found : NP_COMMUNITY_SERVER_ERROR_GAME_RANKING_NOT_FOUND;
+        }
+    }
+    shadpb_arena_free(&arena);
+    pthread_mutex_lock(&g_score.mutex);
+    op_complete(op, result);
+    pthread_mutex_unlock(&g_score.mutex);
+    free(op);
+}
+
+// FailPendingRequests: the session ended before the reply.
+static void on_score_fail(void *user, int32_t error) {
+    ScoreOp *op = user;
+    pthread_mutex_lock(&g_score.mutex);
+    op_complete(op, error);
+    pthread_mutex_unlock(&g_score.mutex);
+    free(op);
+}
+
+static const Ps4NpReplyHandler g_score_reply = {on_score_reply, on_score_fail};
+
+// Lock held. ServiceLabelForRequest: the service label of the request's title context (0 once
+// it was deleted).
+static int32_t req_service_label(const NpScoreRequest *q) {
+    const NpScoreTitleCtx *c = ctx_find(q->title_ctx_id);
+    return c ? (int32_t)c->service_label : 0;
+}
+
+// Lock held. The checks and request of an NpHandler score function: the user's session, the
+// title's NP communication id, then cmd with the payload <comm id>[<u32 size><msg>][<tail>]
+// (msg when desc is set). On success op belongs to the pending request; on failure it is freed
+// and the error returned.
+static int32_t score_send(const NpScoreRequest *q, ScoreOp *op, const ShadPbMessageDesc *desc, const void *msg,
+                          const void *tail, size_t tail_len) {
+    int32_t r = ps4_np_handler_session_status(q->user_id);
+    char comm_id[PS4_NPBIND_COMM_ID_LEN];
+    if (r == 0 && !ps4_np_handler_np_comm_id(req_service_label(q), comm_id)) {
+        fprintf(stderr, "[libSceNpScore] no valid NP communication id (npbind.dat missing or blank); rejecting request\n");
+        r = NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    }
+    if (r == 0) {
+        const size_t proto = desc ? shadpb_encoded_size(desc, msg) : 0;
+        const size_t len = sizeof(comm_id) + (desc ? 4 + proto : 0) + tail_len;
+        uint8_t *payload = malloc(len);
+        if (!payload) {
+            r = NP_COMMUNITY_ERROR_OUT_OF_MEMORY;
+        } else {
+            memcpy(payload, comm_id, sizeof(comm_id));
+            size_t at = sizeof(comm_id);
+            if (desc) {
+                for (int i = 0; i < 4; i++) payload[at + i] = (uint8_t)(proto >> (8 * i));
+                at += 4 + shadpb_encode(desc, msg, payload + at + 4);
+            }
+            if (tail_len) memcpy(payload + at, tail, tail_len);
+            r = ps4_np_handler_send_raw(q->user_id, op->cmd, payload, len, &g_score_reply, op);
+            free(payload);
+        }
+    }
+    if (r != 0) free(op);
+    return r;
+}
+
+// Lock held. A new operation record for q, or NULL when out of memory.
+static ScoreOp *op_new(const NpScoreRequest *q, uint16_t cmd) {
+    ScoreOp *op = calloc(1, sizeof(*op));
+    if (op) {
+        op->req_id = q->id;
+        op->cmd = cmd;
+    }
+    return op;
+}
+
+// Lock held. The end of every operation that goes to the server: a failed dispatch completes
+// the request with its error and returns it; otherwise an asynchronous variant returns 0 and a
+// synchronous one waits for the reply's result.
+static int32_t req_run(NpScoreRequest *q, ScoreOp *op, const ShadPbMessageDesc *desc, const void *msg,
+                       const void *tail, size_t tail_len, bool is_async) {
+    const int32_t r = op ? score_send(q, op, desc, msg, tail, tail_len) : NP_COMMUNITY_ERROR_OUT_OF_MEMORY;
+    if (r != 0) {
+        req_set_result(q, r);
+        return r;
+    }
     return is_async ? 0 : req_wait(q);
 }
 
@@ -199,15 +589,16 @@ static int32_t create_title_ctx(uint32_t service_label, int32_t user_id) {
 int32_t ps4_np_score_create_np_title_ctx(uint32_t service_label, const void *self_np_id) {
     if (service_label == NP_SCORE_INVALID_SERVICE_LABEL) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (!self_np_id) return NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
-    // NpHandler::GetUserIdByOnlineId(selfNpId->handle): no user has an NP id while signed out.
-    return create_title_ctx(service_label, -1);
+    // NpHandler::GetUserIdByOnlineId(selfNpId->handle); OrbisNpId starts with its online id.
+    ps4_np_handler_start();
+    return create_title_ctx(service_label, ps4_np_handler_user_by_online_id(self_np_id));
 }
 
 int32_t ps4_np_score_create_np_title_ctx_a(uint32_t service_label, int32_t self_id) {
-    // NpHandler::IsPsnSignedIn(selfId) is false for every user.
-    (void)service_label;
-    (void)self_id;
-    return NP_SCORE_ERROR_SIGNED_OUT;
+    ps4_np_handler_start();
+    if (!ps4_np_handler_is_signed_in(self_id)) return NP_SCORE_ERROR_SIGNED_OUT; // NpHandler::IsPsnSignedIn
+    if (service_label == NP_SCORE_INVALID_SERVICE_LABEL) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    return create_title_ctx(service_label, self_id);
 }
 
 int32_t ps4_np_score_delete_np_title_ctx(int32_t title_ctx_id) {
@@ -331,37 +722,26 @@ int32_t ps4_np_score_set_player_character_id(int32_t id, int32_t pc_id) {
 // Operations
 //=============================================================================
 
-// Lock held. Starts an operation that goes to the server and runs it.
-static int32_t start_and_run(int32_t req_id, bool is_async) {
-    NpScoreRequest *q = NULL;
-    const int32_t r = req_start(req_id, &q);
-    return r != 0 ? r : req_run(q, is_async);
-}
-
-static int32_t locked_start_and_run(int32_t req_id, bool is_async) {
-    pthread_mutex_lock(&g_score.mutex);
-    const int32_t r = start_and_run(req_id, is_async);
-    pthread_mutex_unlock(&g_score.mutex);
-    return r;
-}
-
 int32_t ps4_np_score_record_score(int32_t req_id, uint32_t board_id, int64_t score, const void *comment,
                                   const void *game_info, uint32_t *tmp_rank, const void *compare_date,
                                   const void *option, bool is_async) {
-    // The board, score, comment, compare date and tmpRank (written by the server's reply) are
-    // only read by the server request.
-    (void)board_id;
-    (void)score;
-    (void)comment;
-    (void)tmp_rank;
-    (void)compare_date;
     if (option) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
-    if (game_info) {
-        uint64_t info_size;
-        memcpy(&info_size, game_info, sizeof(info_size)); // OrbisNpScoreGameInfo::infoSize
-        if (info_size > NP_SCORE_GAMEINFO_MAXSIZE) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    const ScoreGameInfo *info = game_info;
+    if (info && info->info_size > NP_SCORE_GAMEINFO_MAXSIZE) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
+    pthread_mutex_lock(&g_score.mutex);
+    NpScoreRequest *q = NULL;
+    int32_t r = req_start(req_id, &q);
+    if (r == 0) {
+        ShadPb_RecordScoreRequest msg = {.boardId = board_id, .pcId = q->pc_id, .score = score};
+        if (comment) msg.comment = shadpb_bytes(comment, strnlen(comment, NP_SCORE_COMMENT_MAXLEN));
+        if (info) msg.data = shadpb_bytes(info->data, (size_t)info->info_size);
+        if (compare_date) memcpy(&msg.compareDate, compare_date, sizeof(msg.compareDate));
+        ScoreOp *op = op_new(q, SHADNET_CMD_RECORD_SCORE);
+        if (op) op->tmp_rank = tmp_rank;
+        r = req_run(q, op, &shadpb_RecordScoreRequest_desc, &msg, NULL, 0, is_async);
     }
-    return locked_start_and_run(req_id, is_async);
+    pthread_mutex_unlock(&g_score.mutex);
+    return r;
 }
 
 // The comment and game info arrays of a ranking query: their sizes must match arrayNum entries,
@@ -378,10 +758,40 @@ static int32_t clear_comment_info(const NpScoreRankOut *out) {
     return 0;
 }
 
+// Lock held. A ranking operation's record: where its reply goes.
+static ScoreOp *rank_op_new(const NpScoreRequest *q, uint16_t cmd, int rank_kind, const NpScoreRankOut *out) {
+    ScoreOp *op = op_new(q, cmd);
+    if (op) {
+        op->rank_kind = rank_kind;
+        op->rank = out->rank;
+        op->comment = out->comment;
+        op->info = out->info;
+        op->last_sort_date = out->last_sort_date;
+        op->total_record = out->total_record;
+        op->array_num = out->array_num;
+    }
+    return op;
+}
+
+// Lock released. Starts a ranking operation and sends msg.
+static int32_t run_ranking(int32_t req_id, uint16_t cmd, int rank_kind, const NpScoreRankOut *out,
+                           const ShadPbMessageDesc *desc, void *msg, bool *with_comment, bool *with_info,
+                           bool is_async) {
+    *with_comment = out->comment != NULL;
+    *with_info = out->info != NULL;
+    pthread_mutex_lock(&g_score.mutex);
+    NpScoreRequest *q = NULL;
+    int32_t r = req_start(req_id, &q);
+    if (r == 0) {
+        r = req_run(q, rank_op_new(q, cmd, rank_kind, out), desc, msg, NULL, 0, is_async);
+    }
+    pthread_mutex_unlock(&g_score.mutex);
+    return r;
+}
+
 int32_t ps4_np_score_get_ranking_by_range(int32_t req_id, uint32_t board_id, uint32_t start_serial_rank,
                                           const NpScoreRankOut *out, bool a_variant, const void *option,
                                           bool is_async) {
-    (void)board_id;
     if (option) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (out->array_num > NP_SCORE_MAX_RANGE_NUM_PER_REQUEST) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (start_serial_rank == 0) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
@@ -391,13 +801,30 @@ int32_t ps4_np_score_get_ranking_by_range(int32_t req_id, uint32_t board_id, uin
     if (out->rank_size != out->array_num * entry) return NP_COMMUNITY_ERROR_INVALID_ALIGNMENT;
     memset(out->rank, 0, out->rank_size);
     const int32_t r = clear_comment_info(out);
-    return r != 0 ? r : locked_start_and_run(req_id, is_async);
+    if (r != 0) return r;
+    ShadPb_GetScoreRangeRequest msg = {
+        .boardId = board_id, .startRank = start_serial_rank, .numRanks = (uint32_t)out->array_num};
+    return run_ranking(req_id, SHADNET_CMD_GET_SCORE_RANGE, a_variant ? RANK_A : RANK_PLAIN, out,
+                       &shadpb_GetScoreRangeRequest_desc, &msg, &msg.withComment, &msg.withGameInfo, is_async);
+}
+
+// GetRankingByNpId[PcId]: one entry per NP id (pc ids: the array's, or 0).
+static int32_t ranking_by_np_ids(int32_t req_id, uint32_t board_id, const OrbisNpId *np_ids,
+                                 const ScoreNpIdPcId *pairs, const NpScoreRankOut *out, bool is_async) {
+    ShadPb_ScoreNpIdPcId ids[NP_SCORE_MAX_NPID_NUM_PER_REQUEST];
+    for (uint64_t i = 0; i < out->array_num; i++) {
+        const OrbisNpId *id = pairs ? &pairs[i].np_id : &np_ids[i];
+        ids[i].npid = shadpb_bytes(id->handle.data, strnlen(id->handle.data, sizeof(id->handle.data)));
+        ids[i].pcId = pairs ? pairs[i].pc_id : 0;
+    }
+    ShadPb_GetScoreNpIdRequest msg = {.boardId = board_id, .npids = ids, .npids_count = (uint32_t)out->array_num};
+    return run_ranking(req_id, SHADNET_CMD_GET_SCORE_NPID, RANK_PLAYER, out, &shadpb_GetScoreNpIdRequest_desc, &msg,
+                       &msg.withComment, &msg.withGameInfo, is_async);
 }
 
 int32_t ps4_np_score_get_ranking_by_np_id(int32_t req_id, uint32_t board_id, const void *np_id_array,
                                           uint64_t np_id_array_size, const NpScoreRankOut *out,
                                           const void *option, bool is_async) {
-    (void)board_id;
     if (option) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (out->array_num > NP_SCORE_MAX_NPID_NUM_PER_REQUEST) return NP_COMMUNITY_ERROR_TOO_MANY_NPID;
     if (!np_id_array || !out->rank) return NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
@@ -407,13 +834,12 @@ int32_t ps4_np_score_get_ranking_by_np_id(int32_t req_id, uint32_t board_id, con
     }
     memset(out->rank, 0, out->rank_size);
     const int32_t r = clear_comment_info(out);
-    return r != 0 ? r : locked_start_and_run(req_id, is_async);
+    return r != 0 ? r : ranking_by_np_ids(req_id, board_id, np_id_array, NULL, out, is_async);
 }
 
 int32_t ps4_np_score_get_ranking_by_np_id_pc_id(int32_t req_id, uint32_t board_id, const void *id_array,
                                                 uint64_t id_array_size, const NpScoreRankOut *out,
                                                 const void *option, bool is_async) {
-    (void)board_id;
     if (option) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (!id_array || out->array_num == 0 || !out->rank) return NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
     if (out->array_num > NP_SCORE_MAX_NPID_NUM_PER_REQUEST) return NP_COMMUNITY_ERROR_TOO_MANY_NPID;
@@ -423,11 +849,12 @@ int32_t ps4_np_score_get_ranking_by_np_id_pc_id(int32_t req_id, uint32_t board_i
     }
     memset(out->rank, 0, out->rank_size);
     const int32_t r = clear_comment_info(out);
-    return r != 0 ? r : locked_start_and_run(req_id, is_async);
+    return r != 0 ? r : ranking_by_np_ids(req_id, board_id, NULL, id_array, out, is_async);
 }
 
-// GetRankingByAccountIdImpl and GetRankingByAccountIdPcIdImpl; id_entry is the size of one id.
-static int32_t get_ranking_by_account(int32_t req_id, const void *id_array, uint64_t id_array_size,
+// GetRankingByAccountIdImpl and GetRankingByAccountIdPcIdImpl: one entry per account id (pc ids:
+// pairs' or 0).
+static int32_t get_ranking_by_account(int32_t req_id, uint32_t board_id, const void *id_array, uint64_t id_array_size,
                                       uint64_t id_entry, const NpScoreRankOut *out, const void *option,
                                       bool is_async) {
     if (option) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
@@ -437,30 +864,44 @@ static int32_t get_ranking_by_account(int32_t req_id, const void *id_array, uint
     if (out->rank_size != out->array_num * NP_SCORE_PLAYER_RANK_DATA_A_SIZE) return NP_COMMUNITY_ERROR_INVALID_ALIGNMENT;
     memset(out->rank, 0, out->rank_size);
     const int32_t r = clear_comment_info(out);
-    return r != 0 ? r : locked_start_and_run(req_id, is_async);
+    if (r != 0) return r;
+    const bool pairs = id_entry == NP_SCORE_ACCOUNT_ID_PC_ID_SIZE;
+    ShadPb_ScoreAccountIdPcId ids[NP_SCORE_MAX_ID_NUM_PER_REQUEST];
+    for (uint64_t i = 0; i < out->array_num; i++) {
+        if (pairs) {
+            const ScoreAccountIdPcId *p = &((const ScoreAccountIdPcId *)id_array)[i];
+            ids[i].accountId = (int64_t)p->account_id;
+            ids[i].pcId = p->pc_id;
+        } else {
+            uint64_t account_id;
+            memcpy(&account_id, (const uint8_t *)id_array + i * NP_SCORE_ACCOUNT_ID_SIZE, sizeof(account_id));
+            ids[i].accountId = (int64_t)account_id;
+            ids[i].pcId = 0;
+        }
+    }
+    ShadPb_GetScoreAccountIdRequest msg = {.boardId = board_id, .ids = ids, .ids_count = (uint32_t)out->array_num};
+    return run_ranking(req_id, SHADNET_CMD_GET_SCORE_ACCOUNT_ID, RANK_PLAYER_A, out,
+                       &shadpb_GetScoreAccountIdRequest_desc, &msg, &msg.withComment, &msg.withGameInfo, is_async);
 }
 
 int32_t ps4_np_score_get_ranking_by_account_id(int32_t req_id, uint32_t board_id, const void *account_id_array,
                                                uint64_t account_id_array_size, const NpScoreRankOut *out,
                                                const void *option, bool is_async) {
-    (void)board_id;
-    return get_ranking_by_account(req_id, account_id_array, account_id_array_size, NP_SCORE_ACCOUNT_ID_SIZE, out,
-                                  option, is_async);
+    return get_ranking_by_account(req_id, board_id, account_id_array, account_id_array_size, NP_SCORE_ACCOUNT_ID_SIZE,
+                                  out, option, is_async);
 }
 
 int32_t ps4_np_score_get_ranking_by_account_id_pc_id(int32_t req_id, uint32_t board_id, const void *id_array,
                                                      uint64_t id_array_size, const NpScoreRankOut *out,
                                                      const void *option, bool is_async) {
-    (void)board_id;
-    return get_ranking_by_account(req_id, id_array, id_array_size, NP_SCORE_ACCOUNT_ID_PC_ID_SIZE, out, option,
-                                  is_async);
+    return get_ranking_by_account(req_id, board_id, id_array, id_array_size, NP_SCORE_ACCOUNT_ID_PC_ID_SIZE, out,
+                                  option, is_async);
 }
 
 int32_t ps4_np_score_get_friends_ranking(int32_t req_id, uint32_t board_id, int32_t include_self,
                                          const NpScoreRankOut *out, bool a_variant,
                                          const NpScoreFriendRankingOpt *option,
                                          const uint32_t *opt_start_serial_rank, bool is_async) {
-    (void)board_id;
     if (!out->rank) return NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
     const uint64_t entry = a_variant ? NP_SCORE_RANK_DATA_A_SIZE : NP_SCORE_RANK_DATA_SIZE;
     if (out->rank_size != out->array_num * entry) return NP_COMMUNITY_ERROR_INVALID_ALIGNMENT;
@@ -476,12 +917,17 @@ int32_t ps4_np_score_get_friends_ranking(int32_t req_id, uint32_t board_id, int3
     if (out->array_num == 0) return NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
     memset(out->rank, 0, out->rank_size);
     const int32_t r = clear_comment_info(out);
-    return r != 0 ? r : locked_start_and_run(req_id, is_async);
+    if (r != 0) return r;
+    ShadPb_GetScoreFriendsRequest msg = {.boardId = board_id,
+                                         .includeSelf = include_self != 0,
+                                         .max = (uint32_t)out->array_num,
+                                         .startRank = start_serial_rank};
+    return run_ranking(req_id, SHADNET_CMD_GET_SCORE_FRIENDS, a_variant ? RANK_A : RANK_PLAIN, out,
+                       &shadpb_GetScoreFriendsRequest_desc, &msg, &msg.withComment, &msg.withGameInfo, is_async);
 }
 
 int32_t ps4_np_score_get_board_info(int32_t req_id, uint32_t board_id, void *board_info, const void *option,
                                     int32_t sdk_version, bool is_async) {
-    (void)board_id;
     if (option) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (sdk_version >= NP_SCORE_SDK_FW_250 && !board_info) return NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
     pthread_mutex_lock(&g_score.mutex);
@@ -493,32 +939,81 @@ int32_t ps4_np_score_get_board_info(int32_t req_id, uint32_t board_id, void *boa
             req_set_result(q, 0);
         } else {
             memset(board_info, 0, NP_SCORE_BOARD_INFO_SIZE);
-            r = req_run(q, is_async);
+            ScoreOp *op = op_new(q, SHADNET_CMD_GET_BOARD_INFOS);
+            if (op) op->board_info = board_info;
+            const uint8_t id[4] = {(uint8_t)board_id, (uint8_t)(board_id >> 8), (uint8_t)(board_id >> 16),
+                                   (uint8_t)(board_id >> 24)};
+            r = req_run(q, op, NULL, NULL, id, sizeof(id), is_async);
         }
     }
     pthread_mutex_unlock(&g_score.mutex);
     return r;
 }
 
+// Lock held. ServeGameDataFromCache: a transfer of key in progress on q continues from its
+// cache; any other key starts over (false: ask the server).
+static bool serve_game_data_from_cache(NpScoreRequest *q, const char *key, uint64_t *total_size, uint64_t recv_size,
+                                       void *data, bool is_async, int32_t *ret) {
+    if (q->recv_offset == 0 || strcmp(q->recv_key, key) != 0) {
+        free(q->recv_cache);
+        q->recv_cache = NULL;
+        q->recv_len = 0;
+        q->recv_offset = 0;
+        snprintf(q->recv_key, sizeof(q->recv_key), "%s", key);
+        return false;
+    }
+    const uint64_t start = q->recv_offset < q->recv_len ? q->recv_offset : q->recv_len;
+    uint64_t n = 0;
+    if (data) n = q->recv_len - start < recv_size ? q->recv_len - start : recv_size;
+    if (n > 0) memcpy(data, q->recv_cache + start, (size_t)n);
+    if (total_size) *total_size = q->recv_len;
+    if (n < recv_size) {
+        free(q->recv_cache); // transfer complete
+        q->recv_cache = NULL;
+        q->recv_len = 0;
+        q->recv_offset = 0;
+    } else {
+        q->recv_offset = start + n;
+    }
+    req_set_result(q, (int32_t)n);
+    *ret = is_async ? 0 : (int32_t)n;
+    return true;
+}
+
+// Lock held. The game data operation for key: from the cache, or a request to the server.
+static int32_t game_data_run(NpScoreRequest *q, const char *key, uint16_t cmd, const ShadPbMessageDesc *desc,
+                             const void *msg, uint64_t *total_size, uint64_t recv_size, void *data, bool is_async) {
+    int32_t cached;
+    if (serve_game_data_from_cache(q, key, total_size, recv_size, data, is_async, &cached)) return cached;
+    ScoreOp *op = op_new(q, cmd);
+    if (op) {
+        op->data_out = data;
+        op->recv_size = recv_size;
+        op->total_size_out = total_size;
+    }
+    return req_run(q, op, desc, msg, NULL, 0, is_async);
+}
+
 int32_t ps4_np_score_get_game_data(int32_t req_id, uint32_t board_id, const void *np_id, uint64_t *total_size,
                                    uint64_t recv_size, void *data, const void *option, bool is_async) {
-    // The server's reply writes data and *totalSize.
-    (void)board_id;
-    (void)total_size;
-    (void)recv_size;
-    (void)data;
     if (!np_id) return NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
     if (option) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     pthread_mutex_lock(&g_score.mutex);
     NpScoreRequest *q = NULL;
     int32_t r = req_start(req_id, &q);
     if (r == 0) {
-        // OrbisNpId starts with its online id handle.
-        if (((const char *)np_id)[0] == '\0') {
+        const OrbisNpId *id = np_id;
+        const size_t len = strnlen(id->handle.data, sizeof(id->handle.data));
+        if (len == 0) {
             req_set_result(q, NP_COMMUNITY_ERROR_INVALID_ARGUMENT);
             r = NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
         } else {
-            r = req_run(q, is_async);
+            char key[64];
+            snprintf(key, sizeof(key), "%u:npid:%.*s", board_id, (int)len, id->handle.data);
+            const ShadPb_GetScoreGameDataRequest msg = {
+                .boardId = board_id, .npId = shadpb_bytes(id->handle.data, len), .pcId = q->pc_id};
+            r = game_data_run(q, key, SHADNET_CMD_GET_SCORE_DATA, &shadpb_GetScoreGameDataRequest_desc, &msg,
+                              total_size, recv_size, data, is_async);
         }
     }
     pthread_mutex_unlock(&g_score.mutex);
@@ -528,19 +1023,25 @@ int32_t ps4_np_score_get_game_data(int32_t req_id, uint32_t board_id, const void
 int32_t ps4_np_score_get_game_data_by_account_id(int32_t req_id, uint32_t board_id, uint64_t account_id,
                                                  uint64_t *total_size, uint64_t recv_size, void *data,
                                                  const void *option, bool is_async) {
-    (void)board_id;
-    (void)total_size;
-    (void)recv_size;
-    (void)data;
     if (option) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (account_id == 0) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
-    return locked_start_and_run(req_id, is_async);
+    pthread_mutex_lock(&g_score.mutex);
+    NpScoreRequest *q = NULL;
+    int32_t r = req_start(req_id, &q);
+    if (r == 0) {
+        char key[64];
+        snprintf(key, sizeof(key), "%u:acc:%llu", board_id, (unsigned long long)account_id);
+        const ShadPb_GetScoreGameDataByAccountIdRequest msg = {
+            .boardId = board_id, .accountId = (int64_t)account_id, .pcId = q->pc_id};
+        r = game_data_run(q, key, SHADNET_CMD_GET_SCORE_GAME_DATA_BY_ACC_ID,
+                          &shadpb_GetScoreGameDataByAccountIdRequest_desc, &msg, total_size, recv_size, data, is_async);
+    }
+    pthread_mutex_unlock(&g_score.mutex);
+    return r;
 }
 
 int32_t ps4_np_score_record_game_data(int32_t req_id, uint32_t board_id, int64_t score, uint64_t total_size,
                                       uint64_t send_size, const void *data, const void *option, bool is_async) {
-    (void)board_id;
-    (void)score;
     if (option) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (total_size == 0) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (!data) return NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
@@ -565,12 +1066,17 @@ int32_t ps4_np_score_record_game_data(int32_t req_id, uint32_t board_id, int64_t
             if (q->send_len < q->send_total) {
                 req_set_result(q, 0);
             } else {
-                // The whole blob goes to the server; the request's buffer starts over.
-                free(q->send_buf);
+                // The whole blob goes to the server after the request message; the request's
+                // buffer starts over.
+                uint8_t *blob = q->send_buf;
+                const uint64_t blob_len = q->send_len;
                 q->send_buf = NULL;
                 q->send_len = 0;
                 q->send_total = 0;
-                r = req_run(q, is_async);
+                const ShadPb_RecordScoreGameDataRequest msg = {.boardId = board_id, .pcId = q->pc_id, .score = score};
+                r = req_run(q, op_new(q, SHADNET_CMD_RECORD_SCORE_DATA), &shadpb_RecordScoreGameDataRequest_desc,
+                            &msg, blob, (size_t)blob_len, is_async);
+                free(blob);
             }
         }
     }
@@ -656,6 +1162,8 @@ static NpScoreRankOut rank_out(GuestContext *ctx) {
     out.info_size = stack_arg(ctx, 2);
     out.info = gptr(ctx, stack_arg(ctx, 1), out.info_size);
     out.array_num = stack_arg(ctx, 3);
+    out.last_sort_date = gptr(ctx, stack_arg(ctx, 4), sizeof(uint64_t));
+    out.total_record = gptr(ctx, stack_arg(ctx, 5), sizeof(uint32_t));
     return out;
 }
 
@@ -671,6 +1179,8 @@ static NpScoreRankOut id_rank_out(GuestContext *ctx) {
     out.info_size = stack_arg(ctx, 3);
     out.info = gptr(ctx, stack_arg(ctx, 2), out.info_size);
     out.array_num = stack_arg(ctx, 4);
+    out.last_sort_date = gptr(ctx, stack_arg(ctx, 5), sizeof(uint64_t));
+    out.total_record = gptr(ctx, stack_arg(ctx, 6), sizeof(uint32_t));
     return out;
 }
 

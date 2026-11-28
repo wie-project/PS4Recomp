@@ -18,6 +18,9 @@ extern "C" {
 #define ORBIS_NP_AUTH_ERROR_REQUEST_MAX       ((int32_t)0x80550305)
 #define ORBIS_NP_AUTH_ERROR_REQUEST_NOT_FOUND ((int32_t)0x80550306)
 #define ORBIS_NP_AUTH_ERROR_INVALID_ID        ((int32_t)0x80550307)
+#define ORBIS_NP_AUTH_ERROR_NO_TOKEN_RECEIVED ((int32_t)0x80550308)
+#define ORBIS_NP_AUTH_ERROR_SERVICE_DOWN      ((int32_t)0x80550401)
+#define ORBIS_NP_AUTH_ERROR_SERVICE_BUSY      ((int32_t)0x80550402)
 
 // shadPS4 np/np_auth/np_auth.h
 #define ORBIS_NP_AUTH_REQUEST_LIMIT 0x10
@@ -86,20 +89,8 @@ typedef struct OrbisNpAuthGetIdTokenParameterA {
     uint64_t scope;         // const char *
 } OrbisNpAuthGetIdTokenParameterA;
 
-int32_t sceNpAuthCreateRequest(void);
-int32_t sceNpAuthCreateAsyncRequest(const OrbisNpAuthCreateAsyncRequestParameter *param);
-int32_t sceNpAuthGetAuthorizationCode(int32_t req_id, const OrbisNpAuthGetAuthorizationCodeParameter *param,
-                                      OrbisNpAuthorizationCode *auth_code, int32_t *issuer_id);
-int32_t sceNpAuthGetAuthorizationCodeA(int32_t req_id, const OrbisNpAuthGetAuthorizationCodeParameterA *param,
-                                       OrbisNpAuthorizationCode *auth_code, int32_t *issuer_id);
-int32_t sceNpAuthGetIdToken(int32_t req_id, const OrbisNpAuthGetIdTokenParameter *param, OrbisNpIdToken *token);
-int32_t sceNpAuthGetIdTokenA(int32_t req_id, const OrbisNpAuthGetIdTokenParameterA *param, OrbisNpIdToken *token);
-int32_t sceNpAuthSetTimeout(int32_t req_id, int32_t resolve_retry, uint32_t resolve_timeout, uint32_t conn_timeout,
-                            uint32_t send_timeout, uint32_t recv_timeout);
-int32_t sceNpAuthAbortRequest(int32_t req_id);
-int32_t sceNpAuthWaitAsync(int32_t req_id, int32_t *result);
-int32_t sceNpAuthPollAsync(int32_t req_id, int32_t *result);
-int32_t sceNpAuthDeleteRequest(int32_t req_id);
+// The authorization-code issuer id (shadPS4 NpAuthIssuerId).
+#define ORBIS_NP_AUTH_ISSUER_ID 0x100
 
 void shim_sceNpAuthCreateRequest(GuestContext *ctx);
 void shim_sceNpAuthCreateAsyncRequest(GuestContext *ctx);

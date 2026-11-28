@@ -8,9 +8,10 @@ import "testing"
 // without a shadNet sign-in: title contexts and requests, the argument checks of every
 // operation in shadPS4's order, the signed-out completion of server operations, RecordGameData
 // chunk buffering, the local comment operations, WaitAsync across threads, and the shims'
-// register and stack arguments.
+// register and stack arguments; and every server operation against a local shadNet server
+// through the NP handler (online).
 func TestNpScore(t *testing.T) {
-	bin := buildHostCFlags(t, "np_score", []string{kernelInclude},
-		"../runtime/modules/libSceNpScore/ps4_np_score.c")
-	runHostCases(t, bin, []string{"contexts", "operations", "game-data", "comments", "wait", "shim-args"})
+	bin := buildHostCFlags(t, "np_score", []string{kernelInclude, userServiceInclude, shadNetInclude},
+		append([]string{"../runtime/modules/libSceNpScore/ps4_np_score.c"}, npHandlerSources...)...)
+	runHostCases(t, bin, []string{"contexts", "operations", "game-data", "comments", "wait", "shim-args", shadNetOnlineCase})
 }

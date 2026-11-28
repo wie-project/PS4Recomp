@@ -17,5 +17,5 @@ func TestNpManager(t *testing.T) {
 			"../runtime/modules/libSceUserService/ps4_user_service.c",
 		}, npHandlerSources...)...,
 	)
-	runHostCases(t, bin, []string{"requests", "queries", "state-callbacks", "online"})
+	runHostCases(t, bin, []string{"requests", "queries", "state-callbacks", shadNetOnlineCase})
 }

@@ -13,9 +13,11 @@
 
 #include "ps4_np_handler.h"
 #include "ps4_json_object.h"
+#include "ps4_npbind.h"
 #include "ps4_np_manager.h"
 #include "ps4_sfo.h"
 #include "ps4_user_service.h"
+#include "ps4_vfs.h"
 #include "shadnet_client.h"
 #include <pthread.h>
 #include <stdatomic.h>
@@ -57,13 +59,16 @@ typedef struct Reconnect {
     uint64_t next_attempt_ms;
 } Reconnect;
 
-typedef struct PendingLookup {
-    struct PendingLookup *next;
+// A request waiting for its reply (shadPS4's m_pending_* maps): a lookup (on_lookup) or a
+// library request (handler).
+typedef struct PendingRequest {
+    struct PendingRequest *next;
     uint64_t pkt_id;
     int32_t user_id;
-    Ps4NpLookupResult on_result;
+    Ps4NpLookupResult on_lookup;
+    const Ps4NpReplyHandler *handler;
     void *user;
-} PendingLookup;
+} PendingRequest;
 
 typedef struct StateCallback {
     int32_t handle;
@@ -91,8 +96,8 @@ static struct {
     int32_t friend_user[MAX_USERS];
     FriendState friend_state[MAX_USERS];
 
-    pthread_mutex_t lookup_mutex;
-    PendingLookup *lookups;
+    pthread_mutex_t pending_mutex;
+    PendingRequest *pending;
 
     pthread_mutex_t cbs_mutex;
     StateCallback cbs[MAX_STATE_CALLBACKS];
@@ -102,7 +107,7 @@ static struct {
     .worker_mutex = PTHREAD_MUTEX_INITIALIZER,
     .worker_cond = PTHREAD_COND_INITIALIZER,
     .friends_mutex = PTHREAD_MUTEX_INITIALIZER,
-    .lookup_mutex = PTHREAD_MUTEX_INITIALIZER,
+    .pending_mutex = PTHREAD_MUTEX_INITIALIZER,
     .cbs_mutex = PTHREAD_MUTEX_INITIALIZER,
     .next_cb_handle = 1,
     .friend_user = {-1, -1, -1, -1},
@@ -506,48 +511,170 @@ static void on_service_unavailable(void *user, const ShadPb_NotifyServiceUnavail
 // Replies
 //=============================================================================
 
-static PendingLookup *take_lookup(uint64_t pkt_id) {
-    pthread_mutex_lock(&g_np.lookup_mutex);
-    PendingLookup **pp = &g_np.lookups;
+static PendingRequest *take_pending(uint64_t pkt_id) {
+    pthread_mutex_lock(&g_np.pending_mutex);
+    PendingRequest **pp = &g_np.pending;
     while (*pp && (*pp)->pkt_id != pkt_id) pp = &(*pp)->next;
-    PendingLookup *p = *pp;
+    PendingRequest *p = *pp;
     if (p) *pp = p->next;
-    pthread_mutex_unlock(&g_np.lookup_mutex);
+    pthread_mutex_unlock(&g_np.pending_mutex);
     return p;
 }
 
+// pending_mutex held. Queues p and sends its request (send returns the packet id), so the
+// reply cannot arrive before p is found. False when the request could not be queued.
+static bool add_pending(PendingRequest *p, uint64_t pkt_id) {
+    if (pkt_id == 0) return false;
+    p->pkt_id = pkt_id;
+    p->next = g_np.pending;
+    g_np.pending = p;
+    return true;
+}
+
 // NpHandler::OnLookupReply.
-static void on_lookup_reply(uint64_t pkt_id, uint8_t error, const uint8_t *body, size_t len) {
-    PendingLookup *p = take_lookup(pkt_id);
-    if (!p) return; // flushed by a disconnect, or a stray reply
+static void on_lookup_reply(PendingRequest *p, uint8_t error, const uint8_t *body, size_t len) {
     ShadPbArena arena = {0};
     ShadPb_LookupOnlineIdReply reply;
     if (error == SHADNET_ERR_NOT_FOUND) {
-        p->on_result(p->user, ORBIS_NP_COMMUNITY_SERVER_ERROR_NO_SUCH_USER_NPID, 0, "");
+        p->on_lookup(p->user, ORBIS_NP_COMMUNITY_SERVER_ERROR_NO_SUCH_USER_NPID, 0, "");
     } else if (error == SHADNET_ERR_INVALID_INPUT) {
-        p->on_result(p->user, (int32_t)ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT, 0, "");
+        p->on_lookup(p->user, (int32_t)ORBIS_NP_COMMUNITY_ERROR_INVALID_ARGUMENT, 0, "");
     } else if (error != SHADNET_ERR_NO_ERROR || len < 4) {
-        p->on_result(p->user, ORBIS_NP_COMMUNITY_ERROR_BAD_RESPONSE, 0, "");
+        p->on_lookup(p->user, ORBIS_NP_COMMUNITY_ERROR_BAD_RESPONSE, 0, "");
     } else {
         const uint32_t n = (uint32_t)body[0] | ((uint32_t)body[1] << 8) | ((uint32_t)body[2] << 16) |
                            ((uint32_t)body[3] << 24);
         if (len - 4 < n || !shadpb_decode(&shadpb_LookupOnlineIdReply_desc, body + 4, n, &reply, &arena)) {
-            p->on_result(p->user, ORBIS_NP_COMMUNITY_ERROR_BAD_RESPONSE, 0, "");
+            p->on_lookup(p->user, ORBIS_NP_COMMUNITY_ERROR_BAD_RESPONSE, 0, "");
         } else {
             char name[PS4_NP_HANDLER_NPID_CAP];
-            p->on_result(p->user, 0, reply.account_id, bytes_cstr(reply.npid, name, sizeof(name)));
+            p->on_lookup(p->user, 0, reply.account_id, bytes_cstr(reply.npid, name, sizeof(name)));
         }
     }
     shadpb_arena_free(&arena);
     free(p);
 }
 
-// NpHandler::OnAsyncReply: routes a reply by its command. Score, TUS, trophy, Matching2 and
-// authorization-code replies belong to libraries whose server requests are not connected to
-// shadNet yet; nothing waits for them.
+// NpHandler::OnAsyncReply: hands a reply to the request waiting for it. Requests of libraries
+// that are not connected to shadNet yet (TUS, trophies, Matching2) have nobody waiting.
 static void on_async_reply(void *user, uint16_t cmd, uint64_t pkt_id, uint8_t error, const uint8_t *body, size_t len) {
-    (void)user;
-    if (cmd == SHADNET_CMD_LOOKUP_ONLINE_ID) on_lookup_reply(pkt_id, error, body, len);
+    (void)cmd;
+    PendingRequest *p = take_pending(pkt_id);
+    if (!p) return; // flushed by a disconnect, or a stray reply
+    if (p->on_lookup) {
+        on_lookup_reply(p, error, body, len);
+    } else {
+        p->handler->on_reply(p->user, cb_user(user), error, body, len);
+        free(p);
+    }
+}
+
+// The request a library sends: a protobuf message after a prefix (desc set), or a raw payload.
+typedef struct OutgoingRequest {
+    uint16_t cmd;
+    const void *prefix;
+    size_t prefix_len;
+    const struct ShadPbMessageDesc *desc;
+    const void *msg;
+    const uint8_t *payload;
+    size_t len;
+} OutgoingRequest;
+
+int32_t ps4_np_handler_session_status(int32_t user_id) {
+    Session *s = session_acquire(user_id);
+    if (!s) return (int32_t)ORBIS_NP_ERROR_SIGNED_OUT;
+    const bool authenticated = shadnet_client_is_authenticated(s->client);
+    session_release(s);
+    return authenticated ? 0 : (int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+}
+
+static int32_t send_outgoing(int32_t user_id, const OutgoingRequest *o, const Ps4NpReplyHandler *handler,
+                             void *user) {
+    Session *s = session_acquire(user_id);
+    if (!s) return (int32_t)ORBIS_NP_ERROR_SIGNED_OUT;
+    if (!shadnet_client_is_authenticated(s->client)) {
+        session_release(s);
+        return (int32_t)ORBIS_NP_COMMUNITY_ERROR_NO_LOGIN;
+    }
+    PendingRequest *p = calloc(1, sizeof(*p));
+    int32_t r = (int32_t)ORBIS_NP_ERROR_OUT_OF_MEMORY;
+    if (p) {
+        p->user_id = user_id;
+        p->handler = handler;
+        p->user = user;
+        pthread_mutex_lock(&g_np.pending_mutex);
+        const uint64_t pkt_id =
+            o->desc ? shadnet_client_submit_proto(s->client, o->cmd, o->prefix, o->prefix_len, o->desc, o->msg)
+                    : shadnet_client_submit(s->client, o->cmd, o->payload, o->len);
+        const bool queued = add_pending(p, pkt_id);
+        pthread_mutex_unlock(&g_np.pending_mutex);
+        if (queued) {
+            r = 0;
+        } else {
+            free(p);
+        }
+    }
+    session_release(s);
+    return r;
+}
+
+int32_t ps4_np_handler_send_request(int32_t user_id, uint16_t cmd, const void *prefix, size_t prefix_len,
+                                    const struct ShadPbMessageDesc *desc, const void *msg,
+                                    const Ps4NpReplyHandler *handler, void *user) {
+    const OutgoingRequest o = {.cmd = cmd, .prefix = prefix, .prefix_len = prefix_len, .desc = desc, .msg = msg};
+    return send_outgoing(user_id, &o, handler, user);
+}
+
+int32_t ps4_np_handler_send_raw(int32_t user_id, uint16_t cmd, const uint8_t *payload, size_t len,
+                                const Ps4NpReplyHandler *handler, void *user) {
+    const OutgoingRequest o = {.cmd = cmd, .payload = payload, .len = len};
+    return send_outgoing(user_id, &o, handler, user);
+}
+
+//=============================================================================
+// NP communication ids (shadPS4 NpHandler::GetNpCommId, from npbind.dat)
+//=============================================================================
+
+#define MAX_COMM_IDS 32
+
+static struct {
+    pthread_once_t once;
+    int count; // as the file lists them; at most MAX_COMM_IDS are kept
+    char ids[MAX_COMM_IDS][PS4_NPBIND_COMM_ID_LEN];
+} g_comm = {.once = PTHREAD_ONCE_INIT};
+
+// shadPS4 reads /app0/sce_sys/npbind.dat when the title starts; a missing or unparsable file
+// leaves the title without communication ids.
+static void load_comm_ids(void) {
+    char path[1024];
+    if (ps4_vfs_resolve("/app0/sce_sys/npbind.dat", path, sizeof(path)) != 0) return;
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    uint8_t *data = NULL;
+    long size = -1;
+    if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
+    if (size > 0 && fseek(f, 0, SEEK_SET) == 0 && (data = malloc((size_t)size)) != NULL &&
+        fread(data, 1, (size_t)size, f) == (size_t)size) {
+        const int n = ps4_npbind_comm_ids(data, (size_t)size, g_comm.ids, MAX_COMM_IDS);
+        g_comm.count = n < 0 ? 0 : n;
+    }
+    free(data);
+    fclose(f);
+    if (g_comm.count == 0) fprintf(stderr, "[NpHandler] no NP communication ids in npbind.dat\n");
+}
+
+bool ps4_np_handler_np_comm_id(int32_t service_label, char out[PS4_NPBIND_COMM_ID_LEN]) {
+    pthread_once(&g_comm.once, load_comm_ids);
+    memset(out, 0, PS4_NPBIND_COMM_ID_LEN);
+    if (g_comm.count == 0) return false;
+    const int kept = g_comm.count < MAX_COMM_IDS ? g_comm.count : MAX_COMM_IDS;
+    // The service label picks the entry (shadPS4's guess); out of range falls back to the first.
+    const int idx = service_label >= 0 && service_label < g_comm.count && service_label < kept ? service_label : 0;
+    memcpy(out, g_comm.ids[idx], PS4_NPBIND_COMM_ID_LEN);
+    for (int i = 0; i < PS4_NPBIND_COMM_ID_LEN; i++) {
+        if (out[i] != '\0') return true; // IsValidNpCommId
+    }
+    return false;
 }
 
 void ps4_np_handler_resolve_online_id(int32_t user_id, const char *online_id, Ps4NpLookupResult on_result,
@@ -567,35 +694,38 @@ void ps4_np_handler_resolve_online_id(int32_t user_id, const char *online_id, Ps
         on_result(user, ORBIS_NP_COMMUNITY_SERVER_ERROR_NO_SUCH_USER_NPID, 0, "");
         return;
     }
-    PendingLookup *p = calloc(1, sizeof(*p));
-    if (!p) {
-        session_release(s);
-        on_result(user, ORBIS_NP_COMMUNITY_ERROR_BAD_RESPONSE, 0, "");
-        return;
+    PendingRequest *p = calloc(1, sizeof(*p));
+    bool queued = false;
+    if (p) {
+        p->user_id = user_id;
+        p->on_lookup = on_result;
+        p->user = user;
+        pthread_mutex_lock(&g_np.pending_mutex);
+        queued = add_pending(p, shadnet_client_lookup_online_id(s->client, online_id));
+        pthread_mutex_unlock(&g_np.pending_mutex);
     }
-    p->user_id = user_id;
-    p->on_result = on_result;
-    p->user = user;
-    // Registered before the request goes out, so its reply cannot arrive first.
-    pthread_mutex_lock(&g_np.lookup_mutex);
-    p->pkt_id = shadnet_client_lookup_online_id(s->client, online_id);
-    p->next = g_np.lookups;
-    g_np.lookups = p;
-    pthread_mutex_unlock(&g_np.lookup_mutex);
     session_release(s);
+    if (!queued) {
+        free(p);
+        on_result(user, ORBIS_NP_COMMUNITY_ERROR_BAD_RESPONSE, 0, "");
+    }
 }
 
-// NpHandler::FailPendingRequests.
+// NpHandler::FailPendingRequests: every request of the user that waits for a reply fails.
 static void fail_pending_requests(int32_t user_id, int32_t error) {
     for (;;) {
-        pthread_mutex_lock(&g_np.lookup_mutex);
-        PendingLookup **pp = &g_np.lookups;
+        pthread_mutex_lock(&g_np.pending_mutex);
+        PendingRequest **pp = &g_np.pending;
         while (*pp && (*pp)->user_id != user_id) pp = &(*pp)->next;
-        PendingLookup *p = *pp;
+        PendingRequest *p = *pp;
         if (p) *pp = p->next;
-        pthread_mutex_unlock(&g_np.lookup_mutex);
+        pthread_mutex_unlock(&g_np.pending_mutex);
         if (!p) return;
-        p->on_result(p->user, error, 0, "");
+        if (p->on_lookup) {
+            p->on_lookup(p->user, error, 0, "");
+        } else {
+            p->handler->on_fail(p->user, error);
+        }
         free(p);
     }
 }
@@ -865,6 +995,16 @@ void ps4_np_handler_initialize(const Ps4ShadNetConfig *config) {
         return;
     }
     start_worker();
+}
+
+static pthread_once_t g_start_once = PTHREAD_ONCE_INIT;
+
+static void start_once(void) {
+    ps4_np_handler_initialize(NULL);
+}
+
+void ps4_np_handler_start(void) {
+    pthread_once(&g_start_once, start_once);
 }
 
 void ps4_np_handler_shutdown(void) {

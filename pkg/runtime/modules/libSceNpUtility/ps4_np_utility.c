@@ -6,11 +6,11 @@
 // argument checks in its order, one operation per request, abort / delete semantics,
 // asynchronous completion through PollAsync / WaitAsync, and the timeouts SetTimeout records.
 //
-// sceNpLookupNpId resolves an online id through shadPS4's NpHandler, which needs a shadNet
-// session for the searching user. This library is not connected to the NP handler's shadNet sessions (libSceNp/ps4_np_handler.c) yet, so
-// the resolution completes with ORBIS_NP_ERROR_SIGNED_OUT, as NpHandler::ResolveOnlineId does
-// for a user without a session. For the same reason no user has an NP id here: a title context created from one belongs to user -1 (GetUserIdByOnlineId) and
-// the A variants record an empty NP id (GetNpId).
+// sceNpLookupNpId resolves an online id through the NP handler (libSceNp/ps4_np_handler.c,
+// shadPS4 NpHandler::ResolveOnlineId): a LookupOnlineId request on the searching user's shadNet
+// session, which completes the request from the client's reader thread. Without a session it
+// completes with ORBIS_NP_ERROR_SIGNED_OUT. A title context created from an NP id belongs to the
+// signed-in user with that online id, or to user -1 (NpHandler::GetUserIdByOnlineId).
 //
 // Word filtering is local in shadPS4 (no shadNet command yet): CensorComment accepts the
 // comment and SanitizeComment copies it unchanged; both complete with ORBIS_OK.
@@ -18,7 +18,9 @@
 // Every other function of the library is a stub in shadPS4 and is a stub here.
 #include "ps4_np_utility.h"
 #include "ps4_hle_stub.h"
+#include "ps4_np_handler.h"
 #include <pthread.h>
+#include <stdint.h>
 #include <string.h>
 
 // sceNpLookupSetTimeout / sceNpWordFilterSetTimeout values. No network request reads them on a
@@ -54,6 +56,7 @@ typedef struct {
     uint32_t waiters;
     bool has_timeouts;
     NpUtilityTimeouts timeouts;
+    OrbisNpId *np_id; // the NP id sceNpLookupNpId fills
 } NpUtilityRequest;
 
 // The live-request limit is MAX_REQUEST_NUM; the extra slots hold deleted requests that still
@@ -94,11 +97,10 @@ static NpUtilityPool g_word_filter = {
     .max_req = NP_WORD_FILTER_MAX_REQUEST_NUM,
 };
 
-// NpHandler::GetUserIdByOnlineId: the user whose NP id carries the online id. No user has one
-// without a sign-in.
+// NpHandler::GetUserIdByOnlineId: the signed-in user whose NP id carries the online id, or -1.
 static int32_t np_user_id_by_online_id(const void *online_id) {
-    (void)online_id;
-    return -1;
+    ps4_np_handler_start();
+    return ps4_np_handler_user_by_online_id(online_id);
 }
 
 // Lock held.
@@ -125,6 +127,16 @@ static void pool_req_set_result(NpUtilityPool *p, NpUtilityRequest *r, int32_t r
     r->has_result = true;
     r->result = result;
     pthread_cond_broadcast(&p->done);
+}
+
+// Lock held. A request by id, deleted or not: a completion still reaches a deleted request
+// that has waiters (ids are never reused).
+static NpUtilityRequest *pool_req_find_any(NpUtilityPool *p, int32_t id) {
+    if (id == 0) return NULL;
+    for (int i = 0; i < NP_UTILITY_REQUEST_SLOTS; i++) {
+        if (p->req[i].id == id) return &p->req[i];
+    }
+    return NULL;
 }
 
 // Lock held. Removes a request from the id space; its slot is reused once no thread waits on it.
@@ -320,21 +332,57 @@ int32_t ps4_np_lookup_abort_request(int32_t req_id) {
     return pool_abort_request(&g_lookup, req_id);
 }
 
+// The ResolveOnlineId result for request (intptr_t)user: fills its NP id with the canonical
+// online id on success (shadPS4 SetNpId) and completes it. shadPS4 keeps the request alive
+// through its shared_ptr and writes the NP id even after sceNpLookupDeleteRequest; here a
+// request that was deleted with no thread waiting on it is gone, and nothing is written.
+static void lookup_np_id_done(void *user, int32_t result, uint64_t account_id, const char *canonical_online_id) {
+    (void)account_id;
+    NpUtilityPool *p = &g_lookup;
+    pthread_mutex_lock(&p->mutex);
+    NpUtilityRequest *q = pool_req_find_any(p, (int32_t)(intptr_t)user);
+    if (q) {
+        if (result == 0) {
+            memset(q->np_id, 0, sizeof(*q->np_id));
+            memcpy(q->np_id->handle.data, canonical_online_id,
+                   strnlen(canonical_online_id, ORBIS_NP_ONLINEID_MAX_LENGTH));
+        }
+        pool_req_set_result(p, q, result);
+    }
+    pthread_mutex_unlock(&p->mutex);
+}
+
 int32_t ps4_np_lookup_np_id(int32_t req_id, const void *online_id, void *np_id, const void *option) {
     if (option) return NP_COMMUNITY_ERROR_INVALID_ARGUMENT;
     if (!online_id || !np_id) return NP_COMMUNITY_ERROR_INSUFFICIENT_ARGUMENT;
     NpUtilityPool *p = &g_lookup;
     pthread_mutex_lock(&p->mutex);
     NpUtilityRequest *q = pool_req_find(p, req_id);
-    int32_t r;
-    if (!q) {
-        r = NP_COMMUNITY_ERROR_INVALID_ID;
-    } else if ((r = pool_req_start(q)) == 0) {
-        // NpHandler::ResolveOnlineId for the title context's user, who has no shadNet session:
-        // the request completes signed out and *np_id is not written.
-        pool_req_set_result(p, q, NP_ERROR_SIGNED_OUT);
-        r = q->is_async ? 0 : pool_req_wait(p, q);
+    int32_t r = NP_COMMUNITY_ERROR_INVALID_ID;
+    int32_t user_id = -1;
+    bool is_async = false;
+    if (q && (r = pool_req_start(q)) == 0) {
+        const NpUtilityTitleCtx *c = pool_ctx_find(p, q->title_ctx_id);
+        if (c) user_id = c->user_id;
+        is_async = q->is_async;
+        q->np_id = np_id;
     }
+    pthread_mutex_unlock(&p->mutex);
+    if (r != 0) return r;
+
+    char target[ORBIS_NP_ONLINEID_MAX_LENGTH + 1];
+    const OrbisNpOnlineId *id = online_id;
+    const size_t n = strnlen(id->data, ORBIS_NP_ONLINEID_MAX_LENGTH);
+    memcpy(target, id->data, n);
+    target[n] = '\0';
+    // The result may arrive on this thread (no session) or on the client's reader thread.
+    ps4_np_handler_start();
+    ps4_np_handler_resolve_online_id(user_id, target, lookup_np_id_done, (void *)(intptr_t)req_id);
+    if (is_async) return 0;
+
+    pthread_mutex_lock(&p->mutex);
+    q = pool_req_find_any(p, req_id);
+    r = q ? pool_req_wait(p, q) : NP_COMMUNITY_ERROR_ABORTED;
     pthread_mutex_unlock(&p->mutex);
     return r;
 }

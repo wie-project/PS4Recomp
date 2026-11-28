@@ -95,9 +95,6 @@ static bool user_exists(int32_t user_id) {
 // ---------------------------------------------------------------------------------------------
 // shadNet (shadPS4 RegisterLib: g_shadnet_enabled, the NpHandler state bridge and Initialize)
 
-static pthread_once_t g_np_once = PTHREAD_ONCE_INIT;
-static bool g_shadnet_enabled;
-
 static void queue_state_event(int32_t user_id, uint32_t state);
 
 static void on_handler_state(void *user, int32_t user_id, int32_t state) {
@@ -105,18 +102,17 @@ static void on_handler_state(void *user, int32_t user_id, int32_t state) {
     queue_state_event(user_id, (uint32_t)state);
 }
 
-static void np_manager_init(void) {
-    // Registered before Initialize, so the initial SignedIn events are queued.
+// shadPS4 registers the state bridge when the library loads, before NpHandler::Initialize, so
+// the initial SignedIn events are queued whichever NP library starts the handler.
+__attribute__((constructor)) static void np_manager_register_state_bridge(void) {
     ps4_np_handler_register_state_callback(on_handler_state, NULL);
-    ps4_np_handler_initialize(NULL);
-    g_shadnet_enabled = ps4_np_handler_config()->enabled;
 }
 
-// g_shadnet_enabled: shadNet is configured on (captured before the server probe, as shadPS4
-// reads the setting before NpHandler::Initialize).
+// g_shadnet_enabled: shadNet is configured on (the configuration value, which the server probe
+// does not change, as shadPS4 reads the setting before NpHandler::Initialize).
 static bool shadnet_enabled(void) {
-    pthread_once(&g_np_once, np_manager_init);
-    return g_shadnet_enabled;
+    ps4_np_handler_start();
+    return ps4_np_handler_config()->enabled;
 }
 
 // g_shadnet_enabled && NpHandler::IsPsnSignedIn(user_id).

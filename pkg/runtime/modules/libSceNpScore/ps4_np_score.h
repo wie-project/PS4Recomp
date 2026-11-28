@@ -21,6 +21,18 @@
 #define NP_COMMUNITY_ERROR_INVALID_ID            ((int32_t)0x8055070E)
 #define NP_COMMUNITY_ERROR_INVALID_ALIGNMENT     ((int32_t)0x80550714)
 #define NP_COMMUNITY_ERROR_TOO_MANY_NPID         ((int32_t)0x80550719)
+#define NP_COMMUNITY_ERROR_BAD_RESPONSE          ((int32_t)0x80550708)
+#define NP_COMMUNITY_SERVER_ERROR_FORBIDDEN                          ((int32_t)0x80550806)
+#define NP_COMMUNITY_SERVER_ERROR_INTERNAL_SERVER_ERROR              ((int32_t)0x80550807)
+#define NP_COMMUNITY_SERVER_ERROR_GAME_RANKING_NOT_FOUND             ((int32_t)0x80550812)
+#define NP_COMMUNITY_SERVER_ERROR_RANKING_STORE_NOT_FOUND            ((int32_t)0x80550814)
+#define NP_COMMUNITY_SERVER_ERROR_NOT_BEST_SCORE                     ((int32_t)0x80550815)
+#define NP_COMMUNITY_SERVER_ERROR_RANKING_BOARD_MASTER_NOT_FOUND     ((int32_t)0x80550817)
+#define NP_COMMUNITY_SERVER_ERROR_RANKING_GAME_DATA_MASTER_NOT_FOUND ((int32_t)0x80550818)
+#define NP_COMMUNITY_SERVER_ERROR_TOO_LARGE_DATA                     ((int32_t)0x8055081A)
+#define NP_COMMUNITY_SERVER_ERROR_INVALID_SCORE                      ((int32_t)0x80550823)
+#define NP_COMMUNITY_SERVER_ERROR_GAME_DATA_ALREADY_EXISTS           ((int32_t)0x8055082C)
+#define NP_COMMUNITY_SERVER_ERROR_CONDITIONS_NOT_SATISFIED           ((int32_t)0x80550873)
 
 // Limits (shadPS4 np_score.h).
 #define NP_SCORE_COMMENT_MAXLEN 63
@@ -60,8 +72,8 @@ typedef struct NpScoreFriendRankingOpt {
 } NpScoreFriendRankingOpt;
 _Static_assert(sizeof(NpScoreFriendRankingOpt) == NP_SCORE_FRIEND_OPT_SIZE, "OrbisNpScoreGetFriendRankingOptParam");
 
-// The output arrays of the ranking queries, as host pointers (NULL for a guest NULL), with the
-// sizes the caller declared.
+// The outputs of the ranking queries, as host pointers (NULL for a guest NULL): the arrays with
+// the sizes the caller declared, and lastSortDate (an OrbisRtcTick) and totalRecord.
 typedef struct NpScoreRankOut {
     void *rank;
     uint64_t rank_size;
@@ -70,6 +82,8 @@ typedef struct NpScoreRankOut {
     void *info;
     uint64_t info_size;
     uint64_t array_num;
+    uint64_t *last_sort_date;
+    uint32_t *total_record;
 } NpScoreRankOut;
 
 // Host side of the entry points. Pointer arguments are host pointers (NULL for a guest NULL);

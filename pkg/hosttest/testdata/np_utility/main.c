@@ -4,15 +4,29 @@
 // NpWordFilter title contexts and requests (id bases, limits, argument checks in shadPS4's
 // order, one operation per request, abort and delete), the signed-out completion of
 // sceNpLookupNpId, the local completion of word filtering, SetTimeout validation, WaitAsync
-// blocking until another thread completes the request, and the shims' guest pointer handling.
+// blocking until another thread completes the request, and the shims' guest pointer handling;
+// and (online) sceNpLookupNpId resolved by a local shadNet server through the NP handler.
 
 #include "ps4_np_utility.h"
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "../host_guest_mem.h"
+#include "../shadnet_fake_server.h"
+#include "ps4_np_handler.h"
+#include "ps4_user_service.h"
+
+// ps4_sfo_find_and_load (the title id and name the handler logs in with): no application.
+const char *ps4_vfs_get_app_root(void) { return NULL; }
+int ps4_vfs_resolve(const char *guest_path, char *host_path, size_t host_path_sz) {
+    (void)guest_path;
+    (void)host_path;
+    (void)host_path_sz;
+    return -1;
+}
 
 // Runtime symbols the sources link against.
 recomp_fn_t **g_dispatch_l1[DISPATCH_LEVEL_SIZE];
@@ -345,8 +359,96 @@ static int case_shims(void) {
     return 0;
 }
 
+// Writes a shadnet.json for the account Player1 on the local server; PS4_SHADNET_CONFIG names it.
+static int write_shadnet_config(char *path, uint16_t port) {
+    const int fd = mkstemp(path);
+    if (fd < 0) return 1;
+    char json[256];
+    const int n = snprintf(json, sizeof(json),
+                           "{\"enabled\": true, \"server\": \"127.0.0.1:%u\", \"npid\": \"Player1\", "
+                           "\"password\": \"pw\"}",
+                           (unsigned)port);
+    const bool ok = write(fd, json, (size_t)n) == n;
+    close(fd);
+    setenv("PS4_SHADNET_CONFIG", path, 1);
+    return ok ? 0 : 1;
+}
+
+static void online_id(OrbisNpOnlineId *id, const char *name) {
+    memset(id, 0, sizeof(*id));
+    memcpy(id->data, name, strlen(name));
+}
+
+// Signed in as Player1 to a local shadNet server that knows the online id Friend.
+static int case_online(void) {
+    FakeShadNet server = {.account_id = 0x1234, .lookup_npid = "Friend", .lookup_account = 0x5678};
+    CHECK(fake_shadnet_start(&server) == 0);
+    char path[] = "/tmp/ps4recomp_np_utility_XXXXXX";
+    CHECK(write_shadnet_config(path, server.port) == 0);
+
+    // A title context from the signed-in user's NP id belongs to that user; creating it signs
+    // the user in (shadPS4 does it when the libraries load).
+    OrbisNpId self;
+    memset(&self, 0, sizeof(self));
+    memcpy(self.handle.data, "Player1", 7);
+    const int32_t ctx = ps4_np_lookup_create_title_ctx(&self);
+    CHECK(ctx > 0 && server.sessions == 1 && strcmp(server.login_npid, "Player1") == 0);
+
+    // A synchronous lookup returns the server's spelling of the online id in a cleared NP id.
+    OrbisNpOnlineId target;
+    OrbisNpId found;
+    online_id(&target, "friend");
+    memset(&found, 0xEE, sizeof(found));
+    const int32_t sync = ps4_np_lookup_create_request(ctx, false);
+    CHECK(ps4_np_lookup_np_id(sync, &target, &found, NULL) == 0);
+    CHECK(strcmp(found.handle.data, "Friend") == 0 && found.handle.term == 0 && found.opt[0] == 0 &&
+          found.reserved[7] == 0);
+    int32_t result = -1;
+    CHECK(ps4_np_lookup_poll_async(sync, &result) == 0 && result == 0);
+
+    // An unknown online id: NO_SUCH_USER_NPID, the NP id untouched.
+    online_id(&target, "Nobody");
+    memset(&found, 0xEE, sizeof(found));
+    const int32_t missing = ps4_np_lookup_create_request(ctx, false);
+    CHECK(ps4_np_lookup_np_id(missing, &target, &found, NULL) == ORBIS_NP_COMMUNITY_SERVER_ERROR_NO_SUCH_USER_NPID);
+    CHECK(found.handle.data[0] == (char)0xEE);
+    // An empty online id fails without a server request.
+    online_id(&target, "");
+    const int32_t empty = ps4_np_lookup_create_request(ctx, false);
+    CHECK(ps4_np_lookup_np_id(empty, &target, &found, NULL) == ORBIS_NP_COMMUNITY_SERVER_ERROR_NO_SUCH_USER_NPID);
+
+    // An asynchronous lookup from the A variant completes on the client's reader thread.
+    const int32_t ctx_a = ps4_np_lookup_create_title_ctx_a(ORBIS_USER_SERVICE_INITIAL_USER_ID);
+    const int32_t async = ps4_np_lookup_create_request(ctx_a, true);
+    online_id(&target, "FRIEND");
+    memset(&found, 0, sizeof(found));
+    CHECK(ps4_np_lookup_np_id(async, &target, &found, NULL) == 0);
+    result = -1;
+    CHECK(ps4_np_lookup_wait_async(async, &result) == 0 && result == 0);
+    CHECK(strcmp(found.handle.data, "Friend") == 0);
+
+    // A title context of a user without a session (an NP id nobody signed in with) is signed out.
+    OrbisNpId stranger;
+    memset(&stranger, 0, sizeof(stranger));
+    memcpy(stranger.handle.data, "Stranger", 8);
+    const int32_t other = ps4_np_lookup_create_title_ctx(&stranger);
+    const int32_t other_req = ps4_np_lookup_create_request(other, false);
+    online_id(&target, "Friend");
+    CHECK(ps4_np_lookup_np_id(other_req, &target, &found, NULL) == NP_ERROR_SIGNED_OUT);
+
+    ps4_np_handler_shutdown();
+    fake_shadnet_stop(&server);
+    unlink(path);
+    CHECK(server.failures == 0);
+    printf("PASS online\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
+    if (strcmp(argv[1], "online") == 0) return case_online();
+    // The other cases run with shadNet off.
+    setenv("PS4_SHADNET_CONFIG", "/nonexistent/shadnet.json", 1);
     if (strcmp(argv[1], "lookup") == 0) return case_lookup();
     if (strcmp(argv[1], "timeouts") == 0) return case_timeouts();
     if (strcmp(argv[1], "word-filter") == 0) return case_word_filter();

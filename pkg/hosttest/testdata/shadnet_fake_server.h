@@ -2,8 +2,10 @@
 
 // A local server speaking shadPS4's shadNet wire protocol, for host tests of the NP libraries:
 // it answers the NP handler's ServerInfo probe and one login session (Login, GetToken,
-// GetServerFeatures, SetClientVersion), then LookupOnlineId requests, until the client hangs
-// up. Include it in one test program; it needs shadnet_codec.c and shadnet_pb.c.
+// GetServerFeatures, SetClientVersion), then LookupOnlineId, GetAuthorizationCode and score
+// requests, until the client hangs up. Its score service keeps one board entry: the logged-in
+// account's best score with its comment, game info and game data. Include it in one test program; it needs shadnet_codec.c and
+// shadnet_pb.c.
 
 #ifndef SHADNET_FAKE_SERVER_H
 #define SHADNET_FAKE_SERVER_H
@@ -23,10 +25,27 @@ typedef struct FakeShadNet {
     uint64_t account_id;     // LoginReply user_id
     const char *lookup_npid; // the only online id LookupOnlineId finds
     uint64_t lookup_account;
+    // GetAuthorizationCode: replies with auth_code, or auth_error (an ErrorType) when set.
+    const char *auth_code;
+    uint8_t auth_error;
+    // While set, the server holds its next GetAuthorizationCode or score reply back.
+    volatile bool hold_replies;
     pthread_t thread;
     volatile bool stopping;
     // Filled by the server.
     char login_npid[32];
+    char auth_client_id[160]; // of the last GetAuthorizationCode request
+    char auth_scope[64];
+    // Score service.
+    char score_comm_id[13]; // of the last score request
+    bool has_score;
+    int64_t best_score;
+    int32_t score_pc_id;
+    char score_comment[64];
+    uint8_t score_info[200];
+    size_t score_info_len;
+    uint8_t game_data[256];
+    size_t game_data_len;
     int sessions; // login sessions served
     int failures;
 } FakeShadNet;
@@ -88,6 +107,184 @@ static bool fake_decode(const uint8_t *payload, size_t len, const ShadPbMessageD
     return len == 4 + (size_t)n && shadpb_decode(desc, payload + 4, n, msg, a);
 }
 
+static void fake_reply_raw(int fd, uint16_t cmd, uint64_t id, uint8_t err, const uint8_t *body, size_t len) {
+    uint8_t buf[512];
+    buf[0] = err;
+    memcpy(buf + 1, body, len);
+    fake_send(fd, SHADNET_PACKET_REPLY, cmd, id, buf, 1 + len);
+}
+
+// A score request: the 12-byte communication id (recorded), then a u32-prefixed message;
+// *tail gets what follows it.
+static bool fake_score_decode(FakeShadNet *s, const uint8_t *payload, size_t len, const ShadPbMessageDesc *desc,
+                              void *msg, ShadPbArena *a, const uint8_t **tail, size_t *tail_len) {
+    if (len < 16) return false;
+    memcpy(s->score_comm_id, payload, 12);
+    s->score_comm_id[12] = '\0';
+    const uint32_t n = (uint32_t)payload[12] | ((uint32_t)payload[13] << 8) | ((uint32_t)payload[14] << 16) |
+                       ((uint32_t)payload[15] << 24);
+    if (16 + (size_t)n > len || !shadpb_decode(desc, payload + 16, n, msg, a)) return false;
+    if (tail) {
+        *tail = payload + 16 + n;
+        *tail_len = len - 16 - n;
+    }
+    return true;
+}
+
+// The board's entry for a GetScoreResponse slot, or an empty one when entry is false.
+static ShadPb_ScoreRankData fake_rank(const FakeShadNet *s, bool entry) {
+    ShadPb_ScoreRankData r = {0};
+    if (entry) {
+        r.npId = shadpb_str(s->login_npid);
+        r.pcId = s->score_pc_id;
+        r.rank = 1;
+        r.score = s->best_score;
+        r.hasGameData = s->game_data_len > 0;
+        r.recordDate = 1234;
+        r.accountId = (int64_t)s->account_id;
+    }
+    return r;
+}
+
+// Answers a ranking with slots[i] (true: the board's entry) for each requested slot.
+static void fake_ranking_reply(FakeShadNet *s, int fd, uint16_t cmd, uint64_t id, const bool *slots, uint32_t n,
+                               bool with_comment, bool with_info) {
+    ShadPb_ScoreRankData ranks[8];
+    ShadPbBytes comments[8];
+    ShadPb_ScoreInfo infos[8];
+    ShadPb_GetScoreResponse resp = {.rankArray = ranks, .rankArray_count = n, .lastSortDate = 5678, .totalRecord = 1};
+    for (uint32_t i = 0; i < n; i++) {
+        ranks[i] = fake_rank(s, slots[i]);
+        comments[i] = slots[i] ? shadpb_str(s->score_comment) : shadpb_str("");
+        infos[i].data = slots[i] ? shadpb_bytes(s->score_info, s->score_info_len) : shadpb_bytes(NULL, 0);
+    }
+    if (with_comment) {
+        resp.commentArray = comments;
+        resp.commentArray_count = n;
+    }
+    if (with_info) {
+        resp.infoArray = infos;
+        resp.infoArray_count = n;
+    }
+    fake_reply(fd, cmd, id, 0, &shadpb_GetScoreResponse_desc, &resp);
+}
+
+// Score commands; false when the request is malformed.
+static bool fake_score_request(FakeShadNet *s, int fd, uint16_t cmd, uint64_t id, const uint8_t *payload, size_t len,
+                               ShadPbArena *a) {
+    const uint8_t *tail;
+    size_t tail_len;
+    while (s->hold_replies) usleep(1000);
+    switch (cmd) {
+    case SHADNET_CMD_GET_BOARD_INFOS: {
+        if (len != 16) return false;
+        memcpy(s->score_comm_id, payload, 12);
+        s->score_comm_id[12] = '\0';
+        const uint32_t board = (uint32_t)payload[12] | ((uint32_t)payload[13] << 8);
+        if (board == 99) {
+            fake_reply(fd, cmd, id, SHADNET_ERR_NOT_FOUND, NULL, NULL);
+        } else {
+            ShadPb_BoardInfo bi = {.rankLimit = 100, .updateMode = 1, .sortMode = 0, .uploadNumLimit = 10,
+                                   .uploadSizeLimit = 1024};
+            fake_reply(fd, cmd, id, 0, &shadpb_BoardInfo_desc, &bi);
+        }
+        return true;
+    }
+    case SHADNET_CMD_RECORD_SCORE: {
+        ShadPb_RecordScoreRequest r;
+        if (!fake_score_decode(s, payload, len, &shadpb_RecordScoreRequest_desc, &r, a, NULL, NULL)) return false;
+        if (s->has_score && r.score <= s->best_score) {
+            fake_reply(fd, cmd, id, SHADNET_ERR_SCORE_NOT_BEST, NULL, NULL);
+            return true;
+        }
+        s->has_score = true;
+        s->best_score = r.score;
+        s->score_pc_id = r.pcId;
+        snprintf(s->score_comment, sizeof(s->score_comment), "%.*s", (int)r.comment.len, (const char *)r.comment.data);
+        s->score_info_len = r.data.len < sizeof(s->score_info) ? r.data.len : sizeof(s->score_info);
+        memcpy(s->score_info, r.data.data, s->score_info_len);
+        const uint8_t rank[4] = {1, 0, 0, 0};
+        fake_reply_raw(fd, cmd, id, 0, rank, sizeof(rank));
+        return true;
+    }
+    case SHADNET_CMD_RECORD_SCORE_DATA: {
+        ShadPb_RecordScoreGameDataRequest r;
+        if (!fake_score_decode(s, payload, len, &shadpb_RecordScoreGameDataRequest_desc, &r, a, &tail, &tail_len) ||
+            tail_len > sizeof(s->game_data)) {
+            return false;
+        }
+        memcpy(s->game_data, tail, tail_len);
+        s->game_data_len = tail_len;
+        fake_reply_raw(fd, cmd, id, 0, NULL, 0);
+        return true;
+    }
+    case SHADNET_CMD_GET_SCORE_DATA:
+    case SHADNET_CMD_GET_SCORE_GAME_DATA_BY_ACC_ID: {
+        bool mine;
+        if (cmd == SHADNET_CMD_GET_SCORE_DATA) {
+            ShadPb_GetScoreGameDataRequest r;
+            if (!fake_score_decode(s, payload, len, &shadpb_GetScoreGameDataRequest_desc, &r, a, NULL, NULL)) return false;
+            mine = r.npId.len == strlen(s->login_npid) && memcmp(r.npId.data, s->login_npid, r.npId.len) == 0;
+        } else {
+            ShadPb_GetScoreGameDataByAccountIdRequest r;
+            if (!fake_score_decode(s, payload, len, &shadpb_GetScoreGameDataByAccountIdRequest_desc, &r, a, NULL, NULL)) {
+                return false;
+            }
+            mine = (uint64_t)r.accountId == s->account_id;
+        }
+        if (!mine || s->game_data_len == 0) {
+            fake_reply(fd, cmd, id, SHADNET_ERR_NOT_FOUND, NULL, NULL);
+        } else {
+            uint8_t body[4 + sizeof(s->game_data)];
+            fake_put32(body, (uint32_t)s->game_data_len);
+            memcpy(body + 4, s->game_data, s->game_data_len);
+            fake_reply_raw(fd, cmd, id, 0, body, 4 + s->game_data_len);
+        }
+        return true;
+    }
+    case SHADNET_CMD_GET_SCORE_RANGE: {
+        ShadPb_GetScoreRangeRequest r;
+        if (!fake_score_decode(s, payload, len, &shadpb_GetScoreRangeRequest_desc, &r, a, NULL, NULL)) return false;
+        const bool slot = s->has_score && r.startRank == 1;
+        fake_ranking_reply(s, fd, cmd, id, &slot, slot ? 1 : 0, r.withComment, r.withGameInfo);
+        return true;
+    }
+    case SHADNET_CMD_GET_SCORE_FRIENDS: {
+        ShadPb_GetScoreFriendsRequest r;
+        if (!fake_score_decode(s, payload, len, &shadpb_GetScoreFriendsRequest_desc, &r, a, NULL, NULL)) return false;
+        const bool slot = s->has_score && r.includeSelf;
+        fake_ranking_reply(s, fd, cmd, id, &slot, slot ? 1 : 0, r.withComment, r.withGameInfo);
+        return true;
+    }
+    case SHADNET_CMD_GET_SCORE_NPID: {
+        ShadPb_GetScoreNpIdRequest r;
+        bool slots[8];
+        if (!fake_score_decode(s, payload, len, &shadpb_GetScoreNpIdRequest_desc, &r, a, NULL, NULL) ||
+            r.npids_count > 8) {
+            return false;
+        }
+        for (uint32_t i = 0; i < r.npids_count; i++) {
+            slots[i] = s->has_score && r.npids[i].npid.len == strlen(s->login_npid) &&
+                       memcmp(r.npids[i].npid.data, s->login_npid, r.npids[i].npid.len) == 0;
+        }
+        fake_ranking_reply(s, fd, cmd, id, slots, r.npids_count, r.withComment, r.withGameInfo);
+        return true;
+    }
+    case SHADNET_CMD_GET_SCORE_ACCOUNT_ID: {
+        ShadPb_GetScoreAccountIdRequest r;
+        bool slots[8];
+        if (!fake_score_decode(s, payload, len, &shadpb_GetScoreAccountIdRequest_desc, &r, a, NULL, NULL) ||
+            r.ids_count > 8) {
+            return false;
+        }
+        for (uint32_t i = 0; i < r.ids_count; i++) slots[i] = s->has_score && (uint64_t)r.ids[i].accountId == s->account_id;
+        fake_ranking_reply(s, fd, cmd, id, slots, r.ids_count, r.withComment, r.withGameInfo);
+        return true;
+    }
+    default: return true; // not a score command
+    }
+}
+
 static void fake_session(FakeShadNet *s, int fd) {
     uint8_t payload[1024];
     size_t len;
@@ -125,6 +322,24 @@ static void fake_session(FakeShadNet *s, int fd) {
             } else {
                 fake_reply(fd, cmd, id, SHADNET_ERR_NOT_FOUND, NULL, NULL);
             }
+        } else if (cmd == SHADNET_CMD_GET_AUTHORIZATION_CODE) {
+            ShadPb_GetAuthorizationCodeRequest req;
+            if (!fake_decode(payload, len, &shadpb_GetAuthorizationCodeRequest_desc, &req, &arena)) {
+                s->failures++;
+                continue;
+            }
+            snprintf(s->auth_client_id, sizeof(s->auth_client_id), "%.*s", (int)req.client_id.len,
+                     (const char *)req.client_id.data);
+            snprintf(s->auth_scope, sizeof(s->auth_scope), "%.*s", (int)req.scope.len, (const char *)req.scope.data);
+            while (s->hold_replies) usleep(1000);
+            if (s->auth_error) {
+                fake_reply(fd, cmd, id, s->auth_error, NULL, NULL);
+            } else {
+                ShadPb_GetAuthorizationCodeReply r = {.code = shadpb_str(s->auth_code), .expires_in = 300};
+                fake_reply(fd, cmd, id, 0, &shadpb_GetAuthorizationCodeReply_desc, &r);
+            }
+        } else if (cmd >= SHADNET_CMD_GET_BOARD_INFOS && cmd <= SHADNET_CMD_GET_SCORE_GAME_DATA_BY_ACC_ID) {
+            if (!fake_score_request(s, fd, cmd, id, payload, len, &arena)) s->failures++;
         }
         // SetClientVersion and other requests get no reply.
     }
@@ -150,6 +365,7 @@ static void *fake_main(void *arg) {
 
 static int fake_shadnet_start(FakeShadNet *s) {
     s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (s->listen_fd < 0) return 1;
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
     if (bind(s->listen_fd, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(s->listen_fd, 4) != 0) return 1;
     socklen_t len = sizeof(a);
@@ -163,9 +379,9 @@ static void fake_shadnet_stop(FakeShadNet *s) {
     s->stopping = true;
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(s->port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
-    connect(fd, (struct sockaddr *)&a, sizeof(a));
+    if (fd >= 0) connect(fd, (struct sockaddr *)&a, sizeof(a));
     pthread_join(s->thread, NULL);
-    close(fd);
+    if (fd >= 0) close(fd);
     close(s->listen_fd);
 }
 

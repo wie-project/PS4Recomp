@@ -336,6 +336,7 @@ static void *server_main(void *arg) {
 
 static int server_start(Server *s, pthread_t *t) {
     s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (s->listen_fd < 0) return 1;
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
     if (bind(s->listen_fd, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(s->listen_fd, 1) != 0) return 1;
     socklen_t len = sizeof(a);
