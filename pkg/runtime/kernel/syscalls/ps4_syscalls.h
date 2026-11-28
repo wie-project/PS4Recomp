@@ -9,12 +9,10 @@
 extern "C" {
 #endif
 
-void shim_sceKernelUsleep(GuestContext *ctx);
 void shim_write(GuestContext *ctx);
 void shim_writev(GuestContext *ctx);
 void shim_exit(GuestContext *ctx);
 void shim_error(GuestContext *ctx);
-void shim_nanosleep(GuestContext *ctx);
 void shim_sched_yield(GuestContext *ctx);
 void shim_mmap(GuestContext *ctx);
 void shim_munmap(GuestContext *ctx);
@@ -60,7 +58,6 @@ void shim_mlock(GuestContext *ctx);
 void shim_getdents(GuestContext *ctx);
 void shim_getdirentries(GuestContext *ctx);
 void shim_sceKernelGetdirentries(GuestContext *ctx);
-void shim_sceKernelSleep(GuestContext *ctx);
 void shim_sceKernelCheckReachability(GuestContext *ctx);
 void shim_sceKernelMmap(GuestContext *ctx);
 void shim_sceKernelStopUnloadModule(GuestContext *ctx);
@@ -72,8 +69,6 @@ void shim_sigprocmask(GuestContext *ctx);
 void shim_raise(GuestContext *ctx);
 void shim_syscall(GuestContext *ctx);
 void shim___stack_chk_fail(GuestContext *ctx);
-void shim_clock_gettime(GuestContext *ctx);
-void shim_gettimeofday(GuestContext *ctx);
 void shim_getrusage(GuestContext *ctx);
 void shim_getrlimit(GuestContext *ctx);
 void shim_cpuset_getaffinity(GuestContext *ctx);

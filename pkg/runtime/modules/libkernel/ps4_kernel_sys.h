@@ -2,17 +2,13 @@
 #define PS4_KERNEL_SYS_H
 
 #include "recomp_runtime.h"
+#include "ps4_kernel_time.h"
 #include <stdint.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef struct OrbisKernelTimeval {
-    int64_t tv_sec;
-    int64_t tv_usec;
-} OrbisKernelTimeval;
 
 typedef struct OrbisModuleInfoForUnwind {
     uint64_t st_size;
@@ -26,11 +22,6 @@ typedef struct OrbisModuleInfoForUnwind {
 
 // The unwind information of the module containing addr (info is a host pointer).
 int32_t sceKernelGetModuleInfoForUnwind(uint64_t addr, int32_t flags, OrbisModuleInfoForUnwind *info);
-
-typedef struct OrbisKernelTimezone {
-    int32_t tz_minuteswest;
-    int32_t tz_dsttime;
-} OrbisKernelTimezone;
 
 // The system software version the runtime reports (sceKernelGetSystemSwVersion, and the
 // libhttp version in the libSceHttp User-Agent): 9.00, BCD-coded as the console does.
@@ -53,17 +44,6 @@ typedef struct OrbisPthreadAttr {
     // Padding or reserved fields to match typical SDK sizing if necessary
     char     reserved[32];
 } OrbisPthreadAttr;
-
-// High-resolution process timers
-// Microseconds since the process started.
-uint64_t sceKernelGetProcessTime(void);
-uint64_t sceKernelGetProcessTimeCounter(void);
-uint64_t sceKernelGetProcessTimeCounterFrequency(void);
-uint64_t sceKernelGetProcessTime(void);
-uint64_t sceKernelGetTscFrequency(void);
-uint64_t sceKernelReadTsc(void);
-int32_t sceKernelGettimeofday(OrbisKernelTimeval *tv);
-int32_t sceKernelGettimezone(OrbisKernelTimezone *tz);
 
 // CPU & System Configuration
 int32_t sceKernelGetCurrentCpu(void);
@@ -91,26 +71,16 @@ int32_t sceKernelGetPageTableStats(void *stats);
 int32_t sceKernelSetPrtAperture(int32_t id,uint64_t address, size_t size);
 int32_t sceKernelFutimes(const char *path, const struct timeval tv[2]);
 
-// Guest execution shims
-void shim_sceKernelGetProcessTimeCounter(GuestContext *ctx);
-void shim_sceKernelGetProcessTimeCounterFrequency(GuestContext *ctx);
-void shim_sceKernelGetProcessTime(GuestContext *ctx);
-void shim_sceKernelGetTscFrequency(GuestContext *ctx);
-void shim_sceKernelReadTsc(GuestContext *ctx);
-void shim_sceKernelGettimeofday(GuestContext *ctx);
-void shim_sceKernelGettimezone(GuestContext *ctx);
+// Guest execution shims (the time functions are in ps4_kernel_time.h)
 void shim_sceKernelGetCurrentCpu(GuestContext *ctx);
 void shim_sceKernelGetCpumode(GuestContext *ctx);
 void shim_sceKernelIsNeoMode(GuestContext *ctx);
 void shim_sceKernelHasNeoMode(GuestContext *ctx);
 void shim_sceKernelIsAuthenticNeo(GuestContext *ctx);
 void shim_sceKernelGetSystemSwVersion(GuestContext *ctx);
-void shim_sceKernelClockGettime(GuestContext *ctx);
 void shim_sceKernelUuidCreate(GuestContext *ctx);
 void shim_sceKernelSetGPO(GuestContext *ctx);
 void shim_sceKernelIsProspero(GuestContext *ctx);
-void shim_sceKernelConvertUtcToLocaltime(GuestContext *ctx);
-void shim_sceKernelConvertLocaltimeToUtc(GuestContext *ctx);
 void shim___pthread_cxa_finalize(GuestContext *ctx);
 void shim__sceKernelRtldThreadAtexitDecrement(GuestContext *ctx);
 void shim__sceKernelRtldThreadAtexitIncrement(GuestContext *ctx);

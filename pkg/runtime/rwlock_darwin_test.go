@@ -34,7 +34,7 @@ static int writer_released_lock;
 
 static void *write_lock(void *arg) {
     (void)arg;
-    assert(guest_rwlock_write(&lock, 0) == 0);
+    assert(guest_rwlock_write(&lock, 0, NULL) == 0);
     assert(lock.readers == 0);
     assert(guest_rwlock_unlock(&lock) == 0);
     writer_released_lock = 1;
@@ -44,12 +44,12 @@ static void *write_lock(void *arg) {
 
 static void *try_first_read(void *arg) {
     (void)arg;
-    assert(guest_rwlock_read(&lock, 1) == EBUSY);
+    assert(guest_rwlock_read(&lock, 1, NULL) == EBUSY);
     return NULL;
 }
 
 int main(void) {
-    assert(guest_rwlock_read(&lock, 0) == 0);
+    assert(guest_rwlock_read(&lock, 0, NULL) == 0);
     pthread_t writer;
     assert(pthread_create(&writer, NULL, write_lock, NULL) == 0);
     for (;;) {
@@ -65,11 +65,11 @@ int main(void) {
     assert(pthread_create(&other_reader, NULL, try_first_read, NULL) == 0);
     assert(pthread_join(other_reader, NULL) == 0);
     assert(pthread_cancel(writer) == 0);
-    assert(guest_rwlock_read(&lock, 0) == 0);
-    assert(guest_rwlock_read(&lock, 1) == 0);
+    assert(guest_rwlock_read(&lock, 0, NULL) == 0);
+    assert(guest_rwlock_read(&lock, 1, NULL) == 0);
     assert(guest_rwlock_unlock(&lock) == 0);
     assert(guest_rwlock_unlock(&lock) == 0);
-    assert(guest_rwlock_write(&lock, 1) == EBUSY);
+    assert(guest_rwlock_write(&lock, 1, NULL) == EBUSY);
     assert(guest_rwlock_unlock(&lock) == 0);
     void *result;
     assert(pthread_join(writer, &result) == 0);
@@ -82,7 +82,7 @@ int main(void) {
 	}
 	bin := filepath.Join(dir, "rwlock_test")
 	cmd := exec.Command(clang, "-std=gnu11", "-O2", "-Wl,-dead_strip",
-		"-Icore", "-Ikernel/sync", "-Ikernel/threading", source, "-o", bin)
+		"-Icore", "-Ikernel/sync", "-Ikernel/threading", "-Imodules/libkernel", source, "-o", bin)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("compile native rwlock regression: %v\n%s", err, out)
 	}

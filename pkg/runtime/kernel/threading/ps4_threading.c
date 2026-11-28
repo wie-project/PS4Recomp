@@ -1,4 +1,26 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Guest pthreads, after shadPS4 (src/core/libraries/kernel/threads/pthread.cpp, pthread_spec.cpp,
+// pthread_clean.cpp, thread_state.cpp and stack.cpp). Every guest thread is a host thread that
+// runs recompiled code on its own GuestContext; its RecompThread is the ScePthread handle the
+// guest sees. Thread attributes are in ps4_pthread_attr.c.
+//
+// The pthread_* functions return a POSIX errno and the scePthread* ones the Orbis kernel error
+// (0x80020000 + errno), as shadPS4 registers them (plain or through its ORBIS() wrapper).
+//
+// Deliberate differences from shadPS4:
+// - pthread_get_user_context_np reads another thread's guest registers from the host registers
+//   recompiled code keeps them in when that thread is suspended in guest code, otherwise from
+//   its context; shadPS4 on macOS reads the native x86 thread state.
+// - Asynchronous cancellation of another thread takes effect at that thread's next cancellation
+//   point: shadPS4 interrupts it with a host signal, and recompiled code cannot be unwound from
+//   an arbitrary instruction.
+// - A thread attribute asking for a suspended thread (pthread_attr_setcreatesuspend_np) makes
+//   the create call fail with ENOTSUP, where shadPS4 asserts.
+// - pthread_getname_np pads the name with NULs to the 32-byte buffer (shadPS4 copies only the
+//   name's characters).
+// - The main thread ends with a plain host pthread_exit when it calls pthread_exit or is
+//   cancelled; it has no joiner to wake.
 
 #include "recomp_runtime.h"
 #include "ps4_threading.h"
@@ -8,29 +30,51 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #if defined(__APPLE__)
+#include <mach/mach.h>
 #include <pthread/qos.h>
 #endif
 
-// scePthread* report failures as SCE kernel errors (0x80020000 | errno),
-// while the POSIX shims they forward to return plain errno values.
-#define SCE_PTHREAD_ERR(ctx)                                                   \
-  do {                                                                         \
-    uint32_t e_ = (uint32_t)(ctx)->rax;                                        \
-    if (e_ != 0 && e_ < 0x100)                                                 \
-      (ctx)->rax = 0x80020000ULL | e_;                                         \
+#define ORBIS_KERNEL_ERROR_ESRCH 0x80020003u
+#define PTHREAD_DESTRUCTOR_ITERATIONS 4 // shadPS4 PthreadDestructorIterations
+
+// shadPS4 ORBIS(): a nonzero POSIX result becomes 0x80020000 + errno.
+static inline uint64_t orbis_err(int e) { return e ? (uint64_t)(0x80020000u + (uint32_t)e) : 0; }
+
+#define RET_POSIX(e)                                                                               \
+  do {                                                                                             \
+    ctx->rax = (uint64_t)(uint32_t)(e);                                                            \
+    SHIM_RETURN();                                                                                 \
+  } while (0)
+#define RET_ORBIS(e)                                                                               \
+  do {                                                                                             \
+    ctx->rax = orbis_err(e);                                                                       \
+    SHIM_RETURN();                                                                                 \
   } while (0)
 
-#define ORBIS_OK 0
-#define ORBIS_KERNEL_PRIO_FIFO_LOWEST 256
-#define ORBIS_KERNEL_PRIO_FIFO_HIGHEST 767
+static inline void *gptr(GuestContext *ctx, uint64_t addr) { return addr ? ctx->mem_base + addr : NULL; }
+
+const PthreadAttr ps4_pthread_attr_default = {
+    .sched_policy = PS4_SCHED_FIFO,
+    .sched_inherit = PS4_PTHREAD_INHERIT_SCHED,
+    .prio = PS4_PRIO_FIFO_DEFAULT,
+    .suspend = 0,
+    .flags = PTHREAD_ATTR_SCOPE_SYSTEM,
+    .stackaddr_attr = NULL,
+    .stacksize_attr = PS4_THR_STACK_DEFAULT,
+    .guardsize_attr = 0,
+    .cpusetsize = 0,
+    .cpuset = NULL,
+};
 
 static RecompThread *g_threads = NULL;
 static RecompThread *g_gc_list = NULL;
 static pthread_mutex_t g_threads_mutex = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic int g_next_tid = 1001;
 static _Thread_local RecompThread *g_current_thread = NULL;
+static _Atomic uint64_t g_thread_dtors; // _sceKernelSetThreadDtors
 
 static void register_thread(RecompThread *t) {
   pthread_mutex_lock(&g_threads_mutex);
@@ -75,6 +119,27 @@ static void try_collect_locked(RecompThread *t) {
   pthread_mutex_unlock(&t->lock);
 }
 
+static void thread_init_locks(RecompThread *t) {
+  pthread_mutex_init(&t->lock, NULL);
+  pthread_mutex_init(&t->join_wait_mutex, NULL);
+  pthread_cond_init(&t->join_wait_cv, NULL);
+  pthread_mutex_init(&t->cancel_lk, NULL);
+  atomic_store_explicit(&t->cancel_enable, true, memory_order_relaxed);
+}
+
+static void thread_free(RecompThread *t) {
+  if (t->ctx) {
+    recomp_free_thread_context(t->ctx);
+    t->ctx = NULL;
+  }
+  ps4_pthread_attr_release(&t->attr);
+  pthread_mutex_destroy(&t->lock);
+  pthread_mutex_destroy(&t->join_wait_mutex);
+  pthread_cond_destroy(&t->join_wait_cv);
+  pthread_mutex_destroy(&t->cancel_lk);
+  free(t);
+}
+
 // Free resources of terminated detached threads in g_gc_list
 void recomp_thread_collect(void) {
   RecompThread *reclaim_list = NULL;
@@ -96,46 +161,75 @@ void recomp_thread_collect(void) {
   while (reclaim_list) {
     RecompThread *t = reclaim_list;
     reclaim_list = t->next;
-
-    if (t->ctx) {
-      recomp_free_thread_context(t->ctx);
-      t->ctx = NULL;
-    }
-    pthread_mutex_destroy(&t->lock);
-    pthread_mutex_destroy(&t->join_wait_mutex);
-    pthread_cond_destroy(&t->join_wait_cv);
-    free(t);
+    thread_free(t);
   }
 }
 
-// Handle 0 finds no thread. AttrGet, Rename and Getname treat 0 as the calling thread themselves.
+// The thread with this handle in g_threads; g_threads_mutex held.
+static RecompThread *find_thread_locked(uint64_t handle) {
+  for (RecompThread *curr = g_threads; curr; curr = curr->next) {
+    if ((uint64_t)curr == handle || curr->thread_id == handle) return curr;
+    if (curr->ctx) {
+      if (curr->ctx->fs_base == handle) return curr;
+      if (curr->ctx->fs_base && curr->ctx->mem_base && curr->ctx->fs_base + 0x18ULL <= curr->ctx->mem_size) {
+        uint64_t t = *(uint64_t *)(curr->ctx->mem_base + curr->ctx->fs_base + 0x10ULL);
+        if (t != 0 && t == handle) return curr;
+      }
+    }
+  }
+  return NULL;
+}
+
+// Handle 0 finds no thread.
 RecompThread *recomp_find_thread(uint64_t handle) {
   if (handle == 0) return NULL;
   pthread_mutex_lock(&g_threads_mutex);
-  RecompThread *curr = g_threads;
-  while (curr) {
-    if ((uint64_t)curr == handle || curr->thread_id == handle) {
-      pthread_mutex_unlock(&g_threads_mutex);
-      return curr;
-    }
-    if (curr->ctx) {
-      if (curr->ctx->fs_base == handle) {
-        pthread_mutex_unlock(&g_threads_mutex);
-        return curr;
-      }
-      if (curr->ctx->fs_base && curr->ctx->mem_base &&
-          curr->ctx->fs_base + 0x18ULL <= curr->ctx->mem_size) {
-        uint64_t t = *(uint64_t *)(curr->ctx->mem_base + curr->ctx->fs_base + 0x10ULL);
-        if (t != 0 && t == handle) {
-          pthread_mutex_unlock(&g_threads_mutex);
-          return curr;
-        }
-      }
-    }
-    curr = curr->next;
-  }
+  RecompThread *t = find_thread_locked(handle);
   pthread_mutex_unlock(&g_threads_mutex);
-  return NULL;
+  return t;
+}
+
+// A reference to the thread with this handle that keeps it from being collected (shadPS4
+// ThreadState::RefAdd); ESRCH when there is none, or when it is dead and include_dead is false.
+static int thread_ref(uint64_t handle, bool include_dead, RecompThread **out) {
+  if (handle == 0) return ESRCH;
+  pthread_mutex_lock(&g_threads_mutex);
+  RecompThread *t = find_thread_locked(handle);
+  if (!t || (!include_dead && atomic_load_explicit(&t->state, memory_order_acquire) == PTHREAD_STATE_DEAD)) {
+    pthread_mutex_unlock(&g_threads_mutex);
+    return ESRCH;
+  }
+  atomic_fetch_add_explicit(&t->refcount, 1, memory_order_acq_rel);
+  pthread_mutex_unlock(&g_threads_mutex);
+  *out = t;
+  return 0;
+}
+
+// Drops a thread_ref reference with t->lock held, releasing the lock (shadPS4 RefDelete).
+static void thread_unref_locked(RecompThread *t) {
+  atomic_fetch_sub_explicit(&t->refcount, 1, memory_order_acq_rel);
+  try_collect_locked(t);
+}
+
+static void thread_unref(RecompThread *t) {
+  pthread_mutex_lock(&t->lock);
+  thread_unref_locked(t);
+}
+
+static void thread_unref_cb(void *t) { thread_unref((RecompThread *)t); }
+
+// The live thread with this handle, referenced and locked (shadPS4 FindThread(.., false)).
+static int thread_find_locked(uint64_t handle, RecompThread **out) {
+  RecompThread *t;
+  const int e = thread_ref(handle, false, &t);
+  if (e) return e;
+  pthread_mutex_lock(&t->lock);
+  if (atomic_load_explicit(&t->state, memory_order_acquire) == PTHREAD_STATE_DEAD) {
+    thread_unref_locked(t);
+    return ESRCH;
+  }
+  *out = t;
+  return 0;
 }
 
 RecompThread *recomp_get_current_thread(void) {
@@ -144,10 +238,6 @@ RecompThread *recomp_get_current_thread(void) {
 
 void recomp_set_current_thread(RecompThread *t) {
   g_current_thread = t;
-}
-
-static inline RecompThread *find_thread(uint64_t handle) {
-  return recomp_find_thread(handle);
 }
 
 const char *recomp_get_current_thread_name(void) {
@@ -166,14 +256,15 @@ void recomp_init_main_thread(GuestContext *ctx) {
   atomic_store_explicit(&g_main_thread_obj.refcount, 1, memory_order_relaxed);
   atomic_store_explicit(&g_main_thread_obj.state, PTHREAD_STATE_RUNNING, memory_order_relaxed);
   atomic_store_explicit(&g_main_thread_obj.flags, 0, memory_order_relaxed);
-  pthread_mutex_init(&g_main_thread_obj.lock, NULL);
-  pthread_mutex_init(&g_main_thread_obj.join_wait_mutex, NULL);
-  pthread_cond_init(&g_main_thread_obj.join_wait_cv, NULL);
+  thread_init_locks(&g_main_thread_obj);
   g_main_thread_obj.host_thread = pthread_self();
   g_main_thread_obj.thread_id = ctx->thread_id;
   g_main_thread_obj.ctx = ctx;
   g_main_thread_obj.stack_base = ctx->stack_base;
   g_main_thread_obj.stack_size = ctx->stack_alloc_size;
+  g_main_thread_obj.attr = ps4_pthread_attr_default;
+  g_main_thread_obj.attr.stackaddr_attr = (void *)(uintptr_t)ctx->stack_base;
+  g_main_thread_obj.attr.stacksize_attr = ctx->stack_alloc_size;
   atomic_store_explicit(&g_main_thread_obj.start_ready, 1, memory_order_relaxed);
   strncpy(g_main_thread_obj.name, "main", sizeof(g_main_thread_obj.name) - 1);
   if (ctx->fs_base && ctx->mem_base) {
@@ -196,16 +287,16 @@ RecompThread *recomp_init_system_thread(GuestContext *ctx, const char *name) {
   atomic_store_explicit(&t->state, PTHREAD_STATE_RUNNING, memory_order_relaxed);
   atomic_store_explicit(&t->flags, THREAD_FLAG_DETACHED, memory_order_relaxed);
   t->detached = true;
-
-  pthread_mutex_init(&t->lock, NULL);
-  pthread_mutex_init(&t->join_wait_mutex, NULL);
-  pthread_cond_init(&t->join_wait_cv, NULL);
+  thread_init_locks(t);
 
   t->host_thread = pthread_self();
   t->thread_id = (uint64_t)tid;
   t->ctx = ctx;
   t->stack_base = ctx->stack_base;
   t->stack_size = ctx->stack_alloc_size;
+  t->attr = ps4_pthread_attr_default;
+  t->attr.stackaddr_attr = (void *)(uintptr_t)ctx->stack_base;
+  t->attr.stacksize_attr = ctx->stack_alloc_size;
   atomic_store_explicit(&t->start_ready, 1, memory_order_relaxed);
   if (name && name[0]) {
     strncpy(t->name, name, sizeof(t->name) - 1);
@@ -233,54 +324,137 @@ void recomp_cleanup_system_thread(RecompThread *t) {
   }
 }
 
-// Exit routine matching shadps4 ExitThread
-static void recomp_thread_exit(RecompThread *t, void *status) {
-  GuestContext *ctx = t->ctx;
+// ---- Thread-specific data (shadPS4 pthread_spec.cpp). The key table is process-wide; each
+// thread's values and the key generation they were set under are in its GuestContext.
 
-  // Run registered pthread TLS key destructors
-  if (ctx) {
-    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-    for (int iter = 0; iter < 4; iter++) {
-      bool has_active = false;
-      for (int k = 0; k < 128; k++) {
-        uint64_t val = ctx->tls_keys[k];
-        uint64_t dtor = proc->tls_destructors[k];
-        if (val != 0 && dtor != 0) {
-          ctx->tls_keys[k] = 0;
-          has_active = true;
-          ctx->rdi = val;
-          ctx->rsp -= 8;
-          MEM_U64(ctx->rsp) = 0xdeadbeefULL;
-          ctx->rip = dtor;
-          recomp_dispatch(ctx, dtor);
-        }
-      }
-      if (!has_active) break;
+typedef struct PthreadKey {
+  bool allocated;
+  uint32_t seqno;
+  uint64_t destructor;
+} PthreadKey;
+
+static PthreadKey g_keys[RECOMP_PTHREAD_KEYS_MAX];
+static pthread_mutex_t g_key_lock = PTHREAD_MUTEX_INITIALIZER;
+
+uint64_t ps4_pthread_key_destructor(uint32_t key) {
+  if (key >= RECOMP_PTHREAD_KEYS_MAX) return 0;
+  pthread_mutex_lock(&g_key_lock);
+  const uint64_t d = g_keys[key].allocated ? g_keys[key].destructor : 0;
+  pthread_mutex_unlock(&g_key_lock);
+  return d;
+}
+
+static int key_create(uint32_t *key, uint64_t destructor) {
+  pthread_mutex_lock(&g_key_lock);
+  for (uint32_t k = 0; k < RECOMP_PTHREAD_KEYS_MAX; k++) {
+    if (!g_keys[k].allocated) {
+      g_keys[k].allocated = true;
+      g_keys[k].destructor = destructor;
+      g_keys[k].seqno++;
+      pthread_mutex_unlock(&g_key_lock);
+      *key = k;
+      return 0;
     }
   }
+  pthread_mutex_unlock(&g_key_lock);
+  return EAGAIN;
+}
 
-  // Run cleanup handlers
+static int key_delete(uint32_t key) {
+  if (key >= RECOMP_PTHREAD_KEYS_MAX) return EINVAL;
+  pthread_mutex_lock(&g_key_lock);
+  const int e = g_keys[key].allocated ? 0 : EINVAL;
+  g_keys[key].allocated = false;
+  pthread_mutex_unlock(&g_key_lock);
+  return e;
+}
+
+static int key_set(GuestContext *ctx, uint32_t key, uint64_t value) {
+  if (key >= RECOMP_PTHREAD_KEYS_MAX) return EINVAL;
+  pthread_mutex_lock(&g_key_lock);
+  const bool allocated = g_keys[key].allocated;
+  const uint32_t seqno = g_keys[key].seqno;
+  pthread_mutex_unlock(&g_key_lock);
+  if (!allocated) return EINVAL;
+  ctx->tls_keys[key] = value;
+  ctx->tls_seqno[key] = seqno;
+  return 0;
+}
+
+static uint64_t key_get(GuestContext *ctx, uint32_t key) {
+  if (key >= RECOMP_PTHREAD_KEYS_MAX) return 0;
+  pthread_mutex_lock(&g_key_lock);
+  const bool live = g_keys[key].allocated && g_keys[key].seqno == ctx->tls_seqno[key];
+  pthread_mutex_unlock(&g_key_lock);
+  return live ? ctx->tls_keys[key] : 0;
+}
+
+// Calls the guest function fn(arg) on ctx.
+static void guest_call(GuestContext *ctx, uint64_t fn, uint64_t arg) {
+  ctx->rdi = arg;
+  ctx->rsp -= 8;
+  MEM_U64(ctx->rsp) = 0xdeadbeefULL;
+  ctx->rip = fn;
+  recomp_dispatch(ctx, fn);
+}
+
+// shadPS4 _thread_cleanupspecific: the destructors of the thread's non-NULL values, for up to
+// PTHREAD_DESTRUCTOR_ITERATIONS rounds while destructors set new ones. A value of a deleted
+// key (or one set under an older generation of it) is dropped without its destructor.
+static void cleanup_specific(GuestContext *ctx) {
+  for (int i = 0; i < PTHREAD_DESTRUCTOR_ITERATIONS; i++) {
+    bool any = false;
+    for (uint32_t key = 0; key < RECOMP_PTHREAD_KEYS_MAX; key++) {
+      const uint64_t data = ctx->tls_keys[key];
+      if (!data) continue;
+      any = true;
+      pthread_mutex_lock(&g_key_lock);
+      const uint64_t dtor =
+          g_keys[key].allocated && g_keys[key].seqno == ctx->tls_seqno[key] ? g_keys[key].destructor : 0;
+      pthread_mutex_unlock(&g_key_lock);
+      ctx->tls_keys[key] = 0;
+      if (dtor) guest_call(ctx, dtor, data);
+    }
+    if (!any) break;
+  }
+}
+
+// ---- Thread exit (shadPS4 posix_pthread_exit, ExitThread).
+
+void ps4_thread_set_dtors(uint64_t dtor) { atomic_store_explicit(&g_thread_dtors, dtor, memory_order_release); }
+
+static void run_cleanup(GuestContext *ctx, PthreadCleanupEntry *c) {
+  if (c->host_fn) {
+    c->host_fn(c->host_arg);
+  } else if (c->routine) {
+    guest_call(ctx, c->routine, c->arg);
+  }
+}
+
+// Ends the calling thread t with status: its cleanup handlers (last pushed first), the
+// _sceKernelSetThreadDtors routine and its thread-specific data destructors run on ctx (the
+// context the thread runs on: its own or a fiber's), then a joiner is woken.
+__attribute__((noreturn)) static void exit_thread(GuestContext *ctx, RecompThread *t, uint64_t status) {
+  if (!t || t == &g_main_thread_obj) pthread_exit(NULL);
+  if (!ctx) ctx = t->ctx;
+  t->exiting = true;
+  atomic_store_explicit(&t->cancel_enable, false, memory_order_relaxed);
+  atomic_store_explicit(&t->cancel_async, false, memory_order_relaxed);
+  t->ret_val = status;
   while (t->cleanup_stack) {
     PthreadCleanupEntry *c = t->cleanup_stack;
     t->cleanup_stack = c->next;
-    if (c->routine && ctx) {
-      ctx->rdi = c->arg;
-      ctx->rsp -= 8;
-      MEM_U64(ctx->rsp) = 0xdeadbeefULL;
-      ctx->rip = c->routine;
-      recomp_dispatch(ctx, c->routine);
-    }
+    run_cleanup(ctx, c);
     if (c->onheap) free(c);
   }
-
-  t->ret_val = (uint64_t)status;
+  const uint64_t dtors = atomic_load_explicit(&g_thread_dtors, memory_order_acquire);
+  if (dtors) guest_call(ctx, dtors, 0);
+  cleanup_specific(ctx);
 
   pthread_mutex_lock(&t->lock);
   atomic_store_explicit(&t->state, PTHREAD_STATE_DEAD, memory_order_release);
   t->finished = true;
   atomic_fetch_sub_explicit(&t->refcount, 1, memory_order_acq_rel);
-
-  // If detached and refcount reached 0, queue for collection
   try_collect_locked(t); // unlocks t->lock
 
   // Wake up any joiner waiting on join_wait_cv
@@ -290,6 +464,142 @@ static void recomp_thread_exit(RecompThread *t, void *status) {
   pthread_mutex_unlock(&t->join_wait_mutex);
 
   pthread_exit(NULL);
+}
+
+// ---- Cancellation (shadPS4 posix_pthread_cancel, PthreadTestCancel).
+
+static inline bool should_cancel(const RecompThread *t) {
+  return t && !t->exiting && atomic_load_explicit(&t->cancel_pending, memory_order_acquire) &&
+         atomic_load_explicit(&t->cancel_enable, memory_order_acquire);
+}
+
+void ps4_thread_testcancel(void) {
+  RecompThread *t = g_current_thread;
+  if (should_cancel(t)) exit_thread(g_current_ctx, t, PS4_PTHREAD_CANCELED);
+}
+
+bool ps4_thread_cancel_wait_begin(RecompThread *t, pthread_mutex_t *mx, pthread_cond_t *cv) {
+  if (!t) return false;
+  pthread_mutex_lock(&t->cancel_lk);
+  const bool cancel = should_cancel(t);
+  if (!cancel) {
+    t->cancel_wait_mx = mx;
+    t->cancel_wait_cv = cv;
+  }
+  pthread_mutex_unlock(&t->cancel_lk);
+  return cancel;
+}
+
+int ps4_thread_waits_on(uint64_t handle, const pthread_cond_t *cv) {
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  pthread_mutex_lock(&t->cancel_lk);
+  const bool waiting = t->cancel_wait_cv == cv;
+  pthread_mutex_unlock(&t->cancel_lk);
+  thread_unref_locked(t);
+  return waiting ? 0 : 1;
+}
+
+void ps4_thread_cancel_wait_end(RecompThread *t) {
+  if (!t) return;
+  pthread_mutex_lock(&t->cancel_lk);
+  t->cancel_wait_mx = NULL;
+  t->cancel_wait_cv = NULL;
+  pthread_mutex_unlock(&t->cancel_lk);
+}
+
+// Wakes t from the cancellation point it sleeps in, if any. The sleeper holds its mutex while it
+// publishes it (under cancel_lk), so this only tries the mutex while holding cancel_lk and
+// retries until the sleeper has released it by going to sleep or has withdrawn.
+static void cancel_wake(RecompThread *t) {
+  for (;;) {
+    pthread_mutex_lock(&t->cancel_lk);
+    pthread_mutex_t *mx = t->cancel_wait_mx;
+    if (!mx) {
+      pthread_mutex_unlock(&t->cancel_lk);
+      return;
+    }
+    if (pthread_mutex_trylock(mx) == 0) {
+      pthread_cond_broadcast(t->cancel_wait_cv);
+      pthread_mutex_unlock(mx);
+      pthread_mutex_unlock(&t->cancel_lk);
+      return;
+    }
+    pthread_mutex_unlock(&t->cancel_lk);
+    sched_yield();
+  }
+}
+
+static int thread_cancel(uint64_t handle) {
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  const bool newly_pending = !atomic_exchange_explicit(&t->cancel_pending, true, memory_order_acq_rel);
+  const bool self = t == g_current_thread;
+  pthread_mutex_unlock(&t->lock);
+  if (newly_pending && !self) cancel_wake(t);
+  thread_unref(t);
+  if (self && atomic_load_explicit(&t->cancel_async, memory_order_acquire)) ps4_thread_testcancel();
+  return 0;
+}
+
+#define CANCEL_ENABLE 0
+#define CANCEL_DISABLE 1
+#define CANCEL_DEFERRED 0
+#define CANCEL_ASYNCHRONOUS 2
+
+static int set_cancel_state(GuestContext *ctx, int state, uint64_t oldstate_addr) {
+  RecompThread *t = g_current_thread;
+  const bool old = t ? atomic_load_explicit(&t->cancel_enable, memory_order_acquire) : true;
+  switch (state) {
+  case CANCEL_DISABLE:
+    if (t) atomic_store_explicit(&t->cancel_enable, false, memory_order_release);
+    break;
+  case CANCEL_ENABLE:
+    if (t) atomic_store_explicit(&t->cancel_enable, true, memory_order_release);
+    ps4_thread_testcancel();
+    break;
+  default:
+    return EINVAL;
+  }
+  if (oldstate_addr) *(int32_t *)(ctx->mem_base + oldstate_addr) = old ? CANCEL_ENABLE : CANCEL_DISABLE;
+  return 0;
+}
+
+static int set_cancel_type(GuestContext *ctx, int type, uint64_t oldtype_addr) {
+  RecompThread *t = g_current_thread;
+  const bool old_async = t ? atomic_load_explicit(&t->cancel_async, memory_order_acquire) : false;
+  switch (type) {
+  case CANCEL_DEFERRED:
+    if (t) atomic_store_explicit(&t->cancel_async, false, memory_order_release);
+    break;
+  case CANCEL_ASYNCHRONOUS:
+    if (t) atomic_store_explicit(&t->cancel_async, true, memory_order_release);
+    ps4_thread_testcancel();
+    break;
+  default:
+    return EINVAL;
+  }
+  if (oldtype_addr) {
+    *(int32_t *)(ctx->mem_base + oldtype_addr) = old_async ? CANCEL_ASYNCHRONOUS : CANCEL_DEFERRED;
+  }
+  return 0;
+}
+
+void ps4_thread_cleanup_push_host(PthreadCleanupEntry *e, void (*fn)(void *), void *arg) {
+  RecompThread *t = g_current_thread;
+  if (!t) return;
+  memset(e, 0, sizeof(*e));
+  e->host_fn = fn;
+  e->host_arg = arg;
+  e->next = t->cleanup_stack;
+  t->cleanup_stack = e;
+}
+
+void ps4_thread_cleanup_pop_host(PthreadCleanupEntry *e) {
+  RecompThread *t = g_current_thread;
+  if (t && t->cleanup_stack == e) t->cleanup_stack = e->next;
 }
 
 #if defined(__APPLE__)
@@ -331,8 +641,7 @@ static void *recomp_host_thread_runner(void *arg) {
 
   if (t->host_entry) {
     t->host_entry(ctx, t->host_arg);
-    recomp_thread_exit(t, NULL);
-    return NULL;
+    exit_thread(ctx, t, 0);
   }
 
   // Push dummy return address on guest stack
@@ -345,43 +654,95 @@ static void *recomp_host_thread_runner(void *arg) {
 
   recomp_dispatch(ctx, t->start_routine);
 
-  recomp_thread_exit(t, (void *)ctx->rax);
-  return NULL;
+  exit_thread(g_current_ctx ? g_current_ctx : ctx, t, ctx->rax);
 }
 
-// Join implementation matching shadps4 JoinThread: waits on join_wait_cv
-static int do_thread_join(RecompThread *t, void **thread_return) {
-  if (!t) return ESRCH;
-  if (t == g_current_thread) return EDEADLK;
+// ---- Join and detach (shadPS4 JoinThread, posix_pthread_detach).
+
+// The joiner recorded for a caller that is not a guest pthread (an HLE host thread).
+static RecompThread g_host_joiner;
+
+static void join_backout(void *arg) {
+  RecompThread *t = (RecompThread *)arg;
+  RecompThread *cur = g_current_thread;
+  if (cur) {
+    pthread_mutex_lock(&cur->lock);
+    cur->join_target = NULL;
+    pthread_mutex_unlock(&cur->lock);
+  }
+  pthread_mutex_lock(&t->lock);
+  t->joiner = NULL;
+  pthread_mutex_unlock(&t->lock);
+}
+
+// Waits for the thread to end (until abs, CLOCK_REALTIME, when not NULL). A cancellation point.
+static int join_thread(uint64_t handle, uint64_t *thread_return, const struct timespec *abs) {
+  RecompThread *cur = g_current_thread;
+  if (handle == 0) return EINVAL;
+  RecompThread *t;
+  if (thread_ref(handle, true, &t) != 0) return ESRCH;
+  if (t == cur) {
+    thread_unref(t);
+    return EDEADLK;
+  }
 
   pthread_mutex_lock(&t->lock);
+  int ret = 0;
   if (atomic_load_explicit(&t->flags, memory_order_acquire) & THREAD_FLAG_DETACHED) {
-    pthread_mutex_unlock(&t->lock);
-    return EINVAL;
+    ret = EINVAL;
+  } else if (t->joiner != NULL) {
+    ret = ENOTSUP; // Multiple joiners are not supported.
   }
-  if (t->joiner != NULL) {
-    pthread_mutex_unlock(&t->lock);
-    return ENOTSUP;
+  if (ret) {
+    thread_unref_locked(t);
+    return ret;
   }
-  t->joiner = g_current_thread;
-  if (g_current_thread) {
-    g_current_thread->join_target = t;
-  }
+  t->joiner = cur ? cur : &g_host_joiner;
   pthread_mutex_unlock(&t->lock);
+  if (cur) {
+    pthread_mutex_lock(&cur->lock);
+    cur->join_target = t;
+    pthread_mutex_unlock(&cur->lock);
+  }
 
-  // Wait for the target thread to signal termination via join_wait_cv
+  // A cancel while waiting backs the join out, then drops the reference.
+  PthreadCleanupEntry unref, backout;
+  ps4_thread_cleanup_push_host(&unref, thread_unref_cb, t);
+  ps4_thread_cleanup_push_host(&backout, join_backout, t);
+  ps4_thread_testcancel();
+
   pthread_mutex_lock(&t->join_wait_mutex);
   while (atomic_load_explicit(&t->tid, memory_order_acquire) != TID_TERMINATED) {
-    pthread_cond_wait(&t->join_wait_cv, &t->join_wait_mutex);
+    if (ps4_thread_cancel_wait_begin(cur, &t->join_wait_mutex, &t->join_wait_cv)) {
+      pthread_mutex_unlock(&t->join_wait_mutex);
+      ps4_thread_testcancel();
+      pthread_mutex_lock(&t->join_wait_mutex);
+      continue;
+    }
+    const int r = abs ? pthread_cond_timedwait(&t->join_wait_cv, &t->join_wait_mutex, abs)
+                      : pthread_cond_wait(&t->join_wait_cv, &t->join_wait_mutex);
+    ps4_thread_cancel_wait_end(cur);
+    if (r == ETIMEDOUT && atomic_load_explicit(&t->tid, memory_order_acquire) != TID_TERMINATED) {
+      ret = ETIMEDOUT;
+      break;
+    }
   }
   pthread_mutex_unlock(&t->join_wait_mutex);
-
-  if (g_current_thread) {
-    g_current_thread->join_target = NULL;
+  ps4_thread_cleanup_pop_host(&backout);
+  ps4_thread_cleanup_pop_host(&unref);
+  if (cur) {
+    pthread_mutex_lock(&cur->lock);
+    cur->join_target = NULL;
+    pthread_mutex_unlock(&cur->lock);
   }
 
-  void *ret_val = (void *)t->ret_val;
+  if (ret == ETIMEDOUT) {
+    join_backout(t);
+    thread_unref(t);
+    return ret;
+  }
 
+  const uint64_t ret_val = t->ret_val;
   pthread_join(t->host_thread, NULL);
 
   pthread_mutex_lock(&t->lock);
@@ -389,45 +750,62 @@ static int do_thread_join(RecompThread *t, void **thread_return) {
   t->joined = true;
   t->detached = true;
   t->joiner = NULL;
-  try_collect_locked(t); // unlocks t->lock
+  thread_unref_locked(t); // unlocks t->lock
 
   if (thread_return != NULL) {
     *thread_return = ret_val;
   }
-
   recomp_thread_collect();
   return 0;
 }
 
-// Detach implementation matching shadps4 posix_pthread_detach
-static int do_thread_detach(RecompThread *t) {
-  if (!t) return EINVAL;
+static int detach_thread(uint64_t handle) {
+  if (handle == 0) return EINVAL;
+  RecompThread *t;
+  const int e = thread_ref(handle, true, &t);
+  if (e) return e;
 
   pthread_mutex_lock(&t->lock);
-  if ((atomic_load_explicit(&t->flags, memory_order_acquire) & THREAD_FLAG_DETACHED) ||
-      t->joiner != NULL) {
-    pthread_mutex_unlock(&t->lock);
+  if ((atomic_load_explicit(&t->flags, memory_order_acquire) & THREAD_FLAG_DETACHED) || t->joiner != NULL) {
+    thread_unref_locked(t);
     return EINVAL;
   }
-
   pthread_detach(t->host_thread);
-
   atomic_fetch_or_explicit(&t->flags, THREAD_FLAG_DETACHED, memory_order_release);
   t->detached = true;
-  try_collect_locked(t); // unlocks t->lock
+  thread_unref_locked(t); // unlocks t->lock
 
   recomp_thread_collect();
   return 0;
 }
+
+// ---- Thread creation (shadPS4 posix_pthread_create_name_np, ThreadState::CreateStack).
 
 static int do_create_thread(GuestContext *ctx, uint64_t thread_ptr_addr, const PthreadAttr *attr,
                             uint64_t start_routine, uint64_t arg, const char *name,
                             void (*host_entry)(GuestContext *, void *), void *host_arg) {
   recomp_thread_collect();
 
+  PthreadAttr a = attr ? *attr : ps4_pthread_attr_default;
+  a.cpuset = NULL;
+  a.cpusetsize = 0;
+  if (a.suspend) return ENOTSUP;
+  RecompThread *cur = g_current_thread;
+  if (cur && a.sched_inherit == PS4_PTHREAD_INHERIT_SCHED) {
+    pthread_mutex_lock(&cur->lock);
+    if (cur->attr.flags & PTHREAD_ATTR_SCOPE_SYSTEM) {
+      a.flags |= PTHREAD_ATTR_SCOPE_SYSTEM;
+    } else {
+      a.flags &= ~(uint32_t)PTHREAD_ATTR_SCOPE_SYSTEM;
+    }
+    a.prio = cur->attr.prio;
+    a.sched_policy = cur->attr.sched_policy;
+    pthread_mutex_unlock(&cur->lock);
+  }
+
   RecompThread *t = (RecompThread *)calloc(1, sizeof(RecompThread));
   if (!t) {
-    return ENOMEM;
+    return EAGAIN;
   }
 
   t->magic = THREAD_MAGIC;
@@ -435,10 +813,7 @@ static int do_create_thread(GuestContext *ctx, uint64_t thread_ptr_addr, const P
   atomic_store_explicit(&t->tid, tid, memory_order_relaxed);
   atomic_store_explicit(&t->refcount, 1, memory_order_relaxed);
   atomic_store_explicit(&t->state, PTHREAD_STATE_RUNNING, memory_order_relaxed);
-
-  pthread_mutex_init(&t->lock, NULL);
-  pthread_mutex_init(&t->join_wait_mutex, NULL);
-  pthread_cond_init(&t->join_wait_cv, NULL);
+  thread_init_locks(t);
 
   t->thread_id = (uint64_t)tid;
   t->start_routine = start_routine;
@@ -446,35 +821,41 @@ static int do_create_thread(GuestContext *ctx, uint64_t thread_ptr_addr, const P
   t->host_entry = host_entry;
   t->host_arg = host_arg;
 
-  uint64_t stack_size = 2 * 1024 * 1024;
-  if (attr) {
-    t->attr = *attr;
-    if (attr->stacksize_attr >= 16384) {
-      stack_size = attr->stacksize_attr;
-    }
-    if (attr->flags & PTHREAD_ATTR_DETACHED) {
-      atomic_fetch_or_explicit(&t->flags, THREAD_FLAG_DETACHED, memory_order_relaxed);
-      t->detached = true;
-    }
+  // A thread on a runtime-allocated stack gets room for HLE code on top of the attribute's size.
+  const uint64_t user_stack = (uint64_t)(uintptr_t)a.stackaddr_attr;
+  if (!user_stack) a.stacksize_attr += PS4_THR_STACK_HLE_EXTRA;
+  GuestContext *child_ctx = user_stack ? recomp_create_thread_context_on_stack(ctx, user_stack, a.stacksize_attr)
+                                       : recomp_create_thread_context(ctx, a.stacksize_attr);
+  if (!child_ctx) {
+    thread_free(t);
+    return EAGAIN;
+  }
+  if (user_stack) {
+    a.guardsize_attr = 0;
+    a.flags |= PTHREAD_ATTR_STACK_USER;
+    t->stack_base = user_stack;
+    t->stack_size = a.stacksize_attr;
+  } else {
+    a.stackaddr_attr = (void *)(uintptr_t)child_ctx->stack_base;
+    a.flags &= ~(uint32_t)PTHREAD_ATTR_STACK_USER;
+    t->stack_base = child_ctx->stack_base;
+    t->stack_size = child_ctx->stack_alloc_size;
+  }
+  t->attr = a;
+  if (attr && attr->cpuset) ps4_pthread_attr_setaffinity(&t->attr, attr->cpusetsize, attr->cpuset);
+  if (a.flags & PTHREAD_ATTR_DETACHED) {
+    atomic_fetch_or_explicit(&t->flags, THREAD_FLAG_DETACHED, memory_order_relaxed);
+    t->detached = true;
   }
 
   if (name && name[0]) {
     strncpy(t->name, name, sizeof(t->name) - 1);
-  }
-
-  GuestContext *child_ctx = recomp_create_thread_context(ctx, stack_size);
-  if (!child_ctx) {
-    pthread_mutex_destroy(&t->lock);
-    pthread_mutex_destroy(&t->join_wait_mutex);
-    pthread_cond_destroy(&t->join_wait_cv);
-    free(t);
-    return ENOMEM;
+  } else {
+    snprintf(t->name, sizeof(t->name), "Thread%d", tid);
   }
 
   child_ctx->thread_id = t->thread_id;
   t->ctx = child_ctx;
-  t->stack_base = child_ctx->stack_base;
-  t->stack_size = child_ctx->stack_alloc_size;
 
   if (child_ctx->fs_base && child_ctx->mem_base) {
     *(uint64_t *)(child_ctx->mem_base + child_ctx->fs_base + 0x10ULL) = (uint64_t)t;
@@ -488,11 +869,14 @@ static int do_create_thread(GuestContext *ctx, uint64_t thread_ptr_addr, const P
 
   int ret = pthread_create(&t->host_thread, NULL, recomp_host_thread_runner, t);
   if (ret != 0) {
+    if (thread_ptr_addr) *(uint64_t *)(ctx->mem_base + thread_ptr_addr) = 0;
     pthread_mutex_lock(&t->lock);
+    atomic_fetch_or_explicit(&t->flags, THREAD_FLAG_DETACHED, memory_order_relaxed);
     atomic_store_explicit(&t->refcount, 0, memory_order_relaxed);
     atomic_store_explicit(&t->state, PTHREAD_STATE_DEAD, memory_order_relaxed);
+    atomic_store_explicit(&t->tid, TID_TERMINATED, memory_order_relaxed);
     try_collect_locked(t);
-    recomp_free_thread_context(child_ctx);
+    recomp_thread_collect();
     return ret;
   }
 
@@ -518,73 +902,55 @@ int ps4_create_host_entry_thread(GuestContext *ctx, uint64_t thread_out, const P
 }
 
 int ps4_join_guest_thread(uint64_t handle, uint64_t *ret) {
-  void *retval = NULL;
-  const int err = do_thread_join(find_thread(handle), &retval);
-  if (err == 0 && ret) *ret = (uint64_t)retval;
+  return join_thread(handle, ret, NULL);
+}
+
+// posix_pthread_create_name_np(thread, attr, start_routine, arg, name); a NULL or unmapped
+// name gives "Thread<tid>".
+static int create_from_guest(GuestContext *ctx, uint64_t name_addr) {
+  const char *name = NULL;
+  if (name_addr && name_addr < ctx->mem_size) name = (const char *)(ctx->mem_base + name_addr);
+  const PthreadAttr *attr = NULL;
+  if (ctx->rsi) attr = (const PthreadAttr *)(uintptr_t)*(uint64_t *)(ctx->mem_base + ctx->rsi);
+  return do_create_thread(ctx, ctx->rdi, attr, ctx->rdx, ctx->rcx, name, NULL, NULL);
+}
+
+void shim_pthread_create(GuestContext *ctx) { RET_POSIX(create_from_guest(ctx, 0)); }
+
+void shim_pthread_create_name_np(GuestContext *ctx) { RET_POSIX(create_from_guest(ctx, ctx->r8)); }
+
+void shim_scePthreadCreate(GuestContext *ctx) { RET_ORBIS(create_from_guest(ctx, ctx->r8)); }
+
+static int join_from_guest(GuestContext *ctx, uint64_t handle, uint64_t retval_addr, const struct timespec *abs) {
+  uint64_t retval = 0;
+  const int err = join_thread(handle, &retval, abs);
+  if (err == 0 && retval_addr) *(uint64_t *)(ctx->mem_base + retval_addr) = retval;
   return err;
 }
 
-void shim_pthread_create(GuestContext *ctx) {
-  uint64_t thread_ptr_addr = ctx->rdi;
-  uint64_t attr_addr = ctx->rsi;
-  uint64_t start_routine = ctx->rdx;
-  uint64_t arg = ctx->rcx;
+void shim_pthread_join(GuestContext *ctx) { RET_POSIX(join_from_guest(ctx, ctx->rdi, ctx->rsi, NULL)); }
 
-  PthreadAttr attr_val;
-  PthreadAttr *p_attr = NULL;
-  if (attr_addr) {
-    uint64_t p = *(uint64_t *)(ctx->mem_base + attr_addr);
-    if (p) {
-      memcpy(&attr_val, (void *)p, sizeof(PthreadAttr));
-      p_attr = &attr_val;
-    }
-  }
+void shim_scePthreadJoin(GuestContext *ctx) { RET_ORBIS(join_from_guest(ctx, ctx->rdi, ctx->rsi, NULL)); }
 
-  int err = do_create_thread(ctx, thread_ptr_addr, p_attr, start_routine, arg, NULL, NULL, NULL);
-  if (err != 0) {
-    set_guest_errno(ctx, err);
-    ctx->rax = (uint64_t)err;
-  } else {
-    ctx->rax = 0;
-  }
-  SHIM_RETURN();
+// pthread_timedjoin_np(thread, value_ptr, abstime): abstime on CLOCK_REALTIME.
+void shim_pthread_timedjoin_np(GuestContext *ctx) {
+  const int64_t *ts = (const int64_t *)gptr(ctx, ctx->rdx);
+  if (!ts || ts[0] < 0 || ts[1] < 0 || ts[1] >= 1000000000) RET_POSIX(EINVAL);
+  const struct timespec abs = {(time_t)ts[0], (long)ts[1]};
+  RET_POSIX(join_from_guest(ctx, ctx->rdi, ctx->rsi, &abs));
 }
 
-void shim_pthread_join(GuestContext *ctx) {
-  uint64_t handle = ctx->rdi;
-  uint64_t retval_ptr_addr = ctx->rsi;
+void shim_pthread_detach(GuestContext *ctx) { RET_POSIX(detach_thread(ctx->rdi)); }
 
-  RecompThread *t = find_thread(handle);
-  void *retval = NULL;
-  int err = do_thread_join(t, retval_ptr_addr ? &retval : NULL);
-  if (err != 0) {
-    set_guest_errno(ctx, err);
-    ctx->rax = (uint64_t)err;
-    SHIM_RETURN();
-  }
+void shim_scePthreadDetach(GuestContext *ctx) { RET_ORBIS(detach_thread(ctx->rdi)); }
 
-  if (retval_ptr_addr) {
-    *(uint64_t *)(ctx->mem_base + retval_ptr_addr) = (uint64_t)retval;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
+// pthread_exit and scePthreadExit (both shadPS4 posix_pthread_exit).
+void shim_pthread_exit(GuestContext *ctx) { exit_thread(ctx, g_current_thread, ctx->rdi); }
 
-void shim_pthread_detach(GuestContext *ctx) {
-  uint64_t handle = ctx->rdi;
-  RecompThread *t = find_thread(handle);
-  int err = do_thread_detach(t);
-  if (err != 0) {
-    set_guest_errno(ctx, err);
-    ctx->rax = (uint64_t)err;
-  } else {
-    ctx->rax = 0;
-  }
-  SHIM_RETURN();
-}
+void shim_scePthreadExit(GuestContext *ctx) { exit_thread(ctx, g_current_thread, ctx->rdi); }
 
 void shim_pthread_self(GuestContext *ctx) {
-  if (ctx && ctx->fs_base) {
+  if (ctx->fs_base) {
     uint64_t t = MEM_U64(ctx->fs_base + 0x10);
     ctx->rax = (t != 0) ? t : ctx->fs_base;
   } else if (g_current_thread) {
@@ -595,547 +961,463 @@ void shim_pthread_self(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
+void shim_scePthreadSelf(GuestContext *ctx) { shim_pthread_self(ctx); }
+
 void shim_pthread_equal(GuestContext *ctx) {
-  uint64_t t1 = ctx->rdi;
-  uint64_t t2 = ctx->rsi;
-  ctx->rax = (t1 == t2) ? 1 : 0;
+  ctx->rax = ctx->rdi == ctx->rsi ? 1 : 0;
   SHIM_RETURN();
 }
 
-static uint32_t g_next_key = 1;
-static pthread_mutex_t g_key_lock = PTHREAD_MUTEX_INITIALIZER;
+void shim_scePthreadEqual(GuestContext *ctx) { shim_pthread_equal(ctx); }
 
-void shim_pthread_key_create(GuestContext *ctx) {
-  uint64_t key_ptr_addr = ctx->rdi;
-  uint64_t destructor_addr = ctx->rsi;
-  pthread_mutex_lock(&g_key_lock);
-  uint32_t key = g_next_key++;
-  pthread_mutex_unlock(&g_key_lock);
-  if (key_ptr_addr) {
-    *(uint32_t *)(ctx->mem_base + key_ptr_addr) = key;
-  }
-  if (key < 128) {
-    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-    proc->tls_destructors[key] = destructor_addr;
-  }
+// pthread_yield and scePthreadYield (shadPS4 posix_pthread_yield, a void function).
+void shim_pthread_yield(GuestContext *ctx) {
+  sched_yield();
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
-void shim_pthread_key_delete(GuestContext *ctx) {
-  uint32_t key = (uint32_t)ctx->rdi;
-  if (key < 128) {
-    GuestContext *proc = ctx->process_ctx ? ctx->process_ctx : ctx;
-    proc->tls_destructors[key] = 0;
-  }
-  ctx->rax = 0;
+void shim_scePthreadYield(GuestContext *ctx) { shim_pthread_yield(ctx); }
+
+// pthread_getthreadid_np and scePthreadGetthreadid: the calling thread's id.
+void shim_pthread_getthreadid_np(GuestContext *ctx) {
+  ctx->rax = g_current_thread ? g_current_thread->thread_id : (ctx->thread_id ? ctx->thread_id : 1000);
   SHIM_RETURN();
 }
 
-void shim_pthread_setspecific(GuestContext *ctx) {
-  uint32_t key = (uint32_t)ctx->rdi;
-  uint64_t val = ctx->rsi;
-  if (key < 128) {
-    ctx->tls_keys[key] = val;
-    ctx->rax = 0;
-  } else {
-    set_guest_errno(ctx, EINVAL);
-    ctx->rax = (uint64_t)EINVAL;
-  }
-  SHIM_RETURN();
+void shim_scePthreadGetthreadid(GuestContext *ctx) { shim_pthread_getthreadid_np(ctx); }
+
+// ---- Thread-specific data shims.
+
+static int key_create_shim(GuestContext *ctx) {
+  uint32_t key = 0;
+  const int e = key_create(&key, ctx->rsi);
+  if (e == 0 && ctx->rdi) *(uint32_t *)(ctx->mem_base + ctx->rdi) = key;
+  return e;
 }
+
+void shim_pthread_key_create(GuestContext *ctx) { RET_POSIX(key_create_shim(ctx)); }
+
+void shim_scePthreadKeyCreate(GuestContext *ctx) { RET_ORBIS(key_create_shim(ctx)); }
+
+void shim_pthread_key_delete(GuestContext *ctx) { RET_POSIX(key_delete((uint32_t)ctx->rdi)); }
+
+void shim_scePthreadKeyDelete(GuestContext *ctx) { RET_ORBIS(key_delete((uint32_t)ctx->rdi)); }
+
+void shim_pthread_setspecific(GuestContext *ctx) { RET_POSIX(key_set(ctx, (uint32_t)ctx->rdi, ctx->rsi)); }
+
+void shim_scePthreadSetspecific(GuestContext *ctx) { RET_ORBIS(key_set(ctx, (uint32_t)ctx->rdi, ctx->rsi)); }
 
 void shim_pthread_getspecific(GuestContext *ctx) {
-  uint32_t key = (uint32_t)ctx->rdi;
-  if (key < 128) {
-    ctx->rax = ctx->tls_keys[key];
-  } else {
-    ctx->rax = 0;
-  }
+  ctx->rax = key_get(ctx, (uint32_t)ctx->rdi);
   SHIM_RETURN();
 }
 
-void shim_pthread_attr_init(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  if (!attr_addr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  PthreadAttr *attr = (PthreadAttr *)calloc(1, sizeof(PthreadAttr));
-  if (!attr) {
-    ctx->rax = (uint64_t)ENOMEM;
-    SHIM_RETURN();
-  }
-  attr->stacksize_attr = 2 * 1024 * 1024;
-  attr->sched_policy = 2; // Other
-  attr->prio = 700;
-  *(uint64_t *)(ctx->mem_base + attr_addr) = (uint64_t)attr;
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
+void shim_scePthreadGetspecific(GuestContext *ctx) { shim_pthread_getspecific(ctx); }
 
-void shim_pthread_attr_destroy(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  if (attr_addr) {
-    PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
-    if (attr) free(attr);
-    *(uint64_t *)(ctx->mem_base + attr_addr) = 0;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
+// ---- Cleanup handlers (shadPS4 pthread_clean.cpp).
 
-void shim_pthread_attr_setdetachstate(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  int detachstate = (int)ctx->rsi;
-  if (!attr_addr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
-  if (!attr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  if (detachstate == 1) { // PTHREAD_CREATE_DETACHED
-    attr->flags |= PTHREAD_ATTR_DETACHED;
-  } else {
-    attr->flags &= ~PTHREAD_ATTR_DETACHED;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_pthread_attr_setstacksize(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  size_t stacksize = (size_t)ctx->rsi;
-  if (!attr_addr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
-  if (!attr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  attr->stacksize_attr = stacksize;
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_pthread_getschedparam(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_pthread_setschedparam(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_pthread_setcanceltype(GuestContext *ctx) {
-  uint64_t oldtype_addr = ctx->rsi;
-  if (oldtype_addr) {
-    *(int32_t *)(ctx->mem_base + oldtype_addr) = 0;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_pthread_setcancelstate(GuestContext *ctx) {
-  int state = (int)ctx->rdi;
-  uint64_t oldstate_addr = ctx->rsi;
+static void cleanup_push(uint64_t routine, uint64_t arg) {
   RecompThread *t = g_current_thread;
-  if (oldstate_addr && t) {
-    *(int32_t *)(ctx->mem_base + oldstate_addr) = t->cancel_state;
-  }
-  if (t) t->cancel_state = state;
-  ctx->rax = 0;
-  SHIM_RETURN();
+  if (!t) return;
+  PthreadCleanupEntry *c = (PthreadCleanupEntry *)calloc(1, sizeof(PthreadCleanupEntry));
+  if (!c) return;
+  c->routine = routine;
+  c->arg = arg;
+  c->onheap = true;
+  c->next = t->cleanup_stack;
+  t->cleanup_stack = c;
 }
 
+// __pthread_cleanup_push_imp(routine, arg, buffer): the guest's buffer is not needed, the entry
+// is kept on the host.
 void shim___pthread_cleanup_push_imp(GuestContext *ctx) {
-  uint64_t routine = ctx->rdi;
-  uint64_t arg = ctx->rsi;
-  RecompThread *t = g_current_thread;
-  if (t) {
-    PthreadCleanupEntry *c = (PthreadCleanupEntry *)calloc(1, sizeof(PthreadCleanupEntry));
-    if (c) {
-      c->routine = routine;
-      c->arg = arg;
-      c->onheap = true;
-      c->next = t->cleanup_stack;
-      t->cleanup_stack = c;
-    }
-  }
+  cleanup_push(ctx->rdi, ctx->rsi);
   ctx->rax = 0;
   SHIM_RETURN();
 }
+
+void shim_pthread_cleanup_push(GuestContext *ctx) { shim___pthread_cleanup_push_imp(ctx); }
 
 void shim___pthread_cleanup_pop_imp(GuestContext *ctx) {
-  int execute = (int)ctx->rdi;
+  const int execute = (int)ctx->rdi;
   RecompThread *t = g_current_thread;
   if (t && t->cleanup_stack) {
     PthreadCleanupEntry *c = t->cleanup_stack;
     t->cleanup_stack = c->next;
-    if (execute && c->routine) {
-      ctx->rdi = c->arg;
-      ctx->rsp -= 8;
-      MEM_U64(ctx->rsp) = 0xdeadbeefULL;
-      ctx->rip = c->routine;
-      recomp_dispatch(ctx, c->routine);
-    }
+    if (execute) run_cleanup(ctx, c);
     if (c->onheap) free(c);
   }
   ctx->rax = 0;
   SHIM_RETURN();
 }
 
-void shim_pthread_cleanup_push(GuestContext *ctx) {
-  shim___pthread_cleanup_push_imp(ctx);
+void shim_pthread_cleanup_pop(GuestContext *ctx) { shim___pthread_cleanup_pop_imp(ctx); }
+
+// ---- Scheduling (shadPS4 posix_pthread_getschedparam / setschedparam / setprio,
+// scePthreadGetprio, posix_sched_get_priority_*). Priorities are kept, not applied to the host
+// threads (shadPS4's _thr_setscheduler is a TODO as well).
+
+static int get_sched(uint64_t handle, int *policy, int *prio) {
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  *policy = t->attr.sched_policy;
+  *prio = t->attr.prio;
+  thread_unref_locked(t);
+  return 0;
 }
 
-void shim_pthread_cleanup_pop(GuestContext *ctx) {
-  shim___pthread_cleanup_pop_imp(ctx);
+static int getschedparam_shim(GuestContext *ctx) {
+  int32_t *policy = (int32_t *)gptr(ctx, ctx->rsi);
+  int32_t *param = (int32_t *)gptr(ctx, ctx->rdx);
+  if (!policy || !param) return EINVAL;
+  int pol, prio;
+  const int e = get_sched(ctx->rdi, &pol, &prio);
+  if (e) return e;
+  *policy = pol;
+  *param = prio;
+  return 0;
+}
+
+void shim_pthread_getschedparam(GuestContext *ctx) { RET_POSIX(getschedparam_shim(ctx)); }
+
+void shim_scePthreadGetschedparam(GuestContext *ctx) { RET_ORBIS(getschedparam_shim(ctx)); }
+
+static int setschedparam_shim(GuestContext *ctx) {
+  const int32_t *param = (const int32_t *)gptr(ctx, ctx->rdx);
+  if (ctx->rdi == 0 || !param) return EINVAL;
+  RecompThread *t;
+  const int e = thread_find_locked(ctx->rdi, &t);
+  if (e) return e;
+  t->attr.sched_policy = (int)ctx->rsi;
+  t->attr.prio = *param;
+  thread_unref_locked(t);
+  return 0;
+}
+
+void shim_pthread_setschedparam(GuestContext *ctx) { RET_POSIX(setschedparam_shim(ctx)); }
+
+void shim_scePthreadSetschedparam(GuestContext *ctx) { RET_ORBIS(setschedparam_shim(ctx)); }
+
+// scePthreadGetprio(thread, *priority): any failure is ESRCH.
+void shim_scePthreadGetprio(GuestContext *ctx) {
+  int32_t *out = (int32_t *)gptr(ctx, ctx->rsi);
+  int pol, prio;
+  if (get_sched(ctx->rdi, &pol, &prio) != 0) {
+    ctx->rax = ORBIS_KERNEL_ERROR_ESRCH;
+    SHIM_RETURN();
+  }
+  if (out) *out = prio;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+static int setprio(uint64_t handle, int prio) {
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  t->attr.prio = prio;
+  thread_unref_locked(t);
+  return 0;
+}
+
+void shim_pthread_setprio(GuestContext *ctx) { RET_POSIX(setprio(ctx->rdi, (int)ctx->rsi)); }
+
+void shim_scePthreadSetprio(GuestContext *ctx) { RET_ORBIS(setprio(ctx->rdi, (int)ctx->rsi)); }
+
+static int priority_limit(int policy, int limit) {
+  return policy == PS4_SCHED_FIFO || policy == PS4_SCHED_RR ? limit : EINVAL;
 }
 
 void shim_sched_get_priority_max(GuestContext *ctx) {
-  ctx->rax = ORBIS_KERNEL_PRIO_FIFO_HIGHEST;
-  SHIM_RETURN();
+  RET_POSIX(priority_limit((int)ctx->rdi, PS4_PRIO_FIFO_HIGHEST));
 }
 
 void shim_sched_get_priority_min(GuestContext *ctx) {
-  ctx->rax = ORBIS_KERNEL_PRIO_FIFO_LOWEST;
+  RET_POSIX(priority_limit((int)ctx->rdi, PS4_PRIO_FIFO_LOWEST));
+}
+
+// ---- Affinity (shadPS4 posix_pthread_getaffinity_np / setaffinity_np, Pthread::SetAffinity).
+// The mask is kept in the thread's attribute; shadPS4 does not apply it to the host thread
+// either, and macOS has no CPU affinity call.
+
+static int get_affinity(uint64_t handle, size_t cpusetsize, void *cpusetp) {
+  if (handle == 0 || !cpusetp) return EINVAL;
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  const int r = ps4_pthread_attr_getaffinity(&t->attr, cpusetsize, cpusetp);
+  thread_unref_locked(t);
+  return r;
+}
+
+static int set_affinity(uint64_t handle, size_t cpusetsize, const void *cpusetp) {
+  if (handle == 0 || !cpusetp) return EINVAL;
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  int r = ps4_pthread_attr_setaffinity(&t->attr, cpusetsize, cpusetp);
+  // Pthread::SetAffinity: hosts with fewer than 8 CPUs ignore the call; otherwise a thread
+  // whose set was just cleared is EINVAL.
+  if (r == 0 && sysconf(_SC_NPROCESSORS_ONLN) >= 8 && t->attr.cpuset == NULL) r = EINVAL;
+  thread_unref_locked(t);
+  return r;
+}
+
+void shim_pthread_getaffinity_np(GuestContext *ctx) {
+  RET_POSIX(get_affinity(ctx->rdi, (size_t)ctx->rsi, gptr(ctx, ctx->rdx)));
+}
+
+void shim_pthread_setaffinity_np(GuestContext *ctx) {
+  RET_POSIX(set_affinity(ctx->rdi, (size_t)ctx->rsi, gptr(ctx, ctx->rdx)));
+}
+
+// scePthreadGetaffinity(thread, *mask) and scePthreadSetaffinity(thread, mask): the first word
+// of the CPU set.
+void shim_scePthreadGetaffinity(GuestContext *ctx) {
+  Ps4Cpuset set;
+  const int e = get_affinity(ctx->rdi, sizeof(set), &set);
+  if (e == 0 && ctx->rsi) *(uint64_t *)(ctx->mem_base + ctx->rsi) = set.bits;
+  RET_ORBIS(e);
+}
+
+void shim_scePthreadSetaffinity(GuestContext *ctx) {
+  const Ps4Cpuset set = {.bits = ctx->rsi, .reserved = 0};
+  RET_ORBIS(set_affinity(ctx->rdi, sizeof(set), &set));
+}
+
+// ---- Names (shadPS4 posix_pthread_getname_np, posix_pthread_rename_np).
+
+static int get_name(GuestContext *ctx, uint64_t handle, uint64_t buf_addr) {
+  if (!buf_addr || buf_addr >= ctx->mem_size) return EINVAL;
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  strncpy((char *)(ctx->mem_base + buf_addr), t->name, 32);
+  thread_unref_locked(t);
+  return 0;
+}
+
+void shim_pthread_getname_np(GuestContext *ctx) { RET_POSIX(get_name(ctx, ctx->rdi, ctx->rsi)); }
+
+void shim_scePthreadGetname(GuestContext *ctx) { RET_ORBIS(get_name(ctx, ctx->rdi, ctx->rsi)); }
+
+// A NULL name is the empty name. Only the calling thread's host name can be set on macOS.
+static int rename_thread(GuestContext *ctx, uint64_t handle, uint64_t name_addr) {
+  const char *name = name_addr && name_addr < ctx->mem_size ? (const char *)(ctx->mem_base + name_addr) : "";
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  memset(t->name, 0, sizeof(t->name));
+  strncpy(t->name, name, sizeof(t->name) - 1);
+  if (t == g_current_thread) pthread_setname_np(t->name);
+  thread_unref_locked(t);
+  return 0;
+}
+
+void shim_pthread_rename_np(GuestContext *ctx) { RET_POSIX(rename_thread(ctx, ctx->rdi, ctx->rsi)); }
+
+void shim_scePthreadRename(GuestContext *ctx) { RET_ORBIS(rename_thread(ctx, ctx->rdi, ctx->rsi)); }
+
+// pthread_set_name_np is a void function.
+void shim_pthread_set_name_np(GuestContext *ctx) {
+  (void)rename_thread(ctx, ctx->rdi, ctx->rsi);
+  ctx->rax = 0;
   SHIM_RETURN();
 }
+
+// ---- Cancellation shims. scePthreadCancel / Setcancelstate / Setcanceltype convert a failure
+// themselves (ErrnoToSceKernelError), the same as ORBIS().
+
+void shim_pthread_cancel(GuestContext *ctx) { RET_POSIX(thread_cancel(ctx->rdi)); }
+
+void shim_scePthreadCancel(GuestContext *ctx) { RET_ORBIS(thread_cancel(ctx->rdi)); }
+
+void shim_pthread_setcancelstate(GuestContext *ctx) { RET_POSIX(set_cancel_state(ctx, (int)ctx->rdi, ctx->rsi)); }
+
+void shim_scePthreadSetcancelstate(GuestContext *ctx) { RET_ORBIS(set_cancel_state(ctx, (int)ctx->rdi, ctx->rsi)); }
+
+void shim_pthread_setcanceltype(GuestContext *ctx) { RET_POSIX(set_cancel_type(ctx, (int)ctx->rdi, ctx->rsi)); }
+
+void shim_scePthreadSetcanceltype(GuestContext *ctx) { RET_ORBIS(set_cancel_type(ctx, (int)ctx->rdi, ctx->rsi)); }
+
+void shim_pthread_testcancel(GuestContext *ctx) {
+  ps4_thread_testcancel();
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+void shim_scePthreadTestcancel(GuestContext *ctx) { shim_pthread_testcancel(ctx); }
+
+// ---- Attribute of a running thread (shadPS4 posix_pthread_attr_get_np).
+
+static int attr_get_np(GuestContext *ctx, uint64_t handle, uint64_t dst_addr) {
+  PthreadAttr *dst = dst_addr ? (PthreadAttr *)(uintptr_t)*(uint64_t *)(ctx->mem_base + dst_addr) : NULL;
+  if (handle == 0 || !dst) return EINVAL;
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  PthreadAttr a = t->attr;
+  if (atomic_load_explicit(&t->flags, memory_order_acquire) & THREAD_FLAG_DETACHED) a.flags |= PTHREAD_ATTR_DETACHED;
+  ps4_pthread_attr_copy(dst, &a);
+  thread_unref_locked(t);
+  return 0;
+}
+
+void shim_pthread_attr_get_np(GuestContext *ctx) { RET_POSIX(attr_get_np(ctx, ctx->rdi, ctx->rsi)); }
+
+void shim_scePthreadAttrGet(GuestContext *ctx) { RET_ORBIS(attr_get_np(ctx, ctx->rdi, ctx->rsi)); }
+
+// ---- Suspension and user contexts (shadPS4 posix_pthread_{suspend,resume}_user_context_np,
+// posix_pthread_{get,set}_user_context_np, posix_pthread_{suspend,resume}_np). Another thread
+// is stopped with the Mach thread_suspend, as shadPS4 does on macOS; the calling thread is
+// only flagged.
+
+static int suspend_thread(uint64_t handle, bool suspend) {
+  if (handle == 0) return EINVAL;
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  if (suspend) {
+    atomic_fetch_or_explicit(&t->flags, THREAD_FLAG_SUSPENDED, memory_order_acq_rel);
+  } else {
+    atomic_fetch_and_explicit(&t->flags, ~(uint32_t)THREAD_FLAG_SUSPENDED, memory_order_acq_rel);
+  }
+  const bool other = t != g_current_thread;
+  const pthread_t host = t->host_thread;
+  pthread_mutex_unlock(&t->lock);
+#if defined(__APPLE__)
+  if (other) {
+    const mach_port_t port = pthread_mach_thread_np(host);
+    if (suspend) {
+      thread_suspend(port);
+    } else {
+      thread_resume(port);
+    }
+  }
+#endif
+  thread_unref(t);
+  return 0;
+}
+
+void shim_pthread_suspend_user_context_np(GuestContext *ctx) { RET_POSIX(suspend_thread(ctx->rdi, true)); }
+
+void shim_pthread_resume_user_context_np(GuestContext *ctx) { RET_POSIX(suspend_thread(ctx->rdi, false)); }
+
+void shim_pthread_suspend_np(GuestContext *ctx) { RET_POSIX(suspend_thread(ctx->rdi, true)); }
+
+void shim_pthread_resume_np(GuestContext *ctx) { RET_POSIX(suspend_thread(ctx->rdi, false)); }
+
+// Orbis ucontext_t (0x500 bytes): uc_mcontext at 0x40 (FreeBSD amd64 mcontext_t).
+#define UCONTEXT_SIZE 0x500
+#define UC_MC(off) (0x40 + (off))
+enum {
+  MC_RDI = UC_MC(0x08), MC_RSI = UC_MC(0x10), MC_RDX = UC_MC(0x18), MC_RCX = UC_MC(0x20),
+  MC_R8 = UC_MC(0x28), MC_R9 = UC_MC(0x30), MC_RAX = UC_MC(0x38), MC_RBX = UC_MC(0x40),
+  MC_RBP = UC_MC(0x48), MC_R10 = UC_MC(0x50), MC_R11 = UC_MC(0x58), MC_R12 = UC_MC(0x60),
+  MC_R13 = UC_MC(0x68), MC_R14 = UC_MC(0x70), MC_R15 = UC_MC(0x78), MC_RIP = UC_MC(0xa0),
+  MC_RSP = UC_MC(0xb8),
+};
+
+typedef struct GuestRegs {
+  uint64_t rax, rbx, rcx, rdx, rsi, rdi, rbp, rsp, r8, r9, r10, r11, r12, r13, r14, r15, rip;
+} GuestRegs;
+
+static void regs_from_ctx(GuestRegs *r, const GuestContext *c) {
+  *r = (GuestRegs){c->rax, c->rbx, c->rcx, c->rdx, c->rsi, c->rdi, c->rbp, c->rsp, c->r8,
+                   c->r9,  c->r10, c->r11, c->r12, c->r13, c->r14, c->r15, c->rip};
+}
+
+// The guest registers of another thread: when it is stopped in recompiled code they are the
+// host registers the lifter pins them to (as the exception handler bridge reads them);
+// anywhere else (a shim, the runtime) the ones the bridge stored in its context.
+static bool regs_of_thread(RecompThread *t, GuestRegs *r) {
+  GuestContext *c = t->ctx;
+  if (!c) return false;
+  regs_from_ctx(r, c);
+#if defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
+  if (atomic_load_explicit(&t->flags, memory_order_acquire) & THREAD_FLAG_SUSPENDED) {
+    arm_thread_state64_t st;
+    mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+    if (thread_get_state(pthread_mach_thread_np(t->host_thread), ARM_THREAD_STATE64, (thread_state_t)&st, &count) ==
+            KERN_SUCCESS &&
+        recomp_pc_in_guest_code((uint64_t)arm_thread_state64_get_pc(st)) && st.__x[28] == (uint64_t)c->mem_base &&
+        st.__x[26] >= 0x10000ULL && st.__x[26] < c->mem_size) {
+      r->rax = st.__x[19], r->rbx = st.__x[20], r->rcx = st.__x[21], r->rdx = st.__x[22];
+      r->rsi = st.__x[23], r->rdi = st.__x[24], r->rbp = st.__x[25], r->rsp = st.__x[26];
+      r->r8 = st.__x[8], r->r9 = st.__x[9], r->r10 = st.__x[10], r->r11 = st.__x[11];
+      r->r12 = st.__x[12], r->r13 = st.__x[13], r->r14 = st.__x[14], r->r15 = st.__x[15];
+    }
+  }
+#endif
+  return true;
+}
+
+// pthread_get_user_context_np(thread, ucontext): the thread's guest registers; for the calling
+// thread the state at its call. A stack pointer outside the thread's stack (or no state) gives
+// the top of its stack, and no instruction pointer its start routine.
+static int get_user_context(GuestContext *ctx, uint64_t handle, uint64_t uc_addr) {
+  if (handle == 0 || !uc_addr || uc_addr + UCONTEXT_SIZE > ctx->mem_size) return EINVAL;
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  const uint64_t stack_base = (uint64_t)(uintptr_t)t->attr.stackaddr_attr;
+  const uint64_t stack_top = stack_base + t->attr.stacksize_attr;
+  const uint64_t start_pc = t->start_routine;
+  const bool self = t == g_current_thread;
+  pthread_mutex_unlock(&t->lock);
+
+  GuestRegs r = {0};
+  bool got_state;
+  if (self) {
+    // At the call: rsp past the return address, rip the return address.
+    regs_from_ctx(&r, ctx);
+    r.rip = MEM_U64(ctx->rsp);
+    r.rsp = ctx->rsp + 8;
+    got_state = true;
+  } else {
+    got_state = regs_of_thread(t, &r);
+  }
+  thread_unref(t);
+
+  if (stack_base && stack_top > stack_base && (!got_state || r.rsp < stack_base || r.rsp >= stack_top)) {
+    r.rsp = (stack_top - 0x100) & ~0xFULL;
+    r.rbp = r.rsp;
+  }
+  if (r.rip == 0) r.rip = start_pc;
+
+  uint8_t *uc = ctx->mem_base + uc_addr;
+  memset(uc, 0, UCONTEXT_SIZE);
+  const struct {
+    int off;
+    uint64_t v;
+  } fields[] = {{MC_RDI, r.rdi}, {MC_RSI, r.rsi}, {MC_RDX, r.rdx}, {MC_RCX, r.rcx}, {MC_R8, r.r8},
+                {MC_R9, r.r9},   {MC_RAX, r.rax}, {MC_RBX, r.rbx}, {MC_RBP, r.rbp}, {MC_R10, r.r10},
+                {MC_R11, r.r11}, {MC_R12, r.r12}, {MC_R13, r.r13}, {MC_R14, r.r14}, {MC_R15, r.r15},
+                {MC_RIP, r.rip}, {MC_RSP, r.rsp}};
+  for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) memcpy(uc + fields[i].off, &fields[i].v, 8);
+  return 0;
+}
+
+void shim_pthread_get_user_context_np(GuestContext *ctx) { RET_POSIX(get_user_context(ctx, ctx->rdi, ctx->rsi)); }
+
+// pthread_set_user_context_np(thread, ucontext) checks its arguments and the thread only, as in
+// shadPS4.
+static int set_user_context(uint64_t handle, uint64_t uc_addr) {
+  if (handle == 0 || !uc_addr) return EINVAL;
+  RecompThread *t;
+  const int e = thread_find_locked(handle, &t);
+  if (e) return e;
+  thread_unref_locked(t);
+  return 0;
+}
+
+void shim_pthread_set_user_context_np(GuestContext *ctx) { RET_POSIX(set_user_context(ctx->rdi, ctx->rsi)); }
 
 void shim_pthread_sigmask(GuestContext *ctx) {
   ctx->rax = 0;
   SHIM_RETURN();
-}
-
-void shim_pthread_cancel(GuestContext *ctx) {
-  uint64_t handle = ctx->rdi;
-  RecompThread *t = find_thread(handle);
-  if (!t) {
-    set_guest_errno(ctx, ESRCH);
-    ctx->rax = (uint64_t)ESRCH;
-    SHIM_RETURN();
-  }
-  int rc = pthread_cancel(t->host_thread);
-  if (rc != 0) {
-    set_guest_errno(ctx, rc);
-    ctx->rax = (uint64_t)rc;
-  } else {
-    ctx->rax = 0;
-  }
-  SHIM_RETURN();
-}
-
-// Orbis shims forwarding to core implementations
-void shim_scePthreadCreate(GuestContext *ctx) {
-  uint64_t thread_ptr_addr = ctx->rdi;
-  uint64_t attr_addr = ctx->rsi;
-  uint64_t start_routine = ctx->rdx;
-  uint64_t arg = ctx->rcx;
-  uint64_t name_addr = ctx->r8;
-
-  const char *name = NULL;
-  if (name_addr && name_addr < ctx->mem_size) {
-    name = (const char *)(ctx->mem_base + name_addr);
-  }
-
-  PthreadAttr attr_val;
-  PthreadAttr *p_attr = NULL;
-  if (attr_addr) {
-    uint64_t p = *(uint64_t *)(ctx->mem_base + attr_addr);
-    if (p) {
-      memcpy(&attr_val, (void *)p, sizeof(PthreadAttr));
-      p_attr = &attr_val;
-    }
-  }
-
-  int err = do_create_thread(ctx, thread_ptr_addr, p_attr, start_routine, arg, name, NULL, NULL);
-  if (err != 0) {
-    set_guest_errno(ctx, err);
-    ctx->rax = 0x80020000ULL | (uint64_t)err;
-  } else {
-    ctx->rax = 0;
-  }
-  SHIM_RETURN();
-}
-
-void shim_scePthreadJoin(GuestContext *ctx) {
-  shim_pthread_join(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadDetach(GuestContext *ctx) {
-  shim_pthread_detach(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadCancel(GuestContext *ctx) {
-  shim_pthread_cancel(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadExit(GuestContext *ctx) {
-  RecompThread *t = g_current_thread;
-  if (t && t != &g_main_thread_obj) {
-    recomp_thread_exit(t, (void *)ctx->rdi);
-  }
-  pthread_exit(NULL);
-}
-
-void shim_scePthreadSelf(GuestContext *ctx) {
-  shim_pthread_self(ctx);
-}
-
-void shim_scePthreadEqual(GuestContext *ctx) {
-  shim_pthread_equal(ctx);
-}
-
-void shim_scePthreadYield(GuestContext *ctx) {
-  sched_yield();
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadGetthreadid(GuestContext *ctx) {
-  if (g_current_thread) {
-    ctx->rax = (uint64_t)g_current_thread->thread_id;
-  } else {
-    ctx->rax = ctx->thread_id ? ctx->thread_id : 1000;
-  }
-  SHIM_RETURN();
-}
-
-void shim_scePthreadSetprio(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadGetprio(GuestContext *ctx) {
-  uint64_t prio_ptr = ctx->rsi;
-  if (prio_ptr) {
-    *(int32_t *)(ctx->mem_base + prio_ptr) = 700;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadSetaffinity(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadGetaffinity(GuestContext *ctx) {
-  uint64_t mask_ptr = ctx->rsi;
-  if (mask_ptr) {
-    *(uint64_t *)(ctx->mem_base + mask_ptr) = 0x3f;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrInit(GuestContext *ctx) {
-  shim_pthread_attr_init(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadAttrDestroy(GuestContext *ctx) {
-  shim_pthread_attr_destroy(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadAttrSetstacksize(GuestContext *ctx) {
-  shim_pthread_attr_setstacksize(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadAttrSetdetachstate(GuestContext *ctx) {
-  shim_pthread_attr_setdetachstate(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadAttrSetschedpolicy(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrSetschedparam(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrGetschedparam(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrSetinheritsched(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrSetaffinity(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadSetcancelstate(GuestContext *ctx) {
-  shim_pthread_setcancelstate(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadAttrGetstacksize(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t size_ptr = ctx->rsi;
-  if (attr_addr && size_ptr) {
-    PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
-    if (attr) {
-      *(uint64_t *)(ctx->mem_base + size_ptr) = attr->stacksize_attr;
-    }
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrGetstack(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t addr_ptr = ctx->rsi;
-  uint64_t size_ptr = ctx->rdx;
-  if (!attr_addr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
-  if (!attr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  if (addr_ptr && addr_ptr < ctx->mem_size) {
-    *(uint64_t *)(ctx->mem_base + addr_ptr) = (uint64_t)(uintptr_t)attr->stackaddr_attr;
-  }
-  if (size_ptr && size_ptr < ctx->mem_size) {
-    *(uint64_t *)(ctx->mem_base + size_ptr) = (uint64_t)attr->stacksize_attr;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrGetstackaddr(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t addr_ptr = ctx->rsi;
-  if (!attr_addr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
-  if (!attr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  if (addr_ptr && addr_ptr < ctx->mem_size) {
-    *(uint64_t *)(ctx->mem_base + addr_ptr) = (uint64_t)(uintptr_t)attr->stackaddr_attr;
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrSetstackaddr(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t stackaddr = ctx->rsi;
-  if (!attr_addr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
-  if (!attr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  attr->stackaddr_attr = (void *)(uintptr_t)stackaddr;
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrSetguardsize(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  size_t guardsize = (size_t)ctx->rsi;
-  if (!attr_addr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
-  if (!attr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  attr->guardsize_attr = guardsize;
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrSetstack(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t stackaddr = ctx->rsi;
-  size_t stacksize = (size_t)ctx->rdx;
-  if (!attr_addr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
-  if (!attr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  attr->stackaddr_attr = (void *)(uintptr_t)stackaddr;
-  attr->stacksize_attr = stacksize;
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadRename(GuestContext *ctx) {
-  uint64_t thread_handle = ctx->rdi;
-  uint64_t name_addr = ctx->rsi;
-  RecompThread *t = thread_handle ? find_thread(thread_handle) : g_current_thread;
-  if (t && name_addr && name_addr < ctx->mem_size) {
-    const char *name = (const char *)(ctx->mem_base + name_addr);
-    strncpy(t->name, name, sizeof(t->name) - 1);
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadGetschedparam(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadSetschedparam(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadKeyCreate(GuestContext *ctx) {
-  shim_pthread_key_create(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadKeyDelete(GuestContext *ctx) {
-  shim_pthread_key_delete(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadSetspecific(GuestContext *ctx) {
-  shim_pthread_setspecific(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadGetspecific(GuestContext *ctx) {
-  shim_pthread_getspecific(ctx);
 }
 
 void shim___tls_get_addr(GuestContext *ctx) {
@@ -1155,52 +1437,15 @@ void shim___tls_get_addr(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-void shim_scePthreadAttrGetaffinity(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrGetdetachstate(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  uint64_t state_ptr = ctx->rsi;
-  if (attr_addr && state_ptr) {
-    PthreadAttr *attr = (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr));
-    if (attr) {
-      *(int32_t *)(ctx->mem_base + state_ptr) = (attr->flags & PTHREAD_ATTR_DETACHED) ? 1 : 0;
-    }
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadAttrGet(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadGetname(GuestContext *ctx) {
-  uint64_t thread_handle = ctx->rdi;
-  uint64_t buf_addr = ctx->rsi;
-  RecompThread *t = thread_handle ? find_thread(thread_handle) : g_current_thread;
-  if (t && buf_addr && buf_addr < ctx->mem_size) {
-    strncpy((char *)(ctx->mem_base + buf_addr), t->name[0] ? t->name : "unnamed", 32);
-  }
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
 void shim_sceKernelIsStack(GuestContext *ctx) {
   uint64_t addr = ctx->rdi;
-  RecompThread *curr = g_threads;
   pthread_mutex_lock(&g_threads_mutex);
-  while (curr) {
-    if (curr->stack_base && addr >= curr->stack_base &&
-        addr < curr->stack_base + curr->stack_size) {
+  for (RecompThread *curr = g_threads; curr; curr = curr->next) {
+    if (curr->stack_base && addr >= curr->stack_base && addr < curr->stack_base + curr->stack_size) {
       pthread_mutex_unlock(&g_threads_mutex);
       ctx->rax = 1;
       SHIM_RETURN();
     }
-    curr = curr->next;
   }
   pthread_mutex_unlock(&g_threads_mutex);
   ctx->rax = 0;

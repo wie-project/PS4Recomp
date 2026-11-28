@@ -17,6 +17,8 @@ void shim_sem_trywait(GuestContext *ctx);
 void shim_sem_timedwait(GuestContext *ctx);
 void shim_sem_post(GuestContext *ctx);
 void shim_sem_getvalue(GuestContext *ctx);
+void shim_sem_reltimedwait_np(GuestContext *ctx);
+void shim_sem_setname(GuestContext *ctx);
 
 // scePthread semaphore shims
 void shim_scePthreadSemInit(GuestContext *ctx);

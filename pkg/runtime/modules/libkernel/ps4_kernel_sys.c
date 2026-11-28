@@ -3,6 +3,7 @@
 #include "ps4_sysmodule.h"
 #include "ps4_fiber.h"
 #include "ps4_syscalls.h"
+#include "ps4_threading.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,71 +14,6 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #endif
-
-void shim_clock_gettime(GuestContext *ctx);
-
-static uint64_t g_initial_tsc = 0;
-static int g_time_inited = 0;
-
-static void init_time(void) {
-    if (!g_time_inited) {
-        g_initial_tsc = recomp_rdtsc();
-        g_time_inited = 1;
-    }
-}
-
-uint64_t sceKernelGetProcessTimeCounter(void) {
-    init_time();
-    uint64_t now = recomp_rdtsc();
-    return now >= g_initial_tsc ? now - g_initial_tsc : 0;
-}
-
-uint64_t sceKernelGetProcessTimeCounterFrequency(void) {
-    return RECOMP_TSC_FREQ;
-}
-
-uint64_t sceKernelGetProcessTime(void) {
-    init_time();
-    uint64_t now = recomp_rdtsc();
-    uint64_t elapsed = now >= g_initial_tsc ? now - g_initial_tsc : 0;
-    return (uint64_t)(((unsigned __int128)elapsed * 1000000ULL) / RECOMP_TSC_FREQ);
-}
-
-uint64_t sceKernelGetTscFrequency(void) {
-    return RECOMP_TSC_FREQ; // 2.13 GHz (PS4 Pro / Neo clock frequency)
-}
-
-uint64_t sceKernelReadTsc(void) {
-    // Same counter as the lifted RDTSC instruction.
-    return recomp_rdtsc();
-}
-
-int32_t sceKernelGettimeofday(OrbisKernelTimeval *tv) {
-    if (!tv) return -EINVAL;
-    struct timeval host_tv;
-    int ret = gettimeofday(&host_tv, NULL);
-    if (ret == 0) {
-        tv->tv_sec = (int64_t)host_tv.tv_sec;
-        tv->tv_usec = (int64_t)host_tv.tv_usec;
-    }
-    return ret;
-}
-
-// The console's time zone, as shadPS4 reports it (kernel/time.cpp posix_gettimeofday): despite
-// its name, tz_minuteswest holds the standard offset EAST of UTC in minutes, and tz_dsttime the
-// minutes daylight saving time adds now, so local time = UTC + tz_minuteswest + tz_dsttime.
-// libSceRtc and other system libraries add the two to UTC ticks.
-int32_t sceKernelGettimezone(OrbisKernelTimezone *tz) {
-    if (!tz) return -EINVAL;
-    time_t t = time(NULL);
-    struct tm tm_loc;
-    localtime_r(&t, &tm_loc);
-    int32_t dst_sec = tm_loc.tm_isdst > 0 ? 3600 : 0;
-    int32_t standard_offset_sec = (int32_t)tm_loc.tm_gmtoff - dst_sec;
-    tz->tz_minuteswest = standard_offset_sec / 60;
-    tz->tz_dsttime = dst_sec / 60;
-    return 0;
-}
 
 int32_t sceKernelGetCurrentCpu(void) {
     if (g_current_ctx) {
@@ -192,64 +128,6 @@ int32_t sceKernelSetPrtAperture(int32_t id,uint64_t address, size_t size) {
     return 0;
 }
 
-// Guest execution shims
-void shim_sceKernelGetProcessTimeCounter(GuestContext *ctx) {
-    ctx->rax = sceKernelGetProcessTimeCounter();
-    SHIM_RETURN();
-}
-
-void shim_sceKernelGetProcessTimeCounterFrequency(GuestContext *ctx) {
-    ctx->rax = sceKernelGetProcessTimeCounterFrequency();
-    SHIM_RETURN();
-}
-
-void shim_sceKernelGetProcessTime(GuestContext *ctx) {
-    ctx->rax = sceKernelGetProcessTime();
-    SHIM_RETURN();
-}
-
-void shim_sceKernelGetTscFrequency(GuestContext *ctx) {
-    ctx->rax = sceKernelGetTscFrequency();
-    SHIM_RETURN();
-}
-
-void shim_sceKernelReadTsc(GuestContext *ctx) {
-    ctx->rax = sceKernelReadTsc();
-    SHIM_RETURN();
-}
-
-void shim_sceKernelGettimeofday(GuestContext *ctx) {
-    uint64_t tv_guest = ctx->rdi;
-    if (!tv_guest) {
-        ctx->rax = (uint64_t)(int64_t)-EINVAL;
-        SHIM_RETURN();
-    }
-    OrbisKernelTimeval tv = {0};
-    int32_t rc = sceKernelGettimeofday(&tv);
-    if (rc == 0) {
-        memcpy(ctx->mem_base + tv_guest, &tv, sizeof(tv));
-    }
-    ctx->rax = (uint64_t)(int64_t)rc;
-    SHIM_RETURN();
-}
-
-void shim_sceKernelGettimezone(GuestContext *ctx) {
-    uint64_t tz_guest = ctx->rdi;
-    if (!tz_guest || !ctx->mem_base) {
-        ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-        SHIM_RETURN();
-    }
-    OrbisKernelTimezone tz = {0};
-    int32_t rc = sceKernelGettimezone(&tz);
-    if (rc == 0) {
-        memcpy(ctx->mem_base + tz_guest, &tz, sizeof(tz));
-        ctx->rax = 0;
-    } else {
-        ctx->rax = 0x80020016;
-    }
-    SHIM_RETURN();
-}
-
 void shim_sceKernelGetCurrentCpu(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceKernelGetCurrentCpu();
     SHIM_RETURN();
@@ -309,10 +187,6 @@ int32_t sceKernelIsProspero(void) {
     return 0;
 }
 
-void shim_sceKernelClockGettime(GuestContext *ctx) {
-    shim_clock_gettime(ctx);
-}
-
 void shim_sceKernelUuidCreate(GuestContext *ctx) {
     uint64_t uuidGuest = ctx->rdi;
     if (!uuidGuest || !ctx->mem_base) {
@@ -336,64 +210,6 @@ void shim_sceKernelSetGPO(GuestContext *ctx) {
 
 void shim_sceKernelIsProspero(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceKernelIsProspero();
-    SHIM_RETURN();
-}
-
-struct OrbisTimesec {
-    int64_t t;
-    int32_t west_sec;
-    int32_t dst_sec;
-};
-
-void shim_sceKernelConvertUtcToLocaltime(GuestContext *ctx) {
-    time_t utc_sec = (time_t)ctx->rdi;
-    uint64_t local_out = ctx->rsi;
-    uint64_t st_out = ctx->rdx;
-    uint64_t dst_out = ctx->rcx;
-
-    struct tm tm_loc;
-    localtime_r(&utc_sec, &tm_loc);
-    time_t local_sec = utc_sec + tm_loc.tm_gmtoff;
-
-    if (local_out && ctx->mem_base) {
-        *(int64_t *)(ctx->mem_base + local_out) = (int64_t)local_sec;
-    }
-    if (st_out && ctx->mem_base) {
-        struct OrbisTimesec *st = (struct OrbisTimesec *)(ctx->mem_base + st_out);
-        st->t = (int64_t)utc_sec;
-        st->west_sec = -(int32_t)tm_loc.tm_gmtoff;
-        st->dst_sec = tm_loc.tm_isdst > 0 ? 3600 : 0;
-    }
-    if (dst_out && ctx->mem_base) {
-        *(uint64_t *)(ctx->mem_base + dst_out) = tm_loc.tm_isdst > 0 ? 3600ULL : 0ULL;
-    }
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_sceKernelConvertLocaltimeToUtc(GuestContext *ctx) {
-    time_t loc_sec = (time_t)ctx->rdi;
-    uint64_t utc_out = ctx->rsi;
-    uint64_t st_out = ctx->rdx;
-    uint64_t dst_out = ctx->rcx;
-
-    struct tm tm_loc;
-    localtime_r(&loc_sec, &tm_loc);
-    time_t utc_sec = loc_sec - tm_loc.tm_gmtoff;
-
-    if (utc_out && ctx->mem_base) {
-        *(int64_t *)(ctx->mem_base + utc_out) = (int64_t)utc_sec;
-    }
-    if (st_out && ctx->mem_base) {
-        struct OrbisTimesec *st = (struct OrbisTimesec *)(ctx->mem_base + st_out);
-        st->t = (int64_t)utc_sec;
-        st->west_sec = -(int32_t)tm_loc.tm_gmtoff;
-        st->dst_sec = tm_loc.tm_isdst > 0 ? 3600 : 0;
-    }
-    if (dst_out && ctx->mem_base) {
-        *(uint64_t *)(ctx->mem_base + dst_out) = tm_loc.tm_isdst > 0 ? 3600ULL : 0ULL;
-    }
-    ctx->rax = 0;
     SHIM_RETURN();
 }
 
@@ -422,9 +238,9 @@ void shim__sceKernelSetThreadAtexitCount(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-static uint64_t g_thread_dtors = 0;
+// The routine every exiting thread calls (shadPS4 _sceKernelSetThreadDtors, posix_pthread_exit).
 void shim__sceKernelSetThreadDtors(GuestContext *ctx) {
-    g_thread_dtors = ctx->rdi;
+    ps4_thread_set_dtors(ctx->rdi);
     ctx->rax = 0;
     SHIM_RETURN();
 }
@@ -543,7 +359,6 @@ void shim_sceKernelFutimes(GuestContext *ctx) {
 
 #include <signal.h>
 #include <pthread.h>
-#include "ps4_threading.h"
 
 #define ORBIS_KERNEL_ERROR_ESRCH  0x80020003
 #define ORBIS_KERNEL_ERROR_EINVAL 0x80020016

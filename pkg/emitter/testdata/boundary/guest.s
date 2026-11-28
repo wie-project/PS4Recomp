@@ -214,15 +214,18 @@ GUEST_FN _guest_exc_handler
     STORE_REGS RES_EXC_HANDLER
     GUEST_RET
 
-// ---- Guest exception handler that changes thread state: TLS key 5 = 0x7777
-// (pthread_setspecific), a new key with destructor 0x7abc (pthread_key_create, key number to
-// EXC_KEY_OUT) and the heap pointer (shim_test_heap_bump). harness.c test_exception_state
-// checks that all of it survives the return from the handler.
+// ---- Guest exception handler that changes thread state: the value of the TLS key harness.c
+// created (its number at EXC_TLS_KEY) = 0x7777 (pthread_setspecific), a new key with destructor
+// 0x7abc (pthread_key_create, key number to EXC_KEY_OUT) and the heap pointer
+// (shim_test_heap_bump). harness.c test_exception_state checks that all of it survives the
+// return from the handler.
 
 .set EXC_KEY_OUT, D + 0x6f0
+.set EXC_TLS_KEY, D + 0x6f4
 
 GUEST_FN _guest_exc_state_handler
-    movz x24, #5
+    LI   x16, EXC_TLS_KEY
+    ldr  w24, [x28, x16]
     movz x23, #0x7777
     GUEST_CALL _stub_pthread_setspecific
     LI   x24, EXC_KEY_OUT

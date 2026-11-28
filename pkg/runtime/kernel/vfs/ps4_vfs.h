@@ -24,6 +24,14 @@ const char *ps4_vfs_get_app_root(void);
 // Register a custom mount point: guest_prefix (e.g. "/temp0" or "/addcont0") -> host_path
 int ps4_vfs_mount(const char *guest_prefix, const char *host_path);
 
+// Creates the host directory path and its missing parents: 0, or -1 with errno.
+int ps4_vfs_host_mkdir_p(const char *path);
+
+// The host directory of USB storage device device_id (shadPS4 UserDir/mnt/usb<id>):
+// <data>/mnt/usb<id>, where <data> is PS4RECOMP_DATA_DIR or ~/Library/Application Support/PS4Recomp.
+// ps4_vfs_init mounts device 0 at /mnt/usb0. Returns 0 or -ENAMETOOLONG.
+int ps4_vfs_usb_host_path(uint32_t device_id, char *out, size_t out_sz);
+
 // Unregister a mount point
 int ps4_vfs_unmount(const char *guest_prefix);
 

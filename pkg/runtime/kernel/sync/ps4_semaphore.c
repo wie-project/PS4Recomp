@@ -1,792 +1,692 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// POSIX semaphores (sem_*, scePthreadSem*) and Orbis kernel semaphores (sceKernel*Sema), after
+// shadPS4 (src/core/libraries/kernel/threads/semaphore.cpp):
+//
+// POSIX semaphores
+//  * a NULL or unknown semaphore fails with EINVAL; sem_init with a NULL sem_t succeeds without
+//    creating one, and a value above SEM_VALUE_MAX (0x7FFFFFFF) is EINVAL.
+//  * a wait takes a token that is available before it looks at the timeout, so a bad timespec
+//    does not fail a wait that would succeed; then tv_nsec outside [0, 1e9) is EINVAL.
+//    sem_timedwait sleeps until the absolute CLOCK_REALTIME deadline, sem_reltimedwait_np (and
+//    scePthreadSemTimedwait) for a relative number of microseconds; a miss is ETIMEDOUT, and a
+//    post that raced the timeout still wins.
+//  * sem_post at SEM_VALUE_MAX is EOVERFLOW; a post wakes every waiter (libkernel does) and the
+//    ones that lose the race wait again.
+//  * scePthreadSem* return ORBIS_KERNEL_ERROR_UNKNOWN + errno; scePthreadSemInit takes no flags.
+//
+// Kernel semaphores
+//  * attr 1 queues waiters in FIFO order, 0 and 2 by thread priority (a lower value first, FIFO
+//    among equals).
+//  * sceKernelSignalSema adds its count (EINVAL past the maximum) and then hands the tokens to
+//    the queued waiters in queue order: each waiter whose count is covered is woken with its
+//    tokens taken, the others keep waiting.
+//  * sceKernelWaitSema with a timeout of 0 is ETIMEDOUT at once. A timed wait that succeeds
+//    lowers *timeout by the time it waited; one that fails sets it to 0.
+//  * sceKernelCancelSema wakes every waiter with ECANCELED, reports how many there were and
+//    resets the count (setCount, or the initial count when it is negative).
+//  * sceKernelDeleteSema wakes every waiter with EACCES. An unknown handle is ESRCH.
+//
+// Deliberate differences: objects live in refcounted handle tables (ps4_handle_table.h), so a
+// semaphore deleted while threads wait on it is freed after they leave, and a call on a deleted
+// semaphore fails (EINVAL / ESRCH) instead of touching freed memory; the guest sem_t holds a
+// table id, not a host pointer.
 #include "ps4_semaphore.h"
+#include "ps4_handle_table.h"
+#include "ps4_threading.h"
+
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-#define MAX_SEMS 1024
-#define SEM_MAGIC 0x53454d31 // 'SEM1'
+#define ORBIS_KERNEL_ERROR_UNKNOWN 0x80020000u
+#define ORBIS_KERNEL_ERROR_ESRCH ((int32_t)0x80020003)
+#define ORBIS_KERNEL_ERROR_EACCES ((int32_t)0x8002000D)
+#define ORBIS_KERNEL_ERROR_EBUSY ((int32_t)0x80020010)
+#define ORBIS_KERNEL_ERROR_EINVAL ((int32_t)0x80020016)
+#define ORBIS_KERNEL_ERROR_ETIMEDOUT ((int32_t)0x8002003C)
+#define ORBIS_KERNEL_ERROR_ECANCELED ((int32_t)0x80020055)
 
-typedef struct {
-  uint32_t magic;
-  int in_use;
-  int value;
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
-} RecompInternalSem;
+#define ORBIS_KERNEL_SEM_VALUE_MAX 0x7FFFFFFF
+#define MAX_SEMAPHORES 0xFFFFu // shadPS4 MAX_ORBIS_SEMAPHORES
 
-static RecompInternalSem g_sem_table[MAX_SEMS];
-static pthread_mutex_t g_sem_table_lock = PTHREAD_MUTEX_INITIALIZER;
+static inline int32_t kernel_error(int err) {
+    return (int32_t)(ORBIS_KERNEL_ERROR_UNKNOWN + (uint32_t)err);
+}
 
-static int alloc_sem_slot(void) {
-  pthread_mutex_lock(&g_sem_table_lock);
-  for (int i = 1; i < MAX_SEMS; i++) {
-    if (!g_sem_table[i].in_use) {
-      g_sem_table[i].in_use = 1;
-      pthread_mutex_unlock(&g_sem_table_lock);
-      return i;
+// =============================================================================================
+// POSIX semaphores
+
+typedef struct PosixSem {
+    Ps4HandleObject h; // first: the handle table hands out &h
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int32_t value;
+    bool destroyed;
+} PosixSem;
+
+static Ps4HandleTable g_posix_sems = PS4_HANDLE_TABLE_INIT(MAX_SEMAPHORES);
+
+static void posix_sem_free(Ps4HandleObject *obj) {
+    PosixSem *s = (PosixSem *)obj;
+    pthread_mutex_destroy(&s->mutex);
+    pthread_cond_destroy(&s->cond);
+    free(s);
+}
+
+// The semaphore a guest sem_t holds (with a reference), or NULL for a NULL sem_t or unknown id.
+static PosixSem *posix_sem_get(GuestContext *ctx, uint64_t sem_addr) {
+    if (!sem_addr) {
+        return NULL;
     }
-  }
-  pthread_mutex_unlock(&g_sem_table_lock);
-  return -1;
+    const uint64_t id = *(const uint64_t *)(ctx->mem_base + sem_addr);
+    return id <= UINT32_MAX ? (PosixSem *)ps4_handle_get(&g_posix_sems, (uint32_t)id) : NULL;
 }
 
-static RecompInternalSem *get_sem(uint32_t id) {
-  if (id == 0 || id >= MAX_SEMS) {
-    return NULL;
-  }
-  RecompInternalSem *s = &g_sem_table[id];
-  if (!s->in_use || s->magic != SEM_MAGIC) {
-    return NULL;
-  }
-  return s;
+static void posix_sem_put(PosixSem *s) {
+    ps4_handle_put(&g_posix_sems, &s->h);
 }
 
-// sem_init(sem_t *sem, int pshared, unsigned int value)
+// posix_sem_init: 0 or the errno.
+static int posix_sem_init_impl(GuestContext *ctx, uint64_t sem_addr, uint32_t value) {
+    if (value > ORBIS_KERNEL_SEM_VALUE_MAX) {
+        return EINVAL;
+    }
+    if (!sem_addr) {
+        return 0;
+    }
+    PosixSem *s = calloc(1, sizeof(*s));
+    if (!s) {
+        return ENOMEM;
+    }
+    s->h.destroy = posix_sem_free;
+    s->value = (int32_t)value;
+    pthread_mutex_init(&s->mutex, NULL);
+    pthread_cond_init(&s->cond, NULL);
+    const uint32_t id = ps4_handle_insert(&g_posix_sems, &s->h);
+    if (id == 0) {
+        posix_sem_free(&s->h);
+        return ENOSPC;
+    }
+    *(uint64_t *)(ctx->mem_base + sem_addr) = id;
+    return 0;
+}
+
+static int posix_sem_destroy_impl(GuestContext *ctx, uint64_t sem_addr) {
+    if (!sem_addr) {
+        return EINVAL;
+    }
+    const uint64_t id = *(const uint64_t *)(ctx->mem_base + sem_addr);
+    PosixSem *s = id <= UINT32_MAX ? (PosixSem *)ps4_handle_remove(&g_posix_sems, (uint32_t)id) : NULL;
+    if (!s) {
+        return EINVAL;
+    }
+    pthread_mutex_lock(&s->mutex);
+    s->destroyed = true;
+    pthread_cond_broadcast(&s->cond);
+    pthread_mutex_unlock(&s->mutex);
+    posix_sem_put(s);
+    *(uint64_t *)(ctx->mem_base + sem_addr) = 0;
+    return 0;
+}
+
+// Takes a token if there is one (mutex held).
+static bool posix_sem_try_acquire(PosixSem *s) {
+    if (s->value > 0) {
+        s->value--;
+        return true;
+    }
+    return false;
+}
+
+// Deadlines more than this far away wait without limit: they would overflow the host wait.
+#define FAR_FUTURE_SEC (30LL * 365 * 86400)
+
+typedef enum { WAIT_FOREVER, WAIT_ABSOLUTE, WAIT_RELATIVE } PosixWaitKind;
+
+static void posix_sem_put_cb(void *s) { posix_sem_put((PosixSem *)s); }
+
+// PthreadSemWait: 0 or the errno. A cancellation point: a pending cancel ends the thread before
+// it sleeps or when it wakes without a token (dropping the caller's reference to s).
+static int posix_sem_wait_impl(PosixSem *s, PosixWaitKind kind, const int64_t *abstime, uint32_t usec) {
+    RecompThread *self = recomp_get_current_thread();
+    PthreadCleanupEntry put;
+    ps4_thread_cleanup_push_host(&put, posix_sem_put_cb, s);
+    pthread_mutex_lock(&s->mutex);
+    uint64_t reltime_deadline = 0;
+    bool first_sleep = true;
+    int err = 0;
+    for (;;) {
+        if (s->destroyed) {
+            err = EINVAL;
+            break;
+        }
+        // libkernel checks and decrements the value before validating a timeout.
+        if (posix_sem_try_acquire(s)) {
+            break;
+        }
+        if (kind == WAIT_ABSOLUTE && (abstime[1] < 0 || abstime[1] >= 1000000000LL)) {
+            err = EINVAL;
+            break;
+        }
+        if (ps4_thread_cancel_wait_begin(self, &s->mutex, &s->cond)) {
+            pthread_mutex_unlock(&s->mutex);
+            ps4_thread_testcancel();
+            pthread_mutex_lock(&s->mutex);
+            continue;
+        }
+        bool woke = true;
+        if (kind == WAIT_RELATIVE) {
+            if (first_sleep) {
+                reltime_deadline = ps4_mono_ns() + (uint64_t)usec * 1000u;
+                first_sleep = false;
+            }
+            woke = ps4_cond_wait_until(&s->cond, &s->mutex, reltime_deadline);
+        } else if (kind == WAIT_ABSOLUTE) {
+            struct timespec now;
+            clock_gettime(CLOCK_REALTIME, &now);
+            if (abstime[0] < (int64_t)now.tv_sec + FAR_FUTURE_SEC) {
+                const struct timespec deadline = {.tv_sec = (time_t)abstime[0], .tv_nsec = (long)abstime[1]};
+                woke = pthread_cond_timedwait(&s->cond, &s->mutex, &deadline) != ETIMEDOUT;
+            } else {
+                pthread_cond_wait(&s->cond, &s->mutex);
+            }
+        } else {
+            pthread_cond_wait(&s->cond, &s->mutex);
+        }
+        ps4_thread_cancel_wait_end(self);
+        // A post racing the timeout (or a cancel) wins if its token is still available.
+        if (!s->destroyed && posix_sem_try_acquire(s)) {
+            break;
+        }
+        pthread_mutex_unlock(&s->mutex);
+        ps4_thread_testcancel();
+        pthread_mutex_lock(&s->mutex);
+        if (!woke) {
+            if (!s->destroyed && posix_sem_try_acquire(s)) {
+                break;
+            }
+            err = s->destroyed ? EINVAL : ETIMEDOUT;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&s->mutex);
+    ps4_thread_cleanup_pop_host(&put);
+    return err;
+}
+
+static int posix_sem_post_impl(PosixSem *s) {
+    pthread_mutex_lock(&s->mutex);
+    int err = 0;
+    if (s->value == ORBIS_KERNEL_SEM_VALUE_MAX) {
+        err = EOVERFLOW;
+    } else {
+        s->value++;
+        // libkernel wakes every waiter; the ones that do not get the token wait again.
+        pthread_cond_broadcast(&s->cond);
+    }
+    pthread_mutex_unlock(&s->mutex);
+    return err;
+}
+
+// A POSIX operation on the guest sem_t at sem_addr: EINVAL for a NULL or unknown semaphore.
+typedef int (*PosixSemOp)(GuestContext *ctx, PosixSem *s);
+
+static int with_posix_sem(GuestContext *ctx, uint64_t sem_addr, PosixSemOp op) {
+    PosixSem *s = posix_sem_get(ctx, sem_addr);
+    if (!s) {
+        return EINVAL;
+    }
+    const int err = op(ctx, s);
+    posix_sem_put(s);
+    return err;
+}
+
+static int op_wait(GuestContext *ctx, PosixSem *s) {
+    (void)ctx;
+    return posix_sem_wait_impl(s, WAIT_FOREVER, NULL, 0);
+}
+
+static int op_timedwait(GuestContext *ctx, PosixSem *s) {
+    const int64_t *abstime = ctx->rsi ? (const int64_t *)(ctx->mem_base + ctx->rsi) : NULL;
+    return posix_sem_wait_impl(s, abstime ? WAIT_ABSOLUTE : WAIT_FOREVER, abstime, 0);
+}
+
+static int op_reltimedwait(GuestContext *ctx, PosixSem *s) {
+    return posix_sem_wait_impl(s, WAIT_RELATIVE, NULL, (uint32_t)ctx->rsi);
+}
+
+static int op_trywait(GuestContext *ctx, PosixSem *s) {
+    (void)ctx;
+    pthread_mutex_lock(&s->mutex);
+    const bool ok = !s->destroyed && posix_sem_try_acquire(s);
+    pthread_mutex_unlock(&s->mutex);
+    return ok ? 0 : EAGAIN;
+}
+
+static int op_post(GuestContext *ctx, PosixSem *s) {
+    (void)ctx;
+    return posix_sem_post_impl(s);
+}
+
+static int op_getvalue(GuestContext *ctx, PosixSem *s) {
+    pthread_mutex_lock(&s->mutex);
+    const int32_t value = s->value;
+    pthread_mutex_unlock(&s->mutex);
+    if (ctx->rsi) {
+        *(int32_t *)(ctx->mem_base + ctx->rsi) = value;
+    }
+    return 0;
+}
+
+// Posix result: 0, or -1 with the guest errno.
+static void posix_return(GuestContext *ctx, int err) {
+    if (err != 0) {
+        set_guest_errno(ctx, err);
+        ctx->rax = (uint64_t)-1;
+    } else {
+        ctx->rax = 0;
+    }
+}
+
+// scePthreadSem result: ORBIS_OK, or the kernel error of the errno (which stays set).
+static void kernel_return(GuestContext *ctx, int err) {
+    if (err != 0) {
+        set_guest_errno(ctx, err);
+        ctx->rax = (uint64_t)(int64_t)kernel_error(err);
+    } else {
+        ctx->rax = 0;
+    }
+}
+
+// int sem_init(sem_t *sem, int pshared, unsigned int value)
 void shim_sem_init(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  int pshared = (int)ctx->rsi;
-  unsigned int value = (unsigned int)ctx->rdx;
-  (void)pshared;
-
-  if (!sem_addr) {
-    set_guest_errno(ctx, EFAULT);
-    ctx->rax = (uint64_t)-1;
+    posix_return(ctx, posix_sem_init_impl(ctx, ctx->rdi, (uint32_t)ctx->rdx));
     SHIM_RETURN();
-  }
-
-  int slot = alloc_sem_slot();
-  if (slot < 0) {
-    set_guest_errno(ctx, ENOSPC);
-    ctx->rax = (uint64_t)-1;
-    SHIM_RETURN();
-  }
-
-  RecompInternalSem *s = &g_sem_table[slot];
-  s->magic = SEM_MAGIC;
-  s->value = (int)value;
-  pthread_mutex_init(&s->mutex, NULL);
-  pthread_cond_init(&s->cond, NULL);
-
-  // Store slot id in guest sem_t (both 32-bit and 64-bit safe)
-  *(uint64_t *)(ctx->mem_base + sem_addr) = (uint64_t)slot;
-
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
-// sem_destroy(sem_t *sem)
+// int sem_destroy(sem_t *sem)
 void shim_sem_destroy(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  if (!sem_addr) {
-    set_guest_errno(ctx, EFAULT);
-    ctx->rax = (uint64_t)-1;
+    posix_return(ctx, posix_sem_destroy_impl(ctx, ctx->rdi));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    set_guest_errno(ctx, EINVAL);
-    ctx->rax = (uint64_t)-1;
-    SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  s->magic = 0;
-  pthread_cond_broadcast(&s->cond);
-  pthread_mutex_unlock(&s->mutex);
-
-  pthread_mutex_destroy(&s->mutex);
-  pthread_cond_destroy(&s->cond);
-
-  pthread_mutex_lock(&g_sem_table_lock);
-  s->in_use = 0;
-  pthread_mutex_unlock(&g_sem_table_lock);
-
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
-// sem_wait(sem_t *sem)
+// int sem_wait(sem_t *sem)
 void shim_sem_wait(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  if (!sem_addr) {
-    set_guest_errno(ctx, EFAULT);
-    ctx->rax = (uint64_t)-1;
+    posix_return(ctx, with_posix_sem(ctx, ctx->rdi, op_wait));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    set_guest_errno(ctx, EINVAL);
-    ctx->rax = (uint64_t)-1;
-    SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  while (s->value <= 0) {
-    pthread_cond_wait(&s->cond, &s->mutex);
-  }
-  s->value--;
-  pthread_mutex_unlock(&s->mutex);
-
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
-// int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout)
-//
-// Order of checks as in libkernel (see shadPS4 libraries/kernel/threads/semaphore.cpp,
-// posix_sem_timedwait / PthreadSemWait): a NULL or unknown semaphore fails with EINVAL; a
-// token that is available is taken before the timeout is looked at, so a bad timespec does not
-// fail a wait that would succeed; then tv_nsec outside [0, 1e9) fails with EINVAL; otherwise
-// the thread sleeps until the absolute CLOCK_REALTIME deadline and a miss returns -1 with
-// errno ETIMEDOUT (FreeBSD value 60, same as the host). A NULL abs_timeout waits without
-// limit, like sem_wait. A deadline more than 30 years away is treated the same way, which
-// keeps far-future values from overflowing the host's timed wait.
+// int sem_timedwait(sem_t *sem, const struct timespec *abs_timeout): a NULL abs_timeout waits
+// without limit.
 void shim_sem_timedwait(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  uint64_t ts_addr = ctx->rsi;
-  RecompInternalSem *s = NULL;
-  if (sem_addr) {
-    s = get_sem(*(uint32_t *)(ctx->mem_base + sem_addr));
-  }
-  if (!s) {
-    set_guest_errno(ctx, EINVAL);
-    ctx->rax = (uint64_t)-1;
+    posix_return(ctx, with_posix_sem(ctx, ctx->rdi, op_timedwait));
     SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  if (s->value > 0) {
-    s->value--;
-    pthread_mutex_unlock(&s->mutex);
-    ctx->rax = 0;
-    SHIM_RETURN();
-  }
-
-  struct timespec deadline = {0, 0};
-  int timed = 0;
-  if (ts_addr) {
-    const int64_t *ts = (const int64_t *)(ctx->mem_base + ts_addr);
-    int64_t sec = ts[0], nsec = ts[1];
-    if (nsec < 0 || nsec >= 1000000000LL) {
-      pthread_mutex_unlock(&s->mutex);
-      set_guest_errno(ctx, EINVAL);
-      ctx->rax = (uint64_t)-1;
-      SHIM_RETURN();
-    }
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
-    if (sec < (int64_t)now.tv_sec + 30LL * 365 * 86400) {
-      deadline.tv_sec = (time_t)sec;
-      deadline.tv_nsec = (long)nsec;
-      timed = 1;
-    }
-  }
-
-  while (s->value <= 0 && s->magic == SEM_MAGIC) {
-    if (!timed) {
-      pthread_cond_wait(&s->cond, &s->mutex);
-    } else if (pthread_cond_timedwait(&s->cond, &s->mutex, &deadline) != 0) {
-      break; // ETIMEDOUT, or an error that would otherwise spin (EINVAL): report a timeout
-    }
-  }
-  if (s->magic != SEM_MAGIC) { // destroyed while waiting
-    pthread_mutex_unlock(&s->mutex);
-    set_guest_errno(ctx, EINVAL);
-    ctx->rax = (uint64_t)-1;
-    SHIM_RETURN();
-  }
-  if (s->value > 0) { // a post that raced the timeout still wins
-    s->value--;
-    pthread_mutex_unlock(&s->mutex);
-    ctx->rax = 0;
-    SHIM_RETURN();
-  }
-  pthread_mutex_unlock(&s->mutex);
-  set_guest_errno(ctx, ETIMEDOUT);
-  ctx->rax = (uint64_t)-1;
-  SHIM_RETURN();
 }
 
-// sem_trywait(sem_t *sem)
+// int sem_reltimedwait_np(sem_t *sem, useconds_t usec)
+void shim_sem_reltimedwait_np(GuestContext *ctx) {
+    posix_return(ctx, with_posix_sem(ctx, ctx->rdi, op_reltimedwait));
+    SHIM_RETURN();
+}
+
+// int sem_trywait(sem_t *sem)
 void shim_sem_trywait(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  if (!sem_addr) {
-    set_guest_errno(ctx, EFAULT);
-    ctx->rax = (uint64_t)-1;
+    posix_return(ctx, with_posix_sem(ctx, ctx->rdi, op_trywait));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    set_guest_errno(ctx, EINVAL);
-    ctx->rax = (uint64_t)-1;
-    SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  if (s->value > 0) {
-    s->value--;
-    pthread_mutex_unlock(&s->mutex);
-    ctx->rax = 0;
-  } else {
-    pthread_mutex_unlock(&s->mutex);
-    set_guest_errno(ctx, EAGAIN);
-    ctx->rax = (uint64_t)-1;
-  }
-  SHIM_RETURN();
 }
 
-// sem_post(sem_t *sem)
+// int sem_post(sem_t *sem)
 void shim_sem_post(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  if (!sem_addr) {
-    set_guest_errno(ctx, EFAULT);
-    ctx->rax = (uint64_t)-1;
+    posix_return(ctx, with_posix_sem(ctx, ctx->rdi, op_post));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    set_guest_errno(ctx, EINVAL);
-    ctx->rax = (uint64_t)-1;
-    SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  s->value++;
-  pthread_cond_signal(&s->cond);
-  pthread_mutex_unlock(&s->mutex);
-
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
-// sem_getvalue(sem_t *sem, int *sval)
+// int sem_getvalue(sem_t *sem, int *sval): sval is optional.
 void shim_sem_getvalue(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  uint64_t sval_addr = ctx->rsi;
-  if (!sem_addr || !sval_addr) {
-    set_guest_errno(ctx, EFAULT);
-    ctx->rax = (uint64_t)-1;
+    posix_return(ctx, with_posix_sem(ctx, ctx->rdi, op_getvalue));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    set_guest_errno(ctx, EINVAL);
-    ctx->rax = (uint64_t)-1;
-    SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  int cur_val = s->value;
-  pthread_mutex_unlock(&s->mutex);
-
-  *(int *)(ctx->mem_base + sval_addr) = cur_val;
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
-// scePthread semaphore implementations
+// int sem_setname(sem_t *sem, const char *name): names are not kept; only a NULL name fails.
+void shim_sem_setname(GuestContext *ctx) {
+    posix_return(ctx, ctx->rsi ? 0 : EINVAL);
+    SHIM_RETURN();
+}
+
+// int scePthreadSemInit(ScePthreadSem *sem, int flag, unsigned int value, const char *name)
 void shim_scePthreadSemInit(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  int flag = (int)ctx->rsi;
-  unsigned int value = (unsigned int)ctx->rdx;
-
-  if (flag != 0) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
+    if ((int32_t)ctx->rsi != 0) {
+        ctx->rax = (uint64_t)(int64_t)ORBIS_KERNEL_ERROR_EINVAL;
+        SHIM_RETURN();
+    }
+    kernel_return(ctx, posix_sem_init_impl(ctx, ctx->rdi, (uint32_t)ctx->rdx));
     SHIM_RETURN();
-  }
-  if (!sem_addr) {
-    ctx->rax = 0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
-    SHIM_RETURN();
-  }
-
-  int slot = alloc_sem_slot();
-  if (slot < 0) {
-    ctx->rax = 0x8002001c; // ORBIS_KERNEL_ERROR_ENOSPC
-    SHIM_RETURN();
-  }
-
-  RecompInternalSem *s = &g_sem_table[slot];
-  s->magic = SEM_MAGIC;
-  s->value = (int)value;
-  pthread_mutex_init(&s->mutex, NULL);
-  pthread_cond_init(&s->cond, NULL);
-
-  *(uint64_t *)(ctx->mem_base + sem_addr) = (uint64_t)slot;
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
 void shim_scePthreadSemDestroy(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  if (!sem_addr) {
-    ctx->rax = 0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
+    kernel_return(ctx, posix_sem_destroy_impl(ctx, ctx->rdi));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  s->magic = 0;
-  pthread_cond_broadcast(&s->cond);
-  pthread_mutex_unlock(&s->mutex);
-
-  pthread_mutex_destroy(&s->mutex);
-  pthread_cond_destroy(&s->cond);
-
-  pthread_mutex_lock(&g_sem_table_lock);
-  s->in_use = 0;
-  pthread_mutex_unlock(&g_sem_table_lock);
-
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
 void shim_scePthreadSemWait(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  if (!sem_addr) {
-    ctx->rax = 0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
+    kernel_return(ctx, with_posix_sem(ctx, ctx->rdi, op_wait));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  while (s->magic == SEM_MAGIC && s->value <= 0) {
-    pthread_cond_wait(&s->cond, &s->mutex);
-  }
-  if (s->magic != SEM_MAGIC) {
-    pthread_mutex_unlock(&s->mutex);
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-  s->value--;
-  pthread_mutex_unlock(&s->mutex);
-
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
 void shim_scePthreadSemTrywait(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  if (!sem_addr) {
-    ctx->rax = 0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
+    kernel_return(ctx, with_posix_sem(ctx, ctx->rdi, op_trywait));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  if (s->value > 0) {
-    s->value--;
-    pthread_mutex_unlock(&s->mutex);
-    ctx->rax = 0;
-  } else {
-    pthread_mutex_unlock(&s->mutex);
-    ctx->rax = 0x80020023; // ORBIS_KERNEL_ERROR_EAGAIN
-  }
-  SHIM_RETURN();
 }
 
+// int scePthreadSemTimedwait(ScePthreadSem *sem, SceKernelUseconds usec): sem_reltimedwait_np.
 void shim_scePthreadSemTimedwait(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  uint32_t usec = (uint32_t)ctx->rsi;
-  if (!sem_addr) {
-    ctx->rax = 0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
+    kernel_return(ctx, with_posix_sem(ctx, ctx->rdi, op_reltimedwait));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-
-  struct timespec now;
-  clock_gettime(CLOCK_REALTIME, &now);
-  struct timespec ts;
-  ts.tv_sec = now.tv_sec + (time_t)(usec / 1000000ULL);
-  ts.tv_nsec = now.tv_nsec + (long)((usec % 1000000ULL) * 1000ULL);
-  if (ts.tv_nsec >= 1000000000L) {
-    ts.tv_sec += 1;
-    ts.tv_nsec -= 1000000000L;
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  while (s->magic == SEM_MAGIC && s->value <= 0) {
-    int rc = pthread_cond_timedwait(&s->cond, &s->mutex, &ts);
-    if (rc == ETIMEDOUT) {
-      pthread_mutex_unlock(&s->mutex);
-      ctx->rax = 0x8002003c; // ORBIS_KERNEL_ERROR_ETIMEDOUT
-      SHIM_RETURN();
-    }
-  }
-  if (s->magic != SEM_MAGIC) {
-    pthread_mutex_unlock(&s->mutex);
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-  s->value--;
-  pthread_mutex_unlock(&s->mutex);
-
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
 void shim_scePthreadSemPost(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  if (!sem_addr) {
-    ctx->rax = 0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
+    kernel_return(ctx, with_posix_sem(ctx, ctx->rdi, op_post));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  s->value++;
-  pthread_cond_signal(&s->cond);
-  pthread_mutex_unlock(&s->mutex);
-
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
 void shim_scePthreadSemGetvalue(GuestContext *ctx) {
-  uint64_t sem_addr = ctx->rdi;
-  uint64_t sval_addr = ctx->rsi;
-  if (!sem_addr || !sval_addr) {
-    ctx->rax = 0x8002000e; // ORBIS_KERNEL_ERROR_EFAULT
+    kernel_return(ctx, with_posix_sem(ctx, ctx->rdi, op_getvalue));
     SHIM_RETURN();
-  }
-
-  uint32_t id = *(uint32_t *)(ctx->mem_base + sem_addr);
-  RecompInternalSem *s = get_sem(id);
-  if (!s) {
-    ctx->rax = 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-    SHIM_RETURN();
-  }
-
-  pthread_mutex_lock(&s->mutex);
-  int cur_val = s->value;
-  pthread_mutex_unlock(&s->mutex);
-
-  *(int *)(ctx->mem_base + sval_addr) = cur_val;
-  ctx->rax = 0;
-  SHIM_RETURN();
 }
 
-// Orbis Kernel Semaphore implementations
-#define MAX_KSEMS 1024
-#define KSEM_MAGIC 0x4b53454d // 'KSEM'
+// =============================================================================================
+// Orbis kernel semaphores
 
-typedef struct {
-  uint32_t magic;
-  int in_use;
-  char name[32];
-  int32_t current_count;
-  int32_t init_count;
-  int32_t max_count;
-  uint32_t attr;
-  int num_waiters;
-  uint32_t cancel_gen;
-  pthread_mutex_t mutex;
-  pthread_cond_t cond;
-} RecompKernelSema;
+typedef enum { SEMA_WAITING, SEMA_SIGNALED, SEMA_DELETED, SEMA_CANCELED } SemaWaitState;
 
-static RecompKernelSema g_ksem_table[MAX_KSEMS];
-static pthread_mutex_t g_ksem_table_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct SemaWaiter {
+    struct SemaWaiter *next;
+    pthread_cond_t cond;
+    int32_t need_count;
+    int32_t priority;
+    SemaWaitState state;
+} SemaWaiter;
 
-static int alloc_ksem_slot(void) {
-  pthread_mutex_lock(&g_ksem_table_lock);
-  for (int i = 1; i < MAX_KSEMS; i++) {
-    if (!g_ksem_table[i].in_use) {
-      g_ksem_table[i].in_use = 1;
-      pthread_mutex_unlock(&g_ksem_table_lock);
-      return i;
+typedef struct KernelSema {
+    Ps4HandleObject h; // first: the handle table hands out &h
+    pthread_mutex_t mutex;
+    SemaWaiter *waiters; // queue order
+    int32_t token_count;
+    int32_t max_count;
+    int32_t init_count;
+    bool is_fifo;
+    bool deleted;
+    char name[32];
+} KernelSema;
+
+static Ps4HandleTable g_kernel_semas = PS4_HANDLE_TABLE_INIT(MAX_SEMAPHORES);
+
+static void kernel_sema_free(Ps4HandleObject *obj) {
+    KernelSema *s = (KernelSema *)obj;
+    pthread_mutex_destroy(&s->mutex);
+    free(s);
+}
+
+static KernelSema *kernel_sema_get(OrbisKernelSema sem) {
+    return sem > 0 ? (KernelSema *)ps4_handle_get(&g_kernel_semas, (uint32_t)sem) : NULL;
+}
+
+static void kernel_sema_put(KernelSema *s) {
+    ps4_handle_put(&g_kernel_semas, &s->h);
+}
+
+// The calling guest thread's priority (0 for a host thread).
+static int32_t current_priority(void) {
+    RecompThread *t = recomp_get_current_thread();
+    return t ? t->attr.prio : 0;
+}
+
+// FIFO: at the end. By priority: before the first waiter with a higher value (FIFO among equals).
+static void sema_add_waiter(KernelSema *s, SemaWaiter *w) {
+    SemaWaiter **link = &s->waiters;
+    while (*link && (s->is_fifo || (*link)->priority <= w->priority)) {
+        link = &(*link)->next;
     }
-  }
-  pthread_mutex_unlock(&g_ksem_table_lock);
-  return -1;
+    w->next = *link;
+    *link = w;
 }
 
-static RecompKernelSema *get_ksem(OrbisKernelSema id) {
-  if (id <= 0 || id >= MAX_KSEMS) return NULL;
-  RecompKernelSema *s = &g_ksem_table[id];
-  if (!s->in_use || s->magic != KSEM_MAGIC) return NULL;
-  return s;
+static void sema_remove_waiter(KernelSema *s, SemaWaiter *w) {
+    for (SemaWaiter **link = &s->waiters; *link; link = &(*link)->next) {
+        if (*link == w) {
+            *link = w->next;
+            return;
+        }
+    }
 }
 
-int sceKernelCreateSema(OrbisKernelSema *sem, const char *pName, uint32_t attr, int32_t initCount, int32_t maxCount, const void *pOptParam) {
-  (void)pOptParam;
-  if (!sem || !pName || attr > 2 || initCount < 0 || maxCount <= 0 || initCount > maxCount) {
-    return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-  }
-  int slot = alloc_ksem_slot();
-  if (slot < 0) return 0x80020018; // ORBIS_KERNEL_ERROR_ENFILE
+// Wakes and unlinks every waiter with state.
+static int32_t sema_release_all(KernelSema *s, SemaWaitState state) {
+    int32_t n = 0;
+    for (SemaWaiter *w = s->waiters; w; w = w->next, n++) {
+        w->state = state;
+        pthread_cond_signal(&w->cond);
+    }
+    s->waiters = NULL;
+    return n;
+}
 
-  RecompKernelSema *s = &g_ksem_table[slot];
-  s->magic = KSEM_MAGIC;
-  strncpy(s->name, pName, sizeof(s->name) - 1);
-  s->name[sizeof(s->name) - 1] = '\0';
-  s->init_count = initCount;
-  s->max_count = maxCount;
-  s->current_count = initCount;
-  s->attr = attr;
-  s->num_waiters = 0;
-  s->cancel_gen = 0;
-  pthread_mutex_init(&s->mutex, NULL);
-  pthread_cond_init(&s->cond, NULL);
-
-  *sem = (OrbisKernelSema)slot;
-  return 0;
+int sceKernelCreateSema(OrbisKernelSema *sem, const char *pName, uint32_t attr, int32_t initCount, int32_t maxCount,
+                        const void *pOptParam) {
+    (void)pOptParam;
+    if (!sem || !pName || attr > 2 || initCount < 0 || maxCount <= 0 || initCount > maxCount) {
+        return ORBIS_KERNEL_ERROR_EINVAL;
+    }
+    KernelSema *s = calloc(1, sizeof(*s));
+    if (!s) {
+        return kernel_error(ENOMEM);
+    }
+    s->h.destroy = kernel_sema_free;
+    pthread_mutex_init(&s->mutex, NULL);
+    s->token_count = initCount;
+    s->max_count = maxCount;
+    s->init_count = initCount;
+    s->is_fifo = attr == 1;
+    strlcpy(s->name, pName, sizeof(s->name));
+    const uint32_t id = ps4_handle_insert(&g_kernel_semas, &s->h);
+    if (id == 0) {
+        kernel_sema_free(&s->h);
+        return kernel_error(ENFILE);
+    }
+    *sem = (OrbisKernelSema)id;
+    return 0;
 }
 
 int sceKernelDeleteSema(OrbisKernelSema sem) {
-  RecompKernelSema *s = get_ksem(sem);
-  if (!s) return 0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
-
-  pthread_mutex_lock(&s->mutex);
-  s->magic = 0;
-  pthread_cond_broadcast(&s->cond);
-  pthread_mutex_unlock(&s->mutex);
-
-  pthread_mutex_lock(&g_ksem_table_lock);
-  pthread_mutex_destroy(&s->mutex);
-  pthread_cond_destroy(&s->cond);
-  s->in_use = 0;
-  pthread_mutex_unlock(&g_ksem_table_lock);
-  return 0;
+    KernelSema *s = sem > 0 ? (KernelSema *)ps4_handle_remove(&g_kernel_semas, (uint32_t)sem) : NULL;
+    if (!s) {
+        return ORBIS_KERNEL_ERROR_ESRCH;
+    }
+    pthread_mutex_lock(&s->mutex);
+    s->deleted = true;
+    sema_release_all(s, SEMA_DELETED);
+    pthread_mutex_unlock(&s->mutex);
+    kernel_sema_put(s);
+    return 0;
 }
 
-int sceKernelSignalSema(OrbisKernelSema sem, int32_t signalCount) {
-  if (signalCount <= 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-  RecompKernelSema *s = get_ksem(sem);
-  if (!s) return 0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
+// OrbisSem::Wait (mutex held).
+static int sema_wait_locked(KernelSema *s, bool can_block, int32_t need_count, uint32_t *timeout) {
+    if (s->deleted) {
+        return ORBIS_KERNEL_ERROR_ESRCH;
+    }
+    if (s->token_count >= need_count) {
+        s->token_count -= need_count;
+        return 0;
+    }
+    if (!can_block) {
+        return ORBIS_KERNEL_ERROR_EBUSY;
+    }
+    if (timeout && *timeout == 0) {
+        return ORBIS_KERNEL_ERROR_ETIMEDOUT;
+    }
 
-  pthread_mutex_lock(&s->mutex);
-  if (s->current_count + signalCount > s->max_count) {
+    SemaWaiter w = {
+        .need_count = need_count,
+        .priority = s->is_fifo ? 0 : current_priority(),
+        .state = SEMA_WAITING,
+    };
+    pthread_cond_init(&w.cond, NULL);
+    sema_add_waiter(s, &w);
+    if (!timeout) {
+        while (w.state == SEMA_WAITING) {
+            pthread_cond_wait(&w.cond, &s->mutex);
+        }
+    } else {
+        const uint64_t start = ps4_mono_ns();
+        const uint64_t deadline = start + (uint64_t)*timeout * 1000u;
+        while (w.state == SEMA_WAITING && ps4_cond_wait_until(&w.cond, &s->mutex, deadline)) {
+        }
+        if (w.state == SEMA_SIGNALED) {
+            const uint64_t waited = (ps4_mono_ns() - start) / 1000u;
+            *timeout = waited >= *timeout ? 0 : *timeout - (uint32_t)waited;
+        } else {
+            *timeout = 0;
+        }
+    }
+    if (w.state == SEMA_WAITING) { // timed out
+        sema_remove_waiter(s, &w);
+    }
+    pthread_cond_destroy(&w.cond);
+    switch (w.state) {
+    case SEMA_SIGNALED:
+        return 0;
+    case SEMA_DELETED:
+        return ORBIS_KERNEL_ERROR_EACCES;
+    case SEMA_CANCELED:
+        return ORBIS_KERNEL_ERROR_ECANCELED;
+    default:
+        return ORBIS_KERNEL_ERROR_ETIMEDOUT;
+    }
+}
+
+static int sema_wait(OrbisKernelSema sem, bool can_block, int32_t needCount, uint32_t *pTimeout) {
+    KernelSema *s = kernel_sema_get(sem);
+    if (!s) {
+        return ORBIS_KERNEL_ERROR_ESRCH;
+    }
+    pthread_mutex_lock(&s->mutex);
+    const int rc = sema_wait_locked(s, can_block, needCount, pTimeout);
     pthread_mutex_unlock(&s->mutex);
-    return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-  }
-  s->current_count += signalCount;
-  pthread_cond_broadcast(&s->cond);
-  pthread_mutex_unlock(&s->mutex);
-  return 0;
+    kernel_sema_put(s);
+    return rc;
 }
 
 int sceKernelWaitSema(OrbisKernelSema sem, int32_t needCount, uint32_t *pTimeout) {
-  if (needCount <= 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-  RecompKernelSema *s = get_ksem(sem);
-  if (!s) return 0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
-
-  pthread_mutex_lock(&s->mutex);
-
-  if (s->current_count >= needCount) {
-    s->current_count -= needCount;
-    pthread_mutex_unlock(&s->mutex);
-    return 0;
-  }
-
-  if (pTimeout && *pTimeout == 0) {
-    pthread_mutex_unlock(&s->mutex);
-    return 0x8002003c; // ORBIS_KERNEL_ERROR_ETIMEDOUT
-  }
-
-  struct timespec ts;
-  int has_timeout = 0;
-  uint64_t start_us = 0;
-  if (pTimeout) {
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
-    start_us = (uint64_t)now.tv_sec * 1000000ULL + (uint64_t)now.tv_nsec / 1000ULL;
-    uint64_t usec = *pTimeout;
-    ts.tv_sec = now.tv_sec + (time_t)(usec / 1000000ULL);
-    ts.tv_nsec = now.tv_nsec + (long)((usec % 1000000ULL) * 1000ULL);
-    if (ts.tv_nsec >= 1000000000L) {
-      ts.tv_sec += 1;
-      ts.tv_nsec -= 1000000000L;
-    }
-    has_timeout = 1;
-  }
-
-  uint32_t my_cancel_gen = s->cancel_gen;
-  s->num_waiters++;
-  int timed_out = 0;
-  while (s->magic == KSEM_MAGIC && s->cancel_gen == my_cancel_gen && s->current_count < needCount) {
-    if (has_timeout) {
-      int rc = pthread_cond_timedwait(&s->cond, &s->mutex, &ts);
-      if (rc == ETIMEDOUT) {
-        timed_out = 1;
-        break;
-      }
-    } else {
-      pthread_cond_wait(&s->cond, &s->mutex);
-    }
-  }
-
-  s->num_waiters--;
-
-  if (s->magic != KSEM_MAGIC) {
-    pthread_mutex_unlock(&s->mutex);
-    return 0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
-  }
-
-  if (s->cancel_gen != my_cancel_gen) {
-    pthread_mutex_unlock(&s->mutex);
-    return 0x80020040; // ORBIS_KERNEL_ERROR_ECANCELED
-  }
-
-  if (timed_out) {
-    if (pTimeout) {
-      *pTimeout = 0;
-    }
-    pthread_mutex_unlock(&s->mutex);
-    return 0x8002003c; // ORBIS_KERNEL_ERROR_ETIMEDOUT
-  }
-
-  s->current_count -= needCount;
-
-  if (has_timeout && pTimeout) {
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
-    uint64_t end_us = (uint64_t)now.tv_sec * 1000000ULL + (uint64_t)now.tv_nsec / 1000ULL;
-    uint64_t elapsed = end_us > start_us ? end_us - start_us : 0;
-    if (elapsed >= *pTimeout) {
-      *pTimeout = 0;
-    } else {
-      *pTimeout -= (uint32_t)elapsed;
-    }
-  }
-
-  pthread_mutex_unlock(&s->mutex);
-  return 0;
+    return sema_wait(sem, true, needCount, pTimeout);
 }
 
 int sceKernelPollSema(OrbisKernelSema sem, int32_t needCount) {
-  if (needCount <= 0) return 0x80020016; // ORBIS_KERNEL_ERROR_EINVAL
-  RecompKernelSema *s = get_ksem(sem);
-  if (!s) return 0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
+    return sema_wait(sem, false, needCount, NULL);
+}
 
-  pthread_mutex_lock(&s->mutex);
-  if (s->current_count >= needCount) {
-    s->current_count -= needCount;
+int sceKernelSignalSema(OrbisKernelSema sem, int32_t signalCount) {
+    KernelSema *s = kernel_sema_get(sem);
+    if (!s) {
+        return ORBIS_KERNEL_ERROR_ESRCH;
+    }
+    int rc = 0;
+    pthread_mutex_lock(&s->mutex);
+    if (s->deleted) {
+        rc = ORBIS_KERNEL_ERROR_ESRCH;
+    } else if ((int64_t)s->token_count + signalCount > s->max_count) {
+        rc = ORBIS_KERNEL_ERROR_EINVAL;
+    } else {
+        s->token_count += signalCount;
+        // Hand the tokens to the waiters in queue order.
+        SemaWaiter **link = &s->waiters;
+        while (*link) {
+            SemaWaiter *w = *link;
+            if (w->need_count > s->token_count) {
+                link = &w->next;
+                continue;
+            }
+            *link = w->next;
+            s->token_count -= w->need_count;
+            w->state = SEMA_SIGNALED;
+            pthread_cond_signal(&w->cond);
+        }
+    }
     pthread_mutex_unlock(&s->mutex);
-    return 0;
-  }
-  pthread_mutex_unlock(&s->mutex);
-  return 0x80020010; // ORBIS_KERNEL_ERROR_EBUSY
+    kernel_sema_put(s);
+    return rc;
 }
 
 int sceKernelCancelSema(OrbisKernelSema sem, int32_t setCount, int32_t *pNumWaitThreads) {
-  RecompKernelSema *s = get_ksem(sem);
-  if (!s) return 0x80020003; // ORBIS_KERNEL_ERROR_ESRCH
-
-  pthread_mutex_lock(&s->mutex);
-  if (pNumWaitThreads) {
-    *pNumWaitThreads = s->num_waiters;
-  }
-  s->current_count = (setCount < 0) ? s->init_count : setCount;
-  s->cancel_gen++;
-  pthread_cond_broadcast(&s->cond);
-  pthread_mutex_unlock(&s->mutex);
-  return 0;
+    KernelSema *s = kernel_sema_get(sem);
+    if (!s) {
+        return ORBIS_KERNEL_ERROR_ESRCH;
+    }
+    int rc = 0;
+    pthread_mutex_lock(&s->mutex);
+    if (s->deleted) {
+        rc = ORBIS_KERNEL_ERROR_ESRCH;
+    } else {
+        const int32_t n = sema_release_all(s, SEMA_CANCELED);
+        if (pNumWaitThreads) {
+            *pNumWaitThreads = n;
+        }
+        s->token_count = setCount < 0 ? s->init_count : setCount;
+    }
+    pthread_mutex_unlock(&s->mutex);
+    kernel_sema_put(s);
+    return rc;
 }
 
 // Guest shims for Kernel Semaphores
 void shim_sceKernelCreateSema(GuestContext *ctx) {
-  uint64_t semGuest = ctx->rdi;
-  uint64_t pNameGuest = ctx->rsi;
-  uint32_t attr = (uint32_t)ctx->rdx;
-  int32_t initCount = (int32_t)ctx->rcx;
-  int32_t maxCount = (int32_t)ctx->r8;
-  uint64_t optGuest = ctx->r9;
+    uint64_t semGuest = ctx->rdi;
+    uint64_t pNameGuest = ctx->rsi;
+    uint32_t attr = (uint32_t)ctx->rdx;
+    int32_t initCount = (int32_t)ctx->rcx;
+    int32_t maxCount = (int32_t)ctx->r8;
+    uint64_t optGuest = ctx->r9;
 
-  const char *pName = pNameGuest ? (const char *)(ctx->mem_base + pNameGuest) : NULL;
-  const void *opt = optGuest ? (const void *)(ctx->mem_base + optGuest) : NULL;
+    const char *pName = pNameGuest ? (const char *)(ctx->mem_base + pNameGuest) : NULL;
+    const void *opt = optGuest ? (const void *)(ctx->mem_base + optGuest) : NULL;
 
-  OrbisKernelSema sem = 0;
-  int rc = sceKernelCreateSema(&sem, pName, attr, initCount, maxCount, opt);
-  if (rc == 0 && semGuest != 0) {
-    *(int32_t *)(ctx->mem_base + semGuest) = sem;
-  }
-  ctx->rax = (uint64_t)(int64_t)rc;
-  SHIM_RETURN();
+    OrbisKernelSema sem = 0;
+    int rc = sceKernelCreateSema(semGuest ? &sem : NULL, pName, attr, initCount, maxCount, opt);
+    if (rc == 0) {
+        *(int32_t *)(ctx->mem_base + semGuest) = sem;
+    }
+    ctx->rax = (uint64_t)(int64_t)rc;
+    SHIM_RETURN();
 }
 
 void shim_sceKernelDeleteSema(GuestContext *ctx) {
-  OrbisKernelSema sem = (OrbisKernelSema)ctx->rdi;
-  int rc = sceKernelDeleteSema(sem);
-  ctx->rax = (uint64_t)(int64_t)rc;
-  SHIM_RETURN();
+    ctx->rax = (uint64_t)(int64_t)sceKernelDeleteSema((OrbisKernelSema)ctx->rdi);
+    SHIM_RETURN();
 }
 
 void shim_sceKernelWaitSema(GuestContext *ctx) {
-  OrbisKernelSema sem = (OrbisKernelSema)ctx->rdi;
-  int32_t needCount = (int32_t)ctx->rsi;
-  uint64_t timeoutGuest = ctx->rdx;
-
-  uint32_t *pTimeout = timeoutGuest ? (uint32_t *)(ctx->mem_base + timeoutGuest) : NULL;
-  int rc = sceKernelWaitSema(sem, needCount, pTimeout);
-  ctx->rax = (uint64_t)(int64_t)rc;
-  SHIM_RETURN();
+    uint32_t *pTimeout = ctx->rdx ? (uint32_t *)(ctx->mem_base + ctx->rdx) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceKernelWaitSema((OrbisKernelSema)ctx->rdi, (int32_t)ctx->rsi, pTimeout);
+    SHIM_RETURN();
 }
 
 void shim_sceKernelSignalSema(GuestContext *ctx) {
-  OrbisKernelSema sem = (OrbisKernelSema)ctx->rdi;
-  int32_t signalCount = (int32_t)ctx->rsi;
-  int rc = sceKernelSignalSema(sem, signalCount);
-  ctx->rax = (uint64_t)(int64_t)rc;
-  SHIM_RETURN();
+    ctx->rax = (uint64_t)(int64_t)sceKernelSignalSema((OrbisKernelSema)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceKernelPollSema(GuestContext *ctx) {
-  OrbisKernelSema sem = (OrbisKernelSema)ctx->rdi;
-  int32_t needCount = (int32_t)ctx->rsi;
-  int rc = sceKernelPollSema(sem, needCount);
-  ctx->rax = (uint64_t)(int64_t)rc;
-  SHIM_RETURN();
+    ctx->rax = (uint64_t)(int64_t)sceKernelPollSema((OrbisKernelSema)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
 }
 
 void shim_sceKernelCancelSema(GuestContext *ctx) {
-  OrbisKernelSema sem = (OrbisKernelSema)ctx->rdi;
-  int32_t setCount = (int32_t)ctx->rsi;
-  uint64_t numWaitGuest = ctx->rdx;
-
-  int32_t *pNumWait = numWaitGuest ? (int32_t *)(ctx->mem_base + numWaitGuest) : NULL;
-  int rc = sceKernelCancelSema(sem, setCount, pNumWait);
-  ctx->rax = (uint64_t)(int64_t)rc;
-  SHIM_RETURN();
+    int32_t *pNumWait = ctx->rdx ? (int32_t *)(ctx->mem_base + ctx->rdx) : NULL;
+    ctx->rax = (uint64_t)(int64_t)sceKernelCancelSema((OrbisKernelSema)ctx->rdi, (int32_t)ctx->rsi, pNumWait);
+    SHIM_RETURN();
 }
-

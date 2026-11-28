@@ -20,7 +20,6 @@ void ps4_direct_mem_on_unmap(GuestContext *ctx, uint64_t addr, size_t size) {
   (void)size;
 }
 void ps4_equeue_destroy(void) {}
-void ps4_event_flag_destroy(void) {}
 void ps4_gnmdriver_destroy(void) {}
 void ps4_keyboard_destroy(void) {}
 void ps4_log_drain_sync(double timeout_s) { (void)timeout_s; }

@@ -1,398 +1,390 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Orbis event flags, after shadPS4 (src/core/libraries/kernel/threads/event_flag.cpp):
+//  * sceKernelCreateEventFlag: EINVAL for a NULL handle or name, any option parameter, or an
+//    attribute above MULTI | TH_PRIO; ENAMETOOLONG for a name of 32 bytes or more. Without
+//    attributes the flag is SINGLE (one waiter at a time; a second is EPERM) and FIFO.
+//  * a wait whose condition holds returns the pattern and applies its clear mode at once;
+//    otherwise the thread is queued (FIFO, or by thread priority with TH_PRIO) and
+//    sceKernelSetEventFlag hands the new pattern to the queued waiters in queue order, applying
+//    each one's clear mode before it looks at the next.
+//  * a wait that times out returns the current pattern, ETIMEDOUT and sets *timeout to 0; a
+//    successful wait leaves *timeout as it was. sceKernelPollEventFlag is a wait with no time,
+//    EBUSY instead of ETIMEDOUT.
+//  * sceKernelCancelEventFlag sets the pattern and wakes every waiter with ECANCELED and that
+//    pattern; sceKernelDeleteEventFlag wakes them with EACCES. An unknown handle is ESRCH.
+//  * sceKernelClearEventFlag ANDs the pattern with its argument.
+//  * sceKernelOpenEventFlag / sceKernelCloseEventFlag (named flags shared between processes)
+//    are stubs in shadPS4 as well.
+//
+// Deliberate differences: shadPS4 asserts on an attribute or wait mode it does not know
+// (UNREACHABLE); here they fail with EINVAL. A waiter that is granted, canceled or deleted is
+// taken off the queue at once instead of when it wakes, so a second Set before it runs cannot
+// apply its clear mode twice. Flags live in a refcounted handle table (ps4_handle_table.h).
 #include "ps4_event_flag.h"
+#include "ps4_handle_table.h"
+#include "ps4_threading.h"
+
+#include <pthread.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
-#include <errno.h>
-#include <time.h>
 
-#define MAX_EVENT_FLAGS 1024
-#define EVF_MAGIC 0x45564631 // 'EVF1'
+#define MAX_EVENT_FLAGS 0xFFFFu
+#define EVF_NAME_MAX 32
 
-typedef struct {
-    uint32_t magic;
-    int in_use;
-    uint32_t attr;
-    uint64_t pattern;
-    char name[32];
-    uint32_t num_waiters;
-    uint32_t cancel_gen;
-    pthread_mutex_t mutex;
+typedef enum { EVF_CLEAR_NONE, EVF_CLEAR_ALL, EVF_CLEAR_BITS } EvfClearMode;
+typedef enum { EVF_WAITING, EVF_READY, EVF_CANCELED, EVF_DELETED } EvfWaitState;
+
+typedef struct EvfWaiter {
+    struct EvfWaiter *next;
     pthread_cond_t cond;
-} RecompInternalEventFlag;
+    uint64_t bits;
+    bool wait_or;
+    EvfClearMode clear_mode;
+    uint64_t result;
+    int32_t priority;
+    EvfWaitState state;
+} EvfWaiter;
 
-static RecompInternalEventFlag g_evf_table[MAX_EVENT_FLAGS];
-static pthread_mutex_t g_evf_table_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_evf_inited = 0;
+typedef struct EventFlag {
+    Ps4HandleObject h; // first: the handle table hands out &h
+    pthread_mutex_t mutex;
+    EvfWaiter *waiters; // queue order
+    uint64_t bits;
+    bool single_thread;
+    bool by_priority;
+    bool deleted;
+    char name[EVF_NAME_MAX];
+} EventFlag;
 
-void ps4_event_flag_init(void) {
-    pthread_mutex_lock(&g_evf_table_lock);
-    if (!g_evf_inited) {
-        memset(g_evf_table, 0, sizeof(g_evf_table));
-        g_evf_inited = 1;
-    }
-    pthread_mutex_unlock(&g_evf_table_lock);
+static Ps4HandleTable g_event_flags = PS4_HANDLE_TABLE_INIT(MAX_EVENT_FLAGS);
+
+static void event_flag_free(Ps4HandleObject *obj) {
+    EventFlag *f = (EventFlag *)obj;
+    pthread_mutex_destroy(&f->mutex);
+    free(f);
 }
 
-void ps4_event_flag_destroy(void) {
-    pthread_mutex_lock(&g_evf_table_lock);
-    for (int i = 1; i < MAX_EVENT_FLAGS; i++) {
-        if (g_evf_table[i].in_use) {
-            pthread_mutex_destroy(&g_evf_table[i].mutex);
-            pthread_cond_destroy(&g_evf_table[i].cond);
-            g_evf_table[i].in_use = 0;
-            g_evf_table[i].magic = 0;
+static EventFlag *event_flag_get(OrbisKernelEventFlag id) {
+    return id <= UINT32_MAX ? (EventFlag *)ps4_handle_get(&g_event_flags, (uint32_t)id) : NULL;
+}
+
+static void event_flag_put(EventFlag *f) {
+    ps4_handle_put(&g_event_flags, &f->h);
+}
+
+static bool condition_met(const EventFlag *f, const EvfWaiter *w) {
+    return w->wait_or ? (f->bits & w->bits) != 0 : (f->bits & w->bits) == w->bits;
+}
+
+static void apply_clear(EventFlag *f, const EvfWaiter *w) {
+    if (w->clear_mode == EVF_CLEAR_ALL) {
+        f->bits = 0;
+    } else if (w->clear_mode == EVF_CLEAR_BITS) {
+        f->bits &= ~w->bits;
+    }
+}
+
+// FIFO: at the end. By priority, as shadPS4 orders them: before the first waiter with a lower
+// priority value, after the ones with a higher or equal value.
+static void add_waiter(EventFlag *f, EvfWaiter *w) {
+    EvfWaiter **link = &f->waiters;
+    while (*link && (!f->by_priority || (*link)->priority >= w->priority)) {
+        link = &(*link)->next;
+    }
+    w->next = *link;
+    *link = w;
+}
+
+static void remove_waiter(EventFlag *f, EvfWaiter *w) {
+    for (EvfWaiter **link = &f->waiters; *link; link = &(*link)->next) {
+        if (*link == w) {
+            *link = w->next;
+            return;
         }
     }
-    g_evf_inited = 0;
-    pthread_mutex_unlock(&g_evf_table_lock);
 }
 
-static int alloc_evf_slot(void) {
-    pthread_mutex_lock(&g_evf_table_lock);
-    for (int i = 1; i < MAX_EVENT_FLAGS; i++) {
-        if (!g_evf_table[i].in_use) {
-            g_evf_table[i].in_use = 1;
-            pthread_mutex_unlock(&g_evf_table_lock);
-            return i;
-        }
+// Wakes and unlinks every waiter with state and result; returns how many there were.
+static int32_t release_all(EventFlag *f, EvfWaitState state, uint64_t result) {
+    int32_t n = 0;
+    for (EvfWaiter *w = f->waiters; w; w = w->next, n++) {
+        w->result = result;
+        w->state = state;
+        pthread_cond_signal(&w->cond);
     }
-    pthread_mutex_unlock(&g_evf_table_lock);
-    return -1;
+    f->waiters = NULL;
+    return n;
 }
 
-static RecompInternalEventFlag *get_evf(OrbisKernelEventFlag id) {
-    if (id <= 0 || id >= MAX_EVENT_FLAGS) {
-        return NULL;
+int32_t sceKernelCreateEventFlag(OrbisKernelEventFlag *idOut, const char *name, uint32_t attr, uint64_t initPattern,
+                                 const OrbisKernelEventFlagOptParam *opt) {
+    if (!idOut || !name) {
+        return (int32_t)SCE_KERNEL_ERROR_EINVAL;
     }
-    RecompInternalEventFlag *f = &g_evf_table[id];
-    if (!f->in_use || f->magic != EVF_MAGIC) {
-        return NULL;
+    if (opt || attr > (SCE_KERNEL_EVF_ATTR_MULTI | SCE_KERNEL_EVF_ATTR_TH_PRIO)) {
+        return (int32_t)SCE_KERNEL_ERROR_EINVAL;
     }
-    return f;
-}
-
-static inline int check_evf_condition(uint64_t currPattern, uint64_t bitPattern, uint32_t waitMode) {
-    if (waitMode & SCE_KERNEL_EVF_WAITMODE_OR) {
-        return (currPattern & bitPattern) != 0;
+    if (strlen(name) >= EVF_NAME_MAX) {
+        return (int32_t)SCE_KERNEL_ERROR_ENAMETOOLONG;
     }
-    // Default is AND
-    return (currPattern & bitPattern) == bitPattern;
-}
-
-int32_t sceKernelCreateEventFlag(OrbisKernelEventFlag *idOut, const char *name, uint32_t attr, uint64_t initPattern, const OrbisKernelEventFlagOptParam *opt) {
-    (void)opt;
-    if (!idOut) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
-    ps4_event_flag_init();
-
-    int slot = alloc_evf_slot();
-    if (slot < 0) {
-        return (int32_t)0x80020018; // SCE_KERNEL_ERROR_ENFILE
+    const uint32_t queue = attr & 0xfu, threads = attr & 0xf0u;
+    if (queue > SCE_KERNEL_EVF_ATTR_TH_PRIO || (threads != 0 && threads != SCE_KERNEL_EVF_ATTR_SINGLE &&
+                                                threads != SCE_KERNEL_EVF_ATTR_MULTI)) {
+        return (int32_t)SCE_KERNEL_ERROR_EINVAL;
     }
-
-    RecompInternalEventFlag *f = &g_evf_table[slot];
-    f->magic = EVF_MAGIC;
-    f->attr = attr;
-    f->pattern = initPattern;
-    if (name) {
-        strncpy(f->name, name, sizeof(f->name) - 1);
-        f->name[sizeof(f->name) - 1] = '\0';
-    } else {
-        f->name[0] = '\0';
+    EventFlag *f = calloc(1, sizeof(*f));
+    if (!f) {
+        return (int32_t)(0x80020000u + 12u); // ENOMEM
     }
-    f->num_waiters = 0;
-    f->cancel_gen = 0;
+    f->h.destroy = event_flag_free;
     pthread_mutex_init(&f->mutex, NULL);
-    pthread_cond_init(&f->cond, NULL);
-
-    *idOut = (OrbisKernelEventFlag)slot;
+    f->bits = initPattern;
+    f->single_thread = threads != SCE_KERNEL_EVF_ATTR_MULTI;
+    f->by_priority = queue == SCE_KERNEL_EVF_ATTR_TH_PRIO;
+    strlcpy(f->name, name, sizeof(f->name));
+    const uint32_t id = ps4_handle_insert(&g_event_flags, &f->h);
+    if (id == 0) {
+        event_flag_free(&f->h);
+        return (int32_t)(0x80020000u + 23u); // ENFILE
+    }
+    *idOut = id;
     return 0;
 }
 
 int32_t sceKernelDeleteEventFlag(OrbisKernelEventFlag id) {
-    RecompInternalEventFlag *f = get_evf(id);
-    if (!f) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
-
+    EventFlag *f = id <= UINT32_MAX ? (EventFlag *)ps4_handle_remove(&g_event_flags, (uint32_t)id) : NULL;
+    if (!f) {
+        return (int32_t)SCE_KERNEL_ERROR_ESRCH;
+    }
     pthread_mutex_lock(&f->mutex);
-    f->magic = 0;
-    pthread_cond_broadcast(&f->cond);
+    f->deleted = true;
+    release_all(f, EVF_DELETED, 0);
     pthread_mutex_unlock(&f->mutex);
-
-    pthread_mutex_lock(&g_evf_table_lock);
-    pthread_mutex_destroy(&f->mutex);
-    pthread_cond_destroy(&f->cond);
-    f->in_use = 0;
-    pthread_mutex_unlock(&g_evf_table_lock);
-
+    event_flag_put(f);
     return 0;
 }
 
 int32_t sceKernelSetEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern) {
-    RecompInternalEventFlag *f = get_evf(id);
-    if (!f) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
-
+    EventFlag *f = event_flag_get(id);
+    if (!f) {
+        return (int32_t)SCE_KERNEL_ERROR_ESRCH;
+    }
     pthread_mutex_lock(&f->mutex);
-    f->pattern |= bitPattern;
-    pthread_cond_broadcast(&f->cond);
+    f->bits |= bitPattern;
+    EvfWaiter **link = &f->waiters;
+    while (*link) {
+        EvfWaiter *w = *link;
+        if (!condition_met(f, w)) {
+            link = &w->next;
+            continue;
+        }
+        w->result = f->bits;
+        apply_clear(f, w);
+        *link = w->next;
+        w->state = EVF_READY;
+        pthread_cond_signal(&w->cond);
+    }
     pthread_mutex_unlock(&f->mutex);
-
+    event_flag_put(f);
     return 0;
 }
 
 int32_t sceKernelClearEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern) {
-    RecompInternalEventFlag *f = get_evf(id);
-    if (!f) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
-
+    EventFlag *f = event_flag_get(id);
+    if (!f) {
+        return (int32_t)SCE_KERNEL_ERROR_ESRCH;
+    }
     pthread_mutex_lock(&f->mutex);
-    f->pattern &= bitPattern;
+    f->bits &= bitPattern;
     pthread_mutex_unlock(&f->mutex);
-
+    event_flag_put(f);
     return 0;
+}
+
+int32_t sceKernelCancelEventFlag(OrbisKernelEventFlag id, uint64_t setPattern, int32_t *pNumWaitThreads) {
+    EventFlag *f = event_flag_get(id);
+    if (!f) {
+        return (int32_t)SCE_KERNEL_ERROR_ESRCH;
+    }
+    pthread_mutex_lock(&f->mutex);
+    f->bits = setPattern;
+    const int32_t n = release_all(f, EVF_CANCELED, setPattern);
+    if (pNumWaitThreads) {
+        *pNumWaitThreads = n;
+    }
+    pthread_mutex_unlock(&f->mutex);
+    event_flag_put(f);
+    return 0;
+}
+
+// Splits a wait mode; false for one shadPS4 does not accept.
+static bool parse_wait_mode(uint32_t waitMode, bool *wait_or, EvfClearMode *clear_mode) {
+    switch (waitMode & 0xfu) {
+    case SCE_KERNEL_EVF_WAITMODE_AND:
+        *wait_or = false;
+        break;
+    case SCE_KERNEL_EVF_WAITMODE_OR:
+        *wait_or = true;
+        break;
+    default:
+        return false;
+    }
+    switch (waitMode & 0xf0u) {
+    case 0:
+        *clear_mode = EVF_CLEAR_NONE;
+        return true;
+    case SCE_KERNEL_EVF_WAITMODE_CLEAR_ALL:
+        *clear_mode = EVF_CLEAR_ALL;
+        return true;
+    case SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT:
+        *clear_mode = EVF_CLEAR_BITS;
+        return true;
+    default:
+        return false;
+    }
+}
+
+// EventFlagInternal::Wait (mutex held). timeout NULL waits without limit.
+static int32_t evf_wait_locked(EventFlag *f, uint64_t bits, bool wait_or, EvfClearMode clear_mode, uint64_t *result,
+                               OrbisKernelUseconds *timeout) {
+    if (f->deleted) {
+        return (int32_t)SCE_KERNEL_ERROR_EACCES;
+    }
+    if (f->single_thread && f->waiters) {
+        return (int32_t)SCE_KERNEL_ERROR_EPERM;
+    }
+    EvfWaiter w = {.bits = bits, .wait_or = wait_or, .clear_mode = clear_mode, .state = EVF_WAITING};
+    RecompThread *self = recomp_get_current_thread();
+    w.priority = self ? self->attr.prio : 0;
+    if (condition_met(f, &w)) {
+        if (result) {
+            *result = f->bits;
+        }
+        apply_clear(f, &w);
+        return 0;
+    }
+
+    pthread_cond_init(&w.cond, NULL);
+    add_waiter(f, &w);
+    if (!timeout) {
+        while (w.state == EVF_WAITING) {
+            pthread_cond_wait(&w.cond, &f->mutex);
+        }
+    } else {
+        const uint64_t deadline = ps4_mono_ns() + (uint64_t)*timeout * 1000u;
+        while (w.state == EVF_WAITING && ps4_cond_wait_until(&w.cond, &f->mutex, deadline)) {
+        }
+    }
+    pthread_cond_destroy(&w.cond);
+
+    if (w.state == EVF_WAITING) { // timed out
+        remove_waiter(f, &w);
+        if (result) {
+            *result = f->bits;
+        }
+        *timeout = 0;
+        return (int32_t)SCE_KERNEL_ERROR_ETIMEDOUT;
+    }
+    if (result) {
+        *result = w.result;
+    }
+    switch (w.state) {
+    case EVF_CANCELED:
+        return (int32_t)SCE_KERNEL_ERROR_ECANCELED;
+    case EVF_DELETED:
+        return (int32_t)SCE_KERNEL_ERROR_EACCES;
+    default:
+        return 0;
+    }
+}
+
+static int32_t evf_wait(OrbisKernelEventFlag id, uint64_t bitPattern, uint32_t waitMode, uint64_t *resultPattern,
+                        OrbisKernelUseconds *timeout) {
+    EventFlag *f = event_flag_get(id);
+    if (!f) {
+        return (int32_t)SCE_KERNEL_ERROR_ESRCH;
+    }
+    bool wait_or = false;
+    EvfClearMode clear_mode = EVF_CLEAR_NONE;
+    int32_t rc;
+    if (bitPattern == 0 || !parse_wait_mode(waitMode, &wait_or, &clear_mode)) {
+        rc = (int32_t)SCE_KERNEL_ERROR_EINVAL;
+    } else {
+        pthread_mutex_lock(&f->mutex);
+        rc = evf_wait_locked(f, bitPattern, wait_or, clear_mode, resultPattern, timeout);
+        pthread_mutex_unlock(&f->mutex);
+    }
+    event_flag_put(f);
+    return rc;
+}
+
+int32_t sceKernelWaitEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uint32_t waitMode, uint64_t *resultPattern,
+                               OrbisKernelUseconds *timeout) {
+    return evf_wait(id, bitPattern, waitMode, resultPattern, timeout);
 }
 
 int32_t sceKernelPollEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uint32_t waitMode, uint64_t *resultPattern) {
-    if (bitPattern == 0) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
-    RecompInternalEventFlag *f = get_evf(id);
-    if (!f) return (int32_t)SCE_KERNEL_ERROR_ESRCH;
-
-    pthread_mutex_lock(&f->mutex);
-    if (check_evf_condition(f->pattern, bitPattern, waitMode)) {
-        if (resultPattern) {
-            *resultPattern = f->pattern;
-        }
-        if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_ALL) {
-            f->pattern = 0;
-        } else if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT) {
-            f->pattern &= ~bitPattern;
-        }
-        pthread_mutex_unlock(&f->mutex);
-        return 0;
-    }
-    if (resultPattern) {
-        *resultPattern = f->pattern;
-    }
-    pthread_mutex_unlock(&f->mutex);
-    return (int32_t)SCE_KERNEL_ERROR_EBUSY;
+    OrbisKernelUseconds micros = 0;
+    const int32_t rc = evf_wait(id, bitPattern, waitMode, resultPattern, &micros);
+    return rc == (int32_t)SCE_KERNEL_ERROR_ETIMEDOUT ? (int32_t)SCE_KERNEL_ERROR_EBUSY : rc;
 }
 
-int32_t sceKernelWaitEventFlag(OrbisKernelEventFlag id, uint64_t bitPattern, uint32_t waitMode, uint64_t *resultPattern, OrbisKernelUseconds *timeout) {
-    if (bitPattern == 0) return (int32_t)SCE_KERNEL_ERROR_EINVAL;
-    RecompInternalEventFlag *f = get_evf(id);
-    if (!f) return (int32_t)SCE_KERNEL_ERROR_ESRCH;
-
-    pthread_mutex_lock(&f->mutex);
-
-    if (check_evf_condition(f->pattern, bitPattern, waitMode)) {
-        if (resultPattern) {
-            *resultPattern = f->pattern;
-        }
-        if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_ALL) {
-            f->pattern = 0;
-        } else if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT) {
-            f->pattern &= ~bitPattern;
-        }
-        pthread_mutex_unlock(&f->mutex);
-        return 0;
-    }
-
-    if (timeout && *timeout == 0) {
-        if (resultPattern) {
-            *resultPattern = f->pattern;
-        }
-        pthread_mutex_unlock(&f->mutex);
-        return (int32_t)SCE_KERNEL_ERROR_ETIMEDOUT;
-    }
-
-    struct timespec ts;
-    int has_timeout = 0;
-    uint64_t start_us = 0;
-    if (timeout) {
-        struct timespec now;
-        clock_gettime(CLOCK_REALTIME, &now);
-        start_us = (uint64_t)now.tv_sec * 1000000ULL + (uint64_t)now.tv_nsec / 1000ULL;
-        uint64_t usec = *timeout;
-        ts.tv_sec = now.tv_sec + (time_t)(usec / 1000000ULL);
-        ts.tv_nsec = now.tv_nsec + (long)((usec % 1000000ULL) * 1000ULL);
-        if (ts.tv_nsec >= 1000000000L) {
-            ts.tv_sec += 1;
-            ts.tv_nsec -= 1000000000L;
-        }
-        has_timeout = 1;
-    }
-
-    uint32_t my_cancel_gen = f->cancel_gen;
-    f->num_waiters++;
-    int timed_out = 0;
-
-    while (f->magic == EVF_MAGIC &&
-           f->cancel_gen == my_cancel_gen &&
-           !check_evf_condition(f->pattern, bitPattern, waitMode)) {
-        if (has_timeout) {
-            int ret = pthread_cond_timedwait(&f->cond, &f->mutex, &ts);
-            if (ret == ETIMEDOUT) {
-                timed_out = 1;
-                break;
-            }
-        } else {
-            pthread_cond_wait(&f->cond, &f->mutex);
-        }
-    }
-
-    f->num_waiters--;
-
-    if (f->magic != EVF_MAGIC) {
-        pthread_mutex_unlock(&f->mutex);
-        return (int32_t)SCE_KERNEL_ERROR_EACCES;
-    }
-
-    if (f->cancel_gen != my_cancel_gen) {
-        if (resultPattern) {
-            *resultPattern = f->pattern;
-        }
-        pthread_mutex_unlock(&f->mutex);
-        return (int32_t)SCE_KERNEL_ERROR_ECANCELED;
-    }
-
-    if (timed_out) {
-        if (resultPattern) {
-            *resultPattern = f->pattern;
-        }
-        if (timeout) {
-            *timeout = 0;
-        }
-        pthread_mutex_unlock(&f->mutex);
-        return (int32_t)SCE_KERNEL_ERROR_ETIMEDOUT;
-    }
-
-    if (resultPattern) {
-        *resultPattern = f->pattern;
-    }
-    if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_ALL) {
-        f->pattern = 0;
-    } else if (waitMode & SCE_KERNEL_EVF_WAITMODE_CLEAR_PAT) {
-        f->pattern &= ~bitPattern;
-    }
-
-    if (has_timeout && timeout) {
-        struct timespec now;
-        clock_gettime(CLOCK_REALTIME, &now);
-        uint64_t end_us = (uint64_t)now.tv_sec * 1000000ULL + (uint64_t)now.tv_nsec / 1000ULL;
-        uint64_t elapsed = end_us > start_us ? end_us - start_us : 0;
-        if (elapsed >= *timeout) {
-            *timeout = 0;
-        } else {
-            *timeout -= (uint32_t)elapsed;
-        }
-    }
-
-    pthread_mutex_unlock(&f->mutex);
-    return 0;
+static inline void *guest_ptr(GuestContext *ctx, uint64_t addr) {
+    return addr ? (void *)(ctx->mem_base + addr) : NULL;
 }
 
 // Guest shims
 void shim_sceKernelCreateEventFlag(GuestContext *ctx) {
-    uint64_t idOutGuest = ctx->rdi;
-    uint64_t nameGuest = ctx->rsi;
-    uint32_t attr = (uint32_t)ctx->rdx;
-    uint64_t initPattern = ctx->rcx;
-    uint64_t optGuest = ctx->r8;
-
-    const char *name = nameGuest ? (const char *)(ctx->mem_base + nameGuest) : NULL;
-    const OrbisKernelEventFlagOptParam *opt = optGuest ? (const OrbisKernelEventFlagOptParam *)(ctx->mem_base + optGuest) : NULL;
-
-    OrbisKernelEventFlag id = 0;
-    int32_t rc = sceKernelCreateEventFlag(&id, name, attr, initPattern, opt);
-    if (rc == 0 && idOutGuest) {
-        *(int32_t *)(ctx->mem_base + idOutGuest) = id;
-    }
-    ctx->rax = (uint64_t)(int64_t)rc;
+    ctx->rax = (uint64_t)(int64_t)sceKernelCreateEventFlag(guest_ptr(ctx, ctx->rdi), guest_ptr(ctx, ctx->rsi),
+                                                           (uint32_t)ctx->rdx, ctx->rcx, guest_ptr(ctx, ctx->r8));
     SHIM_RETURN();
 }
 
 void shim_sceKernelDeleteEventFlag(GuestContext *ctx) {
-    OrbisKernelEventFlag id = (OrbisKernelEventFlag)ctx->rdi;
-    ctx->rax = (uint64_t)(int64_t)sceKernelDeleteEventFlag(id);
+    ctx->rax = (uint64_t)(int64_t)sceKernelDeleteEventFlag(ctx->rdi);
+    SHIM_RETURN();
+}
+
+// shadPS4 stub (named event flags shared between processes).
+void shim_sceKernelOpenEventFlag(GuestContext *ctx) {
+    fprintf(stderr, "[libkernel] sceKernelOpenEventFlag (STUBBED)\n");
+    ctx->rax = 0;
+    SHIM_RETURN();
+}
+
+// shadPS4 stub (named event flags shared between processes).
+void shim_sceKernelCloseEventFlag(GuestContext *ctx) {
+    fprintf(stderr, "[libkernel] sceKernelCloseEventFlag (STUBBED)\n");
+    ctx->rax = 0;
     SHIM_RETURN();
 }
 
 void shim_sceKernelSetEventFlag(GuestContext *ctx) {
-    OrbisKernelEventFlag id = (OrbisKernelEventFlag)ctx->rdi;
-    uint64_t bitPattern = ctx->rsi;
-    ctx->rax = (uint64_t)(int64_t)sceKernelSetEventFlag(id, bitPattern);
+    ctx->rax = (uint64_t)(int64_t)sceKernelSetEventFlag(ctx->rdi, ctx->rsi);
     SHIM_RETURN();
 }
 
 void shim_sceKernelClearEventFlag(GuestContext *ctx) {
-    OrbisKernelEventFlag id = (OrbisKernelEventFlag)ctx->rdi;
-    uint64_t bitPattern = ctx->rsi;
-    ctx->rax = (uint64_t)(int64_t)sceKernelClearEventFlag(id, bitPattern);
+    ctx->rax = (uint64_t)(int64_t)sceKernelClearEventFlag(ctx->rdi, ctx->rsi);
     SHIM_RETURN();
 }
 
 void shim_sceKernelPollEventFlag(GuestContext *ctx) {
-    OrbisKernelEventFlag id = (OrbisKernelEventFlag)ctx->rdi;
-    uint64_t bitPattern = ctx->rsi;
-    uint32_t waitMode = (uint32_t)ctx->rdx;
-    uint64_t resGuest = ctx->rcx;
-
-    uint64_t resultPattern = 0;
-    int32_t rc = sceKernelPollEventFlag(id, bitPattern, waitMode, &resultPattern);
-    if (resGuest) {
-        *(uint64_t *)(ctx->mem_base + resGuest) = resultPattern;
-    }
-    ctx->rax = (uint64_t)(int64_t)rc;
+    ctx->rax = (uint64_t)(int64_t)sceKernelPollEventFlag(ctx->rdi, ctx->rsi, (uint32_t)ctx->rdx,
+                                                         guest_ptr(ctx, ctx->rcx));
     SHIM_RETURN();
 }
 
 void shim_sceKernelWaitEventFlag(GuestContext *ctx) {
-    OrbisKernelEventFlag id = (OrbisKernelEventFlag)ctx->rdi;
-    uint64_t bitPattern = ctx->rsi;
-    uint32_t waitMode = (uint32_t)ctx->rdx;
-    uint64_t resGuest = ctx->rcx;
-    uint64_t timeoutGuest = ctx->r8;
-
-    uint64_t resultPattern = 0;
-    OrbisKernelUseconds *pTimeout = NULL;
-    OrbisKernelUseconds timeoutVal = 0;
-    if (timeoutGuest) {
-        timeoutVal = *(OrbisKernelUseconds *)(ctx->mem_base + timeoutGuest);
-        pTimeout = &timeoutVal;
-    }
-
-    int32_t rc = sceKernelWaitEventFlag(id, bitPattern, waitMode, &resultPattern, pTimeout);
-    if (resGuest) {
-        *(uint64_t *)(ctx->mem_base + resGuest) = resultPattern;
-    }
-    if (timeoutGuest && pTimeout) {
-        *(uint32_t *)(ctx->mem_base + timeoutGuest) = *pTimeout;
-    }
-    ctx->rax = (uint64_t)(int64_t)rc;
+    ctx->rax = (uint64_t)(int64_t)sceKernelWaitEventFlag(ctx->rdi, ctx->rsi, (uint32_t)ctx->rdx,
+                                                         guest_ptr(ctx, ctx->rcx), guest_ptr(ctx, ctx->r8));
     SHIM_RETURN();
-}
-
-int32_t sceKernelCancelEventFlag(OrbisKernelEventFlag id, uint64_t setPattern, int32_t *pNumWaitThreads) {
-    RecompInternalEventFlag *f = get_evf(id);
-    if (!f) return (int32_t)SCE_KERNEL_ERROR_ESRCH;
-
-    pthread_mutex_lock(&f->mutex);
-    if (pNumWaitThreads) {
-        *pNumWaitThreads = (int32_t)f->num_waiters;
-    }
-    f->pattern = setPattern;
-    f->cancel_gen++;
-    pthread_cond_broadcast(&f->cond);
-    pthread_mutex_unlock(&f->mutex);
-    return 0;
 }
 
 void shim_sceKernelCancelEventFlag(GuestContext *ctx) {
-    OrbisKernelEventFlag id = (OrbisKernelEventFlag)ctx->rdi;
-    uint64_t setPattern = ctx->rsi;
-    uint64_t numWaitGuest = ctx->rdx;
-
-    int32_t *pNumWait = (numWaitGuest && ctx->mem_base) ? (int32_t *)(ctx->mem_base + numWaitGuest) : NULL;
-    int32_t rc = sceKernelCancelEventFlag(id, setPattern, pNumWait);
-    ctx->rax = (uint64_t)(int64_t)rc;
+    ctx->rax = (uint64_t)(int64_t)sceKernelCancelEventFlag(ctx->rdi, ctx->rsi, guest_ptr(ctx, ctx->rdx));
     SHIM_RETURN();
 }
-

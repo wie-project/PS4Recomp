@@ -142,8 +142,8 @@ static bool parse_pak_file(const char *pak_path) {
         return false;
     }
 
+    // Footer: magic, u32 version (not checked), u64 index offset, u64 index size.
     const uint8_t *footer = &tail[magic_pos];
-    uint32_t ver = *(const uint32_t *)(footer + 4);
     uint64_t idx_off = *(const uint64_t *)(footer + 8);
     uint64_t idx_sz = *(const uint64_t *)(footer + 16);
 

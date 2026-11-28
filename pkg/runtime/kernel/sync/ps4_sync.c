@@ -1,20 +1,54 @@
+// Guest mutexes, condition variables, read-write locks and pthread_once, after shadPS4
+// (src/core/libraries/kernel/threads/mutex.cpp, condvar.cpp, rwlock.cpp, pthread.cpp). The
+// pthread_* functions return a POSIX errno and the scePthread* ones 0x80020000 + errno, as
+// shadPS4 registers them (plain or through its ORBIS() wrapper).
+//
+// Deliberate differences from shadPS4:
+// - A mutex attribute's type 0 (no type set) stays recursive; see gm_relock.
+// - A destroyed mutex, condition or lock variable is reset to the static initializer, so a
+//   later use initializes it again where shadPS4 reports EINVAL.
+// - Contended locks spin for PS4_MUTEX_SPIN_US whatever the mutex type; the spin and yield
+//   counts of pthread_mutex_setspinloops_np / setyieldloops_np are kept and reported only.
+//   As in shadPS4, a priority-protocol mutex does not spin.
+// - pthread_cond_signalto_np wakes every waiter of the condition when the target thread waits
+//   on it (the others return as from a spurious wake-up).
+// - pthread_rwlockattr_settype_np checks the new type; shadPS4 checks the attribute's old one.
 #include "recomp_runtime.h"
 #include "ps4_sync.h"
 #include "ps4_sync_objects.h"
 #include "ps4_threading.h"
+#include "ps4_kernel_time.h"
 #include <errno.h>
 #include <mach/mach_time.h>
 #include <stdatomic.h>
 #include <time.h>
 
-// scePthread* report failures as SCE kernel errors (0x80020000 | errno),
-// while the POSIX shims they forward to return plain errno values.
-#define SCE_PTHREAD_ERR(ctx)                                                   \
-  do {                                                                         \
-    uint32_t e_ = (uint32_t)(ctx)->rax;                                        \
-    if (e_ != 0 && e_ < 0x100)                                                 \
-      (ctx)->rax = 0x80020000ULL | e_;                                         \
+// shadPS4 ORBIS(): a nonzero POSIX result becomes 0x80020000 + errno.
+static inline uint64_t orbis_err(int e) { return e ? (uint64_t)(0x80020000u + (uint32_t)e) : 0; }
+
+#define RET_POSIX(e)                                                                               \
+  do {                                                                                             \
+    ctx->rax = (uint64_t)(uint32_t)(e);                                                            \
+    SHIM_RETURN();                                                                                 \
   } while (0)
+#define RET_ORBIS(e)                                                                               \
+  do {                                                                                             \
+    ctx->rax = orbis_err(e);                                                                       \
+    SHIM_RETURN();                                                                                 \
+  } while (0)
+
+static inline void *gptr(GuestContext *ctx, uint64_t addr) { return addr ? ctx->mem_base + addr : NULL; }
+
+// A timespec with tv_nsec outside [0, 1e9) or a negative tv_sec is EINVAL.
+static inline bool bad_timespec(const struct timespec *ts) {
+  return ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000L;
+}
+
+static inline void read_timespec(GuestContext *ctx, uint64_t addr, struct timespec *ts) {
+  const int64_t *g = (const int64_t *)(ctx->mem_base + addr);
+  ts->tv_sec = (time_t)g[0];
+  ts->tv_nsec = (long)g[1];
+}
 
 #define MUTEX_MAP_SIZE 1024
 
@@ -77,6 +111,9 @@ typedef struct GuestMutex {
   _Atomic uint64_t owner; // guest thread id, 0 = free
   uint32_t count;         // recursion depth, touched by the owner only
   int type;
+  int protocol;               // 0 none, 1 inherit, 2 protect (shadPS4 PthreadMutexProt)
+  int spinloops, yieldloops;  // pthread_mutex_setspinloops_np / setyieldloops_np
+  char name[32];              // scePthreadMutexInit / pthread_mutex_setname_np
   _Atomic uint32_t waiters;
   // Statistics (ps4_sync_print_stats), written by the owner.
   uint64_t var;   // guest address of the handle variable last seen
@@ -232,6 +269,10 @@ static GuestMutex *gm_alloc_locked(int type) {
   GM_SET_OWNER(m, 0);
   m->count = 0;
   m->type = type;
+  m->protocol = 0;
+  m->spinloops = type == 4 ? 2000 : 0; // shadPS4 MUTEX_ADAPTIVE_SPINS for ADAPTIVE_NP
+  m->yieldloops = 0;
+  m->name[0] = '\0';
   atomic_store_explicit(&m->waiters, 0, memory_order_relaxed);
   m->var = m->acq_t = m->rel_t = 0;
   m->st_locks = m->st_cont = m->st_wait = m->st_hold = 0;
@@ -475,7 +516,7 @@ static int gm_lock(GuestMutex *m, uint64_t me, const struct timespec *abs, MStat
   }
   MSTAT_ADD(s, contended, 1);
   const uint64_t ts = mach_absolute_time();
-  if (g_mutex_spin_ticks && gm_spin(m, me, ts + g_mutex_spin_ticks)) {
+  if (g_mutex_spin_ticks && m->protocol == 0 && gm_spin(m, me, ts + g_mutex_spin_ticks)) {
     MSTAT_ADD(s, spun, 1);
   } else if (gm_sleep(m, me, abs, s) == ETIMEDOUT) {
     return ETIMEDOUT;
@@ -534,25 +575,73 @@ static void abs_from_usec(struct timespec *ts, uint64_t usec) {
   }
 }
 
+static GuestMutex *mutex_create(GuestContext *ctx, uint64_t addr, int type, int protocol, const char *name) {
+  const uint64_t h = sync_handle(ctx, addr, 1);
+  GuestMutex *m = get_host_mutex_with_type(h, type);
+  *(uint32_t *)(ctx->mem_base + h + SYNC_OBJ_MUTEX_FLAGS) = (uint32_t)type & 0xff;
+  m->protocol = protocol;
+  if (name) {
+    snprintf(m->name, sizeof m->name, "%s", name);
+  } else {
+    static _Atomic int mutex_id;
+    snprintf(m->name, sizeof m->name, "Mutex%d", atomic_fetch_add(&mutex_id, 1));
+  }
+  return m;
+}
+
 int ps4_guest_mutex_init(GuestContext *ctx, uint64_t addr, int type) {
   if (!addr) return EINVAL;
-  const uint64_t h = sync_handle(ctx, addr, 1);
-  (void)get_host_mutex_with_type(h, type);
-  *(uint32_t *)(ctx->mem_base + h + SYNC_OBJ_MUTEX_FLAGS) = (uint32_t)type & 0xff;
+  (void)mutex_create(ctx, addr, type, 0, NULL);
   return 0;
 }
 
-void shim_pthread_mutex_init(GuestContext *ctx) {
-  uint64_t mtx_addr = ctx->rdi;
-  uint64_t attr_addr = ctx->rsi;
-  int guest_type = 0;
-  if (attr_addr) {
-    guest_type = *(int *)(ctx->mem_base + attr_addr);
+// ---- Mutex attributes. The guest's ScePthreadMutexattr variable holds the attribute itself
+// (shadPS4 PthreadMutexAttr: type, protocol, ceiling) rather than a pointer to it: the type in
+// bits 0-31, the protocol in bits 32-39 and the priority ceiling in bits 40-55, with
+// MATTR_VALID set by pthread_mutexattr_init and cleared by destroy (shadPS4's NULL attribute).
+#define MATTR_VALID (1ull << 63)
+#define MATTR_TYPE(v) ((int)(uint32_t)(v))
+#define MATTR_PROTOCOL(v) ((int)(((v) >> 32) & 0xff))
+#define MATTR_CEILING(v) ((int)(((v) >> 40) & 0xffff))
+#define MUTEX_TYPE_MAX 5 // shadPS4 PthreadMutexType::Max
+#define MUTEX_PROT_PROTECT 2
+
+static inline uint64_t mattr_pack(int type, int protocol, int ceiling) {
+  return MATTR_VALID | (uint32_t)type | ((uint64_t)(protocol & 0xff) << 32) | ((uint64_t)(ceiling & 0xffff) << 40);
+}
+
+// The attribute variable at addr; NULL when addr is 0 or the variable holds no attribute.
+static uint64_t *mattr_var(GuestContext *ctx, uint64_t addr) {
+  uint64_t *var = (uint64_t *)gptr(ctx, addr);
+  return var && (*var & MATTR_VALID) ? var : NULL;
+}
+
+// shadPS4 MutexInit: a NULL attribute (or a variable holding none) gives the default mutex; an
+// attribute with an unknown type or protocol is EINVAL.
+static int mutex_init(GuestContext *ctx, uint64_t mtx_addr, uint64_t attr_addr, const char *name) {
+  int type = 0, protocol = 0;
+  const uint64_t *attr = (const uint64_t *)gptr(ctx, attr_addr);
+  if (attr && *attr) {
+    type = MATTR_TYPE(*attr);
+    protocol = MATTR_PROTOCOL(*attr);
+    if (type < 0 || type >= MUTEX_TYPE_MAX || protocol > MUTEX_PROT_PROTECT) return EINVAL;
   }
-  // A NULL mutex address is the guest's own fault; the shim has always ignored it.
-  (void)ps4_guest_mutex_init(ctx, mtx_addr, guest_type);
-  ctx->rax = 0;
-  SHIM_RETURN();
+  if (!mtx_addr) return EINVAL;
+  (void)mutex_create(ctx, mtx_addr, type, protocol, name);
+  return 0;
+}
+
+void shim_pthread_mutex_init(GuestContext *ctx) { RET_POSIX(mutex_init(ctx, ctx->rdi, ctx->rsi, NULL)); }
+
+// scePthreadMutexInitForInternalLibc is shadPS4 ORBIS(posix_pthread_mutex_init).
+void shim_scePthreadMutexInitForInternalLibc(GuestContext *ctx) {
+  RET_ORBIS(mutex_init(ctx, ctx->rdi, ctx->rsi, NULL));
+}
+
+// scePthreadMutexInit(mutex, attr, name)
+void shim_scePthreadMutexInit(GuestContext *ctx) {
+  const char *name = ctx->rdx && ctx->rdx < ctx->mem_size ? (const char *)(ctx->mem_base + ctx->rdx) : NULL;
+  RET_ORBIS(mutex_init(ctx, ctx->rdi, ctx->rsi, name));
 }
 
 // One lock-family call on the mutex named by ctx->rdi; with PS4_MUTEX_STATS
@@ -628,15 +717,14 @@ void shim_pthread_mutex_trylock(GuestContext *ctx) {
 }
 
 void shim_pthread_mutex_timedlock(GuestContext *ctx) {
-  GmCall c;
-  GuestMutex *m = gm_call_begin(ctx, &c);
   uint64_t abstime_addr = ctx->rsi;
   struct timespec ts;
   if (abstime_addr) {
-    uint64_t *guest_ts = (uint64_t *)(ctx->mem_base + abstime_addr);
-    ts.tv_sec = (time_t)guest_ts[0];
-    ts.tv_nsec = (long)guest_ts[1];
+    read_timespec(ctx, abstime_addr, &ts);
+    if (bad_timespec(&ts)) RET_POSIX(EINVAL);
   }
+  GmCall c;
+  GuestMutex *m = gm_call_begin(ctx, &c);
   ctx->rax = (uint64_t)gm_lock(m, guest_owner_id(ctx), abstime_addr ? &ts : NULL, c.s, c.t1);
   MSTAT_ADD(c.s, locks, 1);
   gm_call_end(&c);
@@ -671,6 +759,12 @@ void shim_pthread_mutex_isowned_np(GuestContext *ctx) {
 }
 
 int ps4_guest_mutex_destroy(GuestContext *ctx, uint64_t addr) {
+  // shadPS4 posix_pthread_mutex_destroy: a locked mutex is EBUSY and stays.
+  const uint64_t *var = (const uint64_t *)gptr(ctx, addr);
+  if (var && sync_obj_slot(*var) >= 0) {
+    GuestMutex *m = gm_lookup(ctx, addr);
+    if (m && GM_OWNER(m) != 0) return EBUSY;
+  }
   uint64_t handle = sync_handle_take(ctx, addr);
   const uint64_t id = gm_id(handle);
   GuestMutex *m = NULL;
@@ -817,31 +911,198 @@ void ps4_sync_print_stats(int frames) {
   if (n) fprintf(stderr, "[ps4-mutex] top mutexes per frame: %s\n", line);
 }
 
+// A shim pair: pthread_<posix> returns impl's errno, scePthread<sce> the Orbis error.
+#define SYNC_SHIMS(posix, sce, impl)                                                               \
+  void shim_pthread_##posix(GuestContext *ctx) { RET_POSIX(impl(ctx)); }                           \
+  void shim_scePthread##sce(GuestContext *ctx) { RET_ORBIS(impl(ctx)); }
+
 // The attribute starts with type 0, which gm_relock keeps recursive; on Orbis a fresh
 // attribute is ERRORCHECK (a known divergence, see gm_relock).
-void shim_pthread_mutexattr_init(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  if (attr_addr) {
-    *(uint32_t *)(ctx->mem_base + attr_addr) = 0;
+static int mattr_init(GuestContext *ctx) {
+  uint64_t *var = (uint64_t *)gptr(ctx, ctx->rdi);
+  if (!var) return EINVAL;
+  *var = mattr_pack(0, 0, 0);
+  return 0;
+}
+SYNC_SHIMS(mutexattr_init, MutexattrInit, mattr_init)
+
+// scePthreadMutexattrInitForInternalLibc is shadPS4 ORBIS(posix_pthread_mutexattr_init) too.
+void shim_scePthreadMutexattrInitForInternalLibc(GuestContext *ctx) { RET_ORBIS(mattr_init(ctx)); }
+
+static int mattr_destroy(GuestContext *ctx) {
+  uint64_t *var = mattr_var(ctx, ctx->rdi);
+  if (!var) return EINVAL;
+  *var = 0;
+  return 0;
+}
+SYNC_SHIMS(mutexattr_destroy, MutexattrDestroy, mattr_destroy)
+
+static int mattr_settype(GuestContext *ctx) {
+  uint64_t *var = mattr_var(ctx, ctx->rdi);
+  const int type = (int)ctx->rsi;
+  if (!var || type < 1 || type >= MUTEX_TYPE_MAX) return EINVAL;
+  *var = mattr_pack(type, MATTR_PROTOCOL(*var), MATTR_CEILING(*var));
+  return 0;
+}
+SYNC_SHIMS(mutexattr_settype, MutexattrSettype, mattr_settype)
+
+// Type 0 (none set) is reported as ERRORCHECK, the Orbis default it stands for.
+static int mattr_gettype(GuestContext *ctx) {
+  const uint64_t *var = mattr_var(ctx, ctx->rdi);
+  int32_t *out = (int32_t *)gptr(ctx, ctx->rsi);
+  if (!var || !out || MATTR_TYPE(*var) >= MUTEX_TYPE_MAX) return EINVAL;
+  *out = MATTR_TYPE(*var) ? MATTR_TYPE(*var) : 1;
+  return 0;
+}
+SYNC_SHIMS(mutexattr_gettype, MutexattrGettype, mattr_gettype)
+
+// pthread_mutexattr_setkind_np(attr, kind) sets any kind; a missing attribute sets the guest
+// errno and returns -1.
+static int mattr_setkind(GuestContext *ctx) {
+  uint64_t *var = mattr_var(ctx, ctx->rdi);
+  if (!var) {
+    set_guest_errno(ctx, EINVAL);
+    return -1;
   }
-  ctx->rax = 0;
-  SHIM_RETURN();
+  *var = mattr_pack((int)ctx->rsi, MATTR_PROTOCOL(*var), MATTR_CEILING(*var));
+  return 0;
+}
+SYNC_SHIMS(mutexattr_setkind_np, MutexattrSetkind, mattr_setkind)
+
+// pthread_mutexattr_getkind_np(attr) takes the attribute itself and returns its kind.
+static int mattr_getkind(GuestContext *ctx) {
+  if (!(ctx->rdi & MATTR_VALID)) {
+    set_guest_errno(ctx, EINVAL);
+    return -1;
+  }
+  return MATTR_TYPE(ctx->rdi) ? MATTR_TYPE(ctx->rdi) : 1;
+}
+SYNC_SHIMS(mutexattr_getkind_np, MutexattrGetkind, mattr_getkind)
+
+// A new protocol also sets the ceiling to ORBIS_KERNEL_PRIO_RR_HIGHEST.
+static int mattr_setprotocol(GuestContext *ctx) {
+  uint64_t *var = mattr_var(ctx, ctx->rdi);
+  const int protocol = (int)ctx->rsi;
+  if (!var || protocol < 0 || protocol > MUTEX_PROT_PROTECT) return EINVAL;
+  *var = mattr_pack(MATTR_TYPE(*var), protocol, PS4_PRIO_FIFO_HIGHEST);
+  return 0;
+}
+SYNC_SHIMS(mutexattr_setprotocol, MutexattrSetprotocol, mattr_setprotocol)
+
+static int mattr_getprotocol(GuestContext *ctx) {
+  const uint64_t *var = mattr_var(ctx, ctx->rdi);
+  int32_t *out = (int32_t *)gptr(ctx, ctx->rsi);
+  if (!var || !out) return EINVAL;
+  *out = MATTR_PROTOCOL(*var);
+  return 0;
+}
+SYNC_SHIMS(mutexattr_getprotocol, MutexattrGetprotocol, mattr_getprotocol)
+
+// The ceiling only applies to a PTHREAD_PRIO_PROTECT attribute, within the FIFO priorities.
+static int mattr_setprioceiling(GuestContext *ctx) {
+  uint64_t *var = mattr_var(ctx, ctx->rdi);
+  const int ceiling = (int)ctx->rsi;
+  if (!var || MATTR_PROTOCOL(*var) != MUTEX_PROT_PROTECT || ceiling > PS4_PRIO_FIFO_HIGHEST ||
+      ceiling < PS4_PRIO_FIFO_LOWEST) {
+    return EINVAL;
+  }
+  *var = mattr_pack(MATTR_TYPE(*var), MATTR_PROTOCOL(*var), ceiling);
+  return 0;
+}
+SYNC_SHIMS(mutexattr_setprioceiling, MutexattrSetprioceiling, mattr_setprioceiling)
+
+static int mattr_getprioceiling(GuestContext *ctx) {
+  const uint64_t *var = mattr_var(ctx, ctx->rdi);
+  int32_t *out = (int32_t *)gptr(ctx, ctx->rsi);
+  if (!var || !out || MATTR_PROTOCOL(*var) != MUTEX_PROT_PROTECT) return EINVAL;
+  *out = MATTR_CEILING(*var);
+  return 0;
+}
+SYNC_SHIMS(mutexattr_getprioceiling, MutexattrGetprioceiling, mattr_getprioceiling)
+
+// Only PTHREAD_PROCESS_PRIVATE (0) is supported.
+static int mattr_setpshared(GuestContext *ctx) {
+  return mattr_var(ctx, ctx->rdi) && ctx->rsi == 0 ? 0 : EINVAL;
+}
+SYNC_SHIMS(mutexattr_setpshared, MutexattrSetpshared, mattr_setpshared)
+
+static int mattr_getpshared(GuestContext *ctx) {
+  int32_t *out = (int32_t *)gptr(ctx, ctx->rsi);
+  if (!mattr_var(ctx, ctx->rdi) || !out) return EINVAL;
+  *out = 0;
+  return 0;
+}
+SYNC_SHIMS(mutexattr_getpshared, MutexattrGetpshared, mattr_getpshared)
+
+// ---- Per-mutex settings (shadPS4 posix_pthread_mutex_{get,set}{spin,yield}loops_np,
+// posix_pthread_mutex_setname_np). The variable is initialized first if it holds none.
+
+static int mutex_getspinloops(GuestContext *ctx) {
+  int32_t *out = (int32_t *)gptr(ctx, ctx->rsi);
+  if (!ctx->rdi || !out) return EINVAL;
+  *out = gm_lookup(ctx, ctx->rdi)->spinloops;
+  return 0;
+}
+SYNC_SHIMS(mutex_getspinloops_np, MutexGetspinloops, mutex_getspinloops)
+
+static int mutex_setspinloops(GuestContext *ctx) {
+  if (!ctx->rdi) return EINVAL;
+  gm_lookup(ctx, ctx->rdi)->spinloops = (int)ctx->rsi;
+  return 0;
+}
+SYNC_SHIMS(mutex_setspinloops_np, MutexSetspinloops, mutex_setspinloops)
+
+static int mutex_getyieldloops(GuestContext *ctx) {
+  int32_t *out = (int32_t *)gptr(ctx, ctx->rsi);
+  if (!ctx->rdi || !out) return EINVAL;
+  *out = gm_lookup(ctx, ctx->rdi)->yieldloops;
+  return 0;
+}
+SYNC_SHIMS(mutex_getyieldloops_np, MutexGetyieldloops, mutex_getyieldloops)
+
+static int mutex_setyieldloops(GuestContext *ctx) {
+  if (!ctx->rdi) return EINVAL;
+  gm_lookup(ctx, ctx->rdi)->yieldloops = (int)ctx->rsi;
+  return 0;
+}
+SYNC_SHIMS(mutex_setyieldloops_np, MutexSetyieldloops, mutex_setyieldloops)
+
+// pthread_mutex_setname_np(mutex, name): a NULL name is "SceNoNameMutex"; a variable without a
+// mutex is left alone.
+void shim_pthread_mutex_setname_np(GuestContext *ctx) {
+  const char *name = ctx->rsi && ctx->rsi < ctx->mem_size ? (const char *)(ctx->mem_base + ctx->rsi) : NULL;
+  const uint64_t *var = (const uint64_t *)gptr(ctx, ctx->rdi);
+  if (var && sync_obj_slot(*var) >= 0) {
+    snprintf(gm_lookup(ctx, ctx->rdi)->name, sizeof(((GuestMutex *)0)->name), "%s", name ? name : "SceNoNameMutex");
+  }
+  RET_POSIX(0);
 }
 
-void shim_pthread_mutexattr_settype(GuestContext *ctx) {
-  uint64_t attr_addr = ctx->rdi;
-  int type = (int)ctx->rsi;
-  if (attr_addr) {
-    *(uint32_t *)(ctx->mem_base + attr_addr) = (uint32_t)type;
+// pthread_mutex_reltimedlock_np(mutex, usec) and scePthreadMutexTimedlock: a lock that waits
+// at most usec microseconds (shadPS4 Lock(THR_RELTIME, usec)); 0 only tries, and fails with
+// ETIMEDOUT like a wait that ran out.
+static int mutex_reltimedlock(GuestContext *ctx) {
+  const uint64_t usec = ctx->rsi;
+  GmCall c;
+  GuestMutex *m = gm_call_begin(ctx, &c);
+  int r;
+  if (usec == 0) {
+    r = gm_trylock(m, guest_owner_id(ctx), c.s, c.t1);
+    if (r == EBUSY) r = ETIMEDOUT;
+    MSTAT_ADD(c.s, trylocks, 1);
+  } else {
+    struct timespec ts;
+    abs_from_usec(&ts, usec);
+    r = gm_lock(m, guest_owner_id(ctx), &ts, c.s, c.t1);
+    MSTAT_ADD(c.s, locks, 1);
   }
-  ctx->rax = 0;
-  SHIM_RETURN();
+  gm_call_end(&c);
+  return r;
 }
 
-void shim_pthread_mutexattr_destroy(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
+void shim_pthread_mutex_reltimedlock_np(GuestContext *ctx) { RET_POSIX(mutex_reltimedlock(ctx)); }
+
+void shim_scePthreadMutexTimedlock(GuestContext *ctx) { RET_ORBIS(mutex_reltimedlock(ctx)); }
 
 // Condition variables
 #define COND_MAP_SIZE 1024
@@ -880,13 +1141,22 @@ static CondNode *get_host_cond(uint64_t guest_addr) {
 // condvar. With atomic mutexes the next owner can take m without lk, so a
 // signal takes the lk of the mutex last used with the condvar (cn->m): a
 // wake-up sent after the next owner took m cannot slip in before we sleep.
+// A cancellation point (shadPS4 PthreadCond::Wait): a pending cancel ends the thread with m
+// locked again, before or after the wait.
 static int gm_cond_wait(GuestMutex *m, CondNode *cn, uint64_t me, const struct timespec *abs) {
   MStat *s = mstat_slot();
   MSTAT_ADD(s, cond_waits, 1);
   if (GM_OWNER(m) != me) return EPERM;
+  ps4_thread_testcancel();
+  RecompThread *self = recomp_get_current_thread();
   const uint32_t depth = m->count;
   gm_lk_lock(m, s);
   atomic_store_explicit(&cn->m, m, memory_order_relaxed);
+  if (ps4_thread_cancel_wait_begin(self, &m->lk, &cn->host_cond)) {
+    pthread_mutex_unlock(&m->lk);
+    ps4_thread_testcancel();
+    return 0;
+  }
   m->count = 0;
   gm_released(m, mstat_now());
   if (g_mutex_legacy) {
@@ -900,6 +1170,7 @@ static int gm_cond_wait(GuestMutex *m, CondNode *cn, uint64_t me, const struct t
     }
   }
   int r = abs ? pthread_cond_timedwait(&cn->host_cond, &m->lk, abs) : pthread_cond_wait(&cn->host_cond, &m->lk);
+  ps4_thread_cancel_wait_end(self);
   atomic_fetch_add_explicit(&m->waiters, 1, memory_order_seq_cst);
   if (g_mutex_legacy) {
     while (GM_OWNER(m) != 0) pthread_cond_wait(&m->cv, &m->lk);
@@ -911,6 +1182,7 @@ static int gm_cond_wait(GuestMutex *m, CondNode *cn, uint64_t me, const struct t
   m->count = depth;
   m->acq_t = mstat_now();
   pthread_mutex_unlock(&m->lk);
+  ps4_thread_testcancel();
   return r;
 }
 
@@ -922,11 +1194,84 @@ static int gc_signal(CondNode *cn, bool all) {
   return r;
 }
 
-int ps4_guest_cond_init(GuestContext *ctx, uint64_t addr) {
-  if (!addr) return EINVAL;
-  (void)get_host_cond(sync_handle(ctx, addr, 1));
+// The guest object of a condition keeps its clock where FreeBSD's struct ucond has c_clockid.
+#define SYNC_OBJ_COND_CLOCK 0x08
+#define CLOCK_ID_REALTIME 0
+
+// ---- Condition attributes: the ScePthreadCondattr variable holds the attribute itself (shadPS4
+// PthreadCondAttr: the clock in bits 0-31; process-shared is always 0) with CATTR_VALID set by
+// pthread_condattr_init and cleared by destroy.
+#define CATTR_VALID (1ull << 63)
+
+static uint64_t *cattr_var(GuestContext *ctx, uint64_t addr) {
+  uint64_t *var = (uint64_t *)gptr(ctx, addr);
+  return var && (*var & CATTR_VALID) ? var : NULL;
+}
+
+static int cattr_init(GuestContext *ctx) {
+  uint64_t *var = (uint64_t *)gptr(ctx, ctx->rdi);
+  if (!var) return EINVAL;
+  *var = CATTR_VALID | CLOCK_ID_REALTIME;
   return 0;
 }
+SYNC_SHIMS(condattr_init, CondattrInit, cattr_init)
+
+static int cattr_destroy(GuestContext *ctx) {
+  uint64_t *var = cattr_var(ctx, ctx->rdi);
+  if (!var) return EINVAL;
+  *var = 0;
+  return 0;
+}
+SYNC_SHIMS(condattr_destroy, CondattrDestroy, cattr_destroy)
+
+static int cattr_getclock(GuestContext *ctx) {
+  const uint64_t *var = cattr_var(ctx, ctx->rdi);
+  int32_t *out = (int32_t *)gptr(ctx, ctx->rsi);
+  if (!var || !out) return EINVAL;
+  *out = (int32_t)(uint32_t)*var;
+  return 0;
+}
+SYNC_SHIMS(condattr_getclock, CondattrGetclock, cattr_getclock)
+
+// Realtime, virtual, profiling and monotonic clocks (Orbis ids 0, 1, 2, 4).
+static int cattr_setclock(GuestContext *ctx) {
+  uint64_t *var = cattr_var(ctx, ctx->rdi);
+  const uint32_t clock = (uint32_t)ctx->rsi;
+  if (!var) return EINVAL;
+  if (clock != 0 && clock != 1 && clock != 2 && clock != 4) return EINVAL;
+  *var = CATTR_VALID | clock;
+  return 0;
+}
+SYNC_SHIMS(condattr_setclock, CondattrSetclock, cattr_setclock)
+
+static int cattr_getpshared(GuestContext *ctx) {
+  int32_t *out = (int32_t *)gptr(ctx, ctx->rsi);
+  if (!cattr_var(ctx, ctx->rdi) || !out) return EINVAL;
+  *out = 0;
+  return 0;
+}
+SYNC_SHIMS(condattr_getpshared, CondattrGetpshared, cattr_getpshared)
+
+static int cattr_setpshared(GuestContext *ctx) {
+  if (!cattr_var(ctx, ctx->rdi)) return EINVAL;
+  return ctx->rsi != 0 ? EINVAL : 0;
+}
+SYNC_SHIMS(condattr_setpshared, CondattrSetpshared, cattr_setpshared)
+
+// ---- Condition variables.
+
+// shadPS4 CondInit: the clock comes from the attribute (CLOCK_REALTIME without one).
+static int cond_init(GuestContext *ctx, uint64_t addr, uint64_t attr_addr) {
+  if (!addr) return EINVAL;
+  const uint64_t *attr = (const uint64_t *)gptr(ctx, attr_addr);
+  const uint32_t clock = attr && (*attr & CATTR_VALID) ? (uint32_t)*attr : CLOCK_ID_REALTIME;
+  const uint64_t h = sync_handle(ctx, addr, 1);
+  (void)get_host_cond(h);
+  *(uint32_t *)(ctx->mem_base + h + SYNC_OBJ_COND_CLOCK) = clock;
+  return 0;
+}
+
+int ps4_guest_cond_init(GuestContext *ctx, uint64_t addr) { return cond_init(ctx, addr, 0); }
 
 int ps4_guest_cond_signal(GuestContext *ctx, uint64_t addr) {
   if (!addr) return EINVAL;
@@ -943,52 +1288,76 @@ int ps4_guest_cond_wait(GuestContext *ctx, uint64_t cond_addr, uint64_t mutex_ad
   return gm_cond_wait(m, c, guest_owner_id(ctx), &ts);
 }
 
-void shim_pthread_cond_init(GuestContext *ctx) {
-  // A NULL condition address is the guest's own fault; the shim has always ignored it.
-  (void)ps4_guest_cond_init(ctx, ctx->rdi);
-  ctx->rax = 0;
-  SHIM_RETURN();
+void shim_pthread_cond_init(GuestContext *ctx) { RET_POSIX(cond_init(ctx, ctx->rdi, ctx->rsi)); }
+
+// scePthreadCondInit(cond, attr, name)
+void shim_scePthreadCondInit(GuestContext *ctx) { RET_ORBIS(cond_init(ctx, ctx->rdi, ctx->rsi)); }
+
+// pthread_cond_setname_np(cond, name): only a NULL name is an error.
+void shim_pthread_cond_setname_np(GuestContext *ctx) { RET_POSIX(ctx->rsi ? 0 : EINVAL); }
+
+static int cond_wait(GuestContext *ctx) {
+  CondNode *c = get_host_cond(sync_handle(ctx, ctx->rdi, 0));
+  GuestMutex *m = get_host_mutex(sync_handle(ctx, ctx->rsi, 0));
+  return gm_cond_wait(m, c, guest_owner_id(ctx), NULL);
 }
+SYNC_SHIMS(cond_wait, CondWait, cond_wait)
 
-void shim_pthread_cond_wait(GuestContext *ctx) {
-  uint64_t cond_addr = ctx->rdi;
-  uint64_t mtx_addr = ctx->rsi;
-  CondNode *c = get_host_cond(sync_handle(ctx, cond_addr, 0));
-  GuestMutex *m = get_host_mutex(sync_handle(ctx, mtx_addr, 0));
-  ctx->rax = (uint64_t)gm_cond_wait(m, c, guest_owner_id(ctx), NULL);
-  SHIM_RETURN();
-}
-
-void shim_pthread_cond_timedwait(GuestContext *ctx) {
-  uint64_t cond_addr = ctx->rdi;
-  uint64_t mtx_addr = ctx->rsi;
-  uint64_t abstime_addr = ctx->rdx;
-  CondNode *c = get_host_cond(sync_handle(ctx, cond_addr, 0));
-  GuestMutex *m = get_host_mutex(sync_handle(ctx, mtx_addr, 0));
-
-  struct timespec ts;
-  if (abstime_addr) {
-    uint64_t *guest_ts = (uint64_t *)(ctx->mem_base + abstime_addr);
-    ts.tv_sec = (time_t)guest_ts[0];
-    ts.tv_nsec = (long)guest_ts[1];
+// abs on the condition's clock as the CLOCK_REALTIME deadline pthread_cond_timedwait takes
+// (shadPS4 Pthread::Sleep measures the wait on that clock).
+static void cond_deadline(GuestContext *ctx, uint64_t handle, const struct timespec *abs, struct timespec *out) {
+  const uint32_t clock = handle ? *(const uint32_t *)(ctx->mem_base + handle + SYNC_OBJ_COND_CLOCK) : 0;
+  OrbisKernelTimespec now;
+  if (clock == CLOCK_ID_REALTIME || sceKernelClockGettime(clock, &now) != 0) {
+    *out = *abs;
+    return;
   }
-  ctx->rax = (uint64_t)gm_cond_wait(m, c, guest_owner_id(ctx), abstime_addr ? &ts : NULL);
-  SHIM_RETURN();
+  int64_t rel = (int64_t)(abs->tv_sec - now.tv_sec) * 1000000000 + (abs->tv_nsec - now.tv_nsec);
+  if (rel < 0) rel = 0;
+  clock_gettime(CLOCK_REALTIME, out);
+  rel += out->tv_nsec;
+  out->tv_sec += (time_t)(rel / 1000000000);
+  out->tv_nsec = (long)(rel % 1000000000);
 }
 
-void shim_pthread_cond_signal(GuestContext *ctx) {
-  uint64_t cond_addr = ctx->rdi;
-  CondNode *c = get_host_cond(sync_handle(ctx, cond_addr, 0));
-  ctx->rax = (uint64_t)gc_signal(c, false);
-  SHIM_RETURN();
+// pthread_cond_timedwait(cond, mutex, abstime): abstime on the condition's clock.
+void shim_pthread_cond_timedwait(GuestContext *ctx) {
+  struct timespec abs, deadline;
+  if (!ctx->rdx) RET_POSIX(EINVAL);
+  read_timespec(ctx, ctx->rdx, &abs);
+  if (bad_timespec(&abs)) RET_POSIX(EINVAL);
+  const uint64_t h = sync_handle(ctx, ctx->rdi, 0);
+  CondNode *c = get_host_cond(h);
+  GuestMutex *m = get_host_mutex(sync_handle(ctx, ctx->rsi, 0));
+  cond_deadline(ctx, h, &abs, &deadline);
+  RET_POSIX(gm_cond_wait(m, c, guest_owner_id(ctx), &deadline));
 }
 
-void shim_pthread_cond_broadcast(GuestContext *ctx) {
-  uint64_t cond_addr = ctx->rdi;
-  CondNode *c = get_host_cond(sync_handle(ctx, cond_addr, 0));
-  ctx->rax = (uint64_t)gc_signal(c, true);
-  SHIM_RETURN();
+// pthread_cond_reltimedwait_np(cond, mutex, usec) and scePthreadCondTimedwait: a wait of at
+// most usec microseconds.
+static int cond_reltimedwait(GuestContext *ctx) {
+  CondNode *c = get_host_cond(sync_handle(ctx, ctx->rdi, 0));
+  GuestMutex *m = get_host_mutex(sync_handle(ctx, ctx->rsi, 0));
+  struct timespec ts;
+  abs_from_usec(&ts, ctx->rdx);
+  return gm_cond_wait(m, c, guest_owner_id(ctx), &ts);
 }
+SYNC_SHIMS(cond_reltimedwait_np, CondTimedwait, cond_reltimedwait)
+
+static int cond_signal(GuestContext *ctx) { return gc_signal(get_host_cond(sync_handle(ctx, ctx->rdi, 0)), false); }
+SYNC_SHIMS(cond_signal, CondSignal, cond_signal)
+
+static int cond_broadcast(GuestContext *ctx) { return gc_signal(get_host_cond(sync_handle(ctx, ctx->rdi, 0)), true); }
+SYNC_SHIMS(cond_broadcast, CondBroadcast, cond_broadcast)
+
+// pthread_cond_signalto_np(cond, thread): ESRCH for an unknown thread, 1 when it does not wait
+// on the condition (shadPS4 PthreadCond::Signal).
+static int cond_signalto(GuestContext *ctx) {
+  CondNode *c = get_host_cond(sync_handle(ctx, ctx->rdi, 0));
+  const int r = ps4_thread_waits_on(ctx->rsi, &c->host_cond);
+  return r != 0 ? r : gc_signal(c, true);
+}
+SYNC_SHIMS(cond_signalto_np, CondSignalto, cond_signalto)
 
 int ps4_guest_cond_destroy(GuestContext *ctx, uint64_t addr) {
   uint64_t cond_addr = sync_handle_take(ctx, addr);
@@ -1058,48 +1427,72 @@ static int guest_rwlock_read_blocked(const RwlockNode *rw) {
   return rw->writer || (rw->waiting_writers && !g_rwlock_read_depth);
 }
 
-static int guest_rwlock_read(RwlockNode *rw, int try_only) {
+// shadPS4 PthreadRwlock::Rdlock: abs (CLOCK_REALTIME, NULL waits forever) is only checked when
+// the lock is not free.
+static int guest_rwlock_read(RwlockNode *rw, int try_only, const struct timespec *abs) {
   int cancel_state = PTHREAD_CANCEL_DISABLE;
+  int ret = 0;
   pthread_mutex_lock(&rw->mutex);
   if (guest_rwlock_read_blocked(rw)) {
     if (try_only || (rw->writer && pthread_equal(rw->writer, pthread_self()))) {
       pthread_mutex_unlock(&rw->mutex);
       return try_only ? EBUSY : EDEADLK;
     }
-    // Acquiring a rwlock is not a deferred cancellation point.
+    if (abs && bad_timespec(abs)) {
+      pthread_mutex_unlock(&rw->mutex);
+      return EINVAL;
+    }
+    // Acquiring a rwlock is not a (host) cancellation point.
     pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
     do {
-      pthread_cond_wait(&rw->available, &rw->mutex);
+      const int r = abs ? pthread_cond_timedwait(&rw->available, &rw->mutex, abs)
+                        : pthread_cond_wait(&rw->available, &rw->mutex);
+      if (r == ETIMEDOUT && guest_rwlock_read_blocked(rw)) {
+        ret = ETIMEDOUT;
+        break;
+      }
     } while (guest_rwlock_read_blocked(rw));
   }
-  ++rw->readers;
-  ++g_rwlock_read_depth;
+  if (ret == 0) {
+    ++rw->readers;
+    ++g_rwlock_read_depth;
+  }
   pthread_mutex_unlock(&rw->mutex);
-  if (cancel_state == PTHREAD_CANCEL_ENABLE)
-    pthread_setcancelstate(cancel_state, NULL);
-  return 0;
+  if (cancel_state == PTHREAD_CANCEL_ENABLE) pthread_setcancelstate(cancel_state, NULL);
+  return ret;
 }
 
-static int guest_rwlock_write(RwlockNode *rw, int try_only) {
+static int guest_rwlock_write(RwlockNode *rw, int try_only, const struct timespec *abs) {
   pthread_t self = pthread_self();
   int cancel_state = PTHREAD_CANCEL_DISABLE;
+  int ret = 0;
   pthread_mutex_lock(&rw->mutex);
   if (rw->writer || rw->readers) {
     if (try_only || (rw->writer && pthread_equal(rw->writer, self))) {
       pthread_mutex_unlock(&rw->mutex);
       return try_only ? EBUSY : EDEADLK;
     }
+    if (abs && bad_timespec(abs)) {
+      pthread_mutex_unlock(&rw->mutex);
+      return EINVAL;
+    }
     pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
     ++rw->waiting_writers;
-    while (rw->writer || rw->readers)
-      pthread_cond_wait(&rw->available, &rw->mutex);
-    --rw->waiting_writers;
+    while (rw->writer || rw->readers) {
+      const int r = abs ? pthread_cond_timedwait(&rw->available, &rw->mutex, abs)
+                        : pthread_cond_wait(&rw->available, &rw->mutex);
+      if (r == ETIMEDOUT && (rw->writer || rw->readers)) {
+        ret = ETIMEDOUT;
+        break;
+      }
+    }
+    // A writer that timed out lets the readers queued behind it go.
+    if (--rw->waiting_writers == 0 && ret) pthread_cond_broadcast(&rw->available);
   }
-  rw->writer = self;
+  if (ret == 0) rw->writer = self;
   pthread_mutex_unlock(&rw->mutex);
-  if (cancel_state == PTHREAD_CANCEL_ENABLE)
-    pthread_setcancelstate(cancel_state, NULL);
-  return 0;
+  if (cancel_state == PTHREAD_CANCEL_ENABLE) pthread_setcancelstate(cancel_state, NULL);
+  return ret;
 }
 
 static int guest_rwlock_unlock(RwlockNode *rw) {
@@ -1125,73 +1518,67 @@ static void free_guest_rwlock(RwlockNode *rw) {
   free(rw);
 }
 
-void shim_pthread_rwlock_rdlock(GuestContext *ctx) {
-  uint64_t rw_addr = ctx->rdi;
-  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
-  ctx->rax = (uint64_t)guest_rwlock_read(rw, 0);
-  SHIM_RETURN();
+static inline RwlockNode *rwlock_of(GuestContext *ctx) { return get_guest_rwlock(sync_handle(ctx, ctx->rdi, 0)); }
+
+static int rwlock_rdlock(GuestContext *ctx) { return guest_rwlock_read(rwlock_of(ctx), 0, NULL); }
+SYNC_SHIMS(rwlock_rdlock, RwlockRdlock, rwlock_rdlock)
+
+static int rwlock_wrlock(GuestContext *ctx) { return guest_rwlock_write(rwlock_of(ctx), 0, NULL); }
+SYNC_SHIMS(rwlock_wrlock, RwlockWrlock, rwlock_wrlock)
+
+static int rwlock_tryrdlock(GuestContext *ctx) { return guest_rwlock_read(rwlock_of(ctx), 1, NULL); }
+SYNC_SHIMS(rwlock_tryrdlock, RwlockTryrdlock, rwlock_tryrdlock)
+
+static int rwlock_trywrlock(GuestContext *ctx) { return guest_rwlock_write(rwlock_of(ctx), 1, NULL); }
+SYNC_SHIMS(rwlock_trywrlock, RwlockTrywrlock, rwlock_trywrlock)
+
+static int rwlock_unlock(GuestContext *ctx) { return guest_rwlock_unlock(rwlock_of(ctx)); }
+SYNC_SHIMS(rwlock_unlock, RwlockUnlock, rwlock_unlock)
+
+// pthread_rwlock_timedrdlock / timedwrlock(rwlock, abstime): abstime on CLOCK_REALTIME.
+static const struct timespec *rwlock_abs(GuestContext *ctx, struct timespec *ts) {
+  if (!ctx->rsi) return NULL;
+  read_timespec(ctx, ctx->rsi, ts);
+  return ts;
 }
 
-void shim_pthread_rwlock_wrlock(GuestContext *ctx) {
-  uint64_t rw_addr = ctx->rdi;
-  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
-  ctx->rax = (uint64_t)guest_rwlock_write(rw, 0);
-  SHIM_RETURN();
+void shim_pthread_rwlock_timedrdlock(GuestContext *ctx) {
+  struct timespec ts;
+  RET_POSIX(guest_rwlock_read(rwlock_of(ctx), 0, rwlock_abs(ctx, &ts)));
 }
 
-void shim_pthread_rwlock_tryrdlock(GuestContext *ctx) {
-  uint64_t rw_addr = ctx->rdi;
-  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
-  ctx->rax = (uint64_t)guest_rwlock_read(rw, 1);
-  SHIM_RETURN();
+void shim_pthread_rwlock_timedwrlock(GuestContext *ctx) {
+  struct timespec ts;
+  RET_POSIX(guest_rwlock_write(rwlock_of(ctx), 0, rwlock_abs(ctx, &ts)));
 }
 
-void shim_pthread_rwlock_trywrlock(GuestContext *ctx) {
-  uint64_t rw_addr = ctx->rdi;
-  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
-  ctx->rax = (uint64_t)guest_rwlock_write(rw, 1);
-  SHIM_RETURN();
+// pthread_rwlock_reltimed{rd,wr}lock_np(rwlock, usec) and scePthreadRwlockTimed{rd,wr}lock: a
+// 32-bit microsecond timeout from now (shadPS4 AbsTimeAfter).
+static int rwlock_reltimedrdlock(GuestContext *ctx) {
+  struct timespec ts;
+  abs_from_usec(&ts, (uint32_t)ctx->rsi);
+  return guest_rwlock_read(rwlock_of(ctx), 0, &ts);
 }
+SYNC_SHIMS(rwlock_reltimedrdlock_np, RwlockTimedrdlock, rwlock_reltimedrdlock)
 
-void shim_scePthreadRwlockTryrdlock(GuestContext *ctx) {
-  uint64_t rw_addr = ctx->rdi;
-  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
-  int ret = guest_rwlock_read(rw, 1);
-  if (ret != 0) {
-    ctx->rax = (ret == EBUSY) ? 0x80020010 : (0x80020000 | (uint32_t)ret);
-  } else {
-    ctx->rax = 0;
-  }
-  SHIM_RETURN();
+static int rwlock_reltimedwrlock(GuestContext *ctx) {
+  struct timespec ts;
+  abs_from_usec(&ts, (uint32_t)ctx->rsi);
+  return guest_rwlock_write(rwlock_of(ctx), 0, &ts);
 }
+SYNC_SHIMS(rwlock_reltimedwrlock_np, RwlockTimedwrlock, rwlock_reltimedwrlock)
 
-void shim_scePthreadRwlockTrywrlock(GuestContext *ctx) {
-  uint64_t rw_addr = ctx->rdi;
-  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
-  int ret = guest_rwlock_write(rw, 1);
-  if (ret != 0) {
-    ctx->rax = (ret == EBUSY) ? 0x80020010 : (0x80020000 | (uint32_t)ret);
-  } else {
-    ctx->rax = 0;
-  }
-  SHIM_RETURN();
+// pthread_rwlock_setname_np(rwlock, name): only a NULL name is an error.
+void shim_pthread_rwlock_setname_np(GuestContext *ctx) { RET_POSIX(ctx->rsi ? 0 : EINVAL); }
+
+static int rwlock_init(GuestContext *ctx) {
+  if (!ctx->rdi) return EINVAL;
+  (void)get_guest_rwlock(sync_handle(ctx, ctx->rdi, 1));
+  return 0;
 }
+SYNC_SHIMS(rwlock_init, RwlockInit, rwlock_init)
 
-void shim_pthread_rwlock_unlock(GuestContext *ctx) {
-  uint64_t rw_addr = ctx->rdi;
-  RwlockNode *rw = get_guest_rwlock(sync_handle(ctx, rw_addr, 0));
-  ctx->rax = (uint64_t)guest_rwlock_unlock(rw);
-  SHIM_RETURN();
-}
-
-void shim_pthread_rwlock_init(GuestContext *ctx) {
-  uint64_t rw_addr = ctx->rdi;
-  (void)get_guest_rwlock(sync_handle(ctx, rw_addr, 1));
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_pthread_rwlock_destroy(GuestContext *ctx) {
+static int rwlock_destroy(GuestContext *ctx) {
   uint64_t rw_addr = sync_handle_take(ctx, ctx->rdi);
   uint64_t bucket = sync_obj_hash(rw_addr) % RWLOCK_MAP_SIZE;
   pthread_mutex_lock(&g_rwlock_map_lock);
@@ -1207,9 +1594,9 @@ void shim_pthread_rwlock_destroy(GuestContext *ctx) {
   }
   pthread_mutex_unlock(&g_rwlock_map_lock);
   sync_obj_free(rw_addr);
-  ctx->rax = 0;
-  SHIM_RETURN();
+  return 0;
 }
+SYNC_SHIMS(rwlock_destroy, RwlockDestroy, rwlock_destroy)
 
 typedef struct GuestRwlockAttr {
   int pshared;
@@ -1372,65 +1759,64 @@ void shim_pthread_rwlockattr_getpshared(GuestContext *ctx) {
   shim_scePthreadRwlockattrGetpshared(ctx);
 }
 
-void shim_scePthreadRwlockInit(GuestContext *ctx) {
-  uint64_t rw_addr = ctx->rdi;
-  (void)get_guest_rwlock(sync_handle(ctx, rw_addr, 1));
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadRwlockDestroy(GuestContext *ctx) {
-  shim_pthread_rwlock_destroy(ctx);
-}
-
-void shim_scePthreadRwlockRdlock(GuestContext *ctx) {
-  shim_pthread_rwlock_rdlock(ctx);
-}
-
-void shim_scePthreadRwlockWrlock(GuestContext *ctx) {
-  shim_pthread_rwlock_wrlock(ctx);
-}
-
-void shim_scePthreadRwlockUnlock(GuestContext *ctx) {
-  shim_pthread_rwlock_unlock(ctx);
-}
+// pthread_once (shadPS4 posix_pthread_once): the control word is NeverDone (0), Done (1),
+// InProgress (2) or Wait (3, a thread waits for the running initializer); any other value is
+// EINVAL. An initializer that ends its thread (pthread_exit, cancellation) resets the word to
+// NeverDone, so another caller runs it.
+#define ONCE_NEVER_DONE 0
+#define ONCE_DONE 1
+#define ONCE_IN_PROGRESS 2
+#define ONCE_WAIT 3
 
 static pthread_mutex_t g_once_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_once_cond = PTHREAD_COND_INITIALIZER;
 
-void shim_pthread_once(GuestContext *ctx) {
-  uint64_t once_control_addr = ctx->rdi;
-  uint64_t init_routine_addr = ctx->rsi;
-  if (!once_control_addr) {
-    ctx->rax = (uint64_t)EINVAL;
-    SHIM_RETURN();
-  }
-  int *ctrl = (int *)(ctx->mem_base + once_control_addr);
+static void once_cancel(void *arg) {
+  pthread_mutex_lock(&g_once_mutex);
+  __atomic_store_n((uint32_t *)arg, ONCE_NEVER_DONE, __ATOMIC_RELEASE);
+  pthread_cond_broadcast(&g_once_cond);
+  pthread_mutex_unlock(&g_once_mutex);
+}
+
+static int once(GuestContext *ctx) {
+  const uint64_t once_control_addr = ctx->rdi;
+  const uint64_t init_routine_addr = ctx->rsi;
+  if (!once_control_addr) return EINVAL;
+  uint32_t *ctrl = (uint32_t *)(ctx->mem_base + once_control_addr);
+  if (__atomic_load_n(ctrl, __ATOMIC_ACQUIRE) == ONCE_DONE) return 0;
 
   pthread_mutex_lock(&g_once_mutex);
-  while (*ctrl == 2) { // 2 = InProgress
+  for (;;) {
+    const uint32_t state = __atomic_load_n(ctrl, __ATOMIC_ACQUIRE);
+    if (state == ONCE_DONE) {
+      pthread_mutex_unlock(&g_once_mutex);
+      return 0;
+    }
+    if (state == ONCE_NEVER_DONE) break;
+    if (state != ONCE_IN_PROGRESS && state != ONCE_WAIT) {
+      pthread_mutex_unlock(&g_once_mutex);
+      return EINVAL;
+    }
+    __atomic_store_n(ctrl, ONCE_WAIT, __ATOMIC_RELAXED);
     pthread_cond_wait(&g_once_cond, &g_once_mutex);
   }
-  if (*ctrl == 1) { // 1 = Done
-    pthread_mutex_unlock(&g_once_mutex);
-    ctx->rax = 0;
-    SHIM_RETURN();
-  }
-  *ctrl = 2; // InProgress
+  __atomic_store_n(ctrl, ONCE_IN_PROGRESS, __ATOMIC_RELAXED);
   pthread_mutex_unlock(&g_once_mutex);
 
+  PthreadCleanupEntry cleanup;
+  ps4_thread_cleanup_push_host(&cleanup, once_cancel, ctrl);
   ctx->rsp -= 8;
   MEM_U64(ctx->rsp) = 0xdeadbeefULL;
   recomp_dispatch(ctx, init_routine_addr);
+  ps4_thread_cleanup_pop_host(&cleanup);
 
   pthread_mutex_lock(&g_once_mutex);
-  *ctrl = 1; // Done
+  __atomic_store_n(ctrl, ONCE_DONE, __ATOMIC_RELEASE);
   pthread_cond_broadcast(&g_once_cond);
   pthread_mutex_unlock(&g_once_mutex);
-
-  ctx->rax = 0;
-  SHIM_RETURN();
+  return 0;
 }
+SYNC_SHIMS(once, Once, once)
 
 void ps4_sync_destroy(void) {
   pthread_mutex_lock(&g_mutex_map_lock);
@@ -1479,142 +1865,38 @@ void ps4_sync_destroy(void) {
   pthread_mutex_unlock(&g_rwlock_map_lock);
 }
 
-// scePthreadMutex shims
-void shim_scePthreadMutexInit(GuestContext *ctx) {
-  shim_pthread_mutex_init(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
+// scePthreadMutex shims (shadPS4 ORBIS() of the posix calls).
 void shim_scePthreadMutexLock(GuestContext *ctx) {
   shim_pthread_mutex_lock(ctx);
-  SCE_PTHREAD_ERR(ctx);
+  ctx->rax = orbis_err((int)ctx->rax);
 }
 
 void shim_scePthreadMutexTrylock(GuestContext *ctx) {
   shim_pthread_mutex_trylock(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadMutexTimedlock(GuestContext *ctx) {
-  uint64_t usec = ctx->rsi;
-  GmCall c;
-  GuestMutex *m = gm_call_begin(ctx, &c);
-  if (usec == 0) {
-    ctx->rax = (uint64_t)gm_trylock(m, guest_owner_id(ctx), c.s, c.t1);
-    MSTAT_ADD(c.s, trylocks, 1);
-  } else {
-    struct timespec ts;
-    abs_from_usec(&ts, usec);
-    ctx->rax = (uint64_t)gm_lock(m, guest_owner_id(ctx), &ts, c.s, c.t1);
-    MSTAT_ADD(c.s, locks, 1);
-  }
-  gm_call_end(&c);
-  SCE_PTHREAD_ERR(ctx);
-  SHIM_RETURN();
+  ctx->rax = orbis_err((int)ctx->rax);
 }
 
 void shim_scePthreadMutexUnlock(GuestContext *ctx) {
   shim_pthread_mutex_unlock(ctx);
-  SCE_PTHREAD_ERR(ctx);
+  ctx->rax = orbis_err((int)ctx->rax);
 }
 
+// scePthreadMutexIsowned is ORBIS(posix_pthread_mutex_isowned_np): an owned mutex gives
+// 0x80020001.
 void shim_scePthreadMutexIsownedNp(GuestContext *ctx) {
   shim_pthread_mutex_isowned_np(ctx);
+  ctx->rax = orbis_err((int)ctx->rax);
 }
 
 void shim_scePthreadMutexDestroy(GuestContext *ctx) {
   shim_pthread_mutex_destroy(ctx);
-  SCE_PTHREAD_ERR(ctx);
+  ctx->rax = orbis_err((int)ctx->rax);
 }
 
-void shim_scePthreadMutexattrInit(GuestContext *ctx) {
-  shim_pthread_mutexattr_init(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadMutexattrDestroy(GuestContext *ctx) {
-  shim_pthread_mutexattr_destroy(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadMutexattrSettype(GuestContext *ctx) {
-  shim_pthread_mutexattr_settype(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadMutexattrSetprotocol(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_pthread_mutexattr_setprotocol(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadOnce(GuestContext *ctx) {
-  shim_pthread_once(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-// scePthreadCond shims
-void shim_scePthreadCondInit(GuestContext *ctx) {
-  shim_pthread_cond_init(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
 
 void shim_scePthreadCondDestroy(GuestContext *ctx) {
   shim_pthread_cond_destroy(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadCondSignal(GuestContext *ctx) {
-  shim_pthread_cond_signal(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadCondBroadcast(GuestContext *ctx) {
-  shim_pthread_cond_broadcast(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadCondWait(GuestContext *ctx) {
-  shim_pthread_cond_wait(ctx);
-  SCE_PTHREAD_ERR(ctx);
-}
-
-void shim_scePthreadCondTimedwait(GuestContext *ctx) {
-  uint64_t cond_addr = ctx->rdi;
-  uint64_t mtx_addr = ctx->rsi;
-  uint64_t usec = ctx->rdx;
-  CondNode *c = get_host_cond(sync_handle(ctx, cond_addr, 0));
-  GuestMutex *m = get_host_mutex(sync_handle(ctx, mtx_addr, 0));
-  struct timespec ts;
-  abs_from_usec(&ts, usec);
-  ctx->rax = (uint64_t)gm_cond_wait(m, c, guest_owner_id(ctx), &ts);
-  SCE_PTHREAD_ERR(ctx); // ETIMEDOUT -> SCE_KERNEL_ERROR_ETIMEDOUT (0x8002003c)
-  SHIM_RETURN();
-}
-
-// Condition attributes carry no state the host implementation uses.
-void shim_pthread_condattr_init(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_pthread_condattr_destroy(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadCondattrInit(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
-void shim_scePthreadCondattrDestroy(GuestContext *ctx) {
-  ctx->rax = 0;
-  SHIM_RETURN();
+  ctx->rax = orbis_err((int)ctx->rax);
 }
 
 // C++ ABI static guard shims (matching Itanium C++ ABI with recursion prevention)

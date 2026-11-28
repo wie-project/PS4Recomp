@@ -46,6 +46,10 @@ void recomp_spin_pause_sleep(void);
 void shim_guest_cxa_throw(GuestContext *ctx);
 void recomp_free_runtime(GuestContext *ctx);
 GuestContext *recomp_create_thread_context(GuestContext *parent, uint64_t stack_size);
+// A thread context that runs on the guest's own stack [stack_addr, stack_addr + stack_size)
+// (a thread attribute with a stack address); only its TLS area and TCB are allocated.
+GuestContext *recomp_create_thread_context_on_stack(GuestContext *parent, uint64_t stack_addr,
+                                                    uint64_t stack_size);
 uint64_t recomp_vm_alloc(GuestContext *ctx, size_t size);
 uint64_t recomp_vm_alloc_named(GuestContext *ctx, size_t size, int prot, int flags, const char *name);
 uint64_t recomp_vm_alloc_named_aligned(GuestContext *ctx, size_t size, size_t alignment, int prot, int flags, const char *name);
@@ -85,7 +89,6 @@ void recomp_set_current_ctx(GuestContext *ctx);
 // Subsystem teardown and lifecycle
 void recomp_free_thread_context(GuestContext *ctx);
 void ps4_direct_mem_destroy(void);
-void ps4_event_flag_destroy(void);
 void ps4_sync_destroy(void);
 void ps4_videoout_destroy(void);
 void ps4_equeue_destroy(void);

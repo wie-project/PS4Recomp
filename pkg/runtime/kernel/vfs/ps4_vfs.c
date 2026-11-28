@@ -182,6 +182,51 @@ typedef struct {
 static VfsMount g_mounts[MAX_VFS_MOUNTS];
 static int g_mount_count = 0;
 
+int ps4_vfs_host_mkdir_p(const char *path) {
+  char buf[1024];
+  if (snprintf(buf, sizeof(buf), "%s", path) >= (int)sizeof(buf)) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  for (char *p = buf + 1; *p; p++) {
+    if (*p == '/') {
+      *p = '\0';
+      if (mkdir(buf, 0755) != 0 && errno != EEXIST) {
+        return -1;
+      }
+      *p = '/';
+    }
+  }
+  return mkdir(buf, 0755) != 0 && errno != EEXIST ? -1 : 0;
+}
+
+int ps4_vfs_usb_host_path(uint32_t device_id, char *out, size_t out_sz) {
+  const char *data_dir = getenv("PS4RECOMP_DATA_DIR");
+  const char *home = getenv("HOME");
+  int n;
+  if (data_dir && *data_dir) {
+    n = snprintf(out, out_sz, "%s/mnt/usb%u", data_dir, device_id);
+  } else if (home && *home) {
+    n = snprintf(out, out_sz, "%s/Library/Application Support/PS4Recomp/mnt/usb%u", home, device_id);
+  } else {
+    n = snprintf(out, out_sz, "/tmp/PS4Recomp/mnt/usb%u", device_id);
+  }
+  return n < 0 || (size_t)n >= out_sz ? -ENAMETOOLONG : 0;
+}
+
+// The USB storage device 0 (libSceUsbStorage): its host directory is created and mounted at
+// /mnt/usb0 at boot, as shadPS4's emulator does.
+static void vfs_mount_usb0(void) {
+  char usb_dir[1024];
+  if (ps4_vfs_usb_host_path(0, usb_dir, sizeof(usb_dir)) != 0) {
+    return;
+  }
+  if (ps4_vfs_host_mkdir_p(usb_dir) != 0) {
+    fprintf(stderr, "[ps4-vfs] could not create %s: %s\n", usb_dir, strerror(errno));
+  }
+  ps4_vfs_mount("/mnt/usb0", usb_dir);
+}
+
 void ps4_vfs_init(const char *app_root, bool force_hint) {
   pthread_mutex_lock(&g_vfs_mutex);
   if (g_app_root) {
@@ -211,6 +256,8 @@ void ps4_vfs_init(const char *app_root, bool force_hint) {
   pthread_mutex_unlock(&g_vfile_mutex);
 
   pthread_mutex_unlock(&g_vfs_mutex);
+
+  vfs_mount_usb0();
 
   // Initialize archive providers
   int datx_result = ps4_datx_init(g_app_root);

@@ -39,6 +39,17 @@ var auditedShadPS4Libraries = []string{
 	"jpeg",
 	"kernel/coredump",
 	"kernel/debug.cpp",
+	"kernel/threads/barrier.cpp",
+	"kernel/threads/condvar.cpp",
+	"kernel/threads/event_flag.cpp",
+	"kernel/threads/mutex.cpp",
+	"kernel/threads/pthread.cpp",
+	"kernel/threads/pthread_attr.cpp",
+	"kernel/threads/pthread_clean.cpp",
+	"kernel/threads/pthread_spec.cpp",
+	"kernel/threads/rwlock.cpp",
+	"kernel/threads/semaphore.cpp",
+	"kernel/time.cpp",
 	"keyboard",
 	"libpng",
 	"mouse",
@@ -78,6 +89,8 @@ var auditedShadPS4Libraries = []string{
 	"system/userservice.cpp",
 	"system_gesture",
 	"ulobjmgr",
+	// usbd.cpp (libSceUsbd, libusb backend) is not audited yet; usbstorage.cpp is.
+	"usbd/usbstorage.cpp",
 	"video_recording",
 	// videodec.cpp registers libSceVideodec, videodec2.cpp libSceVideodec2, vdecsw.cpp
 	// libSceVdecsw, vdeccore.cpp libSceVdecCore.

@@ -381,6 +381,7 @@ static void fiber_adopt_thread(GuestContext *f, const GuestContext *t) {
   f->stack_base = t->stack_base;
   f->stack_alloc_size = t->stack_alloc_size;
   memcpy(f->tls_keys, t->tls_keys, sizeof(f->tls_keys));
+  memcpy(f->tls_seqno, t->tls_seqno, sizeof(f->tls_seqno));
   f->process_ctx = t->process_ctx ? t->process_ctx : (GuestContext *)t;
   f->proc_param_addr = t->proc_param_addr;
   f->args_addr = t->args_addr;
@@ -389,6 +390,7 @@ static void fiber_adopt_thread(GuestContext *f, const GuestContext *t) {
 // TLS values written while the fiber ran belong to the guest thread.
 static void fiber_release_thread(const GuestContext *f, GuestContext *t) {
   memcpy(t->tls_keys, f->tls_keys, sizeof(t->tls_keys));
+  memcpy(t->tls_seqno, f->tls_seqno, sizeof(t->tls_seqno));
 }
 
 // Guest code and the shim bridge find the GuestContext of what runs on a guest thread

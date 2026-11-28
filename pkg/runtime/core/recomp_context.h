@@ -20,6 +20,9 @@
 extern "C" {
 #endif
 
+// Number of pthread keys (shadPS4 pthread_spec.cpp PthreadKeysMax).
+#define RECOMP_PTHREAD_KEYS_MAX 256
+
 // UnwindFrame tracks active call frames for C++ exception unwinding
 typedef struct UnwindFrame {
   uint64_t fn_start;
@@ -99,8 +102,10 @@ typedef struct GuestContext {
   uint64_t thread_id;
   uint64_t stack_base;
   size_t stack_alloc_size;
-  uint64_t tls_keys[128];
-  uint64_t tls_destructors[128];
+  // pthread_setspecific values of the thread, and the generation of the key each was set
+  // under (shadPS4 PthreadSpecificElem); the key table itself is ps4_threading.c's.
+  uint64_t tls_keys[RECOMP_PTHREAD_KEYS_MAX];
+  uint32_t tls_seqno[RECOMP_PTHREAD_KEYS_MAX];
 
   // Process root context (shared across threads)
   struct GuestContext *process_ctx;

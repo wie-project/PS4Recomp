@@ -43,7 +43,7 @@ var boundaryStubs = [][2]string{
 // boundaryOutputChecks are further strings a case's output must contain exactly once.
 var boundaryOutputChecks = map[string][]string{
 	"profile": {"[stall-profile] samples in recompiled guest code: PC only (no frame chain)\n",
-		"[stall-profile]   unnamed: busy 100%", ": guest_spin 100%\n"},
+		"[stall-profile]   Thread1001: busy 100%", ": guest_spin 100%\n"},
 	"longjmp":          {"FATAL: guest longjmp(env=0x1000700, val=1) called from 0x0: non-local jumps are not supported"},
 	"unresolved-named": {"Called unimplemented function 'sceRazorCpuInit' (NID: kgOk-kzW+8M, Lib: libSceFoo) at RIP=0x540030 "},
 	"unresolved-plt":   {"Called unimplemented function NID 'AbCdEfGhIjK' (Lib: libSceFoo) at RIP=0x540000 "},
@@ -60,6 +60,7 @@ var boundaryRuntimeSources = []string{
 	"core/recomp_runtime.c",
 	"core/recomp_x87.c",
 	"kernel/threading/ps4_threading.c",
+	"kernel/threading/ps4_pthread_attr.c",
 	"kernel/threading/ps4_stall_profile.c",
 	"modules/libSceFiber/ps4_fiber.c",
 	"modules/libkernel/ps4_kernel_sys.c",

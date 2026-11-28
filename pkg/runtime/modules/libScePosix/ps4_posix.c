@@ -32,42 +32,8 @@ void shim_select(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-void shim_usleep(GuestContext *ctx) {
-    useconds_t usec = (useconds_t)ctx->rdi;
-    int ret = usleep(usec);
-    if (ret < 0) {
-        set_guest_errno(ctx, errno);
-        ctx->rax = (uint64_t)-1;
-    } else {
-        ctx->rax = 0;
-    }
-    SHIM_RETURN();
-}
-
 void shim_getpid(GuestContext *ctx) {
     ctx->rax = (uint64_t)getpid();
     SHIM_RETURN();
-}
-
-void shim_pthread_exit(GuestContext *ctx) {
-    (void)ctx;
-    pthread_exit(NULL);
-}
-
-void shim_pthread_rename_np(GuestContext *ctx) {
-    // pthread_rename_np(pthread_t thread, const char *name)
-    // On macOS: pthread_setname_np(const char *name) for self, or nothing if external.
-    const char *name = (const char *)guest_to_host(ctx, ctx->rsi);
-    if (name) {
-        pthread_setname_np(name);
-    }
-    ctx->rax = 0;
-    SHIM_RETURN();
-}
-
-void shim_pthread_create_name_np(GuestContext *ctx) {
-    // pthread_create_name_np(thread, attr, start_routine, arg, name)
-    // Maps directly to shim_pthread_create which sets up context and spawns thread
-    shim_pthread_create(ctx);
 }
 

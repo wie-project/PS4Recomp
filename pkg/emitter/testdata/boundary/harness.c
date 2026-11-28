@@ -91,6 +91,7 @@ void guest_exc_fiber_a(void);
 void guest_exc_state_handler(void);
 #define ADDR_EXC_STATE_HANDLER 0x401400ULL
 #define EXC_KEY_OUT (D + 0x6f0)
+#define EXC_TLS_KEY (D + 0x6f4)
 #define HELPER_LOOP_FLAG 0x1000800ULL
 void guest_longjmp(void);
 void recomp_register_guest_modules(void);  // emitted guest_modules.c
@@ -307,13 +308,19 @@ void shim_test_heap_bump(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-// A guest exception handler that changes the thread's state: a TLS value, a new key's
-// destructor (in the process context) and the heap pointer. All of it stays after the handler,
-// and the guest registers the interrupted shim returns with are unchanged.
+// A guest exception handler that changes the thread's state: a TLS value, a new key with a
+// destructor and the heap pointer. All of it stays after the handler, and the guest registers
+// the interrupted shim returns with are unchanged.
 static void test_exception_state(void) {
   GuestContext *t = g_proc;
-  GuestContext *proc = t->process_ctx ? t->process_ctx : t;
-  t->tls_keys[5] = 0x1111;
+  // The key the handler sets, created with pthread_key_create on a scratch copy of the context.
+  GuestContext scratch = *t;
+  scratch.rdi = EXC_TLS_KEY;
+  scratch.rsi = 0;
+  shim_pthread_key_create(&scratch);
+  const uint32_t tls_key = *(uint32_t *)(g_proc->mem_base + EXC_TLS_KEY);
+  if (scratch.rax != 0 || tls_key >= RECOMP_PTHREAD_KEYS_MAX) fail("pthread_key_create: %llu", (unsigned long long)scratch.rax);
+  t->tls_keys[tls_key] = 0x1111;
   const uint64_t heap = t->heap_ptr;
   expect("sceKernelInstallExceptionHandler",
          (uint64_t)(int64_t)sceKernelInstallExceptionHandler(30, ADDR_EXC_STATE_HANDLER), 0);
@@ -321,12 +328,12 @@ static void test_exception_state(void) {
   pthread_create(&th, NULL, raise_exception_in_wait, NULL);
   recomp_call_guest(t, ADDR_EXC_MAIN);
   pthread_join(th, NULL);
-  expect("TLS key 5 (set by the handler)", t->tls_keys[5], 0x7777);
+  expect("TLS value (set by the handler)", t->tls_keys[tls_key], 0x7777);
   const uint32_t key = *(uint32_t *)(g_proc->mem_base + EXC_KEY_OUT);
-  if (key == 0 || key >= 128)
+  if (key == tls_key || key >= RECOMP_PTHREAD_KEYS_MAX)
     fail("pthread_key_create in the handler returned key %u", key);
   else
-    expect("destructor of the key the handler created", proc->tls_destructors[key], 0x7abc);
+    expect("destructor of the key the handler created", ps4_pthread_key_destructor(key), 0x7abc);
   expect("heap pointer (moved by the handler)", t->heap_ptr, heap + 0x10000);
   check_pattern("after the shim the handler interrupted", RES_EXC, 0xe000, res(RES_EXC_PRE)[W_RSP], t->fs_base);
 }

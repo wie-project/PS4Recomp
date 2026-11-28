@@ -37,14 +37,6 @@ static inline int net_kernel_errno(GuestContext *ctx) {
 // shadPS4 KernelFstat: a net object is a socket with no size.
 static int net_kernel_fstat(GuestContext *ctx, int fd, uint64_t statbuf_addr);
 
-// PS4 specific: sceKernelUsleep sleeps for microseconds
-void shim_sceKernelUsleep(GuestContext *ctx) {
-  uint32_t usec = (uint32_t)ctx->rdi;
-  usleep(usec);
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
 // POSIX write(fd, buf, count)
 void shim_write(GuestContext *ctx) {
   int fd = (int)ctx->rdi;
@@ -176,29 +168,6 @@ void shim_exit(GuestContext *ctx) {
 // errno pointer (allocated within dynamic TLS space)
 void shim_error(GuestContext *ctx) {
   ctx->rax = ctx->fs_base + 0x100ULL;
-  SHIM_RETURN();
-}
-
-// nanosleep
-void shim_nanosleep(GuestContext *ctx) {
-  uint64_t req_addr = ctx->rdi;
-  uint64_t rem_addr = ctx->rsi;
-
-  struct timespec req, rem;
-  uint64_t *guest_req = (uint64_t *)(ctx->mem_base + req_addr);
-  req.tv_sec = (time_t)guest_req[0];
-  req.tv_nsec = (long)guest_req[1];
-
-  int ret = nanosleep(&req, rem_addr ? &rem : NULL);
-  if (ret < 0) {
-    set_guest_errno(ctx, errno);
-  }
-  if (ret != 0 && rem_addr) {
-    uint64_t *guest_rem = (uint64_t *)(ctx->mem_base + rem_addr);
-    guest_rem[0] = (uint64_t)rem.tv_sec;
-    guest_rem[1] = (uint64_t)rem.tv_nsec;
-  }
-  ctx->rax = (uint64_t)ret;
   SHIM_RETURN();
 }
 
@@ -1453,13 +1422,6 @@ void shim_sceKernelGetdirentries(GuestContext *ctx) {
   SHIM_RETURN();
 }
 
-void shim_sceKernelSleep(GuestContext *ctx) {
-  unsigned int seconds = (unsigned int)ctx->rdi;
-  sleep(seconds);
-  ctx->rax = 0;
-  SHIM_RETURN();
-}
-
 void shim_sceKernelStopUnloadModule(GuestContext *ctx) {
   (void)ctx;
   ctx->rax = 0;
@@ -1824,76 +1786,6 @@ void shim___stack_chk_fail(GuestContext *ctx) {
   }
   fflush(stderr);
   abort();
-}
-
-// clock_gettime(clockid_t clk_id, struct timespec *tp)
-void shim_clock_gettime(GuestContext *ctx) {
-  int clk_id = (int)ctx->rdi;
-  uint64_t tp_addr = ctx->rsi;
-  if (!tp_addr) {
-    set_guest_errno(ctx, EFAULT);
-    ctx->rax = (uint64_t)-1;
-    SHIM_RETURN();
-  }
-
-  clockid_t host_clk = CLOCK_REALTIME;
-  // FreeBSD clock IDs:
-  // 0: CLOCK_REALTIME
-  // 4: CLOCK_MONOTONIC
-  // 5: CLOCK_UPTIME
-  if (clk_id == 4 || clk_id == 5) {
-    host_clk = CLOCK_MONOTONIC;
-  }
-
-  struct timespec host_ts;
-  int ret = clock_gettime(host_clk, &host_ts);
-  if (ret < 0) {
-    set_guest_errno(ctx, errno);
-    ctx->rax = (uint64_t)-1;
-  } else {
-    struct guest_timespec {
-      int64_t tv_sec;
-      int64_t tv_nsec;
-    };
-    struct guest_timespec *g_ts =
-        (struct guest_timespec *)(ctx->mem_base + tp_addr);
-    g_ts->tv_sec = (int64_t)host_ts.tv_sec;
-    g_ts->tv_nsec = (int64_t)host_ts.tv_nsec;
-    ctx->rax = 0;
-  }
-  SHIM_RETURN();
-}
-
-// gettimeofday(struct timeval *tv, struct timezone *tz)
-void shim_gettimeofday(GuestContext *ctx) {
-  uint64_t tv_addr = ctx->rdi;
-  uint64_t tz_addr = ctx->rsi;
-
-  struct timeval host_tv;
-  int ret = gettimeofday(&host_tv, NULL);
-  if (ret < 0) {
-    set_guest_errno(ctx, errno);
-    ctx->rax = (uint64_t)-1;
-  } else {
-    if (tv_addr) {
-      struct guest_timeval {
-        int64_t tv_sec;
-        int64_t tv_usec;
-      };
-      struct guest_timeval *g_tv =
-          (struct guest_timeval *)(ctx->mem_base + tv_addr);
-      g_tv->tv_sec = (int64_t)host_tv.tv_sec;
-      g_tv->tv_usec = (int64_t)host_tv.tv_usec;
-    }
-    if (tz_addr) {
-      // The console fills the zone like sceKernelGettimezone (shadPS4 posix_gettimeofday);
-      // the host's struct timezone is obsolete and holds no zone on macOS.
-      OrbisKernelTimezone *g_tz = (OrbisKernelTimezone *)(ctx->mem_base + tz_addr);
-      sceKernelGettimezone(g_tz);
-    }
-    ctx->rax = 0;
-  }
-  SHIM_RETURN();
 }
 
 // getrusage(int who, struct rusage *usage)

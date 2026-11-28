@@ -10,15 +10,8 @@ extern "C" {
 // select (the socket calls are in libSceNet, ps4_net.h)
 void shim_select(GuestContext *ctx);
 
-// POSIX System & Threading
-void shim_usleep(GuestContext *ctx);
+// POSIX System (the pthread calls are in kernel/threading and kernel/sync)
 void shim_getpid(GuestContext *ctx);
-void shim_pthread_exit(GuestContext *ctx);
-void shim_pthread_key_delete(GuestContext *ctx);
-void shim_pthread_rwlock_init(GuestContext *ctx);
-void shim_pthread_rwlock_destroy(GuestContext *ctx);
-void shim_pthread_rename_np(GuestContext *ctx);
-void shim_pthread_create_name_np(GuestContext *ctx);
 
 #ifdef __cplusplus
 }

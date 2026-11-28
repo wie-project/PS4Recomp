@@ -1000,7 +1000,6 @@ void recomp_free_runtime(GuestContext *ctx) {
   ps4_videoout_destroy();
   ps4_equeue_destroy();
   ps4_direct_mem_destroy();
-  ps4_event_flag_destroy();
   ps4_sync_destroy();
   ps4_vfs_destroy();
   ps4_aio_destroy();
@@ -1585,8 +1584,12 @@ int recomp_vm_free(GuestContext *ctx, uint64_t addr, size_t size) {
   return 0;
 }
 
-GuestContext *recomp_create_thread_context(GuestContext *parent,
-                                           uint64_t stack_size) {
+// A thread context whose stack is either allocated here (user_stack == 0: stack_size bytes
+// below its TLS area and TCB) or the guest's own [user_stack, user_stack + stack_size), for a
+// thread attribute with a stack address (shadPS4 ThreadState::CreateStack, RunThread). The
+// context's stack_base/stack_alloc_size describe what recomp_free_thread_context releases.
+static GuestContext *create_thread_context(GuestContext *parent, uint64_t stack_size,
+                                           uint64_t user_stack) {
   if (!parent)
     return NULL;
   if (stack_size == 0)
@@ -1596,15 +1599,16 @@ GuestContext *recomp_create_thread_context(GuestContext *parent,
   uint64_t tls_size = proc->static_tls_size ? proc->static_tls_size : 0x1000ULL;
   tls_size = (tls_size + 0xFFFULL) & ~0xFFFULL;
 
-  // Allocate stack, TLS area and TCB (64KB) via VM extent allocator
-  size_t alloc_total = stack_size + tls_size + 0x10000ULL;
+  // Allocate stack (unless the guest gave one), TLS area and TCB (64KB) via VM extent allocator
+  const uint64_t own_stack = user_stack ? 0 : stack_size;
+  size_t alloc_total = own_stack + tls_size + 0x10000ULL;
   uint64_t stack_base = recomp_vm_alloc(proc, alloc_total);
   if (stack_base == (uint64_t)-1) {
     fprintf(stderr,
             "[ps4-recomp] FATAL: out of guest memory for new thread stack\n");
     return NULL;
   }
-  uint64_t tcb_base = stack_base + stack_size + tls_size;
+  uint64_t tcb_base = stack_base + own_stack + tls_size;
 
   // Static TLS area for the new thread [tcb_base - tls_size, tcb_base): zeroed, with every
   // module's .tdata template in its block (recomp_init_tls_modules).
@@ -1627,7 +1631,10 @@ GuestContext *recomp_create_thread_context(GuestContext *parent,
   t_ctx->process_ctx = proc;
   t_ctx->stack_base = stack_base;
   t_ctx->stack_alloc_size = alloc_total;
-  t_ctx->rsp = (stack_base + stack_size - 0x100ULL) & ~0xFFULL;
+  if (user_stack)
+    t_ctx->rsp = (user_stack + stack_size) & ~0xFULL;
+  else
+    t_ctx->rsp = (stack_base + stack_size - 0x100ULL) & ~0xFFULL;
   t_ctx->rbp = t_ctx->rsp;
   // The creator's control words, as FreeBSD's cpu_copy_thread copies the user FPU state at
   // thr_new; the guest entry trampoline applies mxcsr to FPCR (RMode, FZ).
@@ -1636,6 +1643,17 @@ GuestContext *recomp_create_thread_context(GuestContext *parent,
   t_ctx->static_tls_size = proc->static_tls_size;
 
   return t_ctx;
+}
+
+GuestContext *recomp_create_thread_context(GuestContext *parent, uint64_t stack_size) {
+  return create_thread_context(parent, stack_size, 0);
+}
+
+GuestContext *recomp_create_thread_context_on_stack(GuestContext *parent, uint64_t stack_addr,
+                                                    uint64_t stack_size) {
+  if (!stack_addr)
+    return NULL;
+  return create_thread_context(parent, stack_size, stack_addr);
 }
 
 void recomp_free_thread_context(GuestContext *ctx) {
